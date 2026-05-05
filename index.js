@@ -1,238 +1,225 @@
 const http = require('http');
+const https = require('https');
 const url = require('url');
 
 const PORT = process.env.PORT || 3000;
-const VERSION = 'LIVE V3.0';
+const VERSION = 'IMAGE V4.0';
 
 function sendText(res, status, text) {
-  res.writeHead(status, {
-    'Content-Type': 'text/plain; charset=utf-8',
-    'Access-Control-Allow-Origin': '*'
-  });
+  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
   return res.end(text);
 }
 
-function sendJson(res, status, obj) {
+function sendJson(res, status, data) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*'
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
   });
-  return res.end(JSON.stringify(obj, null, 2));
+  return res.end(JSON.stringify(data, null, 2));
 }
 
 function parseKey(key) {
   const cleanKey = String(key || '').trim();
-  const parts = cleanKey.split('_').map(v => String(v || '').trim()).filter(Boolean);
-
-  if (parts.length < 3) {
-    return {
-      ok: false,
-      message: 'key 형식 오류: productId_itemId_vendorItemId 필요',
-      key: cleanKey
-    };
-  }
-
-  const [productId, itemId, vendorItemId] = parts;
-  const coupangUrl =
-    `https://www.coupang.com/vp/products/${encodeURIComponent(productId)}` +
-    `?itemId=${encodeURIComponent(itemId)}` +
-    `&vendorItemId=${encodeURIComponent(vendorItemId)}`;
-
+  const parts = cleanKey.split('_').map(v => v.trim()).filter(Boolean);
+  if (parts.length < 3) return null;
   return {
-    ok: true,
-    key: cleanKey,
-    productId,
-    itemId,
-    vendorItemId,
-    coupangUrl
+    productId: parts[0],
+    itemId: parts[1],
+    vendorItemId: parts[2]
   };
 }
 
-function uniq(arr) {
-  return Array.from(new Set((arr || []).filter(Boolean).map(v => String(v).trim()).filter(Boolean)));
+function makeCoupangUrl(productId, itemId, vendorItemId) {
+  return `https://www.coupang.com/vp/products/${productId}?itemId=${itemId}&vendorItemId=${vendorItemId}`;
 }
 
-async function collectCoupangLive(coupangUrl) {
-  let chromium;
-  try {
-    chromium = require('playwright').chromium;
-  } catch (err) {
-    return {
-      ok: false,
-      errorCode: 'PLAYWRIGHT_NOT_INSTALLED',
-      message: 'playwright가 설치되지 않았습니다. package.json 포함 ZIP으로 재배포해야 합니다.',
-      detail: String(err && err.message ? err.message : err)
+function fetchText(targetUrl, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(targetUrl);
+    const options = {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      timeout: timeoutMs,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Referer': 'https://www.coupang.com/'
+      }
     };
+
+    const req = https.request(options, (resp) => {
+      let body = '';
+      resp.setEncoding('utf8');
+      resp.on('data', chunk => {
+        body += chunk;
+        if (body.length > 6_000_000) {
+          req.destroy(new Error('HTML_TOO_LARGE'));
+        }
+      });
+      resp.on('end', () => {
+        resolve({ statusCode: resp.statusCode, headers: resp.headers, body });
+      });
+    });
+
+    req.on('timeout', () => req.destroy(new Error('TIMEOUT')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function normalizeImageUrl(raw) {
+  if (!raw) return '';
+  let s = String(raw).trim();
+  s = s.replace(/\\u002F/g, '/').replace(/\\\//g, '/').replace(/&amp;/g, '&');
+  s = s.replace(/^['\"]+|['\"]+$/g, '');
+  if (s.startsWith('//')) s = 'https:' + s;
+  if (s.startsWith('http://')) s = 'https://' + s.slice(7);
+  return s;
+}
+
+function cleanImageUrl(u) {
+  try {
+    const x = new URL(u);
+    x.search = '';
+    return x.toString();
+  } catch (e) {
+    return u;
+  }
+}
+
+function isCoupangImage(u) {
+  return /^https:\/\//i.test(u) && /(?:coupangcdn\.com|coupang\.com)/i.test(u) && /\.(?:jpg|jpeg|png|webp)(?:$|\?)/i.test(u);
+}
+
+function scoreImage(u) {
+  let score = 0;
+  if (/thumbnail/i.test(u)) score += 10;
+  if (/vendor_inventory|image\d*\.coupangcdn|thumbnail\d*\.coupangcdn/i.test(u)) score += 10;
+  if (/492x492|500x500|600x600|700x700|800x800|1000x1000|1200x1200/i.test(u)) score += 20;
+  if (/detail|contents|product_detail|product-detail|desc/i.test(u)) score += 35;
+  if (/230x230|160x160|48x48|60x60|80x80|100x100/i.test(u)) score -= 20;
+  return score;
+}
+
+function extractImagesFromHtml(html) {
+  const found = new Map();
+
+  const patterns = [
+    /https?:\\?\/\\?\/[^\s'\"<>\\]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>\\]*)?/gi,
+    /\/\/[^\s'\"<>\\]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>\\]*)?/gi,
+    /(?:src|data-src|data-original|content)=["']([^"']+\.(?:jpg|jpeg|png|webp)(?:\?[^"']*)?)["']/gi,
+    /"(?:image|imageUrl|originImage|detailImage|vendorItemImageUrl|thumbnailUrl|url)"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"/gi
+  ];
+
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const raw = m[1] || m[0];
+      const normalized = cleanImageUrl(normalizeImageUrl(raw));
+      if (!isCoupangImage(normalized)) continue;
+      if (!found.has(normalized)) {
+        found.set(normalized, {
+          url: normalized,
+          score: scoreImage(normalized)
+        });
+      }
+    }
   }
 
-  let browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu'
-      ]
-    });
+  const all = Array.from(found.values())
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.url);
 
-    const page = await browser.newPage({
-      viewport: { width: 1365, height: 900 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      locale: 'ko-KR'
-    });
+  const detailImages = all.filter(u => /detail|contents|product_detail|product-detail|desc|vendor_inventory/i.test(u)).slice(0, 80);
+  const productImages = all.filter(u => !detailImages.includes(u)).slice(0, 40);
 
-    await page.setExtraHTTPHeaders({
-      'accept-language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
-    });
+  return {
+    total: all.length,
+    mainImage: productImages[0] || all[0] || null,
+    productImages,
+    detailImages,
+    allImages: all.slice(0, 120)
+  };
+}
 
-    const response = await page.goto(coupangUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
-
-    await page.waitForTimeout(2500);
-
-    // 상세 이미지 lazy-load 대응용 짧은 스크롤
-    for (let i = 0; i < 4; i++) {
-      await page.mouse.wheel(0, 900);
-      await page.waitForTimeout(700);
-    }
-
-    const data = await page.evaluate(() => {
-      const text = (el) => (el && (el.innerText || el.textContent) || '').replace(/\s+/g, ' ').trim();
-      const attr = (el, name) => el && el.getAttribute && el.getAttribute(name);
-      const abs = (src) => {
-        if (!src) return '';
-        src = String(src).trim();
-        if (!src) return '';
-        if (src.startsWith('//')) return location.protocol + src;
-        try { return new URL(src, location.href).href; } catch (e) { return src; }
-      };
-      const uniqLocal = (arr) => Array.from(new Set((arr || []).filter(Boolean).map(v => String(v).trim()).filter(Boolean)));
-
-      const bodyText = document.body ? text(document.body) : '';
-
-      const priceSelectors = [
-        '.total-price strong',
-        '.total-price',
-        '.prod-price .total-price',
-        '.prod-price .price-value',
-        '.sale-price',
-        '.price-value',
-        '[class*="price"] strong',
-        '[class*="Price"] strong',
-        '[class*="price"]'
-      ];
-
-      const priceCandidates = [];
-      for (const sel of priceSelectors) {
-        document.querySelectorAll(sel).forEach(el => {
-          const t = text(el);
-          if (t && /[0-9][0-9,]*\s*원/.test(t)) priceCandidates.push(t);
-        });
-      }
-
-      const allWonTexts = Array.from(document.querySelectorAll('body *'))
-        .map(el => text(el))
-        .filter(t => t && t.length < 80 && /[0-9][0-9,]*\s*원/.test(t));
-
-      const pricePool = uniqLocal(priceCandidates.concat(allWonTexts));
-      const priceNumbers = pricePool.map(t => {
-        const m = t.match(/([0-9][0-9,]*)\s*원/);
-        return m ? Number(m[1].replace(/,/g, '')) : 0;
-      }).filter(n => n > 0);
-
-      const currentPrice = priceNumbers.length ? Math.max(...priceNumbers) : null;
-
-      const soldOutWords = ['품절', '일시품절', '판매중지', '구매불가', '재고 없음', '현재 구매할 수 없는 상품'];
-      const soldOutByText = soldOutWords.some(w => bodyText.includes(w));
-      const disabledBuyButton = Array.from(document.querySelectorAll('button, a'))
-        .some(el => /구매|장바구니|바로구매/.test(text(el)) && (el.disabled || el.getAttribute('aria-disabled') === 'true'));
-
-      const imageUrls = [];
-      document.querySelectorAll('img').forEach(img => {
-        imageUrls.push(abs(attr(img, 'src')));
-        imageUrls.push(abs(attr(img, 'data-src')));
-        imageUrls.push(abs(attr(img, 'data-original')));
-        imageUrls.push(abs(attr(img, 'data-lazy-src')));
-        imageUrls.push(abs(attr(img, 'data-url')));
-      });
-
-      document.querySelectorAll('*').forEach(el => {
-        const bg = getComputedStyle(el).backgroundImage || '';
-        const m = bg.match(/url\(["']?(.*?)["']?\)/);
-        if (m && m[1]) imageUrls.push(abs(m[1]));
-      });
-
-      const coupangImages = uniqLocal(imageUrls)
-        .filter(src => /coupang|coupangcdn|thumbnail|image/i.test(src));
-
-      const detailImages = uniqLocal(Array.from(document.querySelectorAll(
-        '#productDetail img, .product-detail img, .prod-description img, .detail-content img, [class*="detail"] img, [id*="detail"] img'
-      )).flatMap(img => [
-        abs(attr(img, 'src')),
-        abs(attr(img, 'data-src')),
-        abs(attr(img, 'data-original')),
-        abs(attr(img, 'data-lazy-src'))
-      ])).filter(src => /coupang|coupangcdn|thumbnail|image/i.test(src));
-
-      const optionTexts = [];
-      const optionSelectors = [
-        '[class*="option"] button',
-        '[class*="Option"] button',
-        '[class*="option"] li',
-        '[class*="Option"] li',
-        '.prod-option button',
-        '.prod-option li',
-        'select option'
-      ];
-      for (const sel of optionSelectors) {
-        document.querySelectorAll(sel).forEach(el => {
-          const t = text(el);
-          if (t && t.length <= 120 && !/^선택/.test(t)) optionTexts.push(t);
-        });
-      }
-
-      return {
-        title: text(document.querySelector('h1')) || text(document.querySelector('[class*="title"]')),
-        currentPrice,
-        priceCandidates: pricePool.slice(0, 30),
-        soldOut: Boolean(soldOutByText || disabledBuyButton),
-        soldOutDetectedByText: soldOutByText,
-        disabledBuyButton,
-        options: uniqLocal(optionTexts).slice(0, 100),
-        images: coupangImages.slice(0, 80),
-        detailImages: detailImages.slice(0, 80),
-        pageTextSample: bodyText.slice(0, 500)
-      };
-    });
-
-    return {
-      ok: true,
-      status: response ? response.status() : null,
-      finalUrl: page.url(),
-      ...data
-    };
-  } catch (err) {
-    return {
+async function handleCoupangImages(req, res, query) {
+  const keyInfo = parseKey(query.key);
+  if (!keyInfo) {
+    return sendJson(res, 400, {
       ok: false,
-      errorCode: 'LIVE_COLLECT_FAILED',
-      message: '쿠팡 실시간 조회 실패',
-      detail: String(err && err.message ? err.message : err)
-    };
-  } finally {
-    if (browser) {
-      try { await browser.close(); } catch (e) {}
+      version: VERSION,
+      message: 'key 형식 오류: productId_itemId_vendorItemId 필요'
+    });
+  }
+
+  const { productId, itemId, vendorItemId } = keyInfo;
+  const coupangUrl = makeCoupangUrl(productId, itemId, vendorItemId);
+
+  try {
+    const fetched = await fetchText(coupangUrl, 12000);
+    const blocked = /Access Denied|captcha|Robot Check|봇|자동화|abnormal/i.test(fetched.body || '');
+
+    if (fetched.statusCode >= 400 || blocked) {
+      return sendJson(res, 200, {
+        ok: false,
+        version: VERSION,
+        fallback: true,
+        reason: blocked ? 'BLOCKED_OR_CAPTCHA' : `HTTP_${fetched.statusCode}`,
+        productId,
+        itemId,
+        vendorItemId,
+        coupangUrl,
+        images: {
+          total: 0,
+          mainImage: null,
+          productImages: [],
+          detailImages: [],
+          allImages: []
+        }
+      });
     }
+
+    const images = extractImagesFromHtml(fetched.body || '');
+
+    return sendJson(res, 200, {
+      ok: true,
+      version: VERSION,
+      productId,
+      itemId,
+      vendorItemId,
+      coupangUrl,
+      fetchedStatus: fetched.statusCode,
+      images
+    });
+  } catch (err) {
+    return sendJson(res, 200, {
+      ok: false,
+      version: VERSION,
+      fallback: true,
+      reason: err && err.message ? err.message : 'FETCH_FAILED',
+      productId,
+      itemId,
+      vendorItemId,
+      coupangUrl,
+      images: {
+        total: 0,
+        mainImage: null,
+        productImages: [],
+        detailImages: [],
+        allImages: []
+      }
+    });
   }
 }
 
 const server = http.createServer(async (req, res) => {
-  const parsedUrl = url.parse(req.url, true);
-  const pathname = parsedUrl.pathname;
-
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -241,6 +228,10 @@ const server = http.createServer(async (req, res) => {
     });
     return res.end();
   }
+
+  const parsedUrl = url.parse(req.url, true);
+  const pathname = parsedUrl.pathname;
+  const query = parsedUrl.query || {};
 
   if (pathname === '/') {
     return sendText(res, 200, `Glomart API running ${VERSION}`);
@@ -252,43 +243,59 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/test') {
     return sendJson(res, 200, {
-      ok: true,
+      status: 'ok',
       version: VERSION,
       message: 'API works'
     });
   }
 
   if (pathname === '/coupang-json') {
-    const parsed = parseKey(parsedUrl.query.key);
-    return sendJson(res, parsed.ok ? 200 : 400, parsed);
+    const keyInfo = parseKey(query.key);
+    if (!keyInfo) {
+      return sendJson(res, 400, {
+        ok: false,
+        version: VERSION,
+        message: 'key 형식 오류: productId_itemId_vendorItemId 필요'
+      });
+    }
+    const { productId, itemId, vendorItemId } = keyInfo;
+    return sendJson(res, 200, {
+      ok: true,
+      version: VERSION,
+      productId,
+      itemId,
+      vendorItemId,
+      coupangUrl: makeCoupangUrl(productId, itemId, vendorItemId)
+    });
   }
 
   if (pathname === '/coupang') {
-    const parsed = parseKey(parsedUrl.query.key);
-    if (!parsed.ok) return sendJson(res, 400, parsed);
-
-    res.writeHead(302, {
-      Location: parsed.coupangUrl,
-      'Access-Control-Allow-Origin': '*'
-    });
+    const keyInfo = parseKey(query.key);
+    if (!keyInfo) {
+      return sendJson(res, 400, {
+        ok: false,
+        version: VERSION,
+        message: 'key 형식 오류: productId_itemId_vendorItemId 필요'
+      });
+    }
+    const { productId, itemId, vendorItemId } = keyInfo;
+    const coupangUrl = makeCoupangUrl(productId, itemId, vendorItemId);
+    res.writeHead(302, { Location: coupangUrl });
     return res.end();
   }
 
-  if (pathname === '/coupang-live') {
-    const parsed = parseKey(parsedUrl.query.key);
-    if (!parsed.ok) return sendJson(res, 400, parsed);
-
-    const live = await collectCoupangLive(parsed.coupangUrl);
-    return sendJson(res, live.ok ? 200 : 500, {
-      ...parsed,
-      live
-    });
+  if (pathname === '/coupang-images' || pathname === '/coupang-live') {
+    return handleCoupangImages(req, res, query);
   }
 
-  return sendText(res, 404, 'Not found');
+  return sendJson(res, 404, {
+    ok: false,
+    version: VERSION,
+    message: 'Not found'
+  });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Glomart API ${VERSION} running on ${PORT}`);
+  console.log(`Server running on ${PORT} / ${VERSION}`);
 });
 
