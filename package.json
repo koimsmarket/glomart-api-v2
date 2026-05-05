@@ -1,5 +1,5 @@
 {
-  "name": "glomart-order-api",
+  "name": "glomart-api-v2",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
