@@ -1,0 +1,13 @@
+ï{
+  "9129480378_26861376935_90586753276": {
+    "title": "테스트 상품 - 실제 수집 데이터로 교체 필요",
+    "price": 0,
+    "soldOut": false,
+    "options": [
+      { "name": "기본", "value": "기본옵션", "price": 0, "stock": "확인필요" }
+    ],
+    "productImages": [],
+    "detailImages": [],
+    "updatedAt": "2026-05-05"
+  }
+}
