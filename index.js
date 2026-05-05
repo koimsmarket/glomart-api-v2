@@ -1,9 +1,8 @@
 const http = require('http');
-const https = require('https');
 const url = require('url');
 
 const PORT = process.env.PORT || 3000;
-const VERSION = 'IMAGE V4.0';
+const VERSION = 'IMAGE PLAYWRIGHT V4.1';
 
 function sendText(res, status, text) {
   res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -14,288 +13,228 @@ function sendJson(res, status, data) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type'
   });
   return res.end(JSON.stringify(data, null, 2));
 }
 
 function parseKey(key) {
-  const cleanKey = String(key || '').trim();
-  const parts = cleanKey.split('_').map(v => v.trim()).filter(Boolean);
+  const raw = String(key || '').trim();
+  const parts = raw.split('_').map(v => v.trim()).filter(Boolean);
   if (parts.length < 3) return null;
-  return {
-    productId: parts[0],
-    itemId: parts[1],
-    vendorItemId: parts[2]
-  };
+  return { productId: parts[0], itemId: parts[1], vendorItemId: parts[2] };
 }
 
-function makeCoupangUrl(productId, itemId, vendorItemId) {
-  return `https://www.coupang.com/vp/products/${productId}?itemId=${itemId}&vendorItemId=${vendorItemId}`;
+function buildCoupangUrl(ids) {
+  return `https://www.coupang.com/vp/products/${ids.productId}?itemId=${ids.itemId}&vendorItemId=${ids.vendorItemId}`;
 }
 
-function fetchText(targetUrl, timeoutMs = 12000) {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(targetUrl);
-    const options = {
-      protocol: parsed.protocol,
-      hostname: parsed.hostname,
-      path: parsed.pathname + parsed.search,
-      method: 'GET',
-      timeout: timeoutMs,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Referer': 'https://www.coupang.com/'
-      }
-    };
-
-    const req = https.request(options, (resp) => {
-      let body = '';
-      resp.setEncoding('utf8');
-      resp.on('data', chunk => {
-        body += chunk;
-        if (body.length > 6_000_000) {
-          req.destroy(new Error('HTML_TOO_LARGE'));
-        }
-      });
-      resp.on('end', () => {
-        resolve({ statusCode: resp.statusCode, headers: resp.headers, body });
-      });
-    });
-
-    req.on('timeout', () => req.destroy(new Error('TIMEOUT')));
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-function normalizeImageUrl(raw) {
-  if (!raw) return '';
-  let s = String(raw).trim();
-  s = s.replace(/\\u002F/g, '/').replace(/\\\//g, '/').replace(/&amp;/g, '&');
-  s = s.replace(/^['\"]+|['\"]+$/g, '');
+function normalizeImageUrl(src) {
+  if (!src) return '';
+  let s = String(src).trim();
+  if (!s) return '';
   if (s.startsWith('//')) s = 'https:' + s;
-  if (s.startsWith('http://')) s = 'https://' + s.slice(7);
+  if (s.startsWith('http://')) s = s.replace('http://', 'https://');
   return s;
 }
 
-function cleanImageUrl(u) {
-  try {
-    const x = new URL(u);
-    x.search = '';
-    return x.toString();
-  } catch (e) {
-    return u;
-  }
+function uniq(arr) {
+  return Array.from(new Set(arr.filter(Boolean)));
 }
 
-function isCoupangImage(u) {
-  return /^https:\/\//i.test(u) && /(?:coupangcdn\.com|coupang\.com)/i.test(u) && /\.(?:jpg|jpeg|png|webp)(?:$|\?)/i.test(u);
-}
+function classifyImages(all) {
+  const imageUrls = uniq(all.map(normalizeImageUrl))
+    .filter(u => /^https:\/\//i.test(u))
+    .filter(u => /coupang|coupangcdn|image\d*\.coupangcdn|thumbnail/i.test(u))
+    .filter(u => /\.(jpg|jpeg|png|webp)(\?|$)/i.test(u));
 
-function scoreImage(u) {
-  let score = 0;
-  if (/thumbnail/i.test(u)) score += 10;
-  if (/vendor_inventory|image\d*\.coupangcdn|thumbnail\d*\.coupangcdn/i.test(u)) score += 10;
-  if (/492x492|500x500|600x600|700x700|800x800|1000x1000|1200x1200/i.test(u)) score += 20;
-  if (/detail|contents|product_detail|product-detail|desc/i.test(u)) score += 35;
-  if (/230x230|160x160|48x48|60x60|80x80|100x100/i.test(u)) score -= 20;
-  return score;
-}
+  const detailImages = imageUrls.filter(u =>
+    /vendor_inventory|vendor|product-detail|contents|details|image\/retail|content/i.test(u)
+  );
 
-function extractImagesFromHtml(html) {
-  const found = new Map();
-
-  const patterns = [
-    /https?:\\?\/\\?\/[^\s'\"<>\\]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>\\]*)?/gi,
-    /\/\/[^\s'\"<>\\]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s'\"<>\\]*)?/gi,
-    /(?:src|data-src|data-original|content)=["']([^"']+\.(?:jpg|jpeg|png|webp)(?:\?[^"']*)?)["']/gi,
-    /"(?:image|imageUrl|originImage|detailImage|vendorItemImageUrl|thumbnailUrl|url)"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"/gi
-  ];
-
-  for (const re of patterns) {
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      const raw = m[1] || m[0];
-      const normalized = cleanImageUrl(normalizeImageUrl(raw));
-      if (!isCoupangImage(normalized)) continue;
-      if (!found.has(normalized)) {
-        found.set(normalized, {
-          url: normalized,
-          score: scoreImage(normalized)
-        });
-      }
-    }
-  }
-
-  const all = Array.from(found.values())
-    .sort((a, b) => b.score - a.score)
-    .map(x => x.url);
-
-  const detailImages = all.filter(u => /detail|contents|product_detail|product-detail|desc|vendor_inventory/i.test(u)).slice(0, 80);
-  const productImages = all.filter(u => !detailImages.includes(u)).slice(0, 40);
+  const productImages = imageUrls.filter(u => !detailImages.includes(u));
 
   return {
-    total: all.length,
-    mainImage: productImages[0] || all[0] || null,
+    total: imageUrls.length,
+    mainImage: productImages[0] || imageUrls[0] || null,
     productImages,
     detailImages,
-    allImages: all.slice(0, 120)
+    allImages: imageUrls
   };
 }
 
-async function handleCoupangImages(req, res, query) {
-  const keyInfo = parseKey(query.key);
-  if (!keyInfo) {
-    return sendJson(res, 400, {
-      ok: false,
-      version: VERSION,
-      message: 'key 형식 오류: productId_itemId_vendorItemId 필요'
-    });
-  }
+async function collectImagesWithPlaywright(coupangUrl) {
+  const { chromium } = require('playwright-chromium');
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  });
 
-  const { productId, itemId, vendorItemId } = keyInfo;
-  const coupangUrl = makeCoupangUrl(productId, itemId, vendorItemId);
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    viewport: { width: 1366, height: 900 },
+    locale: 'ko-KR',
+    extraHTTPHeaders: {
+      'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+  });
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(15000);
 
   try {
-    const fetched = await fetchText(coupangUrl, 12000);
-    const blocked = /Access Denied|captcha|Robot Check|봇|자동화|abnormal/i.test(fetched.body || '');
+    await page.goto(coupangUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(2500);
 
-    if (fetched.statusCode >= 400 || blocked) {
-      return sendJson(res, 200, {
-        ok: false,
-        version: VERSION,
-        fallback: true,
-        reason: blocked ? 'BLOCKED_OR_CAPTCHA' : `HTTP_${fetched.statusCode}`,
-        productId,
-        itemId,
-        vendorItemId,
-        coupangUrl,
-        images: {
-          total: 0,
-          mainImage: null,
-          productImages: [],
-          detailImages: [],
-          allImages: []
-        }
-      });
+    // 상세 이미지 lazy-load 후보 확보용으로 조금만 스크롤
+    for (let i = 0; i < 4; i++) {
+      await page.mouse.wheel(0, 900);
+      await page.waitForTimeout(700);
     }
 
-    const images = extractImagesFromHtml(fetched.body || '');
+    const title = await page.title().catch(() => '');
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    const html = await page.content().catch(() => '');
 
-    return sendJson(res, 200, {
-      ok: true,
-      version: VERSION,
-      productId,
-      itemId,
-      vendorItemId,
-      coupangUrl,
-      fetchedStatus: fetched.statusCode,
-      images
+    const blocked = /Access Denied|captcha|로봇|자동입력|비정상|잠시 후 다시|현재 접속하신/i.test(title + '\n' + bodyText + '\n' + html);
+
+    const data = await page.evaluate(() => {
+      const urls = [];
+      const push = v => {
+        if (!v) return;
+        String(v).split(',').forEach(part => {
+          const first = part.trim().split(/\s+/)[0];
+          if (first) urls.push(first);
+        });
+      };
+
+      document.querySelectorAll('img').forEach(img => {
+        push(img.currentSrc);
+        push(img.src);
+        push(img.getAttribute('data-src'));
+        push(img.getAttribute('data-lazy-src'));
+        push(img.getAttribute('data-original'));
+        push(img.getAttribute('srcset'));
+      });
+
+      document.querySelectorAll('*').forEach(el => {
+        const bg = getComputedStyle(el).backgroundImage;
+        if (bg && bg !== 'none') {
+          const matches = bg.match(/url\(["']?([^"')]+)["']?\)/g) || [];
+          matches.forEach(m => {
+            const mm = m.match(/url\(["']?([^"')]+)["']?\)/);
+            if (mm && mm[1]) urls.push(mm[1]);
+          });
+        }
+      });
+
+      return {
+        title: document.title || '',
+        bodyText: (document.body && document.body.innerText || '').slice(0, 1000),
+        urls
+      };
     });
+
+    const regexUrls = [];
+    const re = /https?:\\?\/\\?\/[^"'\\\s<>]+?(?:jpg|jpeg|png|webp)(?:\?[^"'\\\s<>]*)?/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      regexUrls.push(m[0].replace(/\\\//g, '/'));
+    }
+
+    await browser.close();
+
+    return {
+      blocked,
+      title: data.title || title,
+      bodySample: data.bodyText || bodyText.slice(0, 1000),
+      rawUrls: uniq([...(data.urls || []), ...regexUrls])
+    };
   } catch (err) {
-    return sendJson(res, 200, {
-      ok: false,
-      version: VERSION,
-      fallback: true,
-      reason: err && err.message ? err.message : 'FETCH_FAILED',
-      productId,
-      itemId,
-      vendorItemId,
-      coupangUrl,
-      images: {
-        total: 0,
-        mainImage: null,
-        productImages: [],
-        detailImages: [],
-        allImages: []
-      }
-    });
+    await browser.close().catch(() => {});
+    throw err;
   }
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
-    });
-    return res.end();
-  }
-
   const parsedUrl = url.parse(req.url, true);
   const pathname = parsedUrl.pathname;
-  const query = parsedUrl.query || {};
 
-  if (pathname === '/') {
-    return sendText(res, 200, `Glomart API running ${VERSION}`);
-  }
+  if (req.method === 'OPTIONS') return sendJson(res, 200, { ok: true });
 
-  if (pathname === '/check') {
-    return sendText(res, 200, `NEW CODE OK ${VERSION}`);
-  }
+  if (pathname === '/') return sendText(res, 200, `Glomart API running ${VERSION}`);
+  if (pathname === '/check') return sendText(res, 200, `NEW CODE OK ${VERSION}`);
 
-  if (pathname === '/test') {
-    return sendJson(res, 200, {
-      status: 'ok',
-      version: VERSION,
-      message: 'API works'
-    });
-  }
+  const ids = parseKey(parsedUrl.query.key);
 
-  if (pathname === '/coupang-json') {
-    const keyInfo = parseKey(query.key);
-    if (!keyInfo) {
+  if (pathname === '/coupang' || pathname === '/coupang-json' || pathname === '/coupang-images') {
+    if (!ids) {
       return sendJson(res, 400, {
         ok: false,
         version: VERSION,
         message: 'key 형식 오류: productId_itemId_vendorItemId 필요'
       });
     }
-    const { productId, itemId, vendorItemId } = keyInfo;
-    return sendJson(res, 200, {
-      ok: true,
-      version: VERSION,
-      productId,
-      itemId,
-      vendorItemId,
-      coupangUrl: makeCoupangUrl(productId, itemId, vendorItemId)
-    });
   }
 
   if (pathname === '/coupang') {
-    const keyInfo = parseKey(query.key);
-    if (!keyInfo) {
-      return sendJson(res, 400, {
-        ok: false,
-        version: VERSION,
-        message: 'key 형식 오류: productId_itemId_vendorItemId 필요'
-      });
-    }
-    const { productId, itemId, vendorItemId } = keyInfo;
-    const coupangUrl = makeCoupangUrl(productId, itemId, vendorItemId);
+    const coupangUrl = buildCoupangUrl(ids);
     res.writeHead(302, { Location: coupangUrl });
     return res.end();
   }
 
-  if (pathname === '/coupang-images' || pathname === '/coupang-live') {
-    return handleCoupangImages(req, res, query);
+  if (pathname === '/coupang-json') {
+    const coupangUrl = buildCoupangUrl(ids);
+    return sendJson(res, 200, { ok: true, version: VERSION, ...ids, coupangUrl });
   }
 
-  return sendJson(res, 404, {
-    ok: false,
-    version: VERSION,
-    message: 'Not found'
-  });
+  if (pathname === '/coupang-images') {
+    const coupangUrl = buildCoupangUrl(ids);
+    try {
+      const live = await collectImagesWithPlaywright(coupangUrl);
+      const images = classifyImages(live.rawUrls || []);
+
+      if (live.blocked || images.total === 0) {
+        return sendJson(res, 200, {
+          ok: false,
+          version: VERSION,
+          fallback: true,
+          reason: live.blocked ? 'BLOCKED_OR_CAPTCHA' : 'NO_IMAGE_FOUND',
+          ...ids,
+          coupangUrl,
+          pageTitle: live.title,
+          images
+        });
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        version: VERSION,
+        fallback: false,
+        ...ids,
+        coupangUrl,
+        pageTitle: live.title,
+        images
+      });
+    } catch (err) {
+      return sendJson(res, 200, {
+        ok: false,
+        version: VERSION,
+        fallback: true,
+        reason: 'PLAYWRIGHT_ERROR',
+        error: String(err && err.message || err),
+        ...ids,
+        coupangUrl,
+        images: { total: 0, mainImage: null, productImages: [], detailImages: [], allImages: [] }
+      });
+    }
+  }
+
+  return sendText(res, 404, 'Not found');
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on ${PORT} / ${VERSION}`);
+  console.log(`Glomart API ${VERSION} running on ${PORT}`);
 });
 
