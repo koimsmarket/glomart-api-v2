@@ -1,12 +1,10 @@
 {
-  "name": "glomart-api-v2",
-  "version": "4.1.0",
+  "name": "glomart-order-api",
+  "version": "1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "dependencies": {
-    "playwright-chromium": "^1.44.0"
-  }
+  "dependencies": {}
 }
 
