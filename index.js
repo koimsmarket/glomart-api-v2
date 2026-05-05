@@ -25,3 +25,29 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(Server running on ${PORT});
 });
+
+app.get("/coupang", (req, res) => {
+  const key = String(req.query.key || "").trim();
+
+  const parts = key.split("_");
+  if (parts.length < 3) {
+    return res.status(400).json({
+      ok: false,
+      message: "key 형식 오류: productId_itemId_vendorItemId 필요"
+    });
+  }
+
+  const [productId, itemId, vendorItemId] = parts;
+
+  const coupangUrl =
+    `https://www.coupang.com/vp/products/${productId}` +
+    `?itemId=${itemId}&vendorItemId=${vendorItemId}`;
+
+  res.json({
+    ok: true,
+    productId,
+    itemId,
+    vendorItemId,
+    coupangUrl
+  });
+});
