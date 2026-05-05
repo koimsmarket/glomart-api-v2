@@ -59,3 +59,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on ${PORT}`);
 });
+
+if (pathname === "/check") {
+  return res.end("NEW CODE OK");
+}
