@@ -1,110 +1,314 @@
-const http = require('http');
-const url = require('url');
-const fs = require('fs');
-const path = require('path');
+/*
+ * GLOMART Cloudtype Scrap Switch Server V1.0
+ * 현재 범위:
+ *   1단계: keyword only
+ *   2단계: target = coupang fixed
+ *   3단계: search / pagination / detail
+ *
+ * Front 기존 호출 유지:
+ *   GET /module/scrap/api/search?q=검색어&page=1
+ *
+ * 중요:
+ *   - Cafe24 요청 없음
+ *   - 서버는 JSON만 반환
+ *   - 프론트 렌더링은 GM_SCRAP_SEARCH_DISPLAY_ENGINE 담당
+ */
 
-const PORT = process.env.PORT || 3000;
-const VERSION = 'DETAIL VIEWER V1.0';
-const DATA_FILE = path.join(__dirname, 'product_data.json');
+const express = require('express');
+const cors = require('cors');
 
-function send(res, status, body, type = 'application/json; charset=utf-8') {
-  res.writeHead(status, {
-    'Content-Type': type,
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+const app = express();
+
+const PORT = Number(process.env.PORT || 3000);
+const VERSION = 'GLOMART_CLOUDTYPE_SCRAP_SWITCH_V1_20260506';
+
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use(cors({
+  origin: true,
+  credentials: false,
+}));
+
+/* -------------------------
+ * Common helpers
+ * ------------------------- */
+
+function cleanText(v) {
+  return String(v || '')
+    .replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeKeyword(q) {
+  q = cleanText(q);
+  q = q.replace(/[，、؛;|]+/g, ' ');
+  q = q.replace(/\s+/g, ' ').trim();
+  q = q.replace(/^[-–—]+\s*/, '').trim();
+  if (
+    (q.startsWith('(') && q.endsWith(')')) ||
+    (q.startsWith('[') && q.endsWith(']'))
+  ) {
+    q = q.slice(1, -1).trim();
+  }
+  return q;
+}
+
+function intParam(v, fallback) {
+  const n = parseInt(String(v || ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function ok(res, data) {
+  res.json({
+    ok: true,
+    version: VERSION,
+    ...data,
   });
-  if (type.includes('application/json')) return res.end(JSON.stringify(body, null, 2));
-  return res.end(body);
 }
 
-function readProducts() {
-  try {
-    if (!fs.existsSync(DATA_FILE)) return {};
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch (e) {
-    return {};
-  }
+function fail(res, status, message, extra = {}) {
+  res.status(status).json({
+    ok: false,
+    version: VERSION,
+    error: message,
+    ...extra,
+  });
 }
 
-function parseKey(key) {
-  const parts = String(key || '').trim().split('_');
-  if (parts.length < 3) return null;
-  return { productId: parts[0], itemId: parts[1], vendorItemId: parts[2], key: parts.slice(0, 3).join('_') };
+/* -------------------------
+ * 1단계: INPUT ANALYZER
+ * 현재는 keyword only
+ * ------------------------- */
+
+function analyzeInput(q) {
+  const keyword = normalizeKeyword(q);
+  return {
+    mode: 'keyword',
+    keyword,
+  };
 }
 
-function coupangUrlFromKey(key) {
-  const p = parseKey(key);
-  if (!p) return null;
-  return `https://www.coupang.com/vp/products/${p.productId}?itemId=${p.itemId}&vendorItemId=${p.vendorItemId}`;
+/* -------------------------
+ * 2단계: TARGET SWITCHER
+ * 현재는 coupang fixed
+ * ------------------------- */
+
+function selectTarget(input) {
+  return {
+    target: 'coupang',
+    mode: input.mode,
+    keyword: input.keyword,
+  };
 }
 
-const server = http.createServer((req, res) => {
-  if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
+/* -------------------------
+ * 3단계: ACTION SWITCHER
+ * search / pagination / detail
+ * ------------------------- */
 
-  const parsedUrl = url.parse(req.url, true);
-  const pathname = parsedUrl.pathname;
+async function runAction(action, ctx) {
+  if (action === 'detail') return await coupangDetail(ctx);
+  return await coupangSearch(ctx);
+}
 
-  if (pathname === '/') {
-    return send(res, 200, `Glomart API running ${VERSION}`, 'text/plain; charset=utf-8');
+/* -------------------------
+ * Coupang adapter
+ * 현재 V1은 안전한 통합 포맷 우선.
+ *
+ * 실제 쿠팡 검색 수집부는 아래 coupangSearch() 내부만 교체하면 됨.
+ * 프론트/라우터는 안 건드림.
+ * ------------------------- */
+
+async function coupangSearch(ctx) {
+  const keyword = ctx.keyword;
+  const page = ctx.page || 1;
+
+  if (!keyword) {
+    return {
+      type: 'search',
+      source: 'coupang',
+      keyword,
+      page,
+      total: 0,
+      items: [],
+      message: 'empty keyword',
+    };
   }
 
-  if (pathname === '/check') {
-    return send(res, 200, `NEW CODE OK ${VERSION}`, 'text/plain; charset=utf-8');
+  /*
+   * TODO:
+   * 여기서 실제 쿠팡 검색 수집 또는 내부 캐시/DB 조회를 연결.
+   *
+   * 반드시 아래 items 형식으로만 반환:
+   * {
+   *   rank,
+   *   title,
+   *   image,
+   *   priceText,
+   *   deliveryText,
+   *   url,
+   *   productId,
+   *   itemId,
+   *   vendorItemId,
+   *   key
+   * }
+   */
+
+  return {
+    type: 'search',
+    source: 'coupang',
+    keyword,
+    page,
+    total: 0,
+    cached: false,
+    nextPage: page + 1,
+    prevPage: page > 1 ? page - 1 : null,
+    items: [],
+    message: 'COUPANG_SEARCH_ADAPTER_NOT_CONNECTED_YET',
+  };
+}
+
+async function coupangDetail(ctx) {
+  const productId = cleanText(ctx.productId);
+  const itemId = cleanText(ctx.itemId);
+  const vendorItemId = cleanText(ctx.vendorItemId);
+
+  if (!productId && !vendorItemId) {
+    return {
+      type: 'detail',
+      source: 'coupang',
+      product: null,
+      message: 'missing productId or vendorItemId',
+    };
   }
 
-  if (pathname === '/coupang-json') {
-    const key = parsedUrl.query.key;
-    const p = parseKey(key);
-    if (!p) return send(res, 400, { ok: false, message: 'key 형식 오류: productId_itemId_vendorItemId 필요' });
-    return send(res, 200, { ok: true, ...p, coupangUrl: coupangUrlFromKey(key) });
-  }
+  /*
+   * TODO:
+   * 여기서 실제 상세 수집 또는 캐시/DB 조회 연결.
+   * 상세 결과는 product 한 객체로 통일.
+   */
 
-  if (pathname === '/coupang') {
-    const coupangUrl = coupangUrlFromKey(parsedUrl.query.key);
-    if (!coupangUrl) return send(res, 400, { ok: false, message: 'key 형식 오류' });
-    res.writeHead(302, { Location: coupangUrl });
-    return res.end();
-  }
+  return {
+    type: 'detail',
+    source: 'coupang',
+    productId,
+    itemId,
+    vendorItemId,
+    product: null,
+    message: 'COUPANG_DETAIL_ADAPTER_NOT_CONNECTED_YET',
+  };
+}
 
-  if (pathname === '/product-detail') {
-    const keyInfo = parseKey(parsedUrl.query.key);
-    if (!keyInfo) return send(res, 400, { ok: false, message: 'key 형식 오류: productId_itemId_vendorItemId 필요' });
+/* -------------------------
+ * Routes
+ * ------------------------- */
 
-    const products = readProducts();
-    const item = products[keyInfo.key] || null;
-
-    return send(res, 200, {
-      ok: true,
-      version: VERSION,
-      found: !!item,
-      key: keyInfo.key,
-      productId: keyInfo.productId,
-      itemId: keyInfo.itemId,
-      vendorItemId: keyInfo.vendorItemId,
-      coupangUrl: coupangUrlFromKey(keyInfo.key),
-      product: item || {
-        title: '',
-        price: null,
-        soldOut: null,
-        options: [],
-        productImages: [],
-        detailImages: [],
-        note: '등록된 상세 데이터 없음'
-      }
-    });
-  }
-
-  if (pathname === '/glomart_detail_viewer_v1_0.js') {
-    const jsPath = path.join(__dirname, 'glomart_detail_viewer_v1_0.js');
-    if (!fs.existsSync(jsPath)) return send(res, 404, 'Not found', 'text/plain; charset=utf-8');
-    return send(res, 200, fs.readFileSync(jsPath, 'utf8'), 'application/javascript; charset=utf-8');
-  }
-
-  return send(res, 404, 'Not found', 'text/plain; charset=utf-8');
+app.get('/', (req, res) => {
+  ok(res, {
+    service: 'glomart-cloudtype-scrap-switch',
+    routes: [
+      'GET /health',
+      'GET /module/scrap/api/switch?q=keyword&action=search&page=1',
+      'GET /module/scrap/api/search?q=keyword&page=1',
+      'GET /module/scrap/api/detail?productId=&itemId=&vendorItemId=',
+    ],
+  });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Glomart API ${VERSION} running on ${PORT}`);
+app.get('/health', (req, res) => {
+  ok(res, {
+    status: 'running',
+  });
+});
+
+/*
+ * 통합 스위치
+ * action:
+ *   - search 기본
+ *   - detail
+ */
+app.get('/module/scrap/api/switch', async (req, res) => {
+  try {
+    const action = cleanText(req.query.action || 'search').toLowerCase();
+    const page = intParam(req.query.page, 1);
+
+    const input = analyzeInput(req.query.q || req.query.keyword || '');
+    const target = selectTarget(input);
+
+    const result = await runAction(action, {
+      ...target,
+      page,
+      productId: req.query.productId,
+      itemId: req.query.itemId,
+      vendorItemId: req.query.vendorItemId || req.query.venderItemId,
+    });
+
+    ok(res, {
+      action,
+      input,
+      target: target.target,
+      ...result,
+    });
+  } catch (e) {
+    fail(res, 500, 'switch failed', { detail: String(e && e.message || e) });
+  }
+});
+
+/*
+ * 기존 GM_SCRAP_SEARCH_DISPLAY_ENGINE 호환 경로
+ */
+app.get('/module/scrap/api/search', async (req, res) => {
+  try {
+    const page = intParam(req.query.page, 1);
+    const input = analyzeInput(req.query.q || req.query.keyword || '');
+    const target = selectTarget(input);
+
+    const result = await runAction('search', {
+      ...target,
+      page,
+    });
+
+    ok(res, {
+      action: 'search',
+      input,
+      target: target.target,
+      ...result,
+    });
+  } catch (e) {
+    fail(res, 500, 'search failed', { detail: String(e && e.message || e) });
+  }
+});
+
+/*
+ * 상세 경로
+ */
+app.get('/module/scrap/api/detail', async (req, res) => {
+  try {
+    const result = await runAction('detail', {
+      target: 'coupang',
+      productId: req.query.productId,
+      itemId: req.query.itemId,
+      vendorItemId: req.query.vendorItemId || req.query.venderItemId,
+    });
+
+    ok(res, {
+      action: 'detail',
+      target: 'coupang',
+      ...result,
+    });
+  } catch (e) {
+    fail(res, 500, 'detail failed', { detail: String(e && e.message || e) });
+  }
+});
+
+/*
+ * 다음/이전 페이지는 search 경로에 page만 바꿔서 사용.
+ * 예:
+ *   /module/scrap/api/search?q=떡볶이&page=2
+ */
+
+app.listen(PORT, () => {
+  console.log(`[${VERSION}] listening on ${PORT}`);
 });
 
