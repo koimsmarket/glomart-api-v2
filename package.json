@@ -1,16 +1,15 @@
 {
-  "name": "glomart-cloudtype-scrap-switch",
-  "version": "5.0.0",
+  "name": "glomart-client-collect-order",
+  "version": "6.0.0",
   "private": true,
-  "description": "Glomart Cloudtype Docker Playwright DOM debug switch server",
+  "description": "Glomart client-side collect receiver and order creator",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.3",
-    "playwright": "^1.44.1"
+    "express": "^4.18.3"
   },
   "engines": {
     "node": ">=18"
