@@ -343,4 +343,3 @@ process.on('SIGTERM', async () => {
 });
 
 app.listen(PORT, () => console.log(`[${VERSION}] listening on ${PORT}`));
-
