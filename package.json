@@ -1,8 +1,8 @@
 {
   "name": "glomart-cloudtype-scrap-switch",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
-  "description": "Glomart Cloudtype Docker Playwright switch server",
+  "description": "Glomart Cloudtype Docker Playwright DOM debug switch server",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
