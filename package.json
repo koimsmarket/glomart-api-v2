@@ -1,6 +1,6 @@
 {
   "name": "glomart-cloudtype-scrap-switch",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Glomart Cloudtype switch server for scrap search/display",
   "main": "index.js",
