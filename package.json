@@ -1,15 +1,17 @@
 {
   "name": "glomart-cloudtype-scrap-switch",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "Glomart Cloudtype switch server for scrap search/display",
+  "description": "Glomart Cloudtype Playwright search switch server",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "npx playwright install chromium"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.3"
+    "express": "^4.18.3",
+    "playwright": "^1.44.1"
   },
   "engines": {
     "node": ">=18"
