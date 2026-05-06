@@ -1,12 +1,11 @@
 {
   "name": "glomart-cloudtype-scrap-switch",
-  "version": "3.1.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "Glomart Cloudtype Playwright search switch server with start-time chromium install",
+  "description": "Glomart Cloudtype Docker Playwright switch server",
   "main": "index.js",
   "scripts": {
-    "postinstall": "npx playwright install chromium",
-    "start": "npx playwright install chromium && node index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
