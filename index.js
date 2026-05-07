@@ -7,7 +7,7 @@ const path = require('path');
 const app = express();
 app.use(express.static('public'));
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = 'GLOMART_USER_DEVICE_COLLECT_TEST_V1_2_TMPDATA_20260507';
+const VERSION = 'GLOMART_USER_DEVICE_COLLECT_TEST_V1_3_CACHE_ALL_20260507';
 
 const DATA_DIR = process.env.DATA_DIR || '/tmp/glomart-data';
 const CACHE_FILE = path.join(DATA_DIR, 'coupang_cache.json');
@@ -105,6 +105,7 @@ app.get('/', (req,res)=>ok(res, {
     'POST /module/scrap/api/collect',
     'POST /module/scrap/api/collect-form',
     'GET /module/scrap/api/cache/search?q=keyword&page=1',
+    'GET /module/scrap/api/cache/all',
     'GET /public/glomart_cache_order_form.html',
     'POST /module/scrap/api/order/create',
     'GET /module/scrap/api/order/list'
@@ -144,6 +145,24 @@ app.get('/module/scrap/api/cache/search', (req,res)=>{
     ok(res, { action:'cache.search', source:'cache', keyword:q, cached:true, ...searchCache(q, page, pageSize) });
   }catch(e){ fail(res, 500, 'cache search failed', { detail:String(e && e.message || e) }); }
 });
+
+app.get('/module/scrap/api/cache/all', (req,res)=>{
+  try{
+    const cache = readJson(CACHE_FILE, { items:{}, updatedAt:null });
+    const items = Object.values(cache.items || {})
+      .sort((a,b) => String(b.collectedAt || '').localeCompare(String(a.collectedAt || '')))
+      .map((it, idx) => ({ ...it, rank:idx + 1 }));
+    ok(res, {
+      action:'cache.all',
+      source:'cache',
+      cached:true,
+      updatedAt:cache.updatedAt || null,
+      total:items.length,
+      items
+    });
+  }catch(e){ fail(res, 500, 'cache all failed', { detail:String(e && e.message || e) }); }
+});
+
 app.get('/module/scrap/api/search', (req,res)=>{
   try{
     const q = cleanText(req.query.q || req.query.keyword || '');
