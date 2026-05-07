@@ -6,7 +6,7 @@ const path = require('path');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = 'GLOMART_USER_DEVICE_COLLECT_TEST_V1_20260507';
+const VERSION = 'GLOMART_USER_DEVICE_COLLECT_TEST_V1_1_INLINE_FORMPOST_20260507';
 
 const DATA_DIR = path.join(__dirname, 'data');
 const CACHE_FILE = path.join(DATA_DIR, 'coupang_cache.json');
@@ -14,8 +14,8 @@ const ORDER_FILE = path.join(DATA_DIR, 'orders.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-app.use(express.json({ limit: '8mb' }));
-app.use(express.urlencoded({ extended: true, limit: '8mb' }));
+app.use(express.json({ limit: '12mb' }));
+app.use(express.urlencoded({ extended: true, limit: '12mb' }));
 app.use(cors({ origin: true, credentials: false }));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
@@ -64,6 +64,23 @@ function normalizeItem(raw){
   item.key = makeKey(item);
   return item;
 }
+function savePayload(payload){
+  const body = payload || {};
+  const arr = Array.isArray(body.items) ? body.items : [body.item || body];
+  const cache = readJson(CACHE_FILE, { items:{}, updatedAt:null });
+  cache.items = cache.items || {};
+  const saved = [], skipped = [];
+  for(const raw0 of arr){
+    const raw = { ...(raw0 || {}), pageUrl: body.pageUrl || raw0.pageUrl || '' };
+    const item = normalizeItem(raw);
+    if(!item.key){ skipped.push({ reason:'missing key', raw }); continue; }
+    cache.items[item.key] = { ...(cache.items[item.key] || {}), ...item, collectedAt:nowIso() };
+    saved.push(cache.items[item.key]);
+  }
+  cache.updatedAt = nowIso();
+  writeJson(CACHE_FILE, cache);
+  return { saved, skipped };
+}
 function searchCache(keyword, page=1, pageSize=40){
   keyword = cleanText(keyword).toLowerCase();
   const cache = readJson(CACHE_FILE, { items:{}, updatedAt:null });
@@ -80,10 +97,12 @@ function searchCache(keyword, page=1, pageSize=40){
 
 app.get('/', (req,res)=>ok(res, {
   service:'glomart-user-device-collect-test',
+  mode:'inline-bookmarklet-formpost',
   routes:[
     'GET /health',
     'GET /public/collector_bookmarklet.html',
     'POST /module/scrap/api/collect',
+    'POST /module/scrap/api/collect-form',
     'GET /module/scrap/api/cache/search?q=keyword&page=1',
     'GET /public/glomart_cache_order_form.html',
     'POST /module/scrap/api/order/create',
@@ -94,22 +113,26 @@ app.get('/health', (req,res)=>ok(res,{status:'running'}));
 
 app.post('/module/scrap/api/collect', (req,res)=>{
   try{
-    const body = req.body || {};
-    const arr = Array.isArray(body.items) ? body.items : [body.item || body];
-    const cache = readJson(CACHE_FILE, { items:{}, updatedAt:null });
-    cache.items = cache.items || {};
-    const saved = [], skipped = [];
-    for(const raw0 of arr){
-      const raw = { ...(raw0 || {}), pageUrl: body.pageUrl || raw0.pageUrl || '' };
-      const item = normalizeItem(raw);
-      if(!item.key){ skipped.push({ reason:'missing key', raw }); continue; }
-      cache.items[item.key] = { ...(cache.items[item.key] || {}), ...item, collectedAt:nowIso() };
-      saved.push(cache.items[item.key]);
-    }
-    cache.updatedAt = nowIso();
-    writeJson(CACHE_FILE, cache);
-    ok(res, { action:'collect', savedCount:saved.length, skippedCount:skipped.length, items:saved, skipped });
+    const result = savePayload(req.body || {});
+    ok(res, { action:'collect', savedCount:result.saved.length, skippedCount:result.skipped.length, items:result.saved, skipped:result.skipped });
   }catch(e){ fail(res, 500, 'collect failed', { detail:String(e && e.message || e) }); }
+});
+
+app.post('/module/scrap/api/collect-form', (req,res)=>{
+  try{
+    let payload = {};
+    if(req.body && req.body.payload){
+      payload = JSON.parse(req.body.payload);
+    } else {
+      payload = req.body || {};
+    }
+    const result = savePayload(payload);
+    res.setHeader('Content-Type','text/html; charset=utf-8');
+    res.end(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Glomart 수집 완료</title><style>body{font-family:Arial,"Noto Sans KR",sans-serif;padding:24px;line-height:1.7}a{display:inline-block;margin-top:14px;padding:10px 14px;background:#111;color:#fff;text-decoration:none;border-radius:8px}</style></head><body><h2>Glomart 수집 완료</h2><p>저장: ${result.saved.length}개 / 스킵: ${result.skipped.length}개</p><a href="/module/scrap/api/cache/search?q=&page=1" target="_blank">전체 캐시 보기</a><script>setTimeout(function(){try{window.close()}catch(e){}},1800);</script></body></html>`);
+  }catch(e){
+    res.status(500).setHeader('Content-Type','text/html; charset=utf-8');
+    res.end('<h2>수집 실패</h2><pre>'+String(e && e.message || e)+'</pre>');
+  }
 });
 
 app.get('/module/scrap/api/cache/search', (req,res)=>{
@@ -120,7 +143,6 @@ app.get('/module/scrap/api/cache/search', (req,res)=>{
     ok(res, { action:'cache.search', source:'cache', keyword:q, cached:true, ...searchCache(q, page, pageSize) });
   }catch(e){ fail(res, 500, 'cache search failed', { detail:String(e && e.message || e) }); }
 });
-
 app.get('/module/scrap/api/search', (req,res)=>{
   try{
     const q = cleanText(req.query.q || req.query.keyword || '');
