@@ -1,4 +1,4 @@
-
+﻿
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
@@ -8,7 +8,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = 'GLOMART_USER_DEVICE_COLLECT_TEST_V1_1_INLINE_FORMPOST_20260507';
 
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = './data';
 const CACHE_FILE = path.join(DATA_DIR, 'coupang_cache.json');
 const ORDER_FILE = path.join(DATA_DIR, 'orders.json');
 
@@ -186,3 +186,4 @@ app.get('/module/scrap/api/order/list', (req,res)=>{
 });
 
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));
+
