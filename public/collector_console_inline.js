@@ -1,0 +1,19 @@
+(function(){
+var A='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
+function T(e){return(e&&(e.innerText||e.textContent)||'').replace(/\s+/g,' ').trim()}
+function G(e,n){return e?(e.getAttribute(n)||''):''}
+function U(u){if(!u)return'';if(u.indexOf('//')===0)return'https:'+u;if(u.indexOf('/')===0)return'https://www.coupang.com'+u;return u}
+function I(u){var o={productId:'',itemId:'',vendorItemId:''},m;m=String(u||'').match(/\/vp\/products\/(\d+)/);if(m)o.productId=m[1];m=String(u||'').match(/[?&]itemId=(\d+)/);if(m)o.itemId=m[1];m=String(u||'').match(/[?&]vendorItemId=(\d+)/);if(m)o.vendorItemId=m[1];return o}
+function C(a){var c=a;for(var i=0;i<9&&c;i++){var t=T(c),h=!!c.querySelector('img'),p=/[0-9,]+\s*원/.test(t);if(h&&(p||t.length>30))return c;c=c.parentElement}return a.parentElement||a}
+function IMG(c){var z=Array.from(c.querySelectorAll('img'));for(var i=0;i<z.length;i++){var im=z[i],u=G(im,'data-img-src')||G(im,'data-src')||G(im,'src')||G(im,'srcset');if(!u||u.indexOf('blank')>=0||u.indexOf('data:image')===0)continue;if(u.indexOf(' ')>-1&&u.indexOf(',')>-1)u=u.split(',')[0].trim().split(' ')[0];return U(u)}return''}
+function TTL(c){var s=['.name','[class*="name"]','[class*="title"]','[class*="product"]','strong','em'];for(var i=0;i<s.length;i++){var v=T(c.querySelector(s[i]));if(v&&v.length>=2&&!/[0-9,]+\s*원/.test(v))return v.slice(0,240)}var im=c.querySelector('img[alt]'),a=G(im,'alt');if(a)return a.slice(0,240);return T(c).replace(/[0-9,]+\s*원/g,' ').replace(/\s+/g,' ').trim().slice(0,240)}
+function PR(c){var m=T(c).match(/[0-9][0-9,]*\s*원/);return m?m[0].replace(/\s+/g,''):''}
+function DV(c){var t=T(c);return['로켓배송','로켓프레시','무료배송','내일','오늘','도착','새벽배송','판매자로켓'].filter(function(x){return t.indexOf(x)>=0}).slice(0,3).join(' ')}
+function search(){var a=Array.from(document.querySelectorAll('a[href*="/vp/products/"]')),s={},r=[];a.forEach(function(x){var u=U(G(x,'href'));if(!u||s[u])return;s[u]=1;var c=C(x),id=I(u);r.push({source:'coupang',title:TTL(c),image:IMG(c),priceText:PR(c),deliveryText:DV(c),url:u,productId:id.productId,itemId:id.itemId,vendorItemId:id.vendorItemId})});return r}
+function detail(){var u=location.href,id=I(u),b=T(document.body),m=b.match(/[0-9][0-9,]*\s*원/),im=document.querySelector('img[src*="coupangcdn"],img[src*="thumbnail"],img'),title=T(document.querySelector('.prod-buy-header__title'))||T(document.querySelector('[class*="title"]'))||(document.title||'').replace(/- 쿠팡.*/,'').trim();return[{source:'coupang',title:title,image:im?U(G(im,'src')||G(im,'data-src')||G(im,'data-img-src')):'',priceText:m?m[0].replace(/\s+/g,''):'',deliveryText:['로켓배송','로켓프레시','무료배송','내일','오늘','도착','새벽배송','판매자로켓'].filter(function(x){return b.indexOf(x)>=0}).slice(0,3).join(' '),url:u,productId:id.productId,itemId:id.itemId,vendorItemId:id.vendorItemId,raw:{pageTitle:document.title}}]}
+var items=location.href.indexOf('/vp/products/')>=0?detail():search();
+if(!items.length){alert('Glomart: 수집할 상품 링크를 찾지 못했습니다. 페이지가 완전히 열린 뒤 다시 시도하세요.');return}
+var f=document.createElement('form');f.method='POST';f.action=A+'/module/scrap/api/collect-form';f.target='_blank';f.style.display='none';
+var inp=document.createElement('input');inp.type='hidden';inp.name='payload';inp.value=JSON.stringify({pageUrl:location.href,items:items});
+f.appendChild(inp);document.body.appendChild(f);f.submit();alert('Glomart 전송 시도: '+items.length+'개');
+})();
