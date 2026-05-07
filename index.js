@@ -1,10 +1,11 @@
-
+﻿
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
+app.use(express.static('public'));
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = 'GLOMART_USER_DEVICE_COLLECT_TEST_V1_2_TMPDATA_20260507';
 
@@ -186,3 +187,4 @@ app.get('/module/scrap/api/order/list', (req,res)=>{
 });
 
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));
+
