@@ -1,5 +1,5 @@
 {
-  "name": "glomart-cloudtype-v123",
+  "name": "glomart-api-v2",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
@@ -8,6 +8,6 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.18.3",
-    "sqlite3": "^5.1.7"
+    "pg": "^8.12.0"
   }
 }
