@@ -588,6 +588,7 @@ app.use(require('./routes/product'));
 app.use(require('./routes/cart'));
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
-
+app.use(require('./routes/builder'));
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));
+
 
