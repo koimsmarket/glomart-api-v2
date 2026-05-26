@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -569,4 +569,14 @@ app.post('/scrap/save-batch', async (req,res)=>{
   }catch(e){ fail(res, 500, 'batch failed', { detail:String(e && e.message || e) }); }
 });
 
+app.locals.pool = pool;
+
+// gm_* route modules
+app.use(require('./routes/health'));
+app.use(require('./routes/product'));
+app.use(require('./routes/cart'));
+app.use(require('./routes/order'));
+app.use(require('./routes/cs'));
+
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));
+
