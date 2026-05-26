@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V004';
+const VERSION = 'GLOMART_API_DB_READY_V005_MIGRATIONS';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -122,17 +122,28 @@ let dbReady = false;
 let dbError = '';
 
 async function initGmDb({ reset=false } = {}){
-  const file = reset ? 'gm_reset_tables.sql' : 'gm_tables.sql';
-  const sql = fs.readFileSync(path.join(__dirname, file), 'utf8');
+  // V005: gm_tables.sql / gm_reset_tables.sql 폐기
+  // 기준 SQL은 migrations/00_gm_all_preserve_structure.sql 하나만 사용
+  if (reset) {
+    throw new Error('DB reset is disabled. Use migrations manually if reset is required.');
+  }
+
+  const file = path.join(__dirname, 'migrations', '00_gm_all_preserve_structure.sql');
+
+  if (!fs.existsSync(file)) {
+    throw new Error('migration file not found: ' + file);
+  }
+
+  const sql = fs.readFileSync(file, 'utf8');
   await pool.query(sql);
   dbReady = true;
   dbError = '';
-  return { file };
+  return { file:'migrations/00_gm_all_preserve_structure.sql' };
 }
 
 if(process.env.GM_DB_AUTOINIT !== '0'){
   initGmDb({ reset:false }).then(() => {
-    console.log('[GM DB READY] gm_tables.sql applied');
+    console.log('[GM DB READY] migrations/00_gm_all_preserve_structure.sql applied');
   }).catch(err => {
     dbReady = false;
     dbError = String(err && err.message || err);
@@ -188,8 +199,8 @@ app.post('/api/gm/db/init', async (req,res)=>{
 });
 
 app.post('/api/gm/db/reset', async (req,res)=>{
-  try{ const r = await initGmDb({ reset:true }); ok(res, { action:'db.reset', ...r }); }
-  catch(e){ fail(res, 500, 'db reset failed', { detail:String(e && e.message || e) }); }
+  // 안전상 자동 reset 비활성화. 테이블 삭제/초기화는 PostgreSQL 콘솔에서 수동 실행.
+  fail(res, 400, 'db reset disabled', { detail:'Use migrations manually if reset is required.' });
 });
 
 app.get('/api/gm/db/status', async (req,res)=>{
