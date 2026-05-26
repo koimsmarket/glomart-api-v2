@@ -1,5 +1,110 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder</title><style>
-body{font-family:Arial,"Noto Sans KR",sans-serif;margin:0;background:#f5f6f8;color:#222}.wrap{max-width:1040px;margin:24px auto;padding:20px;background:#fff;border-radius:14px;box-shadow:0 4px 18px rgba(0,0,0,.08)}h1{font-size:24px;margin:0 0 8px}.sub{color:#666;margin-bottom:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{border:1px solid #ddd;border-radius:12px;padding:16px}label{display:block;font-weight:700;margin:10px 0 6px}select,input,button{font-size:14px}select,input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px}button{padding:10px 14px;border:0;border-radius:8px;background:#1f6feb;color:#fff;font-weight:700;cursor:pointer;margin-right:8px;margin-top:10px}button.gray{background:#666}button.red{background:#c0392b}pre{white-space:pre-wrap;background:#111;color:#eee;padding:14px;border-radius:10px;max-height:260px;overflow:auto}.row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}.hint{font-size:12px;color:#666;line-height:1.5}
-</style></head><body><div class="wrap"><h1>GM 다운로드 / 업로드 빌더 V001</h1><div class="sub">상품 · 장바구니 · 주문 · 주문상품 · CS 데이터를 CSV/JSON으로 내려받고 CSV로 다시 업로드합니다.</div><div class="grid"><div class="card"><h2>다운로드</h2><label>대상</label><select id="exportTable"></select><div class="row"><div><label>guest_key</label><input id="guestKey" placeholder="test"></div><div><label>member_id</label><input id="memberId"></div><div><label>order_no</label><input id="orderNo"></div></div><label>형식</label><select id="format"><option value="csv">CSV</option><option value="json">JSON 화면보기</option></select><button onclick="download()">다운로드</button><button class="gray" onclick="showJson()">JSON 미리보기</button><p class="hint">CSV는 엑셀에서 바로 열 수 있도록 BOM을 붙여 다운로드합니다.</p></div><div class="card"><h2>업로드</h2><label>대상</label><select id="importTable"></select><label>모드</label><select id="mode"><option value="upsert">upsert: 기존 키 있으면 수정</option><option value="insert">insert: 신규 추가</option></select><label>CSV 파일</label><input type="file" id="file" accept=".csv,text/csv"><button onclick="upload()">업로드</button><button class="red" onclick="clearLog()">로그 지우기</button><p class="hint">헤더명은 DB 컬럼명과 같아야 합니다. 다운로드한 CSV를 수정 후 다시 업로드하는 방식이 가장 안전합니다.</p></div></div><div class="card" style="margin-top:16px"><h2>결과</h2><pre id="log">준비됨</pre></div></div><script>
-const API=location.origin;const tableNames={products:'상품 gm_products',cart:'장바구니 gm_basket',orders:'주문 gm_orders',order_items:'주문상품 gm_order_items',cs:'CS gm_cs',cs_messages:'CS 메세지 gm_cs_message'};function log(x){document.getElementById('log').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)}function clearLog(){log('')}function fillTables(){const keys=Object.keys(tableNames);for(const id of ['exportTable','importTable']){document.getElementById(id).innerHTML=keys.map(k=>`<option value="${k}">${tableNames[k]}</option>`).join('')}}function params(format){const p=new URLSearchParams();p.set('table',document.getElementById('exportTable').value);p.set('format',format||document.getElementById('format').value);const g=document.getElementById('guestKey').value.trim();const m=document.getElementById('memberId').value.trim();const o=document.getElementById('orderNo').value.trim();if(g)p.set('guest_key',g);if(m)p.set('member_id',m);if(o)p.set('order_no',o);return p.toString()}function download(){location.href=API+'/api/gm/builder/export?'+params(document.getElementById('format').value)}async function showJson(){const r=await fetch(API+'/api/gm/builder/export?'+params('json'));log(await r.json())}async function upload(){const f=document.getElementById('file').files[0];if(!f){alert('CSV 파일을 선택하세요.');return}const table=document.getElementById('importTable').value;const mode=document.getElementById('mode').value;const text=await f.text();const r=await fetch(API+'/api/gm/builder/import?table='+encodeURIComponent(table)+'&mode='+encodeURIComponent(mode),{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});log(await r.json())}fillTables();
-</script></body></html>
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GM Safe Update Builder V002</title>
+<style>
+body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
+.wrap{max-width:1060px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
+h1{margin:0 0 6px;font-size:24px}.sub{color:#666;margin-bottom:18px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.card{border:1px solid #ddd;border-radius:12px;padding:16px}
+label{display:block;font-weight:700;margin:10px 0 6px}
+select,input,button{font-size:14px}
+select,input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px}
+button{padding:10px 14px;border:0;border-radius:8px;background:#1f6feb;color:white;font-weight:700;cursor:pointer;margin-top:10px;margin-right:8px}
+button.red{background:#c0392b}button.gray{background:#666}
+.warning{background:#fff3cd;border:1px solid #ffe08a;border-radius:10px;padding:12px;margin:14px 0;line-height:1.55}
+pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-wrap;max-height:240px;overflow:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>GM Safe Update Builder V002</h1>
+<div class="sub">CSV 다운로드 / 안전 업데이트 전용. INSERT·DELETE·REPLACE 없음.</div>
+
+<div class="warning">
+<b>안전 정책</b><br>
+업로드는 UPDATE ONLY 입니다. 기준키가 DB에 없으면 SKIP 됩니다.<br>
+빈칸은 기본값 컬럼 외에는 기존 DB 값을 유지합니다.<br>
+부적격 행은 SKIP 되고, 부적격이 많으면 STOP 후 결과 CSV를 다운로드합니다.
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>다운로드</h2>
+    <label>대상</label>
+    <select id="downTable"></select>
+    <label>형식</label>
+    <select id="format"><option value="csv">CSV</option><option value="json">JSON 미리보기</option></select>
+    <button onclick="download()">다운로드</button>
+    <button class="gray" onclick="preview()">JSON 미리보기</button>
+  </div>
+  <div class="card">
+    <h2>안전 업데이트</h2>
+    <label>대상</label>
+    <select id="upTable"></select>
+    <label>CSV 파일</label>
+    <input type="file" id="file" accept=".csv,text/csv">
+    <button class="gray" onclick="dryRun()">검증만 실행</button>
+    <button class="red" onclick="applyUpdate()">APPLY 입력 후 업데이트</button>
+    <p>업데이트 전 반드시 “검증만 실행” 결과 CSV를 확인하세요.</p>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+<h2>로그</h2>
+<pre id="log">준비됨</pre>
+</div>
+</div>
+
+<script>
+const API = location.origin;
+const tables = {
+  products:'상품 gm_products',
+  cart:'장바구니 gm_basket',
+  orders:'주문 gm_orders',
+  order_items:'주문상품 gm_order_items',
+  cs:'CS gm_cs',
+  cs_messages:'CS 메시지 gm_cs_message'
+};
+function fill(){
+  for(const id of ['downTable','upTable']){
+    document.getElementById(id).innerHTML = Object.entries(tables).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
+  }
+}
+function log(x){ document.getElementById('log').textContent = typeof x === 'string' ? x : JSON.stringify(x,null,2); }
+function download(){
+  const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
+  location.href = `${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=${encodeURIComponent(f)}`;
+}
+async function preview(){
+  const t=document.getElementById('downTable').value;
+  const r=await fetch(`${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=json`);
+  log(await r.json());
+}
+async function send(apply){
+  const f=document.getElementById('file').files[0];
+  if(!f){ alert('CSV 파일을 선택하세요.'); return; }
+  if(apply){
+    const x=prompt('실제 업데이트 하려면 APPLY 라고 입력하세요.');
+    if(x !== 'APPLY') return;
+  }
+  const t=document.getElementById('upTable').value;
+  const text=await f.text();
+  const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(t)}&apply=${apply?'YES':'NO'}`;
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+  const blob=await r.blob();
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=(apply?'apply':'dryrun')+'_result_'+Date.now()+'.csv';
+  a.click();
+  log((apply?'업데이트':'검증')+' 결과 CSV 다운로드 완료');
+}
+function dryRun(){ send(false); }
+function applyUpdate(){ send(true); }
+fill();
+</script>
+</body>
+</html>
