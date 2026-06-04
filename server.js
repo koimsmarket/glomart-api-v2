@@ -569,4 +569,13 @@ app.post('/scrap/save-batch', async (req,res)=>{
   }catch(e){ fail(res, 500, 'batch failed', { detail:String(e && e.message || e) }); }
 });
 
+// gm_* route modules
+app.locals.pool = pool;
+app.use(require('./routes/health'));
+app.use(require('./routes/product'));
+app.use(require('./routes/basket'));
+app.use(require('./routes/order'));
+app.use(require('./routes/cs'));
+app.use(require('./routes/builder'));
+
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));

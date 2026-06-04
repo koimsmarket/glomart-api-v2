@@ -56,7 +56,7 @@ async function upsertOne(pool,b){
   const sql=`INSERT INTO gm_basket (
       mall_code,member_id,guest_key,pi_ii_vi,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
-    ON CONFLICT (mall_code, pi_ii_vi, COALESCE(member_id, ''), COALESCE(guest_key, '')) DO UPDATE SET
+    ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
       quantity=gm_basket.quantity + EXCLUDED.quantity,
       product_name=EXCLUDED.product_name,
       option_name=EXCLUDED.option_name,
