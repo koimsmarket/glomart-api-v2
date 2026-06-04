@@ -165,6 +165,9 @@ app.get('/', (req,res)=>ok(res, {
     'POST /api/gm/product/upsert',
     'POST /api/gm/basket/add',
     'GET /api/gm/basket/list',
+    'POST /api/gm/interest/visit',
+    'POST /api/gm/interest/wish',
+    'GET /api/gm/interest/recent',
     'DELETE /api/gm/basket/item',
     'POST /api/gm/order/create',
     'GET /module/scrap/api/cache/search?q=keyword&page=1'
@@ -574,6 +577,7 @@ app.locals.pool = pool;
 app.use(require('./routes/health'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
+app.use(require('./routes/interest'));
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/builder'));
