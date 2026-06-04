@@ -103,6 +103,12 @@ CREATE TABLE IF NOT EXISTS gm_basket (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+
+-- V011 existing-table migration: add required basket fields when gm_basket was created before V009.
+ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS mall_code TEXT NOT NULL DEFAULT 'CPKR';
+ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS product_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS thumb_url TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS idx_gm_basket_member_id
   ON gm_basket (member_id);
 

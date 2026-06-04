@@ -163,9 +163,9 @@ app.get('/', (req,res)=>ok(res, {
     'POST /api/gm/db/init',
     'POST /api/gm/db/reset',
     'POST /api/gm/product/upsert',
-    'POST /api/gm/cart/add',
-    'GET /api/gm/cart/list',
-    'DELETE /api/gm/cart/item',
+    'POST /api/gm/basket/add',
+    'GET /api/gm/basket/list',
+    'DELETE /api/gm/basket/item',
     'POST /api/gm/order/create',
     'GET /module/scrap/api/cache/search?q=keyword&page=1'
   ]
@@ -329,7 +329,7 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
   }catch(e){ fail(res, 500, 'product upsert failed', { detail:String(e && e.message || e) }); }
 });
 
-app.post('/api/gm/cart/add', async (req,res)=>{
+app.post('/api/gm/basket/add', async (req,res)=>{
   try{
     const b = req.body || {};
     const own = owner(b);
@@ -365,10 +365,10 @@ app.post('/api/gm/cart/add', async (req,res)=>{
       cleanText(b.amount_type || 'unit'), cleanText(b.delivery_type || b.deliveryType), toInt(b.delivery_fee, 0)
     ]);
     ok(res, { item:r.rows[0] });
-  }catch(e){ fail(res, 500, 'cart add failed', { detail:String(e && e.message || e) }); }
+  }catch(e){ fail(res, 500, 'basket add failed', { detail:String(e && e.message || e) }); }
 });
 
-app.get('/api/gm/cart/list', async (req,res)=>{
+app.get('/api/gm/basket/list', async (req,res)=>{
   try{
     const memberId = cleanText(req.query.member_id);
     const guestKey = cleanText(req.query.guest_key);
@@ -377,10 +377,10 @@ app.get('/api/gm/cart/list', async (req,res)=>{
       ? await dbQuery('SELECT * FROM gm_basket WHERE member_id=$1 ORDER BY added_at DESC', [memberId])
       : await dbQuery('SELECT * FROM gm_basket WHERE guest_key=$1 ORDER BY added_at DESC', [guestKey]);
     ok(res, { items:r.rows });
-  }catch(e){ fail(res, 500, 'cart list failed', { detail:String(e && e.message || e) }); }
+  }catch(e){ fail(res, 500, 'basket list failed', { detail:String(e && e.message || e) }); }
 });
 
-app.delete('/api/gm/cart/item', async (req,res)=>{
+app.delete('/api/gm/basket/item', async (req,res)=>{
   try{
     const b = req.body || {};
     const own = owner(b);
@@ -388,7 +388,7 @@ app.delete('/api/gm/cart/item', async (req,res)=>{
     if(!pi) return fail(res, 400, 'pi_ii_vi required');
     await dbQuery(`DELETE FROM gm_basket WHERE ${own.col}=$1 AND pi_ii_vi=$2`, [own.val, pi]);
     ok(res, { deleted:true });
-  }catch(e){ fail(res, 500, 'cart delete failed', { detail:String(e && e.message || e) }); }
+  }catch(e){ fail(res, 500, 'basket delete failed', { detail:String(e && e.message || e) }); }
 });
 
 app.post('/api/gm/order/create', async (req,res)=>{
