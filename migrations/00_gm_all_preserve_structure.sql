@@ -79,26 +79,44 @@ CREATE TABLE IF NOT EXISTS gm_product (
 );
 
 
--- 02_gm_cart.sql
--- Source sheet: glomart_basket_db_minimal_revis
--- Column structure is preserved from the uploaded workbook.
+-- 02_gm_basket.sql
+-- Purpose: Glomart external product basket.
+-- Rule: gm_basket stores mall_code + pi_ii_vi separately. product_uid is not stored.
 
-CREATE TABLE IF NOT EXISTS gm_cart (
+CREATE TABLE IF NOT EXISTS gm_basket (
+  mall_code TEXT NOT NULL DEFAULT 'CPKR',
   member_id TEXT,
   guest_key TEXT,
   pi_ii_vi TEXT NOT NULL,
   product_name TEXT NOT NULL,
   option_name TEXT,
   option_value TEXT,
-  quantity INTEGER NOT NULL,
-  amount INTEGER NOT NULL,
-  amount_type TEXT,
+  quantity INTEGER NOT NULL DEFAULT 1,
+  amount INTEGER NOT NULL DEFAULT 0,
+  amount_type TEXT DEFAULT 'unit',
   delivery_type TEXT,
-  delivery_fee INTEGER,
-  added_at TIMESTAMP NOT NULL,
-  updated_at TIMESTAMP
+  delivery_fee INTEGER DEFAULT 0,
+  product_url TEXT NOT NULL,
+  thumb_url TEXT NOT NULL,
+  thumb_file_name TEXT,
+  added_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_gm_basket_member_id
+  ON gm_basket (member_id);
+
+CREATE INDEX IF NOT EXISTS idx_gm_basket_guest_key
+  ON gm_basket (guest_key);
+
+CREATE INDEX IF NOT EXISTS idx_gm_basket_pi_ii_vi
+  ON gm_basket (pi_ii_vi);
+
+CREATE INDEX IF NOT EXISTS idx_gm_basket_mall_pi
+  ON gm_basket (mall_code, pi_ii_vi);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_basket_owner_item
+  ON gm_basket (mall_code, pi_ii_vi, COALESCE(member_id, ''), COALESCE(guest_key, ''));
 
 -- 03_gm_order.sql
 -- Source sheet: 주문서DB_최소구조
@@ -240,3 +258,84 @@ CREATE TABLE IF NOT EXISTS gm_cs_message (
   created_at TIMESTAMP NOT NULL,
   PRIMARY KEY (message_id)
 );
+
+
+-- 07_gm_member_wallet.sql
+-- Source schema: GM_MEMBER_WALLET_DB_SCHEMA_V003.csv
+-- Purpose: Cafe24 member mirror + Glomart wallet/deposit/bonus/point/network incentive ledger.
+-- Rule: current member state is stored in gm_member; every money/incentive movement is recorded in gm_member_ledger.
+
+CREATE TABLE IF NOT EXISTS gm_member (
+  member_id VARCHAR(80) NOT NULL,
+  cafe24_member_id VARCHAR(80),
+  member_name VARCHAR(120),
+  member_name_en VARCHAR(120),
+  email VARCHAR(180),
+  phone VARCHAR(40),
+  country_code VARCHAR(20),
+  nationality VARCHAR(60),
+  language_code VARCHAR(10) DEFAULT 'ko',
+  cs_language VARCHAR(10) DEFAULT 'ko',
+  recommender_id VARCHAR(80),
+  network_seller_id VARCHAR(80),
+  commission_rate NUMERIC(5,2) NOT NULL DEFAULT 0,
+  member_grade VARCHAR(80),
+  member_grade_code VARCHAR(40),
+  member_status VARCHAR(20) NOT NULL DEFAULT 'active',
+  deposit_balance NUMERIC(14,0) NOT NULL DEFAULT 0,
+  bonus_balance NUMERIC(14,0) NOT NULL DEFAULT 0,
+  usable_balance NUMERIC(14,0) NOT NULL DEFAULT 0,
+  refund_balance NUMERIC(14,0) NOT NULL DEFAULT 0,
+  point_balance NUMERIC(14,0) NOT NULL DEFAULT 0,
+  refund_bank_name VARCHAR(80),
+  refund_account_no VARCHAR(120),
+  refund_account_holder VARCHAR(120),
+  last_sync_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (member_id)
+);
+
+CREATE TABLE IF NOT EXISTS gm_member_ledger (
+  ledger_id VARCHAR(40) NOT NULL,
+  member_id VARCHAR(80) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  type VARCHAR(40) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'confirmed',
+  order_no VARCHAR(60),
+  related_member_id VARCHAR(80),
+  description VARCHAR(255),
+  deposit_charge_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  bonus_grant_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  deposit_use_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  bonus_use_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  refund_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  point_grant_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  point_use_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  commission_amount NUMERIC(14,0) NOT NULL DEFAULT 0,
+  commission_rate NUMERIC(5,2) NOT NULL DEFAULT 0,
+  bank_name VARCHAR(80),
+  bank_account_no VARCHAR(120),
+  bank_account_holder VARCHAR(120),
+  deposit_balance_after NUMERIC(14,0) NOT NULL DEFAULT 0,
+  bonus_balance_after NUMERIC(14,0) NOT NULL DEFAULT 0,
+  usable_balance_after NUMERIC(14,0) NOT NULL DEFAULT 0,
+  refund_balance_after NUMERIC(14,0) NOT NULL DEFAULT 0,
+  point_balance_after NUMERIC(14,0) NOT NULL DEFAULT 0,
+  admin_memo TEXT,
+  created_by VARCHAR(80),
+  PRIMARY KEY (ledger_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gm_member_recommender_id
+  ON gm_member (recommender_id);
+
+CREATE INDEX IF NOT EXISTS idx_gm_member_ledger_member_created
+  ON gm_member_ledger (member_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_gm_member_ledger_order_no
+  ON gm_member_ledger (order_no);
+
+CREATE INDEX IF NOT EXISTS idx_gm_member_ledger_type_status
+  ON gm_member_ledger (type, status);
+
