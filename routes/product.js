@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function cleanText(v){ return String(v || '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
-function toInt(v, def=0){ const n = Number(String(v ?? '').replace(/[^0-9.-]/g,'')); return Number.isFinite(n) ? Math.round(n) : def; }
+function toInt(v, def=0){ const n = Number(String(v ?? '').replace(/,/g,'')); return Number.isFinite(n) ? Math.round(n) : def; }
 function normalizeUrl(url){ url = cleanText(url); if(url.startsWith('//')) return 'https:' + url; return url; }
 function fail(res, status, message, extra={}){ res.status(status).json({ ok:false, error:message, ...extra }); }
 function ok(res, data){ res.json({ ok:true, ...data }); }
@@ -16,12 +16,61 @@ function ids(b){
   return { productId, itemId, vendorItemId, mallCode, pi, uid };
 }
 
-router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
-  const pool=db(req), p=req.body||{};
-  if(!pool) return fail(res, 500, 'DB pool is not attached');
-  const id = ids(p);
-  const productName = cleanText(p.product_name || p.productName || p.title);
-  if(!id.uid || !id.pi || !id.mallCode || !productName) return fail(res, 400, 'product_uid/pi_ii_vi/mall_code/product_name required');
+function pickProductName(p){
+  return cleanText(
+    p.product_name || p.productName || p.mall_product_name || p.mallProductName ||
+    p.title || p.name || p.product_title || p.productTitle
+  );
+}
+function pickPrice(p){
+  return toInt(
+    p.mall_sale_price || p.mallSalePrice || p.price || p.real_price || p.realPrice ||
+    p.sale_price || p.salePrice || p.final_price || p.finalPrice,
+    0
+  );
+}
+function pickProductUrl(p){
+  return normalizeUrl(p.product_url || p.productUrl || p.url || p.link || p.href || p.detail_url || p.detailUrl);
+}
+function pickThumbUrl(p){
+  return normalizeUrl(
+    p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl ||
+    p.thumbnail || p.thumbnail_url || p.thumbnailUrl || p.image || p.image_url || p.imageUrl
+  );
+}
+function normalizeProductPayload(raw, parent={}){
+  const p = { ...(raw || {}) };
+  if(!p.mall_code && !p.mallCode) p.mall_code = parent.mall_code || parent.mallCode || parent.source || parent.mall || 'CPKR';
+  if(!p.keyword && parent.keyword) p.keyword = parent.keyword;
+  if(!p.requestId && parent.requestId) p.requestId = parent.requestId;
+
+  const id0 = ids(p);
+  let pi = id0.pi;
+  let productId = id0.productId;
+  let itemId = id0.itemId;
+  let vendorItemId = id0.vendorItemId;
+  if(!pi && id0.uid){
+    const prefix = id0.mallCode + '_';
+    pi = id0.uid.indexOf(prefix) === 0 ? id0.uid.slice(prefix.length) : id0.uid;
+  }
+  if(pi && (!productId || !vendorItemId)){
+    const parts = String(pi).split('_');
+    if(!productId) productId = cleanText(parts[0]);
+    if(!itemId && parts.length > 2) itemId = cleanText(parts[1]);
+    if(!vendorItemId) vendorItemId = cleanText(parts[parts.length - 1]);
+  }
+  if(!vendorItemId && productId) vendorItemId = productId;
+  const mallCode = cleanText(id0.mallCode || 'CPKR').toUpperCase();
+  const uid = cleanText(id0.uid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
+  const productName = pickProductName(p);
+  return { p, id:{ productId, itemId, vendorItemId, mallCode, pi, uid }, productName };
+}
+async function upsertProduct(pool, raw, parent={}){
+  const n = normalizeProductPayload(raw, parent);
+  const p = n.p, id = n.id, productName = n.productName;
+  if(!id.uid || !id.pi || !id.mallCode || !productName){
+    return { ok:false, skipped:true, reason:'product_uid/pi_ii_vi/mall_code/product_name required', uid:id.uid || '', pi_ii_vi:id.pi || '' };
+  }
   const sql=`
     INSERT INTO gm_product (
       product_uid, glomart_code, gm_category, category_keyword, mall_code, mall_category,
@@ -60,36 +109,57 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       last_seen_at=now(),
       expire_at=now() + INTERVAL '30 days',
       updated_at=now()
-    RETURNING product_uid, pi_ii_vi, hit_count
+    RETURNING product_uid, pi_ii_vi, mall_code, hit_count
   `;
+  const thumbUrl = pickThumbUrl(p);
+  const productUrl = pickProductUrl(p);
   const vals=[
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
-    cleanText(p.category_keyword || p.categoryKeyword), id.mallCode, cleanText(p.mall_category || p.mallCategory),
-    id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code),
-    productName, cleanText(p.mall_product_name || p.mallProductName), toInt(p.option_count, 0),
+    cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, cleanText(p.mall_category || p.mallCategory),
+    id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
+    productName, cleanText(p.mall_product_name || p.mallProductName || productName), toInt(p.option_count || p.optionCount, 0),
     cleanText(p.option_name || p.optionName), cleanText(p.option_value || p.optionValue),
-    cleanText(p.origin_country || p.originCountry), toInt(p.mall_sale_price || p.price || p.real_price, 0),
-    p.final_supply_price == null ? null : toInt(p.final_supply_price, 0),
-    p.normal_price == null ? null : toInt(p.normal_price, 0),
-    p.discount_price == null ? null : toInt(p.discount_price, 0),
-    toInt(p.delivery_fee, 0), cleanText(p.delivery_eta_text || p.deliveryText),
-    cleanText(p.delivery_type || p.deliveryType), cleanText(p.tax_type || p.taxType),
-    cleanText(p.overseas_direct_yn || 'N'), cleanText(p.supplier_id || p.supplierId),
-    cleanText(p.supplier_name_snapshot || p.supplierName), normalizeUrl(p.product_url || p.url),
-    normalizeUrl(p.thumb_origin_url || p.image || p.imageUrl), cleanText(p.thumb_file_name),
-    cleanText(p.soldout_yn || 'N'), cleanText(p.sale_status || 'active')
+    cleanText(p.origin_country || p.originCountry), pickPrice(p),
+    p.final_supply_price == null && p.finalSupplyPrice == null ? null : toInt(p.final_supply_price || p.finalSupplyPrice, 0),
+    p.normal_price == null && p.normalPrice == null ? null : toInt(p.normal_price || p.normalPrice, 0),
+    p.discount_price == null && p.discountPrice == null ? null : toInt(p.discount_price || p.discountPrice, 0),
+    toInt(p.delivery_fee || p.deliveryFee || p.shipping_fee || p.shippingFee, 0), cleanText(p.delivery_eta_text || p.deliveryEtaText || p.deliveryText || p.arrival_text || p.arrivalText),
+    cleanText(p.delivery_type || p.deliveryType || p.shipping_type || p.shippingType), cleanText(p.tax_type || p.taxType),
+    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), cleanText(p.supplier_id || p.supplierId),
+    cleanText(p.supplier_name_snapshot || p.supplierName || p.seller_name || p.sellerName), productUrl,
+    thumbUrl, cleanText(p.thumb_file_name || p.thumbFileName || ''),
+    cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active')
   ];
-  try{ const r=await pool.query(sql, vals); ok(res,{item:r.rows[0]}); }
-  catch(e){ fail(res,500,'product upsert failed',{detail:String(e && e.message || e)}); }
+  const r=await pool.query(sql, vals);
+  return { ok:true, item:r.rows[0] };
+}
+
+router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
+  const pool=db(req), p=req.body||{};
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : null);
+  try{
+    if(items){
+      const results=[];
+      for(const item of items){
+        try{ results.push(await upsertProduct(pool, item, p)); }
+        catch(e){ results.push({ ok:false, error:String(e && e.message || e) }); }
+      }
+      const saved = results.filter(x=>x && x.ok).length;
+      const skipped = results.length - saved;
+      return ok(res,{ mode:'batch', received:items.length, saved, skipped, results:results.slice(0,20) });
+    }
+    const result = await upsertProduct(pool, p, p);
+    if(!result.ok) return fail(res, 400, result.reason || 'product upsert validation failed', result);
+    return ok(res,{ mode:'single', item:result.item });
+  }catch(e){ fail(res,500,'product upsert failed',{detail:String(e && e.message || e)}); }
 });
 
-router.post(['/api/gm/product/event','/api/gm/product/wish','/api/gm/product/order'], async (req,res)=>{
+router.post('/api/gm/product/event', async (req,res)=>{
   const pool=db(req), p=req.body||{};
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const id = ids(p);
-  let type = cleanText(p.type || p.event_type || p.eventType).toLowerCase();
-  if(!type && req.path.endsWith('/wish')) type = 'wish';
-  if(!type && req.path.endsWith('/order')) type = 'order';
+  const type = cleanText(p.type || p.event_type || p.eventType).toLowerCase();
   const qty = Math.max(1, toInt(p.quantity || p.qty, 1));
   if(!id.uid && (!id.mallCode || !id.pi)) return fail(res, 400, 'product_uid or mall_code+pi_ii_vi required');
   const where = id.uid ? 'product_uid=$1' : 'mall_code=$1 AND pi_ii_vi=$2';
