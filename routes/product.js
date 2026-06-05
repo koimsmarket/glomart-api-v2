@@ -6,6 +6,24 @@ function toInt(v, def=0){ const n = Number(String(v ?? '').replace(/,/g,'')); re
 function normalizeUrl(url){ url = cleanText(url); if(url.startsWith('//')) return 'https:' + url; return url; }
 function fail(res, status, message, extra={}){ res.status(status).json({ ok:false, error:message, ...extra }); }
 function ok(res, data){ res.json({ ok:true, ...data }); }
+
+function normalizeQueueItems(p){
+  const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : []);
+  return items.filter(Boolean);
+}
+function makeRequestId(p, items){
+  const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
+  if(raw) return raw;
+  const mall = cleanText(p.mall_code || p.mallCode || p.source || 'UNKNOWN').toUpperCase();
+  const keyword = cleanText(p.keyword || p.q || '');
+  const keyText = items.map(function(it){
+    return cleanText(it.product_uid || it.productUid || it.pi_ii_vi || it.vendor_item_id || it.vendorItemId || it.url || it.product_url || it.productName || it.product_name);
+  }).join('|');
+  let h = 0;
+  const s = mall + '|' + keyword + '|' + keyText;
+  for(let i=0;i<s.length;i++){ h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+  return 'GMQ_' + mall + '_' + Date.now() + '_' + Math.abs(h);
+}
 function ids(b){
   const productId = cleanText(b.product_id || b.productId);
   const itemId = cleanText(b.item_id || b.itemId);
@@ -134,6 +152,49 @@ async function upsertProduct(pool, raw, parent={}){
   return { ok:true, item:r.rows[0] };
 }
 
+
+router.post('/api/gm/product/queue', async (req,res)=>{
+  const pool=db(req), p=req.body||{};
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const items = normalizeQueueItems(p);
+  if(!items.length) return fail(res, 400, 'items required');
+  const maxItems = Number(process.env.GM_PRODUCT_QUEUE_MAX_ITEMS || 300);
+  if(items.length > maxItems) return fail(res, 413, 'too many items', { received:items.length, max:maxItems });
+  const requestId = makeRequestId(p, items);
+  const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
+  const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
+  try{
+    const r = await pool.query(`
+      INSERT INTO gm_product_upsert_queue (
+        request_id, mall_code, keyword, items_json, item_count, status, retry_count, created_at
+      ) VALUES ($1,$2,$3,$4::jsonb,$5,'pending',0,now())
+      ON CONFLICT (request_id) DO UPDATE SET
+        mall_code=EXCLUDED.mall_code,
+        keyword=EXCLUDED.keyword,
+        items_json=EXCLUDED.items_json,
+        item_count=EXCLUDED.item_count,
+        status=CASE WHEN gm_product_upsert_queue.status IN ('done','processing') THEN gm_product_upsert_queue.status ELSE 'pending' END,
+        error_message=NULL
+      RETURNING queue_id, request_id, status, item_count
+    `, [requestId, mallCode, keyword, JSON.stringify(items), items.length]);
+    ok(res,{ action:'product.queue', queued:true, queue:r.rows[0] });
+  }catch(e){ fail(res,500,'product queue failed',{detail:String(e && e.message || e)}); }
+});
+
+router.get('/api/gm/product/queue/status', async (req,res)=>{
+  const pool=db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    const r = await pool.query(`
+      SELECT status, COUNT(*)::int AS count
+      FROM gm_product_upsert_queue
+      GROUP BY status
+      ORDER BY status
+    `);
+    ok(res,{ action:'product.queue.status', rows:r.rows });
+  }catch(e){ fail(res,500,'product queue status failed',{detail:String(e && e.message || e)}); }
+});
+
 router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
   const pool=db(req), p=req.body||{};
   if(!pool) return fail(res, 500, 'DB pool is not attached');
@@ -176,4 +237,5 @@ router.post('/api/gm/product/event', async (req,res)=>{
   }catch(e){ fail(res,500,'product event failed',{detail:String(e && e.message || e)}); }
 });
 
+router.upsertProduct = upsertProduct;
 module.exports=router;

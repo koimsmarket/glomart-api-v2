@@ -122,28 +122,40 @@ let dbReady = false;
 let dbError = '';
 
 async function initGmDb({ reset=false } = {}){
-  // V005: gm_tables.sql / gm_reset_tables.sql 폐기
-  // 기준 SQL은 migrations/00_gm_all_preserve_structure.sql 하나만 사용
+  // V006: migrations/*.sql 순차 적용. 기존 DB에는 10번 이후 ALTER가 적용되고,
+  // 신규 DB에는 00~10 전체가 순서대로 적용된다.
   if (reset) {
     throw new Error('DB reset is disabled. Use migrations manually if reset is required.');
   }
 
-  const file = path.join(__dirname, 'migrations', '00_gm_all_preserve_structure.sql');
-
-  if (!fs.existsSync(file)) {
-    throw new Error('migration file not found: ' + file);
+  const dir = path.join(__dirname, 'migrations');
+  if (!fs.existsSync(dir)) {
+    throw new Error('migration directory not found: ' + dir);
   }
 
-  const sql = fs.readFileSync(file, 'utf8');
-  await pool.query(sql);
+  const files = fs.readdirSync(dir)
+    .filter(name => /^\d+_.*\.sql$/i.test(name))
+    .sort((a,b) => a.localeCompare(b, undefined, { numeric:true }));
+
+  if (!files.length) throw new Error('no migration files found');
+
+  const applied = [];
+  for (const name of files) {
+    const file = path.join(dir, name);
+    const sql = fs.readFileSync(file, 'utf8');
+    if (sql.trim()) {
+      await pool.query(sql);
+      applied.push('migrations/' + name);
+    }
+  }
   dbReady = true;
   dbError = '';
-  return { file:'migrations/00_gm_all_preserve_structure.sql' };
+  return { files:applied };
 }
 
 if(process.env.GM_DB_AUTOINIT !== '0'){
   initGmDb({ reset:false }).then(() => {
-    console.log('[GM DB READY] migrations/00_gm_all_preserve_structure.sql applied');
+    console.log('[GM DB READY] migrations/*.sql applied');
   }).catch(err => {
     dbReady = false;
     dbError = String(err && err.message || err);
@@ -163,6 +175,24 @@ function owner(b){
   throw new Error('member_id or guest_key required');
 }
 
+app.locals.pool = pool;
+
+// gm_* route modules are registered before legacy inline endpoints.
+// This prevents old inline handlers from intercepting /api/gm/* paths.
+app.use(require('./routes/health'));
+app.use(require('./routes/product'));
+app.use(require('./routes/basket'));
+app.use(require('./routes/interest'));
+app.use(require('./routes/order'));
+app.use(require('./routes/cs'));
+app.use(require('./routes/builder'));
+
+try{
+  require('./workers/product_queue_worker').startProductQueueWorker(pool);
+}catch(e){
+  console.error('[GM_PRODUCT_QUEUE_WORKER] start skipped:', String(e && e.message || e));
+}
+
 app.get('/', (req,res)=>ok(res, {
   service:'glomart-api',
   mode:'json-cache-plus-postgresql',
@@ -174,6 +204,10 @@ app.get('/', (req,res)=>ok(res, {
     'POST /api/gm/db/init',
     'POST /api/gm/db/reset',
     'POST /api/gm/product/upsert',
+    'POST /api/gm/product/queue',
+    'GET /api/gm/product/queue/status',
+    'POST /api/gm/product/event',
+    'GET /api/gm/db/columns?table=gm_product',
     'POST /api/gm/basket/add',
     'GET /api/gm/basket/list',
     'POST /api/gm/interest/visit',
@@ -216,6 +250,20 @@ app.get('/api/gm/db/status', async (req,res)=>{
     `);
     ok(res, { dbReady, tables:r.rows.map(x=>x.table_name) });
   }catch(e){ fail(res, 500, 'db status failed', { detail:String(e && e.message || e) }); }
+});
+
+app.get('/api/gm/db/columns', async (req,res)=>{
+  try{
+    const table = cleanText(req.query.table || 'gm_product');
+    if(!/^gm_[a-z0-9_]+$/i.test(table)) return fail(res, 400, 'invalid table name');
+    const r = await dbQuery(`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema='public' AND table_name=$1
+      ORDER BY ordinal_position
+    `, [table]);
+    ok(res, { table, columns:r.rows });
+  }catch(e){ fail(res, 500, 'db columns failed', { detail:String(e && e.message || e) }); }
 });
 
 app.post('/api/gm/supplier/upsert', async (req,res)=>{
@@ -583,16 +631,6 @@ app.post('/scrap/save-batch', async (req,res)=>{
   }catch(e){ fail(res, 500, 'batch failed', { detail:String(e && e.message || e) }); }
 });
 
-app.locals.pool = pool;
-
-// gm_* route modules
-app.use(require('./routes/health'));
-app.use(require('./routes/product'));
-app.use(require('./routes/basket'));
-app.use(require('./routes/interest'));
-app.use(require('./routes/order'));
-app.use(require('./routes/cs'));
-app.use(require('./routes/builder'));
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));
 
 
