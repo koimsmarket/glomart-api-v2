@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function cleanText(v){ return String(v || '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
-function toInt(v, def=0){ const n = Number(String(v ?? '').replace(/,/g,'')); return Number.isFinite(n) ? Math.round(n) : def; }
+function toInt(v, def=0){ const n = Number(String(v ?? '').replace(/[^0-9.-]/g,'')); return Number.isFinite(n) ? Math.round(n) : def; }
 function normalizeUrl(url){ url = cleanText(url); if(url.startsWith('//')) return 'https:' + url; return url; }
 function fail(res, status, message, extra={}){ res.status(status).json({ ok:false, error:message, ...extra }); }
 function ok(res, data){ res.json({ ok:true, ...data }); }
@@ -83,11 +83,13 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
   catch(e){ fail(res,500,'product upsert failed',{detail:String(e && e.message || e)}); }
 });
 
-router.post('/api/gm/product/event', async (req,res)=>{
+router.post(['/api/gm/product/event','/api/gm/product/wish','/api/gm/product/order'], async (req,res)=>{
   const pool=db(req), p=req.body||{};
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const id = ids(p);
-  const type = cleanText(p.type || p.event_type || p.eventType).toLowerCase();
+  let type = cleanText(p.type || p.event_type || p.eventType).toLowerCase();
+  if(!type && req.path.endsWith('/wish')) type = 'wish';
+  if(!type && req.path.endsWith('/order')) type = 'order';
   const qty = Math.max(1, toInt(p.quantity || p.qty, 1));
   if(!id.uid && (!id.mallCode || !id.pi)) return fail(res, 400, 'product_uid or mall_code+pi_ii_vi required');
   const where = id.uid ? 'product_uid=$1' : 'mall_code=$1 AND pi_ii_vi=$2';

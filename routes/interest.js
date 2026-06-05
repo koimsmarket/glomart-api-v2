@@ -18,6 +18,29 @@ function itemKey(input){
 }
 function productUid(row){ return row ? Object.assign({}, row, { product_uid: `${row.mall_code}_${row.pi_ii_vi}` }) : row; }
 
+async function touchProductInterest(pool, key, eventType){
+  if(!key || !key.mall_code || !key.pi_ii_vi) return;
+  if(eventType === 'wish') {
+    await pool.query(`
+      UPDATE gm_product
+      SET wish_count=COALESCE(wish_count,0)+1,
+          last_wish_at=NOW(),
+          expire_at=GREATEST(COALESCE(expire_at, NOW()), NOW() + INTERVAL '180 days'),
+          updated_at=NOW()
+      WHERE mall_code=$1 AND pi_ii_vi=$2
+    `, [key.mall_code, key.pi_ii_vi]).catch(()=>{});
+  }
+  if(eventType === 'detail') {
+    await pool.query(`
+      UPDATE gm_product
+      SET detail_view_count=COALESCE(detail_view_count,0)+1,
+          expire_at=GREATEST(COALESCE(expire_at, NOW()), NOW() + INTERVAL '90 days'),
+          updated_at=NOW()
+      WHERE mall_code=$1 AND pi_ii_vi=$2
+    `, [key.mall_code, key.pi_ii_vi]).catch(()=>{});
+  }
+}
+
 async function findOne(pool, owner, key){
   const r=await pool.query(
     `SELECT * FROM gm_product_interest WHERE ${owner.col}=$1 AND mall_code=$2 AND pi_ii_vi=$3 LIMIT 1`,
@@ -77,22 +100,22 @@ async function setWish(pool, input, wish){
 
 router.post('/api/interest/visit', async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await recordVisit(pool, req.body || {}); res.json({ok:true,item:productUid(row)}); }
+  try{ const row=await recordVisit(pool, req.body || {}); await touchProductInterest(pool,itemKey(req.body||{}),'detail'); res.json({ok:true,item:productUid(row)}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 router.post('/api/gm/interest/visit', async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await recordVisit(pool, req.body || {}); res.json({ok:true,item:productUid(row)}); }
+  try{ const row=await recordVisit(pool, req.body || {}); await touchProductInterest(pool,itemKey(req.body||{}),'detail'); res.json({ok:true,item:productUid(row)}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 router.post('/api/interest/wish', async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await setWish(pool, req.body || {}, true); res.json({ok:true,item:productUid(row)}); }
+  try{ const row=await setWish(pool, req.body || {}, true); await touchProductInterest(pool,itemKey(req.body||{}),'wish'); res.json({ok:true,item:productUid(row)}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 router.post('/api/gm/interest/wish', async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await setWish(pool, req.body || {}, true); res.json({ok:true,item:productUid(row)}); }
+  try{ const row=await setWish(pool, req.body || {}, true); await touchProductInterest(pool,itemKey(req.body||{}),'wish'); res.json({ok:true,item:productUid(row)}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 router.post('/api/interest/unwish', async (req,res)=>{

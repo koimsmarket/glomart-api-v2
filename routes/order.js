@@ -2,9 +2,9 @@ const express = require('express');
 const router = express.Router();
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=null){ return v===undefined||v===null||v==='' ? d : String(v).trim(); }
-function n(v,d=0){ if(v===undefined||v===null||v==='') return d; const x=Number(String(v).replace(/,/g,'')); return Number.isFinite(x)?x:d; }
+function n(v,d=0){ if(v===undefined||v===null||v==='') return d; const x=Number(String(v).replace(/[^0-9.-]/g,'')); return Number.isFinite(x)?x:d; }
 function ord(){ const d=new Date(); const p=x=>String(x).padStart(2,'0'); return `GM${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
-router.post('/api/order/create', async (req,res)=>{
+router.post(['/api/order/create','/api/gm/order/create'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, items=Array.isArray(b.items)?b.items:[];
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
@@ -38,6 +38,20 @@ router.post('/api/order/create', async (req,res)=>{
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW()) RETURNING *`,
         [order_no,s(it.pi_ii_vi,''),s(it.product_name,''),s(it.option_name),s(it.option_value),n(it.quantity,1),n(it.mall_sale_price),n(it.customer_order_price),n(it.final_supply_price,null),n(it.product_amount),s(it.delivery_type),n(it.delivery_fee),s(it.courier_name),s(it.invoice_no),it.shipped_at||null,it.delivered_at||null,s(it.item_status,'ordered')]);
       saved.push(r.rows[0]);
+      const mallCode=s(it.mall_code || it.mallCode);
+      const pi=s(it.pi_ii_vi,'');
+      const qty=n(it.quantity,1);
+      if(mallCode && pi){
+        await client.query(`
+          UPDATE gm_product
+          SET order_count=COALESCE(order_count,0)+1,
+              order_qty_total=COALESCE(order_qty_total,0)+$3,
+              last_order_at=NOW(),
+              expire_at=GREATEST(COALESCE(expire_at, NOW()), NOW() + INTERVAL '730 days'),
+              updated_at=NOW()
+          WHERE mall_code=$1 AND pi_ii_vi=$2
+        `,[mallCode,pi,qty]).catch(()=>{});
+      }
     }
     await client.query('COMMIT'); res.json({ok:true,order:or.rows[0],items:saved});
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }

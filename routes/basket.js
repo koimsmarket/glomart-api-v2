@@ -3,7 +3,7 @@ const router = express.Router();
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=null){ return v===undefined||v===null||v==='' ? d : String(v).trim(); }
-function n(v,d=0){ if(v===undefined||v===null||v==='') return d; const x=Number(String(v).replace(/,/g,'')); return Number.isFinite(x)?x:d; }
+function n(v,d=0){ if(v===undefined||v===null||v==='') return d; const x=Number(String(v).replace(/[^0-9.-]/g,'')); return Number.isFinite(x)?x:d; }
 function splitProductUid(uid){
   const v=s(uid,'') || '';
   const p=v.split('_');
@@ -46,6 +46,18 @@ function rowPayload(b){
 function selectSql(where){
   return `SELECT *, (mall_code || '_' || pi_ii_vi) AS product_uid FROM gm_basket ${where||''}`;
 }
+
+async function touchProductCart(pool, row){
+  if(!row || !row.mall_code || !row.pi_ii_vi) return;
+  await pool.query(`
+    UPDATE gm_product
+    SET cart_count=COALESCE(cart_count,0)+1,
+        last_cart_at=NOW(),
+        expire_at=GREATEST(COALESCE(expire_at, NOW()), NOW() + INTERVAL '180 days'),
+        updated_at=NOW()
+    WHERE mall_code=$1 AND pi_ii_vi=$2
+  `, [row.mall_code, row.pi_ii_vi]).catch(()=>{});
+}
 async function upsertOne(pool,b){
   const p=rowPayload(b);
   if(!p.mall_code) throw new Error('mall_code is required');
@@ -75,23 +87,23 @@ async function upsertOne(pool,b){
   return r.rows[0];
 }
 
-router.post('/api/basket/add', async (req,res)=>{
+router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await upsertOne(pool,req.body||{}); res.json({ok:true,item:row}); }
+  try{ const row=await upsertOne(pool,req.body||{}); await touchProductCart(pool,row); res.json({ok:true,item:row}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
-router.post('/api/basket/bulk-upsert', async (req,res)=>{
+router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, items=Array.isArray(b.items)?b.items:[];
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   const saved=[];
   try{
-    for(const raw of items){ saved.push(await upsertOne(pool,Object.assign({},raw,{member_id:b.member_id||raw.member_id,guest_key:b.guest_key||raw.guest_key}))); }
+    for(const raw of items){ const row=await upsertOne(pool,Object.assign({},raw,{member_id:b.member_id||raw.member_id,guest_key:b.guest_key||raw.guest_key})); await touchProductCart(pool,row); saved.push(row); }
     res.json({ok:true,items:saved});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
-router.get('/api/basket', async (req,res)=>{
+router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
   const pool=db(req), owner=ownerWhere(req.query||{});
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   if(!owner) return res.status(400).json({ok:false,error:'member_id or guest_key is required'});
@@ -99,7 +111,7 @@ router.get('/api/basket', async (req,res)=>{
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
-router.post('/api/basket/quantity', async (req,res)=>{
+router.post(['/api/basket/quantity','/api/gm/basket/update'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, owner=ownerWhere(b), key=itemKey(b), qty=Math.max(1,n(b.quantity,1));
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   if(!owner || !key.mall_code || !key.pi_ii_vi) return res.status(400).json({ok:false,error:'mall_code/pi_ii_vi and member_id/guest_key are required'});
@@ -107,7 +119,7 @@ router.post('/api/basket/quantity', async (req,res)=>{
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
-router.post('/api/basket/delete', async (req,res)=>{
+router.delete(['/api/basket/delete','/api/gm/basket/item'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, owner=ownerWhere(b);
   const productUids=Array.isArray(b.product_uids)?b.product_uids.map(x=>s(x)).filter(Boolean):[];
   const keys=Array.isArray(b.items)?b.items.map(itemKey).filter(k=>k.mall_code&&k.pi_ii_vi):[];
