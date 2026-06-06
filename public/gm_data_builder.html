@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V003</title>
+<title>GM Safe Update Builder V004 SINGLE</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1060px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -21,7 +21,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V003</h1>
+<h1>GM Safe Update Builder V004 SINGLE</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 전용. INSERT·DELETE·REPLACE 없음.</div>
 
 <div class="warning">
@@ -40,6 +40,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <select id="format"><option value="csv">CSV</option><option value="json">JSON 미리보기</option></select>
     <button onclick="download()">다운로드</button>
     <button class="gray" onclick="preview()">JSON 미리보기</button>
+    <button class="gray" onclick="counts()">테이블 건수 확인</button>
   </div>
   <div class="card">
     <h2>안전 업데이트</h2>
@@ -82,6 +83,10 @@ function download(){
 async function preview(){
   const t=document.getElementById('downTable').value;
   const r=await fetch(`${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=json`);
+  log(await r.json());
+}
+async function counts(){
+  const r=await fetch(`${API}/api/gm/db/table-counts`);
   log(await r.json());
 }
 async function send(apply){

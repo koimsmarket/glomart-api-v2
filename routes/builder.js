@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V003_SINGLE_TABLES';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V004_SINGLE_TABLES_VERIFY';
 
 // V002 기본 원칙:
 // - UPDATE ONLY

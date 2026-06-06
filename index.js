@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V008_SINGLE_BUILDER_RESET_TEMP';
+const VERSION = 'GLOMART_API_DB_READY_V009_SINGLE_RESET_VERIFY';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -167,6 +167,46 @@ async function dbQuery(sql, vals=[]){
   return pool.query(sql, vals);
 }
 
+async function tableCounts(tableNames){
+  const targets = Array.from(new Set((tableNames || []).map(String)));
+  if(!targets.length) return {};
+  const existing = await dbQuery(`
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_schema='public' AND table_name = ANY($1::text[])
+    ORDER BY table_name
+  `, [targets]);
+  const out = {};
+  for(const row of existing.rows){
+    const table = row.table_name;
+    const quoted = '"' + String(table).replace(/"/g, '""') + '"';
+    const c = await dbQuery('SELECT COUNT(*)::int AS count FROM ' + quoted);
+    out[table] = c.rows[0].count;
+  }
+  for(const table of targets){
+    if(!Object.prototype.hasOwnProperty.call(out, table)) out[table] = null;
+  }
+  return out;
+}
+
+const GM_RESET_TARGETS = [
+  'gm_product_upsert_queue',
+  'gm_basket',
+  'gm_order',
+  'gm_order_item',
+  'gm_supplier',
+  'gm_cs',
+  'gm_cs_message',
+  'gm_product',
+  // legacy plural tables are included only for one-time cleanup after table-name unification
+  'gm_products',
+  'gm_orders',
+  'gm_order_items',
+  'gm_suppliers',
+  'gm_cs_messages'
+];
+
+
 function owner(b){
   const memberId = cleanText(b.member_id);
   const guestKey = cleanText(b.guest_key);
@@ -203,6 +243,7 @@ app.get('/', (req,res)=>ok(res, {
     'GET /api/gm/health',
     'POST /api/gm/db/init',
     'POST /api/gm/db/reset',
+    'GET /api/gm/db/table-counts',
     'POST /api/gm/product/upsert',
     'POST /api/gm/product/queue',
     'GET /api/gm/product/queue/status',
@@ -237,35 +278,34 @@ app.post('/api/gm/db/init', async (req,res)=>{
 
 app.post('/api/gm/db/reset', async (req,res)=>{
   try{
-    const targets = [
-      'gm_product_upsert_queue',
-      'gm_basket',
-      'gm_order',
-      'gm_supplier',
-      'gm_cs_message',
-      'gm_product',
-      // legacy plural tables are included only for one-time cleanup after table-name unification
-      'gm_products',
-      'gm_orders',
-      'gm_suppliers',
-      'gm_order_item',
-      'gm_cs_messages'
-    ];
+    const before = await tableCounts(GM_RESET_TARGETS);
     const existing = await dbQuery(`
       SELECT table_name
       FROM information_schema.tables
       WHERE table_schema='public' AND table_name = ANY($1::text[])
       ORDER BY table_name
-    `, [targets]);
+    `, [GM_RESET_TARGETS]);
     const tables = existing.rows.map(r => r.table_name);
     if(!tables.length){
-      return ok(res, { action:'db.reset', truncated:[], detail:'no target gm_* tables found' });
+      return ok(res, { action:'db.reset', truncated:[], before, after:{}, detail:'no target gm_* tables found' });
     }
     const quoted = tables.map(t => '"' + String(t).replace(/"/g, '""') + '"').join(', ');
     await dbQuery('TRUNCATE TABLE ' + quoted + ' RESTART IDENTITY CASCADE');
-    ok(res, { action:'db.reset', truncated:tables });
+    const after = await tableCounts(GM_RESET_TARGETS);
+    ok(res, { action:'db.reset', truncated:tables, before, after });
   }catch(e){
     fail(res, 500, 'db reset failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/db/table-counts', async (req,res)=>{
+  try{
+    const q = String(req.query.tables || '').trim();
+    const targets = q ? q.split(',').map(x=>x.trim()).filter(Boolean) : GM_RESET_TARGETS;
+    const counts = await tableCounts(targets);
+    ok(res, { action:'db.table-counts', counts });
+  }catch(e){
+    fail(res, 500, 'db table-counts failed', { detail:String(e && e.message || e) });
   }
 });
 
