@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V009_SINGLE_RESET_VERIFY';
+const VERSION = 'GLOMART_API_DB_READY_V010_DASHBOARD_STATUS';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -191,6 +191,8 @@ async function tableCounts(tableNames){
 
 const GM_RESET_TARGETS = [
   'gm_product_upsert_queue',
+  'gm_dashboard_snapshot',
+  'gm_search_log',
   'gm_basket',
   'gm_order',
   'gm_order_item',
@@ -244,6 +246,9 @@ app.get('/', (req,res)=>ok(res, {
     'POST /api/gm/db/init',
     'POST /api/gm/db/reset',
     'GET /api/gm/db/table-counts',
+    'GET /api/gm/dashboard/realtime',
+    'POST /api/gm/dashboard/snapshot',
+    'POST /api/gm/search/log',
     'POST /api/gm/product/upsert',
     'POST /api/gm/product/queue',
     'GET /api/gm/product/queue/status',
@@ -306,6 +311,196 @@ app.get('/api/gm/db/table-counts', async (req,res)=>{
     ok(res, { action:'db.table-counts', counts });
   }catch(e){
     fail(res, 500, 'db table-counts failed', { detail:String(e && e.message || e) });
+  }
+});
+
+
+const GM_DASHBOARD_TABLES = [
+  'gm_product',
+  'gm_basket',
+  'gm_order',
+  'gm_order_item',
+  'gm_supplier',
+  'gm_cs',
+  'gm_cs_message',
+  'gm_product_upsert_queue',
+  'gm_search_log',
+  'gm_dashboard_snapshot'
+];
+
+function nz(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; }
+async function tableExists(table){
+  const r = await dbQuery(`
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema='public' AND table_name=$1
+    LIMIT 1
+  `, [table]);
+  return r.rows.length > 0;
+}
+async function getQueueStatusCounts(){
+  const out = { pending:0, processing:0, done:0, failed:0, total:0, last_created_at:null, last_processed_at:null };
+  if(!(await tableExists('gm_product_upsert_queue'))) return out;
+  const r = await dbQuery(`
+    SELECT lower(COALESCE(status,'')) AS status, COUNT(*)::int AS count
+    FROM gm_product_upsert_queue
+    GROUP BY lower(COALESCE(status,''))
+  `);
+  for(const row of r.rows){
+    const st = row.status || 'unknown';
+    out[st] = nz(row.count);
+    out.total += nz(row.count);
+  }
+  const t = await dbQuery(`
+    SELECT MAX(created_at) AS last_created_at, MAX(processed_at) AS last_processed_at
+    FROM gm_product_upsert_queue
+  `);
+  if(t.rows[0]){
+    out.last_created_at = t.rows[0].last_created_at || null;
+    out.last_processed_at = t.rows[0].last_processed_at || null;
+  }
+  return out;
+}
+async function getDbSizeInfo(){
+  const limitMb = Math.max(1, Number(process.env.GM_DB_SIZE_LIMIT_MB || 1024));
+  try{
+    const r = await dbQuery(`SELECT pg_database_size(current_database())::bigint AS bytes`);
+    const bytes = Number(r.rows[0] && r.rows[0].bytes || 0);
+    const mb = Math.round((bytes / 1024 / 1024) * 100) / 100;
+    const percent = Math.round((mb / limitMb) * 10000) / 100;
+    let level = 'normal';
+    if(percent >= 85) level = 'danger';
+    else if(percent >= 70) level = 'warning';
+    else if(percent >= 50) level = 'prepare';
+    return { bytes, mb, limit_mb:limitMb, percent, level };
+  }catch(e){
+    return { bytes:null, mb:null, limit_mb:limitMb, percent:null, level:'unknown', error:String(e && e.message || e) };
+  }
+}
+async function getPreviousDashboardSnapshot(){
+  if(!(await tableExists('gm_dashboard_snapshot'))) return null;
+  const r = await dbQuery(`
+    SELECT *
+    FROM gm_dashboard_snapshot
+    ORDER BY snapshot_at DESC, snapshot_id DESC
+    LIMIT 1
+  `);
+  return r.rows[0] || null;
+}
+function diffCounts(current, previous){
+  const out = {};
+  if(!previous) return out;
+  const map = {
+    gm_product:'gm_product_count', gm_basket:'gm_basket_count', gm_order:'gm_order_count',
+    gm_order_item:'gm_order_item_count', gm_supplier:'gm_supplier_count', gm_cs:'gm_cs_count',
+    gm_cs_message:'gm_cs_message_count', gm_search_log:'gm_search_log_count'
+  };
+  for(const [table,col] of Object.entries(map)){
+    if(current.counts && current.counts[table] != null && previous[col] != null){
+      out[table] = nz(current.counts[table]) - nz(previous[col]);
+    }
+  }
+  return out;
+}
+async function buildDashboardRealtime(startedAt){
+  const counts = await tableCounts(GM_DASHBOARD_TABLES);
+  const queue = await getQueueStatusCounts();
+  const dbSize = await getDbSizeInfo();
+  const previous = await getPreviousDashboardSnapshot();
+  const apiMs = Date.now() - startedAt;
+  const current = {
+    snapshot_at: nowIso(),
+    counts,
+    queue,
+    db_size: dbSize,
+    api_response_ms: apiMs,
+    server_time: nowIso(),
+    warning: {
+      db: dbSize.level,
+      queue: queue.pending >= 5000 ? 'danger' : (queue.pending >= 1000 ? 'warning' : 'normal'),
+      worker: queue.pending > 0 && !queue.last_processed_at ? 'warning' : 'normal'
+    }
+  };
+  current.diff_from_previous = diffCounts(current, previous);
+  return { current, previous };
+}
+async function saveDashboardSnapshot(current){
+  if(!(await tableExists('gm_dashboard_snapshot'))) return false;
+  const c = current.counts || {}, q = current.queue || {}, d = current.db_size || {};
+  await dbQuery(`
+    INSERT INTO gm_dashboard_snapshot (
+      snapshot_at,
+      gm_product_count, gm_basket_count, gm_order_count, gm_order_item_count,
+      gm_supplier_count, gm_cs_count, gm_cs_message_count, gm_search_log_count,
+      queue_pending_count, queue_processing_count, queue_done_count, queue_failed_count, queue_total_count,
+      db_size_bytes, db_size_mb, db_size_percent, db_size_limit_mb, api_response_ms,
+      created_at
+    ) VALUES (
+      now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now()
+    )
+  `, [
+    nz(c.gm_product), nz(c.gm_basket), nz(c.gm_order), nz(c.gm_order_item),
+    nz(c.gm_supplier), nz(c.gm_cs), nz(c.gm_cs_message), nz(c.gm_search_log),
+    nz(q.pending), nz(q.processing), nz(q.done), nz(q.failed), nz(q.total),
+    d.bytes == null ? null : d.bytes, d.mb == null ? null : d.mb, d.percent == null ? null : d.percent,
+    d.limit_mb == null ? null : d.limit_mb, nz(current.api_response_ms)
+  ]);
+  return true;
+}
+
+app.get('/api/gm/dashboard/realtime', async (req,res)=>{
+  const startedAt = Date.now();
+  try{
+    const data = await buildDashboardRealtime(startedAt);
+    let saved = false;
+    if(String(req.query.save || '1') !== '0') saved = await saveDashboardSnapshot(data.current);
+    ok(res, { action:'dashboard.realtime', saved, ...data });
+  }catch(e){
+    fail(res, 500, 'dashboard realtime failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.post('/api/gm/dashboard/snapshot', async (req,res)=>{
+  const startedAt = Date.now();
+  try{
+    const data = await buildDashboardRealtime(startedAt);
+    const saved = await saveDashboardSnapshot(data.current);
+    ok(res, { action:'dashboard.snapshot', saved, ...data });
+  }catch(e){
+    fail(res, 500, 'dashboard snapshot failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.post('/api/gm/search/log', async (req,res)=>{
+  try{
+    if(!(await tableExists('gm_search_log'))) return fail(res, 500, 'gm_search_log table not found');
+    const b = req.body || {};
+    const keywordOriginal = cleanText(b.keyword_original || b.keyword || b.origin || '');
+    const keywordNormalized = cleanText(b.keyword_normalized || keywordOriginal).toLowerCase();
+    const mallCode = cleanText(b.mall_code || b.mallCode || '');
+    await dbQuery(`
+      INSERT INTO gm_search_log (
+        search_at, keyword_original, keyword_normalized,
+        lang_code, country_code, member_country_code,
+        category_code, category_no, category_name,
+        mall_code, result_count, db_insert_count, queue_send_count,
+        cache_used, cache_key, search_source,
+        member_id, guest_key, device_type, request_id, raw_json, created_at
+      ) VALUES (
+        now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,now()
+      )
+    `, [
+      keywordOriginal, keywordNormalized,
+      cleanText(b.lang_code || b.langCode || ''), cleanText(b.country_code || b.countryCode || ''), cleanText(b.member_country_code || b.memberCountryCode || ''),
+      cleanText(b.category_code || b.categoryCode || ''), cleanText(b.category_no || b.categoryNo || ''), cleanText(b.category_name || b.categoryName || ''),
+      mallCode, toInt(b.result_count || b.resultCount, 0), toInt(b.db_insert_count || b.dbInsertCount, 0), toInt(b.queue_send_count || b.queueSendCount, 0),
+      !!(b.cache_used || b.cacheUsed), cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
+      cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''), cleanText(b.request_id || b.requestId || ''),
+      JSON.stringify(b)
+    ]);
+    ok(res, { action:'search.log', inserted:true });
+  }catch(e){
+    fail(res, 500, 'search log failed', { detail:String(e && e.message || e) });
   }
 });
 

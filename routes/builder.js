@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V004_SINGLE_TABLES_VERIFY';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V005_DASHBOARD';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -95,6 +95,36 @@ const TABLES = {
       read_yn:['Y','N']
     },
     blocked: ['message_id','created_at']
+  },
+  supplier: {
+    table: 'gm_supplier',
+    key: ['gm_supplier_id'],
+    order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
+    critical: ['gm_supplier_id','seller_name'],
+    numeric: [],
+    defaults: { status:'active' },
+    enums: { status:['active','inactive','blocked','deleted'] },
+    blocked: ['created_at']
+  },
+  search_log: {
+    table: 'gm_search_log',
+    key: ['search_id'],
+    order: 'search_at DESC NULLS LAST, created_at DESC NULLS LAST',
+    critical: ['search_id'],
+    numeric: ['search_id','result_count','db_insert_count','queue_send_count'],
+    defaults: { cache_used:'false' },
+    enums: {},
+    blocked: ['search_id','search_at','created_at']
+  },
+  dashboard_snapshot: {
+    table: 'gm_dashboard_snapshot',
+    key: ['snapshot_id'],
+    order: 'snapshot_at DESC NULLS LAST, created_at DESC NULLS LAST',
+    critical: ['snapshot_id'],
+    numeric: ['snapshot_id','gm_product_count','gm_basket_count','gm_order_count','gm_order_item_count','gm_supplier_count','gm_cs_count','gm_cs_message_count','gm_search_log_count','queue_pending_count','queue_processing_count','queue_done_count','queue_failed_count','queue_total_count','member_count','today_order_count','today_order_amount','today_product_view_count','today_search_count','db_size_bytes','db_size_mb','db_size_percent','db_size_limit_mb','api_response_ms'],
+    defaults: {},
+    enums: {},
+    blocked: ['snapshot_id','snapshot_at','created_at']
   }
 };
 

@@ -3,32 +3,65 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V004 SINGLE</title>
+<title>GM Safe Update Builder V005 Dashboard</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
-.wrap{max-width:1060px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
+.wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
 h1{margin:0 0 6px;font-size:24px}.sub{color:#666;margin-bottom:18px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.card{border:1px solid #ddd;border-radius:12px;padding:16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:12px}
+.card{border:1px solid #ddd;border-radius:12px;padding:16px;background:#fff}
 label{display:block;font-weight:700;margin:10px 0 6px}
 select,input,button{font-size:14px}
 select,input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px}
 button{padding:10px 14px;border:0;border-radius:8px;background:#1f6feb;color:white;font-weight:700;cursor:pointer;margin-top:10px;margin-right:8px}
-button.red{background:#c0392b}button.gray{background:#666}
+button.red{background:#c0392b}button.gray{background:#666}button.green{background:#208a3a}button.orange{background:#d9822b}
 .warning{background:#fff3cd;border:1px solid #ffe08a;border-radius:10px;padding:12px;margin:14px 0;line-height:1.55}
-pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-wrap;max-height:240px;overflow:auto}
+.statusBox{background:#f8fbff;border:1px solid #cfe2ff;border-radius:12px;padding:14px;margin-bottom:16px}
+.statusHead{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:10px}
+.statusTitle{font-size:18px;font-weight:800}.small{font-size:12px;color:#666}.badge{display:inline-block;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:800;background:#e9ecef;color:#333}.badge.prepare{background:#fff3cd;color:#8a5a00}.badge.warning{background:#ffe0b2;color:#a14b00}.badge.danger{background:#ffd6d6;color:#a00000}.badge.normal{background:#dff6dd;color:#126b20}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #eee;padding:7px 6px;text-align:left}th{background:#f5f7fb}.num{text-align:right;font-variant-numeric:tabular-nums}.plus{color:#0b7a30;font-weight:800}.minus{color:#b00020;font-weight:800}
+pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-wrap;max-height:260px;overflow:auto}
 </style>
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V004 SINGLE</h1>
-<div class="sub">CSV 다운로드 / 안전 업데이트 전용. INSERT·DELETE·REPLACE 없음.</div>
+<h1>GM Safe Update Builder V005 Dashboard</h1>
+<div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
+
+<div class="statusBox">
+  <div class="statusHead">
+    <div>
+      <div class="statusTitle">DATABASE / QUEUE STATUS</div>
+      <div class="small" id="statusTime">아직 조회 전</div>
+    </div>
+    <div>
+      <button class="green" onclick="loadDashboard(true)">상태 새로고침</button>
+      <button class="orange" onclick="saveSnapshot()">스냅샷 저장</button>
+      <button class="red" onclick="resetAll()">개발용 전체 초기화</button>
+    </div>
+  </div>
+  <div class="grid3">
+    <div class="card">
+      <h3>테이블 레코드 수</h3>
+      <table><thead><tr><th>테이블</th><th class="num">현재</th><th class="num">직전대비</th></tr></thead><tbody id="tableStatus"><tr><td colspan="3">조회 전</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h3>Queue / Worker</h3>
+      <table><tbody id="queueStatus"><tr><td>조회 전</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h3>DB 사용률 / 경고</h3>
+      <div id="dbStatus">조회 전</div>
+      <p class="small">기준: 50% 증설 준비, 70% 증설 진행, 85% 긴급 조치</p>
+    </div>
+  </div>
+</div>
 
 <div class="warning">
 <b>안전 정책</b><br>
 업로드는 UPDATE ONLY 입니다. 기준키가 DB에 없으면 SKIP 됩니다.<br>
 빈칸은 기본값 컬럼 외에는 기존 DB 값을 유지합니다.<br>
-부적격 행은 SKIP 되고, 부적격이 많으면 STOP 후 결과 CSV를 다운로드합니다.
+개발용 전체 초기화는 <b>RESET ALL</b> 입력 시에만 실행됩니다.
 </div>
 
 <div class="grid">
@@ -40,7 +73,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <select id="format"><option value="csv">CSV</option><option value="json">JSON 미리보기</option></select>
     <button onclick="download()">다운로드</button>
     <button class="gray" onclick="preview()">JSON 미리보기</button>
-    <button class="gray" onclick="counts()">테이블 건수 확인</button>
+    <button class="gray" onclick="downloadAll()">전체 CSV 다운로드</button>
   </div>
   <div class="card">
     <h2>안전 업데이트</h2>
@@ -50,7 +83,12 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <input type="file" id="file" accept=".csv,text/csv">
     <button class="gray" onclick="dryRun()">검증만 실행</button>
     <button class="red" onclick="applyUpdate()">APPLY 입력 후 업데이트</button>
-    <p>업데이트 전 반드시 “검증만 실행” 결과 CSV를 확인하세요.</p>
+    <hr>
+    <label>전체 업로드용 CSV 여러 개</label>
+    <input type="file" id="multiFiles" accept=".csv,text/csv" multiple>
+    <button class="gray" onclick="dryRunAll()">전체 검증</button>
+    <button class="red" onclick="applyAll()">전체 APPLY</button>
+    <p class="small">파일명에 gm_product, gm_order, gm_basket 등 테이블명이 포함되어야 자동 매칭됩니다.</p>
   </div>
 </div>
 
@@ -67,8 +105,15 @@ const tables = {
   cart:'장바구니 gm_basket',
   orders:'주문 gm_order',
   order_items:'주문상품 gm_order_item',
+  supplier:'공급사 gm_supplier',
   cs:'CS gm_cs',
-  cs_messages:'CS 메시지 gm_cs_message'
+  cs_messages:'CS 메시지 gm_cs_message',
+  search_log:'검색 로그 gm_search_log',
+  dashboard_snapshot:'대시보드 스냅샷 gm_dashboard_snapshot'
+};
+const tableNameMap = {
+  gm_product:'products', gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
+  gm_cs:'cs', gm_cs_message:'cs_messages', gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
 };
 function fill(){
   for(const id of ['downTable','upTable']){
@@ -76,40 +121,102 @@ function fill(){
   }
 }
 function log(x){ document.getElementById('log').textContent = typeof x === 'string' ? x : JSON.stringify(x,null,2); }
+function fmt(n){ if(n===null||n===undefined) return '-'; return Number(n).toLocaleString(); }
+function diffHtml(v){ if(v===null||v===undefined||v==='') return ''; const n=Number(v)||0; if(n>0) return `<span class="plus">+${fmt(n)}</span>`; if(n<0) return `<span class="minus">${fmt(n)}</span>`; return '0'; }
+function badge(level){ level=String(level||'normal'); const txt={normal:'정상',prepare:'증설 준비',warning:'증설 진행',danger:'긴급 조치',unknown:'확인불가'}[level]||level; return `<span class="badge ${level}">${txt}</span>`; }
+async function loadDashboard(save){
+  try{
+    const r=await fetch(`${API}/api/gm/dashboard/realtime?save=${save?'1':'0'}&t=${Date.now()}`);
+    const j=await r.json();
+    if(!j.ok){ log(j); return; }
+    const cur=j.current||{}, counts=cur.counts||{}, diff=cur.diff_from_previous||{}, q=cur.queue||{}, db=cur.db_size||{};
+    document.getElementById('statusTime').textContent = `현재 조회: ${cur.server_time||cur.snapshot_at||''}` + (j.previous&&j.previous.snapshot_at ? ` / 직전 스냅샷: ${j.previous.snapshot_at}` : '');
+    const order=['gm_product','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_product_upsert_queue','gm_search_log','gm_dashboard_snapshot'];
+    document.getElementById('tableStatus').innerHTML = order.map(t=>`<tr><td>${t}</td><td class="num">${fmt(counts[t])}</td><td class="num">${diffHtml(diff[t])}</td></tr>`).join('');
+    document.getElementById('queueStatus').innerHTML = `
+      <tr><th>pending</th><td class="num">${fmt(q.pending)}</td></tr>
+      <tr><th>processing</th><td class="num">${fmt(q.processing)}</td></tr>
+      <tr><th>done</th><td class="num">${fmt(q.done)}</td></tr>
+      <tr><th>failed</th><td class="num">${fmt(q.failed)}</td></tr>
+      <tr><th>total</th><td class="num">${fmt(q.total)}</td></tr>
+      <tr><th>last processed</th><td>${q.last_processed_at||'-'}</td></tr>`;
+    document.getElementById('dbStatus').innerHTML = `
+      <p>DB 사용량: <b>${db.mb==null?'-':fmt(db.mb)+' MB'}</b></p>
+      <p>기준 용량: <b>${db.limit_mb==null?'-':fmt(db.limit_mb)+' MB'}</b></p>
+      <p>사용률: <b>${db.percent==null?'-':db.percent+'%'}</b> ${badge(db.level)}</p>
+      <p>Queue 경고: ${badge((cur.warning||{}).queue)}</p>
+      <p>API 응답: ${fmt(cur.api_response_ms)} ms</p>`;
+    log({action:'dashboard.loaded', saved:j.saved, current:cur.warning||{}, counts, queue:q, db_size:db});
+  }catch(e){ log('dashboard error: '+(e&&e.message||e)); }
+}
+async function saveSnapshot(){
+  const r=await fetch(`${API}/api/gm/dashboard/snapshot`,{method:'POST'});
+  const j=await r.json(); log(j); await loadDashboard(false);
+}
+async function resetAll(){
+  const x=prompt('개발용 전체 초기화입니다. 실행하려면 RESET ALL 을 입력하세요.');
+  if(x!=='RESET ALL') return;
+  const r=await fetch(`${API}/api/gm/db/reset`,{method:'POST'});
+  const j=await r.json(); log(j); await loadDashboard(true);
+}
 function download(){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
   location.href = `${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=${encodeURIComponent(f)}`;
+}
+function downloadAll(){
+  const keys=Object.keys(tables);
+  keys.forEach((k,i)=>setTimeout(()=>{ window.open(`${API}/api/gm/builder/export?table=${encodeURIComponent(k)}&format=csv`, '_blank'); }, i*500));
+  log('전체 CSV 다운로드 요청: '+keys.join(', '));
 }
 async function preview(){
   const t=document.getElementById('downTable').value;
   const r=await fetch(`${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=json`);
   log(await r.json());
 }
-async function counts(){
-  const r=await fetch(`${API}/api/gm/db/table-counts`);
-  log(await r.json());
-}
 async function send(apply){
   const f=document.getElementById('file').files[0];
   if(!f){ alert('CSV 파일을 선택하세요.'); return; }
-  if(apply){
-    const x=prompt('실제 업데이트 하려면 APPLY 라고 입력하세요.');
-    if(x !== 'APPLY') return;
-  }
+  if(apply){ const x=prompt('실제 업데이트 하려면 APPLY 라고 입력하세요.'); if(x !== 'APPLY') return; }
   const t=document.getElementById('upTable').value;
-  const text=await f.text();
-  const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(t)}&apply=${apply?'YES':'NO'}`;
+  await uploadOne(t,f,apply);
+}
+function inferTableFromFileName(name){
+  const n=String(name||'').toLowerCase();
+  const pairs=[['gm_dashboard_snapshot','dashboard_snapshot'],['gm_search_log','search_log'],['gm_order_item','order_items'],['gm_cs_message','cs_messages'],['gm_product','products'],['gm_basket','cart'],['gm_order','orders'],['gm_supplier','supplier'],['gm_cs','cs']];
+  for(const [needle,key] of pairs){ if(n.indexOf(needle)>=0) return key; }
+  return '';
+}
+async function uploadOne(tableKey,file,apply){
+  const text=await file.text();
+  const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}`;
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
   const blob=await r.blob();
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download=(apply?'apply':'dryrun')+'_result_'+Date.now()+'.csv';
+  a.download=(apply?'apply':'dryrun')+'_result_'+tableKey+'_'+Date.now()+'.csv';
   a.click();
-  log((apply?'업데이트':'검증')+' 결과 CSV 다운로드 완료');
+}
+async function sendAll(apply){
+  const files=[...document.getElementById('multiFiles').files];
+  if(!files.length){ alert('CSV 파일들을 선택하세요.'); return; }
+  if(apply){ const x=prompt('전체 실제 업데이트 하려면 APPLY ALL 이라고 입력하세요.'); if(x !== 'APPLY ALL') return; }
+  const result=[];
+  for(const f of files){
+    const key=inferTableFromFileName(f.name);
+    if(!key){ result.push({file:f.name, result:'SKIP', reason:'파일명에서 테이블명 추정 실패'}); continue; }
+    await uploadOne(key,f,apply);
+    result.push({file:f.name, table:key, result:apply?'APPLY_REQUESTED':'DRYRUN_REQUESTED'});
+  }
+  log(result);
+  await loadDashboard(true);
 }
 function dryRun(){ send(false); }
 function applyUpdate(){ send(true); }
+function dryRunAll(){ sendAll(false); }
+function applyAll(){ sendAll(true); }
 fill();
+loadDashboard(true);
+setInterval(()=>loadDashboard(false), 60000);
 </script>
 </body>
 </html>
