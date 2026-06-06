@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V010_DASHBOARD_STATUS';
+const VERSION = 'GLOMART_API_DB_READY_V011_DASHBOARD_SAFE_SNAPSHOT';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -315,6 +315,7 @@ app.get('/api/gm/db/table-counts', async (req,res)=>{
 });
 
 
+const GM_DASHBOARD_SNAPSHOT_MINUTES = Math.max(1, Number(process.env.GM_DASHBOARD_SNAPSHOT_MINUTES || 30));
 const GM_DASHBOARD_TABLES = [
   'gm_product',
   'gm_basket',
@@ -387,6 +388,18 @@ async function getPreviousDashboardSnapshot(){
   `);
   return r.rows[0] || null;
 }
+async function getRecentDashboardSnapshot(minutes){
+  if(!(await tableExists('gm_dashboard_snapshot'))) return null;
+  const m = Math.max(1, Number(minutes || GM_DASHBOARD_SNAPSHOT_MINUTES || 30));
+  const r = await dbQuery(`
+    SELECT *
+    FROM gm_dashboard_snapshot
+    WHERE snapshot_at >= now() - ($1::int * interval '1 minute')
+    ORDER BY snapshot_at DESC, snapshot_id DESC
+    LIMIT 1
+  `, [m]);
+  return r.rows[0] || null;
+}
 function diffCounts(current, previous){
   const out = {};
   if(!previous) return out;
@@ -425,7 +438,7 @@ async function buildDashboardRealtime(startedAt){
   return { current, previous };
 }
 async function saveDashboardSnapshot(current){
-  if(!(await tableExists('gm_dashboard_snapshot'))) return false;
+  if(!(await tableExists('gm_dashboard_snapshot'))) return { saved:false, skipped:true, reason:'table_missing' };
   const c = current.counts || {}, q = current.queue || {}, d = current.db_size || {};
   await dbQuery(`
     INSERT INTO gm_dashboard_snapshot (
@@ -445,16 +458,33 @@ async function saveDashboardSnapshot(current){
     d.bytes == null ? null : d.bytes, d.mb == null ? null : d.mb, d.percent == null ? null : d.percent,
     d.limit_mb == null ? null : d.limit_mb, nz(current.api_response_ms)
   ]);
-  return true;
+  return { saved:true, skipped:false, reason:'inserted' };
 }
+async function saveDashboardSnapshotIfDue(current, opts){
+  opts = opts || {};
+  const force = !!opts.force;
+  const minutes = Math.max(1, Number(opts.minutes || GM_DASHBOARD_SNAPSHOT_MINUTES || 30));
+  if(!force){
+    const recent = await getRecentDashboardSnapshot(minutes);
+    if(recent){
+      return { saved:false, skipped:true, reason:'recent_exists', interval_minutes:minutes, recent_snapshot_at:recent.snapshot_at };
+    }
+  }
+  const r = await saveDashboardSnapshot(current);
+  r.interval_minutes = minutes;
+  return r;
+}
+
 
 app.get('/api/gm/dashboard/realtime', async (req,res)=>{
   const startedAt = Date.now();
   try{
     const data = await buildDashboardRealtime(startedAt);
-    let saved = false;
-    if(String(req.query.save || '1') !== '0') saved = await saveDashboardSnapshot(data.current);
-    ok(res, { action:'dashboard.realtime', saved, ...data });
+    let snapshot = { saved:false, skipped:true, reason:'realtime_no_save' };
+    if(String(req.query.save || '0') === '1'){
+      snapshot = await saveDashboardSnapshotIfDue(data.current, { force:false, minutes:req.query.minutes });
+    }
+    ok(res, { action:'dashboard.realtime', saved:!!snapshot.saved, snapshot, ...data });
   }catch(e){
     fail(res, 500, 'dashboard realtime failed', { detail:String(e && e.message || e) });
   }
@@ -464,8 +494,9 @@ app.post('/api/gm/dashboard/snapshot', async (req,res)=>{
   const startedAt = Date.now();
   try{
     const data = await buildDashboardRealtime(startedAt);
-    const saved = await saveDashboardSnapshot(data.current);
-    ok(res, { action:'dashboard.snapshot', saved, ...data });
+    const force = String((req.body&&req.body.force)||req.query.force||'0') === '1';
+    const snapshot = await saveDashboardSnapshotIfDue(data.current, { force, minutes:(req.body&&req.body.minutes)||req.query.minutes });
+    ok(res, { action:'dashboard.snapshot', saved:!!snapshot.saved, snapshot, ...data });
   }catch(e){
     fail(res, 500, 'dashboard snapshot failed', { detail:String(e && e.message || e) });
   }

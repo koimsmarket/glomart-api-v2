@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V005 Dashboard</title>
+<title>GM Safe Update Builder V006 Dashboard</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -25,7 +25,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V005 Dashboard</h1>
+<h1>GM Safe Update Builder V006 Dashboard</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -35,7 +35,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
       <div class="small" id="statusTime">아직 조회 전</div>
     </div>
     <div>
-      <button class="green" onclick="loadDashboard(true)">상태 새로고침</button>
+      <button class="green" onclick="loadDashboard(false)">상태 새로고침</button>
       <button class="orange" onclick="saveSnapshot()">스냅샷 저장</button>
       <button class="red" onclick="resetAll()">개발용 전체 초기화</button>
     </div>
@@ -150,14 +150,14 @@ async function loadDashboard(save){
   }catch(e){ log('dashboard error: '+(e&&e.message||e)); }
 }
 async function saveSnapshot(){
-  const r=await fetch(`${API}/api/gm/dashboard/snapshot`,{method:'POST'});
+  const r=await fetch(`${API}/api/gm/dashboard/snapshot`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});
   const j=await r.json(); log(j); await loadDashboard(false);
 }
 async function resetAll(){
   const x=prompt('개발용 전체 초기화입니다. 실행하려면 RESET ALL 을 입력하세요.');
   if(x!=='RESET ALL') return;
   const r=await fetch(`${API}/api/gm/db/reset`,{method:'POST'});
-  const j=await r.json(); log(j); await loadDashboard(true);
+  const j=await r.json(); log(j); await loadDashboard(false);
 }
 function download(){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
@@ -208,14 +208,14 @@ async function sendAll(apply){
     result.push({file:f.name, table:key, result:apply?'APPLY_REQUESTED':'DRYRUN_REQUESTED'});
   }
   log(result);
-  await loadDashboard(true);
+  await loadDashboard(false);
 }
 function dryRun(){ send(false); }
 function applyUpdate(){ send(true); }
 function dryRunAll(){ sendAll(false); }
 function applyAll(){ sendAll(true); }
 fill();
-loadDashboard(true);
+loadDashboard(false);
 setInterval(()=>loadDashboard(false), 60000);
 </script>
 </body>
