@@ -240,7 +240,7 @@ app.post('/api/gm/supplier/upsert', async (req,res)=>{
     const supplierCode = cleanText(s.supplier_code || `${mallCode}_SP_${mallSellerId}`);
 
     const r = await dbQuery(`
-      INSERT INTO gm_suppliers (
+      INSERT INTO gm_supplier (
         gm_supplier_id, mall_code, mall_seller_id, supplier_code, seller_key,
         seller_name, company_name, ceo_name, business_number, online_sales_number,
         main_phone, main_email, business_zipcode, business_address1, business_address2,
@@ -298,7 +298,7 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
     if(!uid || !pi || !mallCode || !productName) return fail(res, 400, 'product_uid/pi_ii_vi/mall_code/product_name required');
 
     const r = await dbQuery(`
-      INSERT INTO gm_products (
+      INSERT INTO gm_product (
         product_uid, glomart_code, gm_category, category_keyword, mall_code, mall_category,
         product_id, item_id, vendor_item_id, pi_ii_vi, internal_product_code,
         product_name, mall_product_name, option_count, option_name, option_value,
@@ -424,7 +424,7 @@ app.post('/api/gm/order/create', async (req,res)=>{
   try{
     await client.query('BEGIN');
     await client.query(`
-      INSERT INTO gm_orders (
+      INSERT INTO gm_order (
         order_no, member_id, guest_key, orderer_name, orderer_phone, orderer_mobile, orderer_email,
         receiver_name, receiver_phone, receiver_mobile, receiver_safe_phone,
         receiver_zipcode, receiver_address1, receiver_address2, delivery_memo,
