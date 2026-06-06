@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V005_QUEUE_WORKER_UPSERT';
+const VERSION = 'GLOMART_API_DB_READY_V006_RESET_TEMP';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -213,7 +213,31 @@ app.post('/api/gm/db/init', async (req,res)=>{
 });
 
 app.post('/api/gm/db/reset', async (req,res)=>{
-  fail(res, 400, 'db reset disabled', { detail:'Use migrations manually if reset is required.' });
+  try{
+    const targets = [
+      'gm_product_upsert_queue',
+      'gm_basket',
+      'gm_order',
+      'gm_supplier',
+      'gm_cs_message',
+      'gm_product'
+    ];
+    const existing = await dbQuery(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema='public' AND table_name = ANY($1::text[])
+      ORDER BY table_name
+    `, [targets]);
+    const tables = existing.rows.map(r => r.table_name);
+    if(!tables.length){
+      return ok(res, { action:'db.reset', truncated:[], detail:'no target gm_* tables found' });
+    }
+    const quoted = tables.map(t => '"' + String(t).replace(/"/g, '""') + '"').join(', ');
+    await dbQuery('TRUNCATE TABLE ' + quoted + ' RESTART IDENTITY CASCADE');
+    ok(res, { action:'db.reset', truncated:tables });
+  }catch(e){
+    fail(res, 500, 'db reset failed', { detail:String(e && e.message || e) });
+  }
 });
 
 app.get('/api/gm/db/status', async (req,res)=>{
