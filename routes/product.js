@@ -2,7 +2,12 @@ const express = require('express');
 const router = express.Router();
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function cleanText(v){ return String(v || '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
-function toInt(v, def=0){ const n = Number(String(v ?? '').replace(/,/g,'')); return Number.isFinite(n) ? Math.round(n) : def; }
+function toInt(v, def=0){
+  const raw = String(v ?? '').replace(/,/g,'').trim();
+  const m = raw.match(/-?\d+(?:\.\d+)?/);
+  const n = m ? Number(m[0]) : Number(raw);
+  return Number.isFinite(n) ? Math.round(n) : def;
+}
 function normalizeUrl(url){ url = cleanText(url); if(url.startsWith('//')) return 'https:' + url; return url; }
 function fail(res, status, message, extra={}){ res.status(status).json({ ok:false, error:message, ...extra }); }
 function ok(res, data){ res.json({ ok:true, ...data }); }
@@ -25,35 +30,47 @@ function makeRequestId(p, items){
   return 'GMQ_' + mall + '_' + Date.now() + '_' + Math.abs(h);
 }
 function ids(b){
-  const productId = cleanText(b.product_id || b.productId);
-  const itemId = cleanText(b.item_id || b.itemId);
-  const vendorItemId = cleanText(b.vendor_item_id || b.vendorItemId || b.venderItemId);
-  const mallCode = cleanText(b.mall_code || b.mallCode || 'CPKR').toUpperCase();
-  const pi = cleanText(b.pi_ii_vi || [productId,itemId,vendorItemId].filter(Boolean).join('_'));
-  const uid = cleanText(b.product_uid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
+  const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
+
+  // CPKR uses productId/itemId/vendorItemId. ALI often has only aliProductId/aliKey.
+  let productId = cleanText(b.product_id || b.productId || b.productID || b.ali_product_id || b.aliProductId || b.aliProductID || b.itemId || b.item_id);
+  let itemId = cleanText(b.item_id || b.itemId || b.sku_id || b.skuId || b.ali_sku_id || b.aliSkuId);
+  let vendorItemId = cleanText(b.vendor_item_id || b.vendorItemId || b.venderItemId || b.offer_id || b.offerId || b.ali_offer_id || b.aliOfferId);
+
+  let pi = cleanText(b.pi_ii_vi || b.piIiVi || b.ali_key || b.aliKey || b.product_key || b.productKey);
+  if(!pi){
+    if(mallCode === 'ALI') pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || productId;
+    else pi = [productId, itemId, vendorItemId].filter(Boolean).join('_');
+  }
+
+  // For ALI/search result rows, a single product id is enough for queue storage.
+  if(!productId && pi){ productId = String(pi).split('_')[0] || ''; }
+  if(!vendorItemId && mallCode === 'ALI') vendorItemId = vendorItemId || itemId || productId;
+  if(!vendorItemId && productId && !itemId) vendorItemId = productId;
+
+  const uid = cleanText(b.product_uid || b.productUid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
   return { productId, itemId, vendorItemId, mallCode, pi, uid };
 }
-
 function pickProductName(p){
   return cleanText(
     p.product_name || p.productName || p.mall_product_name || p.mallProductName ||
-    p.title || p.name || p.product_title || p.productTitle
+    p.title || p.name || p.subject || p.item_title || p.itemTitle || p.product_title || p.productTitle
   );
 }
 function pickPrice(p){
   return toInt(
     p.mall_sale_price || p.mallSalePrice || p.price || p.real_price || p.realPrice ||
-    p.sale_price || p.salePrice || p.final_price || p.finalPrice,
+    p.sale_price || p.salePrice || p.final_price || p.finalPrice || p.ali_price || p.aliPrice || p.min_price || p.minPrice,
     0
   );
 }
 function pickProductUrl(p){
-  return normalizeUrl(p.product_url || p.productUrl || p.url || p.link || p.href || p.detail_url || p.detailUrl);
+  return normalizeUrl(p.product_url || p.productUrl || p.url || p.link || p.href || p.detail_url || p.detailUrl || p.ali_url || p.aliUrl);
 }
 function pickThumbUrl(p){
   return normalizeUrl(
     p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl ||
-    p.thumbnail || p.thumbnail_url || p.thumbnailUrl || p.image || p.image_url || p.imageUrl
+    p.thumbnail || p.thumbnail_url || p.thumbnailUrl || p.image || p.image_url || p.imageUrl || p.img || p.img_url || p.imgUrl
   );
 }
 function normalizeProductPayload(raw, parent={}){
@@ -77,6 +94,7 @@ function normalizeProductPayload(raw, parent={}){
     if(!itemId && parts.length > 2) itemId = cleanText(parts[1]);
     if(!vendorItemId) vendorItemId = cleanText(parts[parts.length - 1]);
   }
+  if(!pi && productId) pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || productId;
   if(!vendorItemId && productId) vendorItemId = productId;
   const mallCode = cleanText(id0.mallCode || 'CPKR').toUpperCase();
   const uid = cleanText(id0.uid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
@@ -209,7 +227,7 @@ router.get('/api/gm/product/queue/recent', async (req,res)=>{
   try{
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10) || 20));
     const r = await pool.query(`
-      SELECT queue_id, request_id, mall_code, keyword, item_count, status, retry_count, error_message, created_at, started_at, finished_at
+      SELECT queue_id, request_id, mall_code, keyword, item_count, status, retry_count, error_message, result_json, created_at, locked_at, processed_at
       FROM gm_product_upsert_queue
       ORDER BY created_at DESC
       LIMIT $1

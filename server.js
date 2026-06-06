@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V004';
+const VERSION = 'GLOMART_API_DB_READY_V005_QUEUE_WORKER_UPSERT';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -595,6 +595,13 @@ app.post('/scrap/save-batch', async (req,res)=>{
 
 // gm_* route modules
 app.locals.pool = pool;
+
+// Start queue worker from server.js as package entry may not load index.js.
+try{
+  require('./workers/product_queue_worker').startProductQueueWorker(pool);
+}catch(e){
+  console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
+}
 app.use(require('./routes/health'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));

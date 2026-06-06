@@ -77,7 +77,13 @@ async function processRow(pool, row){
       errors.push(String(e && e.message || e));
     }
   }
-  return { received: items.length, saved, skipped, errors: errors.slice(0, 5) };
+  const result = { received: items.length, saved, skipped, errors: errors.slice(0, 5) };
+  if(items.length && saved === 0){
+    const e = new Error('queue processed but no gm_product rows saved: ' + (result.errors.join(' | ') || 'unknown mapping error'));
+    e.result = result;
+    throw e;
+  }
+  return result;
 }
 
 async function tick(pool, opts){
