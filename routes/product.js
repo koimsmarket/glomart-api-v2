@@ -157,13 +157,17 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const pool=db(req), p=req.body||{};
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const items = normalizeQueueItems(p);
-  if(!items.length) return fail(res, 400, 'items required');
+  if(!items.length){
+    console.warn('[GM_PRODUCT_QUEUE] rejected: items required', { keys:Object.keys(p || {}) });
+    return fail(res, 400, 'items required');
+  }
   const maxItems = Number(process.env.GM_PRODUCT_QUEUE_MAX_ITEMS || 300);
   if(items.length > maxItems) return fail(res, 413, 'too many items', { received:items.length, max:maxItems });
   const requestId = makeRequestId(p, items);
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
+    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
         request_id, mall_code, keyword, items_json, item_count, status, retry_count, created_at
@@ -177,8 +181,12 @@ router.post('/api/gm/product/queue', async (req,res)=>{
         error_message=NULL
       RETURNING queue_id, request_id, status, item_count
     `, [requestId, mallCode, keyword, JSON.stringify(items), items.length]);
+    console.log('[GM_PRODUCT_QUEUE] inserted', r.rows[0]);
     ok(res,{ action:'product.queue', queued:true, queue:r.rows[0] });
-  }catch(e){ fail(res,500,'product queue failed',{detail:String(e && e.message || e)}); }
+  }catch(e){
+    console.error('[GM_PRODUCT_QUEUE] insert failed', String(e && e.message || e));
+    fail(res,500,'product queue failed',{detail:String(e && e.message || e)});
+  }
 });
 
 router.get('/api/gm/product/queue/status', async (req,res)=>{
@@ -193,6 +201,21 @@ router.get('/api/gm/product/queue/status', async (req,res)=>{
     `);
     ok(res,{ action:'product.queue.status', rows:r.rows });
   }catch(e){ fail(res,500,'product queue status failed',{detail:String(e && e.message || e)}); }
+});
+
+router.get('/api/gm/product/queue/recent', async (req,res)=>{
+  const pool=db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10) || 20));
+    const r = await pool.query(`
+      SELECT queue_id, request_id, mall_code, keyword, item_count, status, retry_count, error_message, created_at, started_at, finished_at
+      FROM gm_product_upsert_queue
+      ORDER BY created_at DESC
+      LIMIT $1
+    `, [limit]);
+    ok(res,{ action:'product.queue.recent', rows:r.rows });
+  }catch(e){ fail(res,500,'product queue recent failed',{detail:String(e && e.message || e)}); }
 });
 
 router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{

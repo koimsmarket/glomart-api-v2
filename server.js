@@ -122,17 +122,39 @@ let dbReady = false;
 let dbError = '';
 
 async function initGmDb({ reset=false } = {}){
-  const file = reset ? 'gm_reset_tables.sql' : 'gm_tables.sql';
-  const sql = fs.readFileSync(path.join(__dirname, file), 'utf8');
-  await pool.query(sql);
+  if (reset) {
+    throw new Error('DB reset is disabled. Use migrations manually if reset is required.');
+  }
+
+  const dir = path.join(__dirname, 'migrations');
+  if (!fs.existsSync(dir)) {
+    throw new Error('migration directory not found: ' + dir);
+  }
+
+  const files = fs.readdirSync(dir)
+    .filter(name => /^\d+_.*\.sql$/i.test(name))
+    .sort((a,b) => a.localeCompare(b, undefined, { numeric:true }));
+
+  if (!files.length) throw new Error('no migration files found');
+
+  const applied = [];
+  for (const name of files) {
+    const file = path.join(dir, name);
+    const sql = fs.readFileSync(file, 'utf8');
+    if (sql.trim()) {
+      await pool.query(sql);
+      applied.push('migrations/' + name);
+    }
+  }
+
   dbReady = true;
   dbError = '';
-  return { file };
+  return { files:applied };
 }
 
 if(process.env.GM_DB_AUTOINIT !== '0'){
-  initGmDb({ reset:false }).then(() => {
-    console.log('[GM DB READY] gm_tables.sql applied');
+  initGmDb({ reset:false }).then((r) => {
+    console.log('[GM DB READY] migrations/*.sql applied', r && r.files ? r.files.length : '');
   }).catch(err => {
     dbReady = false;
     dbError = String(err && err.message || err);
@@ -191,8 +213,7 @@ app.post('/api/gm/db/init', async (req,res)=>{
 });
 
 app.post('/api/gm/db/reset', async (req,res)=>{
-  try{ const r = await initGmDb({ reset:true }); ok(res, { action:'db.reset', ...r }); }
-  catch(e){ fail(res, 500, 'db reset failed', { detail:String(e && e.message || e) }); }
+  fail(res, 400, 'db reset disabled', { detail:'Use migrations manually if reset is required.' });
 });
 
 app.get('/api/gm/db/status', async (req,res)=>{
