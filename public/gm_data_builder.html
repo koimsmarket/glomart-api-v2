@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V002</title>
+<title>GM Safe Update Builder V003</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1060px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -21,7 +21,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V002</h1>
+<h1>GM Safe Update Builder V003</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 전용. INSERT·DELETE·REPLACE 없음.</div>
 
 <div class="warning">
@@ -62,10 +62,10 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <script>
 const API = location.origin;
 const tables = {
-  products:'상품 gm_products',
+  products:'상품 gm_product',
   cart:'장바구니 gm_basket',
-  orders:'주문 gm_orders',
-  order_items:'주문상품 gm_order_items',
+  orders:'주문 gm_order',
+  order_items:'주문상품 gm_order_item',
   cs:'CS gm_cs',
   cs_messages:'CS 메시지 gm_cs_message'
 };

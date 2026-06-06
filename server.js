@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V006_RESET_TEMP';
+const VERSION = 'GLOMART_API_DB_READY_V008_SINGLE_BUILDER_RESET_TEMP';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -220,7 +220,13 @@ app.post('/api/gm/db/reset', async (req,res)=>{
       'gm_order',
       'gm_supplier',
       'gm_cs_message',
-      'gm_product'
+      'gm_product',
+      // legacy plural tables are included only for one-time cleanup after table-name unification
+      'gm_products',
+      'gm_orders',
+      'gm_suppliers',
+      'gm_order_item',
+      'gm_cs_messages'
     ];
     const existing = await dbQuery(`
       SELECT table_name
@@ -479,7 +485,7 @@ app.post('/api/gm/order/create', async (req,res)=>{
 
     for(const it of items){
       await client.query(`
-        INSERT INTO gm_order_items (
+        INSERT INTO gm_order_item (
           order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
           mall_sale_price, customer_order_price, final_supply_price, product_amount,
           delivery_type, delivery_fee, extra_area_delivery_fee, mall_code, supplier_id, supplier_name,

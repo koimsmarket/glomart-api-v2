@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V002';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V003_SINGLE_TABLES';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -16,7 +16,7 @@ const VERSION = 'GM_SAFE_UPDATE_BUILDER_V002';
 
 const TABLES = {
   products: {
-    table: 'gm_products',
+    table: 'gm_product',
     key: ['mall_code', 'pi_ii_vi'],
     order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
     critical: ['mall_code', 'pi_ii_vi', 'product_name', 'mall_sale_price'],
@@ -41,7 +41,7 @@ const TABLES = {
     blocked: ['added_at','created_at']
   },
   orders: {
-    table: 'gm_orders',
+    table: 'gm_order',
     key: ['order_no'],
     order: 'created_at DESC NULLS LAST',
     critical: ['order_no','orderer_name','orderer_mobile','receiver_name','receiver_mobile','receiver_zipcode','receiver_address1','total_payment_price'],
@@ -59,7 +59,7 @@ const TABLES = {
     blocked: ['order_no','created_at','ordered_at']
   },
   order_items: {
-    table: 'gm_order_items',
+    table: 'gm_order_item',
     key: ['order_no','pi_ii_vi'],
     order: 'created_at DESC NULLS LAST',
     critical: ['order_no','pi_ii_vi','product_name','quantity','mall_sale_price','customer_order_price','product_amount'],
