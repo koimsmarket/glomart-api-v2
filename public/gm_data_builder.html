@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V006 Dashboard</title>
+<title>GM Safe Update Builder V008 Sales Aggregate</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -25,7 +25,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V006 Dashboard</h1>
+<h1>GM Safe Update Builder V008 Sales Aggregate</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -108,11 +108,29 @@ const tables = {
   supplier:'공급사 gm_supplier',
   cs:'CS gm_cs',
   cs_messages:'CS 메시지 gm_cs_message',
+  product_archive:'상품 아카이브 gm_product_archive',
+  category:'카테고리 gm_category',
+  category_keyword:'카테고리 검색어 gm_category_keyword',
+  search_keyword_stat:'검색어 통계 gm_search_keyword_stat',
+  category_search_stat:'카테고리 통계 gm_category_search_stat',
+  category_search_monthly:'카테고리 월별 통계 gm_category_search_monthly',
+  category_search_yearly:'카테고리 연간 검색 통계 gm_category_search_yearly',
+  product_sales_monthly:'상품 월별 판매 gm_product_sales_monthly',
+  product_sales_yearly:'상품 연간 판매 gm_product_sales_yearly',
+  product_country_sales_monthly:'상품 국가별 월별 판매 gm_product_country_sales_monthly',
+  product_country_sales_yearly:'상품 국가별 연간 판매 gm_product_country_sales_yearly',
+  category_sales_monthly:'카테고리 월별 판매 gm_category_sales_monthly',
+  category_sales_yearly:'카테고리 연간 판매 gm_category_sales_yearly',
+  category_country_sales_monthly:'카테고리 국가별 월별 판매 gm_category_country_sales_monthly',
+  category_country_sales_yearly:'카테고리 국가별 연간 판매 gm_category_country_sales_yearly',
   search_log:'검색 로그 gm_search_log',
   dashboard_snapshot:'대시보드 스냅샷 gm_dashboard_snapshot'
 };
 const tableNameMap = {
-  gm_product:'products', gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
+  gm_product:'products', gm_product_archive:'product_archive',
+  gm_category:'category', gm_category_keyword:'category_keyword',
+  gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',
+  gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
   gm_cs:'cs', gm_cs_message:'cs_messages', gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
 };
 function fill(){
@@ -131,7 +149,7 @@ async function loadDashboard(save){
     if(!j.ok){ log(j); return; }
     const cur=j.current||{}, counts=cur.counts||{}, diff=cur.diff_from_previous||{}, q=cur.queue||{}, db=cur.db_size||{};
     document.getElementById('statusTime').textContent = `현재 조회: ${cur.server_time||cur.snapshot_at||''}` + (j.previous&&j.previous.snapshot_at ? ` / 직전 스냅샷: ${j.previous.snapshot_at}` : '');
-    const order=['gm_product','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_product_upsert_queue','gm_search_log','gm_dashboard_snapshot'];
+    const order=['gm_product','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_product_upsert_queue','gm_search_log','gm_dashboard_snapshot'];
     document.getElementById('tableStatus').innerHTML = order.map(t=>`<tr><td>${t}</td><td class="num">${fmt(counts[t])}</td><td class="num">${diffHtml(diff[t])}</td></tr>`).join('');
     document.getElementById('queueStatus').innerHTML = `
       <tr><th>pending</th><td class="num">${fmt(q.pending)}</td></tr>
@@ -182,7 +200,13 @@ async function send(apply){
 }
 function inferTableFromFileName(name){
   const n=String(name||'').toLowerCase();
-  const pairs=[['gm_dashboard_snapshot','dashboard_snapshot'],['gm_search_log','search_log'],['gm_order_item','order_items'],['gm_cs_message','cs_messages'],['gm_product','products'],['gm_basket','cart'],['gm_order','orders'],['gm_supplier','supplier'],['gm_cs','cs']];
+  const pairs=[
+    ['gm_dashboard_snapshot','dashboard_snapshot'],['gm_search_log','search_log'],
+    ['gm_search_keyword_stat','search_keyword_stat'],['gm_category_search_stat','category_search_stat'],['gm_category_search_monthly','category_search_monthly'],['gm_category_search_yearly','category_search_yearly'],['gm_product_sales_monthly','product_sales_monthly'],['gm_product_sales_yearly','product_sales_yearly'],['gm_product_country_sales_monthly','product_country_sales_monthly'],['gm_product_country_sales_yearly','product_country_sales_yearly'],['gm_category_sales_monthly','category_sales_monthly'],['gm_category_sales_yearly','category_sales_yearly'],['gm_category_country_sales_monthly','category_country_sales_monthly'],['gm_category_country_sales_yearly','category_country_sales_yearly'],
+    ['gm_category_keyword','category_keyword'],['gm_category','category'],
+    ['gm_product_archive','product_archive'],['gm_order_item','order_items'],['gm_cs_message','cs_messages'],
+    ['gm_product','products'],['gm_basket','cart'],['gm_order','orders'],['gm_supplier','supplier'],['gm_cs','cs']
+  ];
   for(const [needle,key] of pairs){ if(n.indexOf(needle)>=0) return key; }
   return '';
 }

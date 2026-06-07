@@ -1,0 +1,232 @@
+-- 15_gm_sales_aggregate.sql
+-- Purpose: category monthly/yearly summary + product/category sales aggregate tables.
+
+-- Category monthly search summary: one row per yyyymm + category, 25 language/country count columns.
+ALTER TABLE IF EXISTS gm_category_search_monthly
+  ADD COLUMN IF NOT EXISTS total_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS ko_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS en_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS zh_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS vi_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS ja_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS tw_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS th_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS uz_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS ne_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS km_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS id_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS tl_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS mn_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS my_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS kk_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS si_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS ru_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS bn_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS ur_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS lo_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS hi_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS tr_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS fa_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS es_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS fr_count INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS gm_category_search_yearly (
+  yearly_id BIGSERIAL PRIMARY KEY,
+  yyyy TEXT NOT NULL,
+  category_no TEXT NOT NULL,
+  category_code TEXT,
+  category_name TEXT,
+  mall_code TEXT NOT NULL DEFAULT '',
+  total_count INTEGER NOT NULL DEFAULT 0,
+  ko_count INTEGER NOT NULL DEFAULT 0,
+  en_count INTEGER NOT NULL DEFAULT 0,
+  zh_count INTEGER NOT NULL DEFAULT 0,
+  vi_count INTEGER NOT NULL DEFAULT 0,
+  ja_count INTEGER NOT NULL DEFAULT 0,
+  tw_count INTEGER NOT NULL DEFAULT 0,
+  th_count INTEGER NOT NULL DEFAULT 0,
+  uz_count INTEGER NOT NULL DEFAULT 0,
+  ne_count INTEGER NOT NULL DEFAULT 0,
+  km_count INTEGER NOT NULL DEFAULT 0,
+  id_count INTEGER NOT NULL DEFAULT 0,
+  tl_count INTEGER NOT NULL DEFAULT 0,
+  mn_count INTEGER NOT NULL DEFAULT 0,
+  my_count INTEGER NOT NULL DEFAULT 0,
+  kk_count INTEGER NOT NULL DEFAULT 0,
+  si_count INTEGER NOT NULL DEFAULT 0,
+  ru_count INTEGER NOT NULL DEFAULT 0,
+  bn_count INTEGER NOT NULL DEFAULT 0,
+  ur_count INTEGER NOT NULL DEFAULT 0,
+  lo_count INTEGER NOT NULL DEFAULT 0,
+  hi_count INTEGER NOT NULL DEFAULT 0,
+  tr_count INTEGER NOT NULL DEFAULT 0,
+  fa_count INTEGER NOT NULL DEFAULT 0,
+  es_count INTEGER NOT NULL DEFAULT 0,
+  fr_count INTEGER NOT NULL DEFAULT 0,
+  first_search_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_search_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyy, category_no, mall_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gm_category_search_yearly_count
+  ON gm_category_search_yearly (yyyy, total_count DESC, last_search_at DESC);
+
+CREATE TABLE IF NOT EXISTS gm_product_sales_monthly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyymm TEXT NOT NULL,
+  product_uid TEXT NOT NULL,
+  pi_ii_vi TEXT,
+  mall_code TEXT NOT NULL DEFAULT '',
+  product_name TEXT,
+  category_no TEXT,
+  category_code TEXT,
+  search_count INTEGER NOT NULL DEFAULT 0,
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  gross_profit NUMERIC(18,2) NOT NULL DEFAULT 0,
+  margin_rate NUMERIC(10,4) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyymm, product_uid)
+);
+
+CREATE TABLE IF NOT EXISTS gm_product_sales_yearly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyy TEXT NOT NULL,
+  product_uid TEXT NOT NULL,
+  pi_ii_vi TEXT,
+  mall_code TEXT NOT NULL DEFAULT '',
+  product_name TEXT,
+  category_no TEXT,
+  category_code TEXT,
+  search_count INTEGER NOT NULL DEFAULT 0,
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  gross_profit NUMERIC(18,2) NOT NULL DEFAULT 0,
+  margin_rate NUMERIC(10,4) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyy, product_uid)
+);
+
+CREATE TABLE IF NOT EXISTS gm_product_country_sales_monthly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyymm TEXT NOT NULL,
+  product_uid TEXT NOT NULL,
+  country_code TEXT NOT NULL DEFAULT '',
+  mall_code TEXT NOT NULL DEFAULT '',
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyymm, product_uid, country_code)
+);
+
+CREATE TABLE IF NOT EXISTS gm_product_country_sales_yearly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyy TEXT NOT NULL,
+  product_uid TEXT NOT NULL,
+  country_code TEXT NOT NULL DEFAULT '',
+  mall_code TEXT NOT NULL DEFAULT '',
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyy, product_uid, country_code)
+);
+
+CREATE TABLE IF NOT EXISTS gm_category_sales_monthly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyymm TEXT NOT NULL,
+  category_no TEXT NOT NULL,
+  category_code TEXT,
+  category_name TEXT,
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  gross_profit NUMERIC(18,2) NOT NULL DEFAULT 0,
+  margin_rate NUMERIC(10,4) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyymm, category_no)
+);
+
+CREATE TABLE IF NOT EXISTS gm_category_sales_yearly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyy TEXT NOT NULL,
+  category_no TEXT NOT NULL,
+  category_code TEXT,
+  category_name TEXT,
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  gross_profit NUMERIC(18,2) NOT NULL DEFAULT 0,
+  margin_rate NUMERIC(10,4) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyy, category_no)
+);
+
+CREATE TABLE IF NOT EXISTS gm_category_country_sales_monthly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyymm TEXT NOT NULL,
+  category_no TEXT NOT NULL,
+  country_code TEXT NOT NULL DEFAULT '',
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyymm, category_no, country_code)
+);
+
+CREATE TABLE IF NOT EXISTS gm_category_country_sales_yearly (
+  sales_id BIGSERIAL PRIMARY KEY,
+  yyyy TEXT NOT NULL,
+  category_no TEXT NOT NULL,
+  country_code TEXT NOT NULL DEFAULT '',
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  purchase_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  first_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_order_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (yyyy, category_no, country_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gm_product_sales_monthly_amount ON gm_product_sales_monthly (yyyymm, sales_amount DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_product_sales_yearly_amount ON gm_product_sales_yearly (yyyy, sales_amount DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_category_sales_monthly_amount ON gm_category_sales_monthly (yyyymm, sales_amount DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_category_sales_yearly_amount ON gm_category_sales_yearly (yyyy, sales_amount DESC);
+
+ALTER TABLE IF EXISTS gm_dashboard_snapshot
+  ADD COLUMN IF NOT EXISTS gm_category_search_yearly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_product_sales_monthly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_product_sales_yearly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_product_country_sales_monthly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_product_country_sales_yearly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_category_sales_monthly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_category_sales_yearly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_category_country_sales_monthly_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS gm_category_country_sales_yearly_count INTEGER NOT NULL DEFAULT 0;

@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V011_DASHBOARD_SAFE_SNAPSHOT';
+const VERSION = 'GLOMART_API_DB_READY_V013_SALES_AGGREGATE';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -193,6 +193,21 @@ const GM_RESET_TARGETS = [
   'gm_product_upsert_queue',
   'gm_dashboard_snapshot',
   'gm_search_log',
+  'gm_search_keyword_stat',
+  'gm_category_search_stat',
+  'gm_category_search_monthly',
+  'gm_category_search_yearly',
+  'gm_product_sales_monthly',
+  'gm_product_sales_yearly',
+  'gm_product_country_sales_monthly',
+  'gm_product_country_sales_yearly',
+  'gm_category_sales_monthly',
+  'gm_category_sales_yearly',
+  'gm_category_country_sales_monthly',
+  'gm_category_country_sales_yearly',
+  'gm_category_keyword',
+  'gm_category',
+  'gm_product_archive',
   'gm_basket',
   'gm_order',
   'gm_order_item',
@@ -249,6 +264,10 @@ app.get('/', (req,res)=>ok(res, {
     'GET /api/gm/dashboard/realtime',
     'POST /api/gm/dashboard/snapshot',
     'POST /api/gm/search/log',
+    'POST /api/gm/product/archive',
+    'GET /api/gm/search/summary',
+    'GET /api/gm/search/monthly',
+    'GET /api/gm/sales/summary',
     'POST /api/gm/product/upsert',
     'POST /api/gm/product/queue',
     'GET /api/gm/product/queue/status',
@@ -318,6 +337,21 @@ app.get('/api/gm/db/table-counts', async (req,res)=>{
 const GM_DASHBOARD_SNAPSHOT_MINUTES = Math.max(1, Number(process.env.GM_DASHBOARD_SNAPSHOT_MINUTES || 30));
 const GM_DASHBOARD_TABLES = [
   'gm_product',
+  'gm_product_archive',
+  'gm_category',
+  'gm_category_keyword',
+  'gm_search_keyword_stat',
+  'gm_category_search_stat',
+  'gm_category_search_monthly',
+  'gm_category_search_yearly',
+  'gm_product_sales_monthly',
+  'gm_product_sales_yearly',
+  'gm_product_country_sales_monthly',
+  'gm_product_country_sales_yearly',
+  'gm_category_sales_monthly',
+  'gm_category_sales_yearly',
+  'gm_category_country_sales_monthly',
+  'gm_category_country_sales_yearly',
   'gm_basket',
   'gm_order',
   'gm_order_item',
@@ -404,7 +438,7 @@ function diffCounts(current, previous){
   const out = {};
   if(!previous) return out;
   const map = {
-    gm_product:'gm_product_count', gm_basket:'gm_basket_count', gm_order:'gm_order_count',
+    gm_product:'gm_product_count', gm_product_archive:'gm_product_archive_count', gm_category:'gm_category_count', gm_category_keyword:'gm_category_keyword_count', gm_search_keyword_stat:'gm_search_keyword_stat_count', gm_category_search_stat:'gm_category_search_stat_count', gm_category_search_monthly:'gm_category_search_monthly_count', gm_category_search_yearly:'gm_category_search_yearly_count', gm_product_sales_monthly:'gm_product_sales_monthly_count', gm_product_sales_yearly:'gm_product_sales_yearly_count', gm_product_country_sales_monthly:'gm_product_country_sales_monthly_count', gm_product_country_sales_yearly:'gm_product_country_sales_yearly_count', gm_category_sales_monthly:'gm_category_sales_monthly_count', gm_category_sales_yearly:'gm_category_sales_yearly_count', gm_category_country_sales_monthly:'gm_category_country_sales_monthly_count', gm_category_country_sales_yearly:'gm_category_country_sales_yearly_count', gm_basket:'gm_basket_count', gm_order:'gm_order_count',
     gm_order_item:'gm_order_item_count', gm_supplier:'gm_supplier_count', gm_cs:'gm_cs_count',
     gm_cs_message:'gm_cs_message_count', gm_search_log:'gm_search_log_count'
   };
@@ -443,16 +477,24 @@ async function saveDashboardSnapshot(current){
   await dbQuery(`
     INSERT INTO gm_dashboard_snapshot (
       snapshot_at,
-      gm_product_count, gm_basket_count, gm_order_count, gm_order_item_count,
+      gm_product_count, gm_product_archive_count, gm_category_count, gm_category_keyword_count,
+      gm_search_keyword_stat_count, gm_category_search_stat_count, gm_category_search_monthly_count, gm_category_search_yearly_count,
+      gm_product_sales_monthly_count, gm_product_sales_yearly_count, gm_product_country_sales_monthly_count, gm_product_country_sales_yearly_count,
+      gm_category_sales_monthly_count, gm_category_sales_yearly_count, gm_category_country_sales_monthly_count, gm_category_country_sales_yearly_count,
+      gm_basket_count, gm_order_count, gm_order_item_count,
       gm_supplier_count, gm_cs_count, gm_cs_message_count, gm_search_log_count,
       queue_pending_count, queue_processing_count, queue_done_count, queue_failed_count, queue_total_count,
       db_size_bytes, db_size_mb, db_size_percent, db_size_limit_mb, api_response_ms,
       created_at
     ) VALUES (
-      now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now()
+      now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33, now()
     )
   `, [
-    nz(c.gm_product), nz(c.gm_basket), nz(c.gm_order), nz(c.gm_order_item),
+    nz(c.gm_product), nz(c.gm_product_archive), nz(c.gm_category), nz(c.gm_category_keyword),
+    nz(c.gm_search_keyword_stat), nz(c.gm_category_search_stat), nz(c.gm_category_search_monthly), nz(c.gm_category_search_yearly),
+    nz(c.gm_product_sales_monthly), nz(c.gm_product_sales_yearly), nz(c.gm_product_country_sales_monthly), nz(c.gm_product_country_sales_yearly),
+    nz(c.gm_category_sales_monthly), nz(c.gm_category_sales_yearly), nz(c.gm_category_country_sales_monthly), nz(c.gm_category_country_sales_yearly),
+    nz(c.gm_basket), nz(c.gm_order), nz(c.gm_order_item),
     nz(c.gm_supplier), nz(c.gm_cs), nz(c.gm_cs_message), nz(c.gm_search_log),
     nz(q.pending), nz(q.processing), nz(q.done), nz(q.failed), nz(q.total),
     d.bytes == null ? null : d.bytes, d.mb == null ? null : d.mb, d.percent == null ? null : d.percent,
@@ -502,36 +544,409 @@ app.post('/api/gm/dashboard/snapshot', async (req,res)=>{
   }
 });
 
+
+function normalizeKeywordForStat(v){
+  return cleanText(v || '').toLowerCase().replace(/\s+/g, '');
+}
+function currentYyyymm(){
+  const d = new Date();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  return String(d.getFullYear()) + m;
+}
+async function findCategoryKeywordMatch(keywordNormalized, langCode){
+  if(!(await tableExists('gm_category_keyword'))) return null;
+  const kw = normalizeKeywordForStat(keywordNormalized);
+  if(!kw) return null;
+  const r = await dbQuery(`
+    SELECT *
+    FROM gm_category_keyword
+    WHERE keyword_normalized = $1
+      AND status IN ('active','confirmed','auto')
+      AND ($2 = '' OR lang_code = '' OR lang_code IS NULL OR lang_code = $2)
+    ORDER BY
+      CASE WHEN lang_code = $2 THEN 0 ELSE 1 END,
+      confidence_score DESC NULLS LAST,
+      updated_at DESC NULLS LAST
+    LIMIT 1
+  `, [kw, cleanText(langCode || '')]);
+  return r.rows[0] || null;
+}
+
+const GM_LANG_COUNT_COLUMNS = ['ko', 'en', 'zh', 'vi', 'ja', 'tw', 'th', 'uz', 'ne', 'km', 'id', 'tl', 'mn', 'my', 'kk', 'si', 'ru', 'bn', 'ur', 'lo', 'hi', 'tr', 'fa', 'es', 'fr'];
+function gmCountColumnFromLang(v){
+  const s = cleanText(v || '').toLowerCase();
+  if(GM_LANG_COUNT_COLUMNS.includes(s)) return s + '_count';
+  return 'total_count';
+}
+function currentYyyy(){ return new Date().getFullYear().toString(); }
+async function incrementCategoryPeriodCounter(table, periodCol, periodVal, row, client){
+  if(!row.category_no) return;
+  const q = client || { query: dbQuery };
+  if(!(await tableExists(table))) return;
+  const countCol = gmCountColumnFromLang(row.lang_code || row.ui_lang_code || row.country_code);
+  const categoryNo = cleanText(row.category_no);
+  const mallCode = cleanText(row.mall_code || '');
+  const params = [periodVal, categoryNo, cleanText(row.category_code), cleanText(row.category_name), mallCode];
+  const updateSql = `UPDATE ${table} SET category_code=$3, category_name=$4, mall_code=$5, total_count=COALESCE(total_count,0)+1, ${countCol}=COALESCE(${countCol},0)+1, last_search_at=now(), updated_at=now() WHERE ${periodCol}=$1 AND category_no=$2 AND COALESCE(mall_code,'')=COALESCE($5,'')`;
+  const r = await q.query(updateSql, params);
+  if(!r.rowCount){
+    const insertSql = `INSERT INTO ${table} (${periodCol}, category_no, category_code, category_name, mall_code, total_count, ${countCol}, first_search_at, last_search_at, updated_at) VALUES ($1,$2,$3,$4,$5,1,1,now(),now(),now())`;
+    await q.query(insertSql, params);
+  }
+}
+async function upsertSalesAggregate(client, order, item){
+  const q = client;
+  const now = new Date();
+  const yyyymm = String(now.getFullYear()) + String(now.getMonth()+1).padStart(2,'0');
+  const yyyy = String(now.getFullYear());
+  const qty = Math.max(1, toInt(item.quantity, 1));
+  const saleUnit = toInt(item.customer_order_price ?? item.mall_sale_price, 0);
+  const salesAmount = toInt(item.product_amount, saleUnit * qty);
+  const purchaseUnit = toInt(item.final_supply_price ?? item.purchase_price ?? item.purchase_unit_price, 0);
+  const purchaseAmount = toInt(item.purchase_amount, purchaseUnit * qty);
+  const productUid = cleanText(item.product_uid || (cleanText(item.mall_code||'') && cleanText(item.pi_ii_vi||'') ? cleanText(item.mall_code)+'_'+cleanText(item.pi_ii_vi) : cleanText(item.pi_ii_vi||'')));
+  if(!productUid) return;
+  const pi = cleanText(item.pi_ii_vi || '');
+  const mall = cleanText(item.mall_code || '');
+  const pname = cleanText(item.product_name || '');
+  const catNo = cleanText(item.category_no || order.category_no || '');
+  const catCode = cleanText(item.category_code || order.category_code || '');
+  const catName = cleanText(item.category_name || order.category_name || '');
+  const country = cleanText(order.country_code || order.member_country_code || order.receiver_country_code || order.lang_code || order.ui_lang_code || '');
+  async function upProduct(table, periodCol, periodVal){
+    if(!(await tableExists(table))) return;
+    await q.query(`INSERT INTO ${table} (${periodCol}, product_uid, pi_ii_vi, mall_code, product_name, category_no, category_code, sales_qty, sales_amount, purchase_amount, gross_profit, margin_rate, first_order_at, last_order_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9-$10, CASE WHEN $9>0 THEN ROUND((($9-$10)/$9)*100,4) ELSE 0 END, now(), now(), now())
+      ON CONFLICT (${periodCol}, product_uid) DO UPDATE SET
+        product_name=EXCLUDED.product_name, category_no=EXCLUDED.category_no, category_code=EXCLUDED.category_code,
+        sales_qty=${table}.sales_qty+EXCLUDED.sales_qty, sales_amount=${table}.sales_amount+EXCLUDED.sales_amount, purchase_amount=${table}.purchase_amount+EXCLUDED.purchase_amount,
+        gross_profit=(${table}.sales_amount+EXCLUDED.sales_amount)-(${table}.purchase_amount+EXCLUDED.purchase_amount),
+        margin_rate=CASE WHEN (${table}.sales_amount+EXCLUDED.sales_amount)>0 THEN ROUND((((${table}.sales_amount+EXCLUDED.sales_amount)-(${table}.purchase_amount+EXCLUDED.purchase_amount))/(${table}.sales_amount+EXCLUDED.sales_amount))*100,4) ELSE 0 END,
+        last_order_at=now(), updated_at=now()`, [periodVal, productUid, pi, mall, pname, catNo, catCode, qty, salesAmount, purchaseAmount]);
+  }
+  async function upProductCountry(table, periodCol, periodVal){
+    if(!country || !(await tableExists(table))) return;
+    await q.query(`INSERT INTO ${table} (${periodCol}, product_uid, country_code, mall_code, sales_qty, sales_amount, purchase_amount, first_order_at, last_order_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now(),now())
+      ON CONFLICT (${periodCol}, product_uid, country_code) DO UPDATE SET
+        sales_qty=${table}.sales_qty+EXCLUDED.sales_qty, sales_amount=${table}.sales_amount+EXCLUDED.sales_amount, purchase_amount=${table}.purchase_amount+EXCLUDED.purchase_amount,
+        last_order_at=now(), updated_at=now()`, [periodVal, productUid, country, mall, qty, salesAmount, purchaseAmount]);
+  }
+  async function upCategory(table, periodCol, periodVal){
+    if(!catNo || !(await tableExists(table))) return;
+    await q.query(`INSERT INTO ${table} (${periodCol}, category_no, category_code, category_name, sales_qty, sales_amount, purchase_amount, gross_profit, margin_rate, first_order_at, last_order_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$6-$7, CASE WHEN $6>0 THEN ROUND((($6-$7)/$6)*100,4) ELSE 0 END, now(), now(), now())
+      ON CONFLICT (${periodCol}, category_no) DO UPDATE SET
+        category_code=EXCLUDED.category_code, category_name=EXCLUDED.category_name,
+        sales_qty=${table}.sales_qty+EXCLUDED.sales_qty, sales_amount=${table}.sales_amount+EXCLUDED.sales_amount, purchase_amount=${table}.purchase_amount+EXCLUDED.purchase_amount,
+        gross_profit=(${table}.sales_amount+EXCLUDED.sales_amount)-(${table}.purchase_amount+EXCLUDED.purchase_amount),
+        margin_rate=CASE WHEN (${table}.sales_amount+EXCLUDED.sales_amount)>0 THEN ROUND((((${table}.sales_amount+EXCLUDED.sales_amount)-(${table}.purchase_amount+EXCLUDED.purchase_amount))/(${table}.sales_amount+EXCLUDED.sales_amount))*100,4) ELSE 0 END,
+        last_order_at=now(), updated_at=now()`, [periodVal, catNo, catCode, catName, qty, salesAmount, purchaseAmount]);
+  }
+  async function upCategoryCountry(table, periodCol, periodVal){
+    if(!catNo || !country || !(await tableExists(table))) return;
+    await q.query(`INSERT INTO ${table} (${periodCol}, category_no, country_code, sales_qty, sales_amount, purchase_amount, first_order_at, last_order_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,now(),now(),now())
+      ON CONFLICT (${periodCol}, category_no, country_code) DO UPDATE SET
+        sales_qty=${table}.sales_qty+EXCLUDED.sales_qty, sales_amount=${table}.sales_amount+EXCLUDED.sales_amount, purchase_amount=${table}.purchase_amount+EXCLUDED.purchase_amount,
+        last_order_at=now(), updated_at=now()`, [periodVal, catNo, country, qty, salesAmount, purchaseAmount]);
+  }
+  await upProduct('gm_product_sales_monthly','yyyymm',yyyymm); await upProduct('gm_product_sales_yearly','yyyy',yyyy);
+  await upProductCountry('gm_product_country_sales_monthly','yyyymm',yyyymm); await upProductCountry('gm_product_country_sales_yearly','yyyy',yyyy);
+  await upCategory('gm_category_sales_monthly','yyyymm',yyyymm); await upCategory('gm_category_sales_yearly','yyyy',yyyy);
+  await upCategoryCountry('gm_category_country_sales_monthly','yyyymm',yyyymm); await upCategoryCountry('gm_category_country_sales_yearly','yyyy',yyyy);
+}
+
+async function upsertSearchStats(row){
+  if(await tableExists('gm_search_keyword_stat')){
+    await dbQuery(`
+      INSERT INTO gm_search_keyword_stat (
+        keyword_original, keyword_normalized, keyword_canonical,
+        country_code, lang_code, member_country_code,
+        category_no, category_code, category_name,
+        mall_code, search_count, cache_used_count, cache_miss_count,
+        result_count_sum, db_insert_count_sum, queue_send_count_sum,
+        first_search_at, last_search_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,$15,now(),now(),now()
+      )
+      ON CONFLICT (keyword_normalized, country_code, lang_code, category_no, mall_code) DO UPDATE SET
+        keyword_original=EXCLUDED.keyword_original,
+        keyword_canonical=EXCLUDED.keyword_canonical,
+        member_country_code=EXCLUDED.member_country_code,
+        category_code=EXCLUDED.category_code,
+        category_name=EXCLUDED.category_name,
+        search_count=gm_search_keyword_stat.search_count+1,
+        cache_used_count=gm_search_keyword_stat.cache_used_count+EXCLUDED.cache_used_count,
+        cache_miss_count=gm_search_keyword_stat.cache_miss_count+EXCLUDED.cache_miss_count,
+        result_count_sum=gm_search_keyword_stat.result_count_sum+EXCLUDED.result_count_sum,
+        db_insert_count_sum=gm_search_keyword_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
+        queue_send_count_sum=gm_search_keyword_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
+        last_search_at=now(),
+        updated_at=now()
+    `, [
+      row.keyword_original, row.keyword_normalized, row.keyword_canonical,
+      row.country_code, row.lang_code, row.member_country_code,
+      row.category_no, row.category_code, row.category_name,
+      row.mall_code, row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
+      row.result_count, row.db_insert_count, row.queue_send_count
+    ]);
+  }
+  if(row.category_no && await tableExists('gm_category_search_stat')){
+    await dbQuery(`
+      INSERT INTO gm_category_search_stat (
+        category_no, category_code, category_name,
+        country_code, lang_code, member_country_code, mall_code,
+        search_count, cache_used_count, cache_miss_count,
+        result_count_sum, db_insert_count_sum, queue_send_count_sum,
+        first_search_at, last_search_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$11,$12,now(),now(),now()
+      )
+      ON CONFLICT (category_no, country_code, lang_code, mall_code) DO UPDATE SET
+        category_code=EXCLUDED.category_code,
+        category_name=EXCLUDED.category_name,
+        member_country_code=EXCLUDED.member_country_code,
+        search_count=gm_category_search_stat.search_count+1,
+        cache_used_count=gm_category_search_stat.cache_used_count+EXCLUDED.cache_used_count,
+        cache_miss_count=gm_category_search_stat.cache_miss_count+EXCLUDED.cache_miss_count,
+        result_count_sum=gm_category_search_stat.result_count_sum+EXCLUDED.result_count_sum,
+        db_insert_count_sum=gm_category_search_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
+        queue_send_count_sum=gm_category_search_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
+        last_search_at=now(),
+        updated_at=now()
+    `, [
+      row.category_no, row.category_code, row.category_name,
+      row.country_code, row.lang_code, row.member_country_code, row.mall_code,
+      row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
+      row.result_count, row.db_insert_count, row.queue_send_count
+    ]);
+  }
+
+  if(row.category_no){
+    const yyyymm = cleanText(row.yyyymm || currentYyyymm());
+    await incrementCategoryPeriodCounter('gm_category_search_monthly','yyyymm',yyyymm,row);
+    await incrementCategoryPeriodCounter('gm_category_search_yearly','yyyy',cleanText(row.yyyy || currentYyyy()),row);
+  }
+}
+
 app.post('/api/gm/search/log', async (req,res)=>{
   try{
     if(!(await tableExists('gm_search_log'))) return fail(res, 500, 'gm_search_log table not found');
     const b = req.body || {};
     const keywordOriginal = cleanText(b.keyword_original || b.keyword || b.origin || '');
-    const keywordNormalized = cleanText(b.keyword_normalized || keywordOriginal).toLowerCase();
-    const mallCode = cleanText(b.mall_code || b.mallCode || '');
+    const keywordNormalized = normalizeKeywordForStat(b.keyword_normalized || keywordOriginal);
+    const langCode = cleanText(b.lang_code || b.langCode || '');
+    let keywordCanonical = cleanText(b.keyword_canonical || b.keywordCanonical || '');
+    let categoryNo = cleanText(b.category_no || b.categoryNo || '');
+    let categoryCode = cleanText(b.category_code || b.categoryCode || '');
+    let categoryName = cleanText(b.category_name || b.categoryName || '');
+    const match = await findCategoryKeywordMatch(keywordNormalized, langCode);
+    if(match){
+      if(!keywordCanonical) keywordCanonical = cleanText(match.keyword_canonical || match.keyword_normalized || keywordNormalized);
+      if(!categoryNo) categoryNo = cleanText(match.category_no || '');
+      if(!categoryCode) categoryCode = cleanText(match.category_code || '');
+      if(!categoryName) categoryName = cleanText(match.category_name || '');
+    }
+    if(!keywordCanonical) keywordCanonical = keywordNormalized;
+    const row = {
+      keyword_original: keywordOriginal,
+      keyword_normalized: keywordNormalized,
+      keyword_canonical: keywordCanonical,
+      lang_code: langCode,
+      country_code: cleanText(b.country_code || b.countryCode || ''),
+      member_country_code: cleanText(b.member_country_code || b.memberCountryCode || ''),
+      category_code: categoryCode,
+      category_no: categoryNo,
+      category_name: categoryName,
+      mall_code: cleanText(b.mall_code || b.mallCode || ''),
+      result_count: toInt(b.result_count || b.resultCount, 0),
+      db_insert_count: toInt(b.db_insert_count || b.dbInsertCount, 0),
+      queue_send_count: toInt(b.queue_send_count || b.queueSendCount, 0),
+      cache_used: !!(b.cache_used || b.cacheUsed),
+      yyyymm: cleanText(b.yyyymm || b.year_month || b.yearMonth || '')
+    };
     await dbQuery(`
       INSERT INTO gm_search_log (
-        search_at, keyword_original, keyword_normalized,
+        search_at, keyword_original, keyword_normalized, keyword_canonical,
         lang_code, country_code, member_country_code,
         category_code, category_no, category_name,
         mall_code, result_count, db_insert_count, queue_send_count,
         cache_used, cache_key, search_source,
         member_id, guest_key, device_type, request_id, raw_json, created_at
       ) VALUES (
-        now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,now()
+        now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,now()
       )
     `, [
-      keywordOriginal, keywordNormalized,
-      cleanText(b.lang_code || b.langCode || ''), cleanText(b.country_code || b.countryCode || ''), cleanText(b.member_country_code || b.memberCountryCode || ''),
-      cleanText(b.category_code || b.categoryCode || ''), cleanText(b.category_no || b.categoryNo || ''), cleanText(b.category_name || b.categoryName || ''),
-      mallCode, toInt(b.result_count || b.resultCount, 0), toInt(b.db_insert_count || b.dbInsertCount, 0), toInt(b.queue_send_count || b.queueSendCount, 0),
-      !!(b.cache_used || b.cacheUsed), cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
+      row.keyword_original, row.keyword_normalized, row.keyword_canonical,
+      row.lang_code, row.country_code, row.member_country_code,
+      row.category_code, row.category_no, row.category_name,
+      row.mall_code, row.result_count, row.db_insert_count, row.queue_send_count,
+      row.cache_used, cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
       cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''), cleanText(b.request_id || b.requestId || ''),
-      JSON.stringify(b)
+      JSON.stringify({ ...b, matched_category_keyword: match || null })
     ]);
-    ok(res, { action:'search.log', inserted:true });
+    await upsertSearchStats(row);
+    ok(res, { action:'search.log', inserted:true, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
   }catch(e){
     fail(res, 500, 'search log failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/search/summary', async (req,res)=>{
+  try{
+    const limit = Math.max(1, Math.min(100, toInt(req.query.limit, 20)));
+    const out = {};
+    if(await tableExists('gm_search_keyword_stat')){
+      const r = await dbQuery(`
+        SELECT keyword_canonical, keyword_normalized, country_code, lang_code, category_no, category_code, mall_code, search_count, last_search_at
+        FROM gm_search_keyword_stat
+        ORDER BY search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit]);
+      out.top_keywords = r.rows;
+    }
+    if(await tableExists('gm_category_search_stat')){
+      const r = await dbQuery(`
+        SELECT category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+        FROM gm_category_search_stat
+        ORDER BY search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit]);
+      out.top_categories = r.rows;
+    }
+    if(await tableExists('gm_category_search_monthly')){
+      const ym = cleanText(req.query.yyyymm || req.query.month || '');
+      const r = await dbQuery(`
+        SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+        FROM gm_category_search_monthly
+        WHERE ($2 = '' OR yyyymm = $2)
+        ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit, ym]);
+      out.monthly_categories = r.rows;
+    }
+    ok(res, { action:'search.summary', ...out });
+  }catch(e){
+    fail(res, 500, 'search summary failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/search/monthly', async (req,res)=>{
+  try{
+    if(!(await tableExists('gm_category_search_monthly'))) return fail(res, 500, 'gm_category_search_monthly table not found');
+    const limit = Math.max(1, Math.min(500, toInt(req.query.limit, 100)));
+    const yyyymm = cleanText(req.query.yyyymm || req.query.month || '');
+    const country = cleanText(req.query.country_code || req.query.countryCode || '');
+    const lang = cleanText(req.query.lang_code || req.query.langCode || '');
+    const r = await dbQuery(`
+      SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code,
+             search_count, cache_used_count, cache_miss_count, result_count_sum, db_insert_count_sum, queue_send_count_sum,
+             first_search_at, last_search_at
+      FROM gm_category_search_monthly
+      WHERE ($2 = '' OR yyyymm = $2)
+        AND ($3 = '' OR country_code = $3)
+        AND ($4 = '' OR lang_code = $4)
+      ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+      LIMIT $1
+    `, [limit, yyyymm, country, lang]);
+    ok(res, { action:'search.monthly', rows:r.rows });
+  }catch(e){
+    fail(res, 500, 'search monthly failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/sales/summary', async (req,res)=>{
+  try{
+    const yyyymm = cleanText(req.query.yyyymm || currentYyyymm());
+    const yyyy = cleanText(req.query.yyyy || currentYyyy());
+    const out = { yyyymm, yyyy };
+    if(await tableExists('gm_product_sales_monthly')){
+      const r = await dbQuery(`SELECT product_uid, product_name, sales_qty, sales_amount, purchase_amount, gross_profit, margin_rate FROM gm_product_sales_monthly WHERE yyyymm=$1 ORDER BY sales_amount DESC, sales_qty DESC LIMIT 50`, [yyyymm]);
+      out.product_monthly_top = r.rows;
+    }
+    if(await tableExists('gm_category_sales_monthly')){
+      const r = await dbQuery(`SELECT category_no, category_code, category_name, sales_qty, sales_amount, purchase_amount, gross_profit, margin_rate FROM gm_category_sales_monthly WHERE yyyymm=$1 ORDER BY sales_amount DESC, sales_qty DESC LIMIT 50`, [yyyymm]);
+      out.category_monthly_top = r.rows;
+    }
+    if(await tableExists('gm_product_sales_yearly')){
+      const r = await dbQuery(`SELECT product_uid, product_name, sales_qty, sales_amount, purchase_amount, gross_profit, margin_rate FROM gm_product_sales_yearly WHERE yyyy=$1 ORDER BY sales_amount DESC, sales_qty DESC LIMIT 50`, [yyyy]);
+      out.product_yearly_top = r.rows;
+    }
+    if(await tableExists('gm_category_sales_yearly')){
+      const r = await dbQuery(`SELECT category_no, category_code, category_name, sales_qty, sales_amount, purchase_amount, gross_profit, margin_rate FROM gm_category_sales_yearly WHERE yyyy=$1 ORDER BY sales_amount DESC, sales_qty DESC LIMIT 50`, [yyyy]);
+      out.category_yearly_top = r.rows;
+    }
+    ok(res, { action:'sales.summary', ...out });
+  }catch(e){ fail(res,500,'sales summary failed',{detail:String(e && e.message || e)}); }
+});
+
+
+async function tableColumnNames(table){
+  const r = await dbQuery(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema='public' AND table_name=$1
+    ORDER BY ordinal_position
+  `, [table]);
+  return r.rows.map(x=>x.column_name);
+}
+async function archiveProducts(productUids, meta){
+  productUids = (Array.isArray(productUids) ? productUids : [productUids]).map(cleanText).filter(Boolean);
+  if(!productUids.length) return { moved:0, product_uids:[] };
+  if(!(await tableExists('gm_product'))) throw new Error('gm_product table not found');
+  if(!(await tableExists('gm_product_archive'))) throw new Error('gm_product_archive table not found');
+  const productCols = await tableColumnNames('gm_product');
+  const archiveCols = await tableColumnNames('gm_product_archive');
+  const common = productCols.filter(c => archiveCols.includes(c));
+  const extraCols = ['archive_reason','archive_source','expire_date','archive_note','archived_by'].filter(c => archiveCols.includes(c));
+  const insertCols = common.concat(extraCols);
+  const selectCols = common.map(c => 'p."' + c.replace(/"/g,'""') + '"').concat(extraCols.map(c => {
+    if(c === 'archive_reason') return '$2::text';
+    if(c === 'archive_source') return '$3::text';
+    if(c === 'expire_date') return '$4::timestamp';
+    if(c === 'archive_note') return '$5::text';
+    if(c === 'archived_by') return '$6::text';
+    return 'NULL';
+  }));
+  const conflict = archiveCols.includes('product_uid') ? ' ON CONFLICT (product_uid) DO UPDATE SET ' + insertCols.filter(c=>c!=='product_uid').map(c => '"' + c + '"=EXCLUDED."' + c + '"').join(', ') : '';
+  const sql = `
+    INSERT INTO gm_product_archive (${insertCols.map(c=>'"'+c.replace(/"/g,'""')+'"').join(', ')})
+    SELECT ${selectCols.join(', ')}
+    FROM gm_product p
+    WHERE p.product_uid = ANY($1::text[])
+    ${conflict}
+    RETURNING product_uid
+  `;
+  const r = await dbQuery(sql, [
+    productUids,
+    cleanText(meta.archive_reason || 'EXPIRE'),
+    cleanText(meta.archive_source || 'SYSTEM'),
+    cleanText(meta.expire_date || new Date().toISOString()),
+    cleanText(meta.archive_note || ''),
+    cleanText(meta.archived_by || '')
+  ]);
+  const moved = r.rows.map(x=>x.product_uid);
+  if(moved.length){
+    await dbQuery(`DELETE FROM gm_product WHERE product_uid = ANY($1::text[])`, [moved]);
+  }
+  return { moved:moved.length, product_uids:moved };
+}
+
+app.post('/api/gm/product/archive', async (req,res)=>{
+  try{
+    const b = req.body || {};
+    const productUids = b.product_uids || b.productUids || b.product_uid || b.productUid || [];
+    const result = await archiveProducts(productUids, {
+      archive_reason: b.archive_reason || b.archiveReason || b.reason || 'EXPIRE',
+      archive_source: b.archive_source || b.archiveSource || 'MANUAL',
+      expire_date: b.expire_date || b.expireDate || new Date().toISOString(),
+      archive_note: b.archive_note || b.archiveNote || '',
+      archived_by: b.archived_by || b.archivedBy || ''
+    });
+    ok(res, { action:'product.archive', ...result });
+  }catch(e){
+    fail(res, 500, 'product archive failed', { detail:String(e && e.message || e) });
   }
 });
 
@@ -813,6 +1228,7 @@ app.post('/api/gm/order/create', async (req,res)=>{
         cleanText(it.tracking_number), cleanText(it.item_order_status || 'ordered'),
         cleanText(it.item_shipping_status || 'pending')
       ]);
+      try{ await upsertSalesAggregate(client, o, it); }catch(_agg){ try{ console.warn('[GM SALES AGG SKIP]', String(_agg && _agg.message || _agg)); }catch(_w){} }
     }
 
     await client.query('COMMIT');
