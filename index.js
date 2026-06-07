@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V013_SALES_AGGREGATE';
+const VERSION = 'GLOMART_API_DB_READY_V014_SALES_AGG_IDEMPOTENT';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -205,6 +205,7 @@ const GM_RESET_TARGETS = [
   'gm_category_sales_yearly',
   'gm_category_country_sales_monthly',
   'gm_category_country_sales_yearly',
+  'gm_sales_aggregate_event',
   'gm_category_keyword',
   'gm_category',
   'gm_product_archive',
@@ -352,6 +353,7 @@ const GM_DASHBOARD_TABLES = [
   'gm_category_sales_yearly',
   'gm_category_country_sales_monthly',
   'gm_category_country_sales_yearly',
+  'gm_sales_aggregate_event',
   'gm_basket',
   'gm_order',
   'gm_order_item',
@@ -607,6 +609,16 @@ async function upsertSalesAggregate(client, order, item){
   const productUid = cleanText(item.product_uid || (cleanText(item.mall_code||'') && cleanText(item.pi_ii_vi||'') ? cleanText(item.mall_code)+'_'+cleanText(item.pi_ii_vi) : cleanText(item.pi_ii_vi||'')));
   if(!productUid) return;
   const pi = cleanText(item.pi_ii_vi || '');
+  const itemKey = pi || productUid;
+  const orderNo = cleanText(order.order_no || '');
+  if(orderNo && itemKey && await tableExists('gm_sales_aggregate_event')){
+    const ev = await q.query(`INSERT INTO gm_sales_aggregate_event (
+        order_no, item_key, pi_ii_vi, product_uid, sales_qty, sales_amount, purchase_amount, created_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+      ON CONFLICT (order_no, item_key) DO NOTHING
+      RETURNING id`, [orderNo, itemKey, pi, productUid, qty, salesAmount, purchaseAmount]);
+    if(!ev.rowCount) return;
+  }
   const mall = cleanText(item.mall_code || '');
   const pname = cleanText(item.product_name || '');
   const catNo = cleanText(item.category_no || order.category_no || '');
@@ -736,7 +748,9 @@ app.post('/api/gm/search/log', async (req,res)=>{
     const b = req.body || {};
     const keywordOriginal = cleanText(b.keyword_original || b.keyword || b.origin || '');
     const keywordNormalized = normalizeKeywordForStat(b.keyword_normalized || keywordOriginal);
-    const langCode = cleanText(b.lang_code || b.langCode || '');
+    const uiLangCode = cleanText(b.ui_lang_code || b.uiLangCode || b.gm_lang || b.gmLang || b.lang_code || b.langCode || '');
+    const keywordLangCode = cleanText(b.keyword_lang_code || b.keywordLangCode || uiLangCode);
+    const langCode = uiLangCode;
     let keywordCanonical = cleanText(b.keyword_canonical || b.keywordCanonical || '');
     let categoryNo = cleanText(b.category_no || b.categoryNo || '');
     let categoryCode = cleanText(b.category_code || b.categoryCode || '');
@@ -769,22 +783,22 @@ app.post('/api/gm/search/log', async (req,res)=>{
     await dbQuery(`
       INSERT INTO gm_search_log (
         search_at, keyword_original, keyword_normalized, keyword_canonical,
-        lang_code, country_code, member_country_code,
+        lang_code, ui_lang_code, keyword_lang_code, country_code, member_country_code,
         category_code, category_no, category_name,
         mall_code, result_count, db_insert_count, queue_send_count,
         cache_used, cache_key, search_source,
         member_id, guest_key, device_type, request_id, raw_json, created_at
       ) VALUES (
-        now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,now()
+        now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,now()
       )
     `, [
       row.keyword_original, row.keyword_normalized, row.keyword_canonical,
-      row.lang_code, row.country_code, row.member_country_code,
+      row.lang_code, uiLangCode, keywordLangCode, row.country_code, row.member_country_code,
       row.category_code, row.category_no, row.category_name,
       row.mall_code, row.result_count, row.db_insert_count, row.queue_send_count,
       row.cache_used, cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
       cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''), cleanText(b.request_id || b.requestId || ''),
-      JSON.stringify({ ...b, matched_category_keyword: match || null })
+      JSON.stringify({ ...b, ui_lang_code:uiLangCode, keyword_lang_code:keywordLangCode, matched_category_keyword: match || null })
     ]);
     await upsertSearchStats(row);
     ok(res, { action:'search.log', inserted:true, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
@@ -1053,9 +1067,12 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
         origin_country, mall_sale_price, final_supply_price, normal_price, discount_price,
         delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn,
         supplier_id, supplier_name_snapshot, product_url, thumb_origin_url, thumb_file_name,
+        return_available_yn, exchange_available_yn, return_policy_text, exchange_policy_text,
+        return_shipping_fee, exchange_shipping_fee, return_period_days, exchange_period_days,
+        return_address, exchange_address, return_contact, exchange_contact,
         soldout_yn, sale_status, last_seen_at, created_at, updated_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,now(),now(),now()
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,now(),now(),now()
       )
       ON CONFLICT (product_uid) DO UPDATE SET
         product_name=EXCLUDED.product_name,
@@ -1075,6 +1092,18 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
         product_url=EXCLUDED.product_url,
         thumb_origin_url=EXCLUDED.thumb_origin_url,
         thumb_file_name=EXCLUDED.thumb_file_name,
+        return_available_yn=EXCLUDED.return_available_yn,
+        exchange_available_yn=EXCLUDED.exchange_available_yn,
+        return_policy_text=EXCLUDED.return_policy_text,
+        exchange_policy_text=EXCLUDED.exchange_policy_text,
+        return_shipping_fee=EXCLUDED.return_shipping_fee,
+        exchange_shipping_fee=EXCLUDED.exchange_shipping_fee,
+        return_period_days=EXCLUDED.return_period_days,
+        exchange_period_days=EXCLUDED.exchange_period_days,
+        return_address=EXCLUDED.return_address,
+        exchange_address=EXCLUDED.exchange_address,
+        return_contact=EXCLUDED.return_contact,
+        exchange_contact=EXCLUDED.exchange_contact,
         soldout_yn=EXCLUDED.soldout_yn,
         sale_status=EXCLUDED.sale_status,
         last_seen_at=now(),
@@ -1095,6 +1124,14 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
       cleanText(p.overseas_direct_yn || 'N'), cleanText(p.supplier_id || p.supplierId),
       cleanText(p.supplier_name_snapshot || p.supplierName), normalizeUrl(p.product_url || p.url),
       normalizeUrl(p.thumb_origin_url || p.image || p.imageUrl), cleanText(p.thumb_file_name),
+      cleanText(p.return_available_yn || p.returnAvailableYn || 'Y'), cleanText(p.exchange_available_yn || p.exchangeAvailableYn || 'Y'),
+      cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
+      cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
+      toInt(p.return_shipping_fee || p.returnShippingFee, 0), toInt(p.exchange_shipping_fee || p.exchangeShippingFee, 0),
+      p.return_period_days == null && p.returnPeriodDays == null ? null : toInt(p.return_period_days || p.returnPeriodDays, 0),
+      p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0),
+      cleanText(p.return_address || p.returnAddress || ''), cleanText(p.exchange_address || p.exchangeAddress || ''),
+      cleanText(p.return_contact || p.returnContact || ''), cleanText(p.exchange_contact || p.exchangeContact || ''),
       cleanText(p.soldout_yn || 'N'), cleanText(p.sale_status || 'active')
     ]);
     ok(res, { item:r.rows[0] });

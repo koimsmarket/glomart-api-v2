@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V007_SALES_AGGREGATE';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V008_OPERATION_METRICS';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -20,13 +20,13 @@ const TABLES = {
     key: ['mall_code', 'pi_ii_vi'],
     order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
     critical: ['mall_code', 'pi_ii_vi', 'product_name', 'mall_sale_price'],
-    numeric: ['mall_sale_price','customer_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','unit_price_value','unit_base_qty','unit_norm_qty','unit_norm_price','option_count'],
-    defaults: { mall_code:'CPKR', currency:'KRW', sale_status:'active', collect_status:'ok', unit_sortable_yn:'N', unit_parse_status:'failed' },
+    numeric: ['mall_sale_price','customer_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','unit_price_value','unit_base_qty','unit_norm_qty','unit_norm_price','option_count','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
+    defaults: { mall_code:'CPKR', currency:'KRW', sale_status:'active', collect_status:'ok', unit_sortable_yn:'N', unit_parse_status:'failed', return_available_yn:'Y', exchange_available_yn:'Y' },
     enums: {
       delivery_type:['seller','bundle','fresh','rocket','rocket_fresh','unknown'],
       sale_status:['active','soldout','unavailable','deleted','collect_failed'],
       collect_status:['ok','option_failed','price_failed','page_failed','etc'],
-      unit_sortable_yn:['Y','N']
+      unit_sortable_yn:['Y','N'], return_available_yn:['Y','N'], exchange_available_yn:['Y','N']
     },
     blocked: ['product_uid','created_at']
   },
@@ -111,9 +111,9 @@ const TABLES = {
     key: ['product_uid'],
     order: 'expire_date DESC NULLS LAST, updated_at DESC NULLS LAST',
     critical: ['product_uid'],
-    numeric: ['mall_sale_price','customer_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','unit_price_value','unit_base_qty','unit_norm_qty','unit_norm_price','option_count'],
-    defaults: { archive_reason:'EXPIRE', archive_source:'SYSTEM' },
-    enums: {},
+    numeric: ['mall_sale_price','customer_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','unit_price_value','unit_base_qty','unit_norm_qty','unit_norm_price','option_count','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
+    defaults: { archive_reason:'EXPIRE', archive_source:'SYSTEM', return_available_yn:'Y', exchange_available_yn:'Y' },
+    enums: { return_available_yn:['Y','N'], exchange_available_yn:['Y','N'] },
     blocked: ['created_at']
   },
   category: {
@@ -121,7 +121,7 @@ const TABLES = {
     key: ['category_no'],
     order: 'depth ASC, sort_order ASC, category_no ASC',
     critical: ['category_no'],
-    numeric: ['depth','sort_order'],
+    numeric: ['depth','sort_order','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
     defaults: { leaf_yn:'N', display_yn:'Y', depth:'0', sort_order:'0' },
     enums: { leaf_yn:['Y','N'], display_yn:['Y','N'] },
     blocked: ['created_at'],

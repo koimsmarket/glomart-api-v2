@@ -115,11 +115,14 @@ async function upsertProduct(pool, raw, parent={}){
       origin_country, mall_sale_price, final_supply_price, normal_price, discount_price,
       delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn,
       supplier_id, supplier_name_snapshot, product_url, thumb_origin_url, thumb_file_name,
+      return_available_yn, exchange_available_yn, return_policy_text, exchange_policy_text,
+      return_shipping_fee, exchange_shipping_fee, return_period_days, exchange_period_days,
+      return_address, exchange_address, return_contact, exchange_contact,
       soldout_yn, hit_count, detail_view_count, cart_count, wish_count, order_count, order_qty_total,
       sale_status, last_seen_at, expire_at, created_at, updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,
-      1,0,0,0,0,0,$33,now(),now() + INTERVAL '30 days',now(),now()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,
+      1,0,0,0,0,0,$45,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
       product_name=EXCLUDED.product_name,
@@ -139,6 +142,18 @@ async function upsertProduct(pool, raw, parent={}){
       product_url=EXCLUDED.product_url,
       thumb_origin_url=EXCLUDED.thumb_origin_url,
       thumb_file_name=EXCLUDED.thumb_file_name,
+      return_available_yn=EXCLUDED.return_available_yn,
+      exchange_available_yn=EXCLUDED.exchange_available_yn,
+      return_policy_text=EXCLUDED.return_policy_text,
+      exchange_policy_text=EXCLUDED.exchange_policy_text,
+      return_shipping_fee=EXCLUDED.return_shipping_fee,
+      exchange_shipping_fee=EXCLUDED.exchange_shipping_fee,
+      return_period_days=EXCLUDED.return_period_days,
+      exchange_period_days=EXCLUDED.exchange_period_days,
+      return_address=EXCLUDED.return_address,
+      exchange_address=EXCLUDED.exchange_address,
+      return_contact=EXCLUDED.return_contact,
+      exchange_contact=EXCLUDED.exchange_contact,
       soldout_yn=EXCLUDED.soldout_yn,
       sale_status=EXCLUDED.sale_status,
       hit_count=COALESCE(gm_product.hit_count,0)+1,
@@ -164,6 +179,14 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), cleanText(p.supplier_id || p.supplierId),
     cleanText(p.supplier_name_snapshot || p.supplierName || p.seller_name || p.sellerName), productUrl,
     thumbUrl, cleanText(p.thumb_file_name || p.thumbFileName || ''),
+    cleanText(p.return_available_yn || p.returnAvailableYn || 'Y'), cleanText(p.exchange_available_yn || p.exchangeAvailableYn || 'Y'),
+    cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
+    cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
+    toInt(p.return_shipping_fee || p.returnShippingFee, 0), toInt(p.exchange_shipping_fee || p.exchangeShippingFee, 0),
+    p.return_period_days == null && p.returnPeriodDays == null ? null : toInt(p.return_period_days || p.returnPeriodDays, 0),
+    p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0),
+    cleanText(p.return_address || p.returnAddress || ''), cleanText(p.exchange_address || p.exchangeAddress || ''),
+    cleanText(p.return_contact || p.returnContact || ''), cleanText(p.exchange_contact || p.exchangeContact || ''),
     cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active')
   ];
   const r=await pool.query(sql, vals);
@@ -267,11 +290,15 @@ router.post('/api/gm/product/event', async (req,res)=>{
   const where = id.uid ? 'product_uid=$1' : 'mall_code=$1 AND pi_ii_vi=$2';
   const vals = id.uid ? [id.uid] : [id.mallCode, id.pi];
   let setSql = '';
-  if(type === 'detail') setSql = "detail_view_count=COALESCE(detail_view_count,0)+1, expire_at=GREATEST(COALESCE(expire_at, now()), now() + INTERVAL '90 days')";
+  if(type === 'detail' || type === 'view') setSql = "detail_view_count=COALESCE(detail_view_count,0)+1, view_count=COALESCE(view_count,0)+1, last_view_at=now(), expire_at=GREATEST(COALESCE(expire_at, now()), now() + INTERVAL '90 days')";
   else if(type === 'cart') setSql = "cart_count=COALESCE(cart_count,0)+1, last_cart_at=now(), expire_at=GREATEST(COALESCE(expire_at, now()), now() + INTERVAL '180 days')";
   else if(type === 'wish') setSql = "wish_count=COALESCE(wish_count,0)+1, last_wish_at=now(), expire_at=GREATEST(COALESCE(expire_at, now()), now() + INTERVAL '180 days')";
   else if(type === 'order') setSql = "order_count=COALESCE(order_count,0)+1, order_qty_total=COALESCE(order_qty_total,0)+" + qty + ", last_order_at=now(), expire_at=GREATEST(COALESCE(expire_at, now()), now() + INTERVAL '730 days')";
-  else return fail(res, 400, 'event type must be detail/cart/wish/order');
+  else if(type === 'return') setSql = "return_count=COALESCE(return_count,0)+1, last_return_at=now()";
+  else if(type === 'exchange') setSql = "exchange_count=COALESCE(exchange_count,0)+1, last_exchange_at=now()";
+  else if(type === 'ad_view') setSql = "ad_view_count=COALESCE(ad_view_count,0)+1, last_ad_view_at=now()";
+  else if(type === 'ad_sale') setSql = "ad_order_count=COALESCE(ad_order_count,0)+1, ad_sales_qty=COALESCE(ad_sales_qty,0)+" + qty + ", last_ad_order_at=now()";
+  else return fail(res, 400, 'event type must be detail/view/cart/wish/order/return/exchange/ad_view/ad_sale');
   try{
     const r=await pool.query(`UPDATE gm_product SET ${setSql}, updated_at=now() WHERE ${where} RETURNING product_uid, pi_ii_vi`, vals);
     ok(res,{action:'product.event', type, updated:r.rowCount, item:r.rows[0] || null});
