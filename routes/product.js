@@ -19,12 +19,28 @@ function normalizeQueueItems(p){
 function makeRequestId(p, items){
   const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
+  const chunkTotal = toInt(p.chunk_total || p.chunkTotal, 0);
   const searchRunId = cleanText(p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || '');
-  if(raw){
-    if(chunkIndex && !/_C\d{1,4}$/i.test(raw)) return raw + '_C' + String(chunkIndex).padStart(3,'0');
-    return raw;
-  }
-  if(searchRunId && chunkIndex) return searchRunId + '_C' + String(chunkIndex).padStart(3,'0');
+
+  // Queue 작업 식별자는 상품 UID와 절대 섞지 않는다.
+  // 같은 검색을 10개 단위 chunk로 보내면 request_id가 동일할 수 있으므로,
+  // 서버에서 chunk_index를 붙여 queue row 단위로 유일하게 보정한다.
+  // 예: REQ123 + chunk_index 2 => REQ123_C002
+  const withChunk = function(base){
+    base = cleanText(base);
+    if(!base) return '';
+    if(chunkIndex > 0){
+      return /_C\d{1,4}$/i.test(base) ? base : base + '_C' + String(chunkIndex).padStart(3,'0');
+    }
+    return base;
+  };
+
+  const fromRaw = withChunk(raw);
+  if(fromRaw) return fromRaw;
+
+  const fromRun = withChunk(searchRunId);
+  if(fromRun) return fromRun;
+
   const mall = cleanText(p.mall_code || p.mallCode || p.source || 'UNKNOWN').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || '');
   const keyText = items.map(function(it){
@@ -33,7 +49,10 @@ function makeRequestId(p, items){
   let h = 0;
   const s = mall + '|' + keyword + '|' + keyText;
   for(let i=0;i<s.length;i++){ h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
-  return 'GMQ_' + mall + '_' + Date.now() + '_' + Math.abs(h);
+
+  // request_id가 없는 구형 Runtime도 chunk끼리 덮지 않도록 item hash + timestamp로 생성한다.
+  const base = 'GMQ_' + mall + '_' + Date.now() + '_' + Math.abs(h);
+  return chunkIndex > 0 ? base + '_C' + String(chunkIndex).padStart(3,'0') : base;
 }
 function ids(b){
   const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
@@ -262,8 +281,25 @@ router.post('/api/gm/product/queue', async (req,res)=>{
         error_message=NULL
       RETURNING queue_id, request_id, status, item_count
     `, [requestId, mallCode, keyword, JSON.stringify(items), items.length]);
-    console.log('[GM_PRODUCT_QUEUE] inserted', r.rows[0]);
-    ok(res,{ action:'product.queue', queued:true, queue:r.rows[0] });
+    console.log('[GM_PRODUCT_QUEUE] inserted', {
+      queue_id:r.rows[0] && r.rows[0].queue_id,
+      request_id:r.rows[0] && r.rows[0].request_id,
+      status:r.rows[0] && r.rows[0].status,
+      item_count:r.rows[0] && r.rows[0].item_count,
+      chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
+      chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
+    });
+    ok(res,{
+      action:'product.queue',
+      queued:true,
+      queue:r.rows[0],
+      queue_id:r.rows[0] && r.rows[0].queue_id,
+      request_id:r.rows[0] && r.rows[0].request_id,
+      item_count:r.rows[0] && r.rows[0].item_count,
+      received:items.length,
+      chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
+      chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
+    });
   }catch(e){
     console.error('[GM_PRODUCT_QUEUE] insert failed', String(e && e.message || e));
     fail(res,500,'product queue failed',{detail:String(e && e.message || e)});
