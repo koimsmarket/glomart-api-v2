@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V014_SALES_AGG_IDEMPOTENT';
+const VERSION = 'GLOMART_API_DB_READY_V016_DASHBOARD_OPS';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -1412,6 +1412,7 @@ app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
+app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
 
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));
