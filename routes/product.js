@@ -18,7 +18,13 @@ function normalizeQueueItems(p){
 }
 function makeRequestId(p, items){
   const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
-  if(raw) return raw;
+  const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
+  const searchRunId = cleanText(p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || '');
+  if(raw){
+    if(chunkIndex && !/_C\d{1,4}$/i.test(raw)) return raw + '_C' + String(chunkIndex).padStart(3,'0');
+    return raw;
+  }
+  if(searchRunId && chunkIndex) return searchRunId + '_C' + String(chunkIndex).padStart(3,'0');
   const mall = cleanText(p.mall_code || p.mallCode || p.source || 'UNKNOWN').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || '');
   const keyText = items.map(function(it){
@@ -242,7 +248,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
-    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword });
+    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
         request_id, mall_code, keyword, items_json, item_count, status, retry_count, created_at
