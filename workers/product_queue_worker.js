@@ -65,21 +65,42 @@ async function processRow(pool, row){
   const items = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : []);
   const parent = { mall_code: row.mall_code, keyword: row.keyword, requestId: row.request_id };
   let saved = 0;
+  let inserted = 0;
+  let updated = 0;
   let skipped = 0;
+  const skip_reason_count = {};
+  const samples = [];
   const errors = [];
   for(const item of items){
     try{
       const r = await productRouter.upsertProduct(pool, item, parent);
-      if(r && r.ok) saved += 1;
-      else { skipped += 1; if(r && r.reason) errors.push(r.reason); }
+      if(r && r.ok){
+        saved += 1;
+        if(r.action === 'inserted') inserted += 1;
+        else updated += 1;
+        if(samples.length < 5){
+          samples.push({ action:r.action || 'saved', uid:r.item && r.item.product_uid, hit_count:r.item && r.item.hit_count });
+        }
+      }else{
+        skipped += 1;
+        const reason = (r && r.reason) || 'unknown_skip';
+        skip_reason_count[reason] = (skip_reason_count[reason] || 0) + 1;
+        if(samples.length < 8){
+          samples.push({ action:'skip', reason, missing:r && r.missing, uid:r && r.uid, pi_ii_vi:r && r.pi_ii_vi, product_id:r && r.product_id, url:r && r.source_url, title:r && r.title_sample });
+        }
+      }
     }catch(e){
       skipped += 1;
-      errors.push(String(e && e.message || e));
+      const reason = String(e && e.message || e);
+      errors.push(reason);
+      skip_reason_count[reason] = (skip_reason_count[reason] || 0) + 1;
+      if(samples.length < 8) samples.push({ action:'error', reason });
     }
   }
-  const result = { received: items.length, saved, skipped, errors: errors.slice(0, 5) };
+  const result = { received: items.length, saved, inserted, updated, skipped, skip_reason_count, samples, errors: errors.slice(0, 5) };
+  console.log('[GM_PRODUCT_QUEUE_WORKER_RESULT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...result });
   if(items.length && saved === 0){
-    const e = new Error('queue processed but no gm_product rows saved: ' + (result.errors.join(' | ') || 'unknown mapping error'));
+    const e = new Error('queue processed but no gm_product rows saved: ' + (Object.keys(skip_reason_count).join(' | ') || 'unknown mapping error'));
     e.result = result;
     throw e;
   }

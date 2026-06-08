@@ -31,25 +31,43 @@ function makeRequestId(p, items){
 }
 function ids(b){
   const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
+  const isAliMall = mallCode === 'ALI' || mallCode === 'ALKR' || /^AL/.test(mallCode);
 
-  // CPKR uses productId/itemId/vendorItemId. ALI often has only aliProductId/aliKey.
-  let productId = cleanText(b.product_id || b.productId || b.productID || b.ali_product_id || b.aliProductId || b.aliProductID || b.itemId || b.item_id);
+  // ALI/ALKR often arrives with product_url only. Parse /item/1005....html before giving up.
+  const urlText = normalizeUrl(
+    b.product_url || b.productUrl || b.url || b.link || b.href || b.detail_url || b.detailUrl || b.ali_url || b.aliUrl || ''
+  );
+  let aliUrlId = '';
+  let m = String(urlText || '').match(/\/item\/(\d+)(?:\.html)?/i);
+  if(m) aliUrlId = m[1];
+  if(!aliUrlId){
+    m = String(urlText || '').match(/[?&](?:productId|itemId|goodsId|item_id)=(\d+)/i);
+    if(m) aliUrlId = m[1];
+  }
+
+  let productId = cleanText(
+    b.product_id || b.productId || b.productID || b.ali_product_id || b.aliProductId || b.aliProductID ||
+    b.itemId || b.item_id || b.item_id_ali || b.ali_item_id || b.aliItemId || aliUrlId
+  );
   let itemId = cleanText(b.item_id || b.itemId || b.sku_id || b.skuId || b.ali_sku_id || b.aliSkuId);
   let vendorItemId = cleanText(b.vendor_item_id || b.vendorItemId || b.venderItemId || b.offer_id || b.offerId || b.ali_offer_id || b.aliOfferId);
 
   let pi = cleanText(b.pi_ii_vi || b.piIiVi || b.ali_key || b.aliKey || b.product_key || b.productKey);
   if(!pi){
-    if(mallCode === 'ALI') pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || productId;
+    if(isAliMall) pi = productId || [productId, itemId, vendorItemId].filter(Boolean).join('_');
     else pi = [productId, itemId, vendorItemId].filter(Boolean).join('_');
   }
 
-  // For ALI/search result rows, a single product id is enough for queue storage.
+  // For ALI/ALKR search rows, productId alone is the stable key.
   if(!productId && pi){ productId = String(pi).split('_')[0] || ''; }
-  if(!vendorItemId && mallCode === 'ALI') vendorItemId = vendorItemId || itemId || productId;
+  if(isAliMall && productId){
+    if(!vendorItemId) vendorItemId = productId;
+    if(!pi) pi = productId;
+  }
   if(!vendorItemId && productId && !itemId) vendorItemId = productId;
 
   const uid = cleanText(b.product_uid || b.productUid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
-  return { productId, itemId, vendorItemId, mallCode, pi, uid };
+  return { productId, itemId, vendorItemId, mallCode, pi, uid, source_url:urlText };
 }
 function pickProductName(p){
   return cleanText(
@@ -104,8 +122,24 @@ function normalizeProductPayload(raw, parent={}){
 async function upsertProduct(pool, raw, parent={}){
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
-  if(!id.uid || !id.pi || !id.mallCode || !productName){
-    return { ok:false, skipped:true, reason:'product_uid/pi_ii_vi/mall_code/product_name required', uid:id.uid || '', pi_ii_vi:id.pi || '' };
+  const missing = [];
+  if(!id.uid) missing.push('product_uid');
+  if(!id.pi) missing.push('pi_ii_vi');
+  if(!id.mallCode) missing.push('mall_code');
+  if(!productName) missing.push('product_name');
+  if(missing.length){
+    return {
+      ok:false,
+      skipped:true,
+      reason:'required field missing: ' + missing.join(','),
+      missing,
+      uid:id.uid || '',
+      pi_ii_vi:id.pi || '',
+      mall_code:id.mallCode || '',
+      product_id:id.productId || '',
+      source_url:id.source_url || pickProductUrl(p),
+      title_sample: cleanText(p.title || p.name || p.productName || p.product_name).slice(0, 120)
+    };
   }
   const sql=`
     INSERT INTO gm_product (
@@ -160,7 +194,7 @@ async function upsertProduct(pool, raw, parent={}){
       last_seen_at=now(),
       expire_at=now() + INTERVAL '30 days',
       updated_at=now()
-    RETURNING product_uid, pi_ii_vi, mall_code, hit_count
+    RETURNING product_uid, pi_ii_vi, mall_code, hit_count, (xmax = 0) AS inserted
   `;
   const thumbUrl = pickThumbUrl(p);
   const productUrl = pickProductUrl(p);
@@ -190,7 +224,7 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active')
   ];
   const r=await pool.query(sql, vals);
-  return { ok:true, item:r.rows[0] };
+  return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:r.rows[0] };
 }
 
 
