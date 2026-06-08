@@ -13,6 +13,11 @@
   .card h2{font-size:17px;margin:0 0 10px}.metric{font-size:28px;font-weight:800;margin:8px 0}.small{font-size:12px;color:var(--muted)}
   .badge{display:inline-block;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:700}.b-ok{background:#e7f8ee;color:var(--ok)}.b-warn{background:#fff3d6;color:var(--warn)}.b-bad{background:#fee4e2;color:var(--bad)}
   .cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.wide{grid-column:1/-1} table{width:100%;border-collapse:collapse;font-size:13px} th,td{border-bottom:1px solid #edf2f7;padding:8px 7px;text-align:left;vertical-align:top} th{background:#f8fafc;color:#334155;font-weight:800} td.num{text-align:right;font-variant-numeric:tabular-nums}.ellipsis{max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.thumb{width:40px;height:40px;object-fit:cover;border-radius:6px;border:1px solid #e5e7eb}.rowflex{display:flex;gap:8px;align-items:center}.log{white-space:pre-wrap;background:#0b1020;color:#b7f7c9;border-radius:10px;padding:10px;max-height:200px;overflow:auto;font-family:Consolas,monospace;font-size:12px}.hidden{display:none}
+  #topProducts th,#topProducts td{white-space:nowrap}
+  #topProducts td:first-child{white-space:normal}
+  #topProducts td:first-child .ellipsis{max-width:360px}
+  #topProducts th:last-child,#topProducts td:last-child{min-width:118px;white-space:nowrap}
+  #topProducts th:nth-child(2),#topProducts td:nth-child(2){min-width:54px;white-space:nowrap}
   @media(max-width:980px){.grid,.cols{grid-template-columns:1fr}.top{display:block}.btns{margin-top:10px}.ellipsis{max-width:220px}}
 </style>
 </head>
@@ -45,6 +50,7 @@ const API=''; let auto=true, timer=null;
 function esc(v){return String(v??'').replace(/[&<>"]/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s]));}
 function num(v){return v==null?'-':Number(v).toLocaleString('ko-KR');}
 function date(v){if(!v)return '-'; try{return new Date(v).toLocaleString('ko-KR',{hour12:false});}catch(e){return v}}
+function dateShort(v){if(!v)return '-'; try{const d=new Date(v); const z=n=>String(n).padStart(2,'0'); return `${z(d.getMonth()+1)}.${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`;}catch(e){return v}}
 function set(id,v){document.getElementById(id).textContent=v}
 function table(id, heads, rows){document.getElementById(id).innerHTML='<thead><tr>'+heads.map(h=>`<th>${esc(h)}</th>`).join('')+'</tr></thead><tbody>'+rows.join('')+'</tbody>';}
 function queueBadge(q){const b=document.getElementById('qBadge'); const failed=Number(q.failed||0), pending=Number(q.pending||0), processing=Number(q.processing||0); b.className='badge '+(failed?'b-bad':(pending||processing?'b-warn':'b-ok')); b.textContent=failed?'오류':(pending||processing?'처리중':'정상');}
@@ -59,7 +65,7 @@ async function loadDash(){
   table('categoryKeyword',['키워드','상품수','hit','최근'], (j.product.category_keyword||[]).map(x=>`<tr><td>${esc(x.category_keyword)}</td><td class="num">${num(x.product_count)}</td><td class="num">${num(x.hit_count)}</td><td>${date(x.last_updated_at)}</td></tr>`));
   table('queueRecent',['ID','검색어','몰','수량','상태','처리결과','생성','처리'], (j.queue.recent||[]).map(x=>{let rr=x.result_json||{}; if(typeof rr==='string'){try{rr=JSON.parse(rr)}catch(e){}} return `<tr><td class="num">${num(x.queue_id)}</td><td>${esc(x.keyword)}</td><td>${esc(x.mall_code)}</td><td class="num">${num(x.item_count)}</td><td>${esc(x.status)}</td><td>recv ${num(rr.received)} / save ${num(rr.saved)} / ins ${num(rr.inserted)} / upd ${num(rr.updated)} / skip ${num(rr.skipped)}</td><td>${date(x.created_at)}</td><td>${date(x.processed_at)}</td></tr>`;}));
   table('recentProducts',['이미지','상품','키워드','가격','hit','생성','갱신'], (j.product.recent||[]).map(x=>`<tr><td>${x.thumb_origin_url?`<img class="thumb" src="${esc(x.thumb_origin_url)}">`:''}</td><td><div class="ellipsis">${esc(x.product_name)}</div><div class="small">${esc(x.product_uid)}</div></td><td>${esc(x.category_keyword)}</td><td class="num">${num(x.mall_sale_price)}</td><td class="num">${num(x.hit_count)}</td><td>${date(x.created_at)}</td><td>${date(x.updated_at)}</td></tr>`));
-  table('topProducts',['상품','키워드','hit','view','search','갱신'], (j.product.top||[]).map(x=>`<tr><td><div class="ellipsis">${esc(x.product_name)}</div></td><td>${esc(x.category_keyword)}</td><td class="num">${num(x.hit_count)}</td><td class="num">${num(x.view_count)}</td><td class="num">${num(x.search_count)}</td><td>${date(x.updated_at)}</td></tr>`));
+  table('topProducts',['상품','키워드','hit','view','search','갱신'], (j.product.top||[]).map(x=>`<tr><td><div class="ellipsis">${esc(x.product_name)}</div></td><td>${esc(x.category_keyword)}</td><td class="num">${num(x.hit_count)}</td><td class="num">${num(x.view_count)}</td><td class="num">${num(x.search_count)}</td><td>${dateShort(x.updated_at)}</td></tr>`));
   table('recentSearches',['검색어','언어','국가','몰','결과','Queue','시간'], (j.search.recent||[]).map(x=>`<tr><td>${esc(x.keyword_original||x.keyword_normalized)}</td><td>${esc(x.keyword_lang_code||x.ui_lang_code)}</td><td>${esc(x.country_code)}</td><td>${esc(x.mall_code)}</td><td class="num">${num(x.result_count)}</td><td class="num">${num(x.queue_send_count)}</td><td>${date(x.search_at||x.created_at)}</td></tr>`));
   document.getElementById('rawLog').textContent=JSON.stringify({today:j.today, counts:j.counts, queue:j.queue.summary},null,2);
 }
