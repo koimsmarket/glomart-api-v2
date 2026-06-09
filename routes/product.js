@@ -116,6 +116,82 @@ function pickThumbUrl(p){
     p.thumbnail || p.thumbnail_url || p.thumbnailUrl || p.image || p.image_url || p.imageUrl || p.img || p.img_url || p.imgUrl
   );
 }
+
+function pickOptionName(p){
+  return cleanText(
+    p.option_name || p.optionName || p.display_option_name || p.displayOptionName ||
+    p.selected_option_name || p.selectedOptionName || p.sku_name || p.skuName ||
+    p.variant_name || p.variantName || p.optionTitle || p.option_title || ''
+  );
+}
+function pickOptionValue(p){
+  return cleanText(
+    p.option_value || p.optionValue || p.display_option_value || p.displayOptionValue ||
+    p.selected_option_value || p.selectedOptionValue || p.sku_value || p.skuValue ||
+    p.variant_value || p.variantValue || p.optionText || p.option_text || ''
+  );
+}
+function pickDeliveryText(p){
+  return cleanText(
+    p.delivery_eta_text || p.deliveryEtaText || p.deliveryText || p.delivery_text ||
+    p.shipping_text || p.shippingText || p.shipping_message || p.shippingMessage ||
+    p.arrival_text || p.arrivalText || p.eta_text || p.etaText || ''
+  );
+}
+function pickDeliveryType(p){
+  return cleanText(
+    p.delivery_type || p.deliveryType || p.shipping_type || p.shippingType ||
+    p.delivery_badge || p.deliveryBadge || p.shipping_badge || p.shippingBadge || ''
+  );
+}
+function pickSupplierName(p){
+  return cleanText(
+    p.supplier_name_snapshot || p.supplierNameSnapshot || p.supplier_name || p.supplierName ||
+    p.seller_name || p.sellerName || p.vendor_name || p.vendorName ||
+    p.store_name || p.storeName || p.shop_name || p.shopName || ''
+  );
+}
+function pickSupplierId(p){
+  return cleanText(p.supplier_id || p.supplierId || p.seller_id || p.sellerId || p.vendor_id || p.vendorId || p.store_id || p.storeId || '');
+}
+function pickAny(p, names){
+  for(const n of names){
+    if(p && p[n] !== undefined && p[n] !== null && cleanText(p[n]) !== '') return cleanText(p[n]);
+  }
+  return '';
+}
+function safeJsonString(v){
+  try{return JSON.stringify(v == null ? {} : v);}catch(_e){return '{}';}
+}
+function buildOptionJson(p, id){
+  return safeJsonString({
+    option_name:pickOptionName(p), option_value:pickOptionValue(p),
+    option_count:toInt(p.option_count || p.optionCount, 0),
+    product_id:id.productId || '', item_id:id.itemId || '', vendor_item_id:id.vendorItemId || '',
+    raw_option:p.option || p.options || p.option_info || p.optionInfo || p.sku || p.sku_info || p.skuInfo || null
+  });
+}
+function buildShippingJson(p){
+  return safeJsonString({
+    delivery_type:pickDeliveryType(p), delivery_text:pickDeliveryText(p),
+    delivery_fee:toInt(p.delivery_fee || p.deliveryFee || p.shipping_fee || p.shippingFee, 0),
+    delivery_days_range:cleanText(p.delivery_days_range || p.deliveryDaysRange || ''),
+    raw_shipping:p.shipping || p.delivery || p.delivery_info || p.deliveryInfo || p.shipping_info || p.shippingInfo || null
+  });
+}
+function buildSupplierJson(p){
+  return safeJsonString({
+    supplier_id:pickSupplierId(p), seller_name:pickSupplierName(p),
+    business_number:pickAny(p,['business_number_snapshot','businessNumberSnapshot','business_number','businessNumber','seller_business_number','sellerBusinessNumber']),
+    online_sales_number:pickAny(p,['online_sales_number_snapshot','onlineSalesNumberSnapshot','online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber']),
+    ceo_name:pickAny(p,['ceo_name_snapshot','ceoNameSnapshot','ceo_name','ceoName','representative_name','representativeName']),
+    mobile:pickAny(p,['supplier_mobile_snapshot','supplierMobileSnapshot','supplier_mobile','supplierMobile','seller_mobile','sellerMobile']),
+    phone:pickAny(p,['supplier_phone_snapshot','supplierPhoneSnapshot','supplier_phone','supplierPhone','seller_phone','sellerPhone']),
+    email:pickAny(p,['supplier_email_snapshot','supplierEmailSnapshot','supplier_email','supplierEmail','seller_email','sellerEmail']),
+    address:pickAny(p,['supplier_address_snapshot','supplierAddressSnapshot','supplier_address','supplierAddress','seller_address','sellerAddress']),
+    raw_supplier:p.supplier || p.seller || p.vendor || p.store || p.shop || p.supplier_info || p.supplierInfo || p.seller_info || p.sellerInfo || null
+  });
+}
 function normalizeProductPayload(raw, parent={}){
   const p = { ...(raw || {}) };
   if(!p.mall_code && !p.mallCode) p.mall_code = parent.mall_code || parent.mallCode || parent.source || parent.mall || 'CPKR';
@@ -173,15 +249,20 @@ async function upsertProduct(pool, raw, parent={}){
       product_name, mall_product_name, option_count, option_name, option_value,
       origin_country, mall_sale_price, final_supply_price, normal_price, discount_price,
       delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn,
-      supplier_id, supplier_name_snapshot, product_url, thumb_origin_url, thumb_file_name,
+      supplier_id, supplier_name_snapshot, business_number_snapshot, online_sales_number_snapshot,
+      ceo_name_snapshot, supplier_mobile_snapshot, supplier_phone_snapshot, supplier_email_snapshot, supplier_address_snapshot,
+      product_url, thumb_origin_url, thumb_file_name,
+      option_json, shipping_json, supplier_json, product_raw_json,
       return_available_yn, exchange_available_yn, return_policy_text, exchange_policy_text,
       return_shipping_fee, exchange_shipping_fee, return_period_days, exchange_period_days,
       return_address, exchange_address, return_contact, exchange_contact,
       soldout_yn, hit_count, detail_view_count, cart_count, wish_count, order_count, order_qty_total,
       sale_status, last_seen_at, expire_at, created_at, updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,
-      1,0,0,0,0,0,$45,now(),now() + INTERVAL '30 days',now(),now()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+      $27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39::jsonb,$40::jsonb,$41::jsonb,$42::jsonb,
+      $43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,
+      1,0,0,0,0,0,$56,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
       product_name=EXCLUDED.product_name,
@@ -198,9 +279,20 @@ async function upsertProduct(pool, raw, parent={}){
       delivery_type=EXCLUDED.delivery_type,
       supplier_id=EXCLUDED.supplier_id,
       supplier_name_snapshot=EXCLUDED.supplier_name_snapshot,
+      business_number_snapshot=EXCLUDED.business_number_snapshot,
+      online_sales_number_snapshot=EXCLUDED.online_sales_number_snapshot,
+      ceo_name_snapshot=EXCLUDED.ceo_name_snapshot,
+      supplier_mobile_snapshot=EXCLUDED.supplier_mobile_snapshot,
+      supplier_phone_snapshot=EXCLUDED.supplier_phone_snapshot,
+      supplier_email_snapshot=EXCLUDED.supplier_email_snapshot,
+      supplier_address_snapshot=EXCLUDED.supplier_address_snapshot,
       product_url=EXCLUDED.product_url,
       thumb_origin_url=EXCLUDED.thumb_origin_url,
       thumb_file_name=EXCLUDED.thumb_file_name,
+      option_json=EXCLUDED.option_json,
+      shipping_json=EXCLUDED.shipping_json,
+      supplier_json=EXCLUDED.supplier_json,
+      product_raw_json=EXCLUDED.product_raw_json,
       return_available_yn=EXCLUDED.return_available_yn,
       exchange_available_yn=EXCLUDED.exchange_available_yn,
       return_policy_text=EXCLUDED.return_policy_text,
@@ -223,21 +315,34 @@ async function upsertProduct(pool, raw, parent={}){
   `;
   const thumbUrl = pickThumbUrl(p);
   const productUrl = pickProductUrl(p);
+  const optionName = pickOptionName(p);
+  const optionValue = pickOptionValue(p);
+  const deliveryText = pickDeliveryText(p);
+  const deliveryType = pickDeliveryType(p);
+  const supplierId = pickSupplierId(p);
+  const supplierName = pickSupplierName(p);
   const vals=[
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, cleanText(p.mall_category || p.mallCategory),
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
-    productName, cleanText(p.mall_product_name || p.mallProductName || productName), toInt(p.option_count || p.optionCount, 0),
-    cleanText(p.option_name || p.optionName), cleanText(p.option_value || p.optionValue),
+    productName, cleanText(p.mall_product_name || p.mallProductName || productName), toInt(p.option_count || p.optionCount, optionName || optionValue ? 1 : 0),
+    optionName, optionValue,
     cleanText(p.origin_country || p.originCountry), pickPrice(p),
     p.final_supply_price == null && p.finalSupplyPrice == null ? null : toInt(p.final_supply_price || p.finalSupplyPrice, 0),
     p.normal_price == null && p.normalPrice == null ? null : toInt(p.normal_price || p.normalPrice, 0),
     p.discount_price == null && p.discountPrice == null ? null : toInt(p.discount_price || p.discountPrice, 0),
-    toInt(p.delivery_fee || p.deliveryFee || p.shipping_fee || p.shippingFee, 0), cleanText(p.delivery_eta_text || p.deliveryEtaText || p.deliveryText || p.arrival_text || p.arrivalText),
-    cleanText(p.delivery_type || p.deliveryType || p.shipping_type || p.shippingType), cleanText(p.tax_type || p.taxType),
-    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), cleanText(p.supplier_id || p.supplierId),
-    cleanText(p.supplier_name_snapshot || p.supplierName || p.seller_name || p.sellerName), productUrl,
-    thumbUrl, cleanText(p.thumb_file_name || p.thumbFileName || ''),
+    toInt(p.delivery_fee || p.deliveryFee || p.shipping_fee || p.shippingFee, 0), deliveryText,
+    deliveryType, cleanText(p.tax_type || p.taxType),
+    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), supplierId, supplierName,
+    pickAny(p,['business_number_snapshot','businessNumberSnapshot','business_number','businessNumber','seller_business_number','sellerBusinessNumber']),
+    pickAny(p,['online_sales_number_snapshot','onlineSalesNumberSnapshot','online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber']),
+    pickAny(p,['ceo_name_snapshot','ceoNameSnapshot','ceo_name','ceoName','representative_name','representativeName']),
+    pickAny(p,['supplier_mobile_snapshot','supplierMobileSnapshot','supplier_mobile','supplierMobile','seller_mobile','sellerMobile']),
+    pickAny(p,['supplier_phone_snapshot','supplierPhoneSnapshot','supplier_phone','supplierPhone','seller_phone','sellerPhone']),
+    pickAny(p,['supplier_email_snapshot','supplierEmailSnapshot','supplier_email','supplierEmail','seller_email','sellerEmail']),
+    pickAny(p,['supplier_address_snapshot','supplierAddressSnapshot','supplier_address','supplierAddress','seller_address','sellerAddress']),
+    productUrl, thumbUrl, cleanText(p.thumb_file_name || p.thumbFileName || ''),
+    buildOptionJson(p, id), buildShippingJson(p), buildSupplierJson(p), safeJsonString(p),
     cleanText(p.return_available_yn || p.returnAvailableYn || 'Y'), cleanText(p.exchange_available_yn || p.exchangeAvailableYn || 'Y'),
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
@@ -247,8 +352,7 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.return_address || p.returnAddress || ''), cleanText(p.exchange_address || p.exchangeAddress || ''),
     cleanText(p.return_contact || p.returnContact || ''), cleanText(p.exchange_contact || p.exchangeContact || ''),
     cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active')
-  ];
-  const r=await pool.query(sql, vals);
+  ];  const r=await pool.query(sql, vals);
   return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:r.rows[0] };
 }
 
