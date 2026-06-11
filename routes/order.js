@@ -32,6 +32,21 @@ router.post(['/api/order/create','/api/gm/order/create'], async (req,res)=>{
       b.ordered_at||null,b.payment_requested_at||null,b.payment_completed_at||null,b.payment_confirmed_at||null,s(b.cancel_status,'none'),b.cancel_requested_at||null,b.cancel_completed_at||null,
       s(b.purchase_confirmed_yn,'N'),b.purchase_confirmed_at||null,b.delivered_at||null];
     const or=await client.query(osql,op);
+    await client.query(`UPDATE gm_order
+      SET receiver_address_old=$2,
+          receiver_address_full=$3,
+          receiver_sido=$4,
+          receiver_sigungu=$5,
+          receiver_eup_myeon_dong=$6,
+          updated_at=NOW()
+      WHERE order_no=$1`, [
+        order_no,
+        s(b.receiver_address_old || b.address_old || b.jibun_address),
+        s(b.receiver_address_full || b.address_full),
+        s(b.receiver_sido || b.sido),
+        s(b.receiver_sigungu || b.sigungu),
+        s(b.receiver_eup_myeon_dong || b.eup_myeon_dong || b.dong)
+      ]).catch(()=>{});
     const saved=[];
     for(const it of items){
       const r=await client.query(`INSERT INTO gm_order_item (order_no,pi_ii_vi,product_name,option_name,option_value,quantity,mall_sale_price,customer_order_price,final_supply_price,product_amount,delivery_type,delivery_fee,courier_name,invoice_no,shipped_at,delivered_at,item_status,created_at,updated_at)
