@@ -258,6 +258,10 @@ app.get('/', (req,res)=>ok(res, {
     'GET /api/gm/interest/recent',
     'DELETE /api/gm/basket/item',
     'POST /api/gm/order/create',
+    'POST /api/gm/member/upsert',
+    'GET /api/gm/member/me',
+    'GET /api/gm/member/address/list',
+    'POST /api/gm/member/address/upsert',
     'GET /module/scrap/api/cache/search?q=keyword&page=1'
   ]
 }));

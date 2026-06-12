@@ -47,7 +47,7 @@ function memberPayload(b){
     default_sigungu: pick(b, ['default_sigungu','sigungu']),
     default_eup_myeon_dong: pick(b, ['default_eup_myeon_dong','eup_myeon_dong','dong']),
     customs_clearance_code: pick(b, ['customs_clearance_code','customsClearanceCode','pccc']),
-    delivery_memo: pick(b, ['delivery_memo','deliveryMemo'])
+    delivery_memo: pick(b, ['delivery_memo','deliveryMemo','default_delivery_memo','defaultDeliveryMemo'])
   };
 }
 function addressPayload(b, memberId){
@@ -72,7 +72,7 @@ function addressPayload(b, memberId){
     sigungu: pick(b, ['sigungu','default_sigungu']),
     eup_myeon_dong: pick(b, ['eup_myeon_dong','default_eup_myeon_dong','dong']),
     customs_clearance_code: pick(b, ['customs_clearance_code','customsClearanceCode','pccc']),
-    delivery_memo: pick(b, ['delivery_memo','deliveryMemo']),
+    delivery_memo: pick(b, ['delivery_memo','deliveryMemo','default_delivery_memo','defaultDeliveryMemo']),
     is_default: yn(b.is_default === undefined ? 'Y' : b.is_default)
   };
 }
@@ -176,4 +176,29 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
   finally{ client.release(); }
 });
+
+router.get(['/api/gm/member/address/list','/api/member/address/list'], async (req,res)=>{
+  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  try{
+    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC, created_at DESC',[memberId]);
+    res.json({ok:true,items:a.rows,default_address:a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null});
+  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
+});
+
+router.get(['/api/gm/member/address/default','/api/member/address/default'], async (req,res)=>{
+  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  try{
+    const a=await pool.query(`
+      SELECT *
+      FROM gm_member_address
+      WHERE member_id=$1
+      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+      LIMIT 1
+    `,[memberId]);
+    res.json({ok:true,address:a.rows[0]||null});
+  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
+});
+
 module.exports=router;
