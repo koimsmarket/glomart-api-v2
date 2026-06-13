@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V009_CAFE24_MEMBER_IMPORT';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V010_CAFE24_MEMBER_IMPORT_AUTODETECT';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -519,6 +519,62 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   let rows = parseCsv(req.body);
   if (rows.length > LIMITS.MAX_ROWS) {
     rows = rows.slice(0, LIMITS.MAX_ROWS);
+  }
+
+  // Cafe24 회원명부를 일반 gm_member safe-update에 넣어도 자동으로 전용 import로 처리한다.
+  // 일반 safe-update는 member_id 컬럼을 찾기 때문에 Cafe24 원본 CSV(아이디/이름/휴대폰번호...)를 그대로 넣으면 MISSING_KEY가 난다.
+  if (spec.table === 'gm_member' && rows.some(r => Object.prototype.hasOwnProperty.call(r, '아이디'))) {
+    const result = [];
+    let processed=0, insertedOrUpdated=0, skipped=0, invalid=0;
+    const outCols = ['row_no','member_id','result','member_action','address_action','name','mobile','zipcode','address1','reason'];
+    try {
+      const memberCols = new Set(await getColumns(db, 'gm_member'));
+      const addressCols = new Set(await getColumns(db, 'gm_member_address'));
+      const client = apply ? await db.connect() : null;
+      try {
+        if (client) await client.query('BEGIN');
+        for (const row of rows) {
+          processed++;
+          const mapped = mapCafe24Member(row);
+          const m = mapped.member;
+          const a = mapped.address;
+          if (!m.member_id) {
+            invalid++; skipped++;
+            result.push({row_no:row.__row_no, member_id:'', result:'SKIP', member_action:'', address_action:'', name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:'MISSING_MEMBER_ID'});
+            continue;
+          }
+          const mObj = {};
+          for (const [k,v] of Object.entries(m)) if (memberCols.has(k)) mObj[k]=v;
+          const aObj = {};
+          for (const [k,v] of Object.entries(a)) if (addressCols.has(k)) aObj[k]=v;
+          let memberAction = 'VALID_MEMBER';
+          let addressAction = (a.zipcode || a.address1 || a.address2) ? 'VALID_ADDRESS' : 'NO_ADDRESS';
+          if (apply) {
+            const mr = await upsertObject(client, 'gm_member', mObj, ['member_id']);
+            memberAction = mr.action;
+            if (addressAction !== 'NO_ADDRESS') {
+              if (addressCols.has('is_default')) await client.query(`UPDATE gm_member_address SET is_default='N', updated_at=NOW() WHERE member_id=$1`, [m.member_id]);
+              const ar = await upsertObject(client, 'gm_member_address', aObj, ['address_id']);
+              addressAction = ar.action;
+            }
+          }
+          insertedOrUpdated++;
+          result.push({row_no:row.__row_no, member_id:m.member_id, result:apply?'APPLIED':'VALID', member_action:memberAction, address_action:addressAction, name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:'CAFE24_AUTO_IMPORT'});
+        }
+        if (client) await client.query('COMMIT');
+      } catch(e) {
+        if (client) await client.query('ROLLBACK').catch(()=>{});
+        throw e;
+      } finally {
+        if (client) client.release();
+      }
+      const csv = toCsv(result, outCols);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="cafe24_member_import_${apply?'apply':'dryrun'}_${Date.now()}.csv"`);
+      return res.end(csv);
+    } catch(e) {
+      return fail(res, 500, 'cafe24 member auto import failed', { detail:String(e && e.message || e), processed, insertedOrUpdated, skipped, invalid });
+    }
   }
 
   const result = [];

@@ -229,15 +229,32 @@ async function readCsvText(file){
   }
   return text;
 }
-async function uploadOne(tableKey,file,apply){
-  const text=await readCsvText(file);
-  const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}`;
-  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+function isCafe24MemberCsvText(text){
+  const first=String(text||'').split(/\r?\n/)[0]||'';
+  return first.indexOf('아이디')>=0 && (first.indexOf('휴대폰번호')>=0 || first.indexOf('회원등급')>=0 || first.indexOf('회원 가입일')>=0);
+}
+async function downloadCsvResponse(r, filename){
   const blob=await r.blob();
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download=(apply?'apply':'dryrun')+'_result_'+tableKey+'_'+Date.now()+'.csv';
+  a.download=filename;
   a.click();
+}
+async function uploadCafe24MemberText(text,fileName,apply){
+  const url=`${API}/api/gm/builder/cafe24-member-import?apply=${apply?'YES':'NO'}`;
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+  await downloadCsvResponse(r,(apply?'member_apply':'member_dryrun')+'_result_'+Date.now()+'.csv');
+  log({action:'cafe24-member-import', apply, status:r.status, file:fileName||'', result:'CSV result downloaded'});
+}
+async function uploadOne(tableKey,file,apply){
+  const text=await readCsvText(file);
+  if((tableKey==='member' || tableKey==='gm_member' || !tableKey) && isCafe24MemberCsvText(text)){
+    await uploadCafe24MemberText(text,file.name,apply);
+    return;
+  }
+  const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}`;
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+  await downloadCsvResponse(r,(apply?'apply':'dryrun')+'_result_'+tableKey+'_'+Date.now()+'.csv');
 }
 async function sendAll(apply){
   const files=[...document.getElementById('multiFiles').files];
@@ -245,6 +262,12 @@ async function sendAll(apply){
   if(apply){ const x=prompt('전체 실제 업데이트 하려면 APPLY ALL 이라고 입력하세요.'); if(x !== 'APPLY ALL') return; }
   const result=[];
   for(const f of files){
+    const text=await readCsvText(f);
+    if(isCafe24MemberCsvText(text)){
+      await uploadCafe24MemberText(text,f.name,apply);
+      result.push({file:f.name, table:'cafe24_member', result:apply?'APPLY_REQUESTED':'DRYRUN_REQUESTED'});
+      continue;
+    }
     const key=inferTableFromFileName(f.name);
     if(!key){ result.push({file:f.name, result:'SKIP', reason:'파일명에서 테이블명 추정 실패'}); continue; }
     await uploadOne(key,f,apply);
@@ -259,14 +282,7 @@ async function uploadCafe24Members(apply){
   if(!f){ alert('Cafe24 회원 CSV 파일을 선택하세요.'); return; }
   if(apply){ const x=prompt('회원정보를 실제 저장하려면 MEMBER APPLY 라고 입력하세요.'); if(x !== 'MEMBER APPLY') return; }
   const text=await readCsvText(f);
-  const url=`${API}/api/gm/builder/cafe24-member-import?apply=${apply?'YES':'NO'}`;
-  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
-  const blob=await r.blob();
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download=(apply?'member_apply':'member_dryrun')+'_result_'+Date.now()+'.csv';
-  a.click();
-  log({action:'cafe24-member-import', apply, status:r.status, file:f.name, result:'CSV result downloaded'});
+  await uploadCafe24MemberText(text,f.name,apply);
   await loadDashboard(false);
 }
 function memberDryRun(){ uploadCafe24Members(false); }
