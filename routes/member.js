@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const argon2 = require('argon2');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=''){ return v===undefined||v===null ? d : String(v).trim(); }
 function yn(v){ return String(v || '').toUpperCase() === 'Y' || v === true ? 'Y' : 'N'; }
@@ -8,6 +9,35 @@ function pick(b, names, d=''){
   for(const n of names){ if(b[n] !== undefined && b[n] !== null && String(b[n]).trim() !== '') return s(b[n]); }
   return d;
 }
+
+function pickPasswordPlain(b){
+  // Accept only transient password fields from HTTPS request body.
+  // Never store these values in raw_json, session storage, logs, or exports.
+  const names = [
+    'password_plain','plain_password','member_password','passwd','user_passwd','password',
+    'new_passwd','new_password','newPassword'
+  ];
+  for(const n of names){
+    if(b[n] !== undefined && b[n] !== null && String(b[n]).trim() !== '') return String(b[n]);
+  }
+  return '';
+}
+async function hashPasswordIfPresent(b){
+  const plain = pickPasswordPlain(b);
+  if(!plain) return null;
+  const hash = await argon2.hash(plain, { type: argon2.argon2id });
+  return { password_hash: hash, password_algo: 'argon2id', password_updated_at: new Date(), password_migrated: 'Y' };
+}
+function redactMember(row){
+  if(!row) return row;
+  const x = Object.assign({}, row);
+  delete x.password_hash;
+  delete x.password_algo;
+  delete x.password_updated_at;
+  delete x.password_migrated;
+  return x;
+}
+function redactMembers(rows){ return Array.isArray(rows) ? rows.map(redactMember) : rows; }
 function fullAddress(zip, a1, a2, old){
   const first = [zip ? `[${zip}]` : '', a1, a2].filter(Boolean).join(' ').trim();
   return old ? `${first} (${old})`.trim() : first;
@@ -80,6 +110,9 @@ function addressPayload(b, memberId){
 router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   const p=memberPayload(b); if(!p.member_id) return res.status(400).json({ok:false,error:'member_id is required'});
+  let passwordMeta=null;
+  try{ passwordMeta = await hashPasswordIfPresent(b); }
+  catch(e){ return res.status(400).json({ok:false,error:'password hash failed'}); }
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
   try{
     await client.query('BEGIN');
@@ -87,9 +120,10 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       member_id,cafe24_member_id,member_name,member_name_en,email,phone,country_code,nationality,language_code,cs_language,
       recommender_id,member_grade,member_status,refund_bank_name,refund_account_no,refund_account_holder,
       default_receiver_name,default_receiver_phone,default_receiver_mobile,default_zipcode,default_address1,default_address2,default_address_old,default_address_full,
-      default_sido,default_sigungu,default_eup_myeon_dong,customs_clearance_code,delivery_memo,last_sync_at,created_at,updated_at
+      default_sido,default_sigungu,default_eup_myeon_dong,customs_clearance_code,delivery_memo,
+      password_hash,password_algo,password_updated_at,password_migrated,last_sync_at,created_at,updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,NOW(),NOW(),NOW()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,NOW(),NOW(),NOW()
     ) ON CONFLICT (member_id) DO UPDATE SET
       cafe24_member_id=COALESCE(NULLIF(EXCLUDED.cafe24_member_id,''),gm_member.cafe24_member_id),
       member_name=COALESCE(NULLIF(EXCLUDED.member_name,''),gm_member.member_name),
@@ -119,11 +153,19 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       default_eup_myeon_dong=COALESCE(NULLIF(EXCLUDED.default_eup_myeon_dong,''),gm_member.default_eup_myeon_dong),
       customs_clearance_code=COALESCE(NULLIF(EXCLUDED.customs_clearance_code,''),gm_member.customs_clearance_code),
       delivery_memo=COALESCE(NULLIF(EXCLUDED.delivery_memo,''),gm_member.delivery_memo),
+      password_hash=COALESCE(EXCLUDED.password_hash,gm_member.password_hash),
+      password_algo=COALESCE(NULLIF(EXCLUDED.password_algo,''),gm_member.password_algo),
+      password_updated_at=COALESCE(EXCLUDED.password_updated_at,gm_member.password_updated_at),
+      password_migrated=CASE WHEN EXCLUDED.password_hash IS NOT NULL THEN 'Y' ELSE gm_member.password_migrated END,
       last_sync_at=NOW(),updated_at=NOW()
     RETURNING *`;
     const vals=[p.member_id,p.cafe24_member_id,p.member_name,p.member_name_en,p.email,p.phone,p.country_code,p.nationality,p.language_code,p.cs_language,
       p.recommender_id,p.member_grade,p.member_status,p.refund_bank_name,p.refund_account_no,p.refund_account_holder,p.default_receiver_name,p.default_receiver_phone,p.default_receiver_mobile,
-      p.default_zipcode,p.default_address1,p.default_address2,p.default_address_old,p.default_address_full,p.default_sido,p.default_sigungu,p.default_eup_myeon_dong,p.customs_clearance_code,p.delivery_memo];
+      p.default_zipcode,p.default_address1,p.default_address2,p.default_address_old,p.default_address_full,p.default_sido,p.default_sigungu,p.default_eup_myeon_dong,p.customs_clearance_code,p.delivery_memo,
+      passwordMeta ? passwordMeta.password_hash : null,
+      passwordMeta ? passwordMeta.password_algo : null,
+      passwordMeta ? passwordMeta.password_updated_at : null,
+      passwordMeta ? passwordMeta.password_migrated : 'N'];
     const mr=await client.query(sql, vals);
     let address=null;
     if(p.default_zipcode || p.default_address1 || p.default_address2){
@@ -141,7 +183,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       address=ar.rows[0];
     }
     await client.query('COMMIT');
-    res.json({ok:true,member:mr.rows[0],default_address:address});
+    res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address});
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
   finally{ client.release(); }
 });
@@ -152,7 +194,7 @@ router.get(['/api/gm/member/me','/api/member/me'], async (req,res)=>{
   try{
     const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1',[memberId]);
     const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC',[memberId]);
-    res.json({ok:true,member:m.rows[0]||null,addresses:a.rows,default_address:a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null});
+    res.json({ok:true,member:redactMember(m.rows[0]||null),addresses:a.rows,default_address:a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 

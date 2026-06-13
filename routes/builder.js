@@ -104,7 +104,7 @@ const TABLES = {
     numeric: ['deposit_balance','bonus_balance','usable_balance','refund_balance','point_balance'],
     defaults: { language_code:'ko', cs_language:'ko', member_status:'active' },
     enums: { member_status:['active','guest','withdrawn','dormant','blocked'] },
-    blocked: ['created_at'],
+    blocked: ['created_at','password_hash','password_algo','password_updated_at','password_migrated'],
     allowInsert: true
   },
   member_address: {
@@ -589,7 +589,8 @@ router.get('/api/gm/builder/export', async (req,res)=>{
   const limit = Math.min(Math.max(Number(req.query.limit || 5000), 1), 50000);
 
   try {
-    const cols = await getColumns(db, spec.table);
+    let cols = await getColumns(db, spec.table);
+    if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
     const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
     if (format === 'json') return ok(res, { table:spec.table, count:r.rows.length, columns:cols, rows:r.rows });
 

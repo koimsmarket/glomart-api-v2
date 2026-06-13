@@ -29,11 +29,24 @@ CREATE TABLE IF NOT EXISTS gm_member (
   refund_account_no VARCHAR(120),
   refund_account_holder VARCHAR(120),
   cafe24_raw_json JSONB,
+  password_hash TEXT,
+  password_algo VARCHAR(40),
+  password_updated_at TIMESTAMP,
+  password_migrated VARCHAR(1) NOT NULL DEFAULT 'N',
   last_sync_at TIMESTAMP,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (member_id)
 );
+
+
+
+-- Future Glomart independent login preparation.
+-- Plain passwords must never be stored. Only Argon2id hash metadata is stored.
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_algo VARCHAR(40);
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMP;
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_migrated VARCHAR(1) NOT NULL DEFAULT 'N';
 
 CREATE TABLE IF NOT EXISTS gm_member_ledger (
   ledger_id VARCHAR(40) NOT NULL,
