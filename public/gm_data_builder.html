@@ -93,6 +93,15 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </div>
 
 <div class="card" style="margin-top:16px">
+<h2>Cafe24 회원 CSV 업로드</h2>
+<p class="small">Cafe24 회원명부 CSV를 gm_member / gm_member_address로 변환해 업로드합니다. DRY RUN은 검증 결과 CSV만 다운로드하고, APPLY는 실제 저장 후 결과 CSV를 다운로드합니다.</p>
+<input id="memberFile" type="file" accept=".csv,.txt">
+<button onclick="memberDryRun()">회원 DRY RUN</button>
+<button class="red" onclick="memberApply()">회원 APPLY</button>
+<button class="secondary" onclick="downloadMemberTemplate()">회원 업로드 템플릿 다운로드</button>
+</div>
+
+<div class="card" style="margin-top:16px">
 <h2>로그</h2>
 <pre id="log">준비됨</pre>
 </div>
@@ -108,6 +117,8 @@ const tables = {
   supplier:'공급사 gm_supplier',
   cs:'CS gm_cs',
   cs_messages:'CS 메시지 gm_cs_message',
+  member:'회원 gm_member',
+  member_address:'회원 배송지 gm_member_address',
   product_archive:'상품 아카이브 gm_product_archive',
   category:'카테고리 gm_category',
   category_keyword:'카테고리 검색어 gm_category_keyword',
@@ -131,7 +142,7 @@ const tableNameMap = {
   gm_category:'category', gm_category_keyword:'category_keyword',
   gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',
   gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
-  gm_cs:'cs', gm_cs_message:'cs_messages', gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
+  gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
 };
 function fill(){
   for(const id of ['downTable','upTable']){
@@ -149,7 +160,7 @@ async function loadDashboard(save){
     if(!j.ok){ log(j); return; }
     const cur=j.current||{}, counts=cur.counts||{}, diff=cur.diff_from_previous||{}, q=cur.queue||{}, db=cur.db_size||{};
     document.getElementById('statusTime').textContent = `현재 조회: ${cur.server_time||cur.snapshot_at||''}` + (j.previous&&j.previous.snapshot_at ? ` / 직전 스냅샷: ${j.previous.snapshot_at}` : '');
-    const order=['gm_product','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_product_upsert_queue','gm_search_log','gm_dashboard_snapshot'];
+    const order=['gm_product','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_search_log','gm_dashboard_snapshot'];
     document.getElementById('tableStatus').innerHTML = order.map(t=>`<tr><td>${t}</td><td class="num">${fmt(counts[t])}</td><td class="num">${diffHtml(diff[t])}</td></tr>`).join('');
     document.getElementById('queueStatus').innerHTML = `
       <tr><th>pending</th><td class="num">${fmt(q.pending)}</td></tr>
@@ -205,13 +216,21 @@ function inferTableFromFileName(name){
     ['gm_search_keyword_stat','search_keyword_stat'],['gm_category_search_stat','category_search_stat'],['gm_category_search_monthly','category_search_monthly'],['gm_category_search_yearly','category_search_yearly'],['gm_product_sales_monthly','product_sales_monthly'],['gm_product_sales_yearly','product_sales_yearly'],['gm_product_country_sales_monthly','product_country_sales_monthly'],['gm_product_country_sales_yearly','product_country_sales_yearly'],['gm_category_sales_monthly','category_sales_monthly'],['gm_category_sales_yearly','category_sales_yearly'],['gm_category_country_sales_monthly','category_country_sales_monthly'],['gm_category_country_sales_yearly','category_country_sales_yearly'],
     ['gm_category_keyword','category_keyword'],['gm_category','category'],
     ['gm_product_archive','product_archive'],['gm_order_item','order_items'],['gm_cs_message','cs_messages'],
-    ['gm_product','products'],['gm_basket','cart'],['gm_order','orders'],['gm_supplier','supplier'],['gm_cs','cs']
+    ['gm_member_address','member_address'],['gm_member','member'],['gm_product','products'],['gm_basket','cart'],['gm_order','orders'],['gm_supplier','supplier'],['gm_cs','cs']
   ];
   for(const [needle,key] of pairs){ if(n.indexOf(needle)>=0) return key; }
   return '';
 }
+async function readCsvText(file){
+  const buf=await file.arrayBuffer();
+  let text=new TextDecoder('utf-8').decode(buf);
+  if((text.match(/�/g)||[]).length>5){
+    try{ text=new TextDecoder('euc-kr').decode(buf); }catch(e){}
+  }
+  return text;
+}
 async function uploadOne(tableKey,file,apply){
-  const text=await file.text();
+  const text=await readCsvText(file);
   const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}`;
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
   const blob=await r.blob();
@@ -234,6 +253,26 @@ async function sendAll(apply){
   log(result);
   await loadDashboard(false);
 }
+
+async function uploadCafe24Members(apply){
+  const f=document.getElementById('memberFile').files[0];
+  if(!f){ alert('Cafe24 회원 CSV 파일을 선택하세요.'); return; }
+  if(apply){ const x=prompt('회원정보를 실제 저장하려면 MEMBER APPLY 라고 입력하세요.'); if(x !== 'MEMBER APPLY') return; }
+  const text=await readCsvText(f);
+  const url=`${API}/api/gm/builder/cafe24-member-import?apply=${apply?'YES':'NO'}`;
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+  const blob=await r.blob();
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=(apply?'member_apply':'member_dryrun')+'_result_'+Date.now()+'.csv';
+  a.click();
+  log({action:'cafe24-member-import', apply, status:r.status, file:f.name, result:'CSV result downloaded'});
+  await loadDashboard(false);
+}
+function memberDryRun(){ uploadCafe24Members(false); }
+function memberApply(){ uploadCafe24Members(true); }
+function downloadMemberTemplate(){ location.href = `${API}/api/gm/builder/cafe24-member-template`; }
+
 function dryRun(){ send(false); }
 function applyUpdate(){ send(true); }
 function dryRunAll(){ sendAll(false); }

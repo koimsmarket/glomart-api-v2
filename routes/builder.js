@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V008_OPERATION_METRICS';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V009_CAFE24_MEMBER_IMPORT';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -95,6 +95,28 @@ const TABLES = {
       read_yn:['Y','N']
     },
     blocked: ['message_id','created_at']
+  },
+  member: {
+    table: 'gm_member',
+    key: ['member_id'],
+    order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
+    critical: ['member_id'],
+    numeric: ['deposit_balance','bonus_balance','usable_balance','refund_balance','point_balance'],
+    defaults: { language_code:'ko', cs_language:'ko', member_status:'active' },
+    enums: { member_status:['active','guest','withdrawn','dormant','blocked'] },
+    blocked: ['created_at'],
+    allowInsert: true
+  },
+  member_address: {
+    table: 'gm_member_address',
+    key: ['address_id'],
+    order: 'member_id ASC, is_default DESC, updated_at DESC NULLS LAST',
+    critical: ['address_id','member_id'],
+    numeric: [],
+    defaults: { address_name:'기본배송지', is_default:'Y' },
+    enums: { is_default:['Y','N'] },
+    blocked: ['created_at'],
+    allowInsert: true
   },
   supplier: {
     table: 'gm_supplier',
@@ -344,6 +366,123 @@ function resultRow(rowNo, table, key, result, column, value, reason) {
   return { row_no:rowNo, table, key:key || '', result, column_name:column || '', value:value ?? '', reason:reason || '' };
 }
 
+
+function pickKor(row, names, d='') {
+  for (const n of names) {
+    if (row[n] !== undefined && row[n] !== null && clean(row[n]) !== '') return clean(row[n]);
+  }
+  return d;
+}
+function digits(v) {
+  return clean(v).replace(/[^0-9]/g, '');
+}
+function money(v) {
+  const n = Number(clean(v).replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
+function splitRefundInfo(v) {
+  const raw = clean(v);
+  const out = { bank:'', account:'', holder:'' };
+  if (!raw) return out;
+  // Cafe24 export is usually "은행/계좌/예금주", but tolerate spaces, pipes and commas.
+  const parts = raw.split(/[\/|,]/).map(x=>clean(x)).filter(Boolean);
+  if (parts.length >= 3) {
+    out.bank = parts[0]; out.account = parts[1]; out.holder = parts.slice(2).join(' ');
+  } else if (parts.length === 2) {
+    out.bank = parts[0]; out.account = parts[1];
+  } else {
+    out.account = raw;
+  }
+  return out;
+}
+function cafe24Status(row) {
+  const withdrawn = pickKor(row, ['탈퇴여부']);
+  const dormant = pickKor(row, ['휴면처리일','휴면안내(대량메일) 발송일']);
+  const bad = pickKor(row, ['불량회원']);
+  if (/^(T|Y|1|TRUE|탈퇴)$/i.test(withdrawn)) return 'withdrawn';
+  if (dormant) return 'dormant';
+  if (/^(T|Y|1|TRUE)$/i.test(bad)) return 'blocked';
+  return 'active';
+}
+function compactAddress(zip, a1, a2, old) {
+  return [zip ? '[' + zip + ']' : '', a1, a2, old ? '(' + old + ')' : ''].filter(Boolean).join(' ').trim();
+}
+function mapCafe24Member(row) {
+  const memberId = pickKor(row, ['아이디','ID','회원아이디','member_id']);
+  const name = pickKor(row, ['이름','회원명']);
+  const phone = pickKor(row, ['전화번호']);
+  const mobile = pickKor(row, ['휴대폰번호']);
+  const zip = pickKor(row, ['우편번호']);
+  const addr1 = pickKor(row, ['주소1']);
+  const addr2 = pickKor(row, ['주소2']);
+  const sido = pickKor(row, ['주 (State/Province)','지역']);
+  const city = pickKor(row, ['도시 (City)']);
+  const refund = splitRefundInfo(pickKor(row, ['환불계좌정보(은행/계좌/예금주)']));
+  const member = {
+    member_id: memberId,
+    cafe24_member_id: memberId,
+    member_name: name,
+    member_name_en: pickKor(row, ['영문이름']),
+    email: pickKor(row, ['이메일','이메일주소']),
+    phone: mobile || phone,
+    country_code: pickKor(row, ['국가']),
+    nationality: pickKor(row, ['국적']),
+    language_code: 'ko',
+    cs_language: 'ko',
+    recommender_id: pickKor(row, ['추천인 아이디']),
+    member_grade: pickKor(row, ['회원등급']),
+    member_grade_code: pickKor(row, ['회원등급코드']),
+    member_status: cafe24Status(row),
+    deposit_balance: money(pickKor(row, ['총예치금'])),
+    point_balance: money(pickKor(row, ['사용가능 적립금','총적립금'])),
+    refund_bank_name: refund.bank,
+    refund_account_no: refund.account,
+    refund_account_holder: refund.holder,
+    default_receiver_name: name,
+    default_receiver_phone: phone,
+    default_receiver_mobile: mobile,
+    default_zipcode: zip,
+    default_address1: addr1,
+    default_address2: addr2,
+    default_address_old: '',
+    default_address_full: compactAddress(zip, addr1, addr2, ''),
+    default_sido: sido,
+    default_sigungu: city,
+    default_eup_myeon_dong: '',
+    delivery_memo: ''
+  };
+  const address = {
+    address_id: memberId ? memberId + '_default' : '',
+    member_id: memberId,
+    address_name: '기본배송지',
+    receiver_name: name,
+    receiver_phone: phone,
+    receiver_mobile: mobile,
+    zipcode: zip,
+    address1: addr1,
+    address2: addr2,
+    address_old: '',
+    address_full: compactAddress(zip, addr1, addr2, ''),
+    sido: sido,
+    sigungu: city,
+    eup_myeon_dong: '',
+    delivery_memo: '',
+    is_default: 'Y'
+  };
+  return { member, address };
+}
+async function upsertObject(client, table, obj, keyCols, allowBlank=false) {
+  const cols = Object.keys(obj).filter(k => obj[k] !== undefined && obj[k] !== null && (allowBlank || clean(obj[k]) !== ''));
+  if (!cols.length) return { action:'SKIP', reason:'NO_COLUMNS' };
+  const vals = cols.map(k => obj[k]);
+  const setCols = cols.filter(c => !keyCols.includes(c));
+  const sql = `INSERT INTO ${qIdent(table)} (${cols.map(qIdent).join(',')}) VALUES (${cols.map((_,i)=>'$'+(i+1)).join(',')}) ON CONFLICT (${keyCols.map(qIdent).join(',')}) DO UPDATE SET ${setCols.map(c => `${qIdent(c)}=COALESCE(NULLIF(EXCLUDED.${qIdent(c)}::text,'')::${qIdent(table)}.${qIdent(c)}%TYPE,${qIdent(table)}.${qIdent(c)})`).join(',') || keyCols.map(c=>`${qIdent(c)}=EXCLUDED.${qIdent(c)}`).join(',')}, updated_at=NOW()`;
+  // PostgreSQL cannot use table.column%TYPE in prepared SQL expression. Build a simpler blank-preserving query below.
+  const updateSql = `INSERT INTO ${qIdent(table)} (${cols.map(qIdent).join(',')}) VALUES (${cols.map((_,i)=>'$'+(i+1)).join(',')}) ON CONFLICT (${keyCols.map(qIdent).join(',')}) DO UPDATE SET ${setCols.map(c => `${qIdent(c)}=CASE WHEN EXCLUDED.${qIdent(c)} IS NULL OR EXCLUDED.${qIdent(c)}::text='' THEN ${qIdent(table)}.${qIdent(c)} ELSE EXCLUDED.${qIdent(c)} END`).join(',') || keyCols.map(c=>`${qIdent(c)}=EXCLUDED.${qIdent(c)}`).join(',')}${cols.includes('updated_at') || setCols.includes('updated_at') ? '' : ', updated_at=NOW()'}`;
+  await client.query(updateSql, vals);
+  return { action:'UPSERT' };
+}
+
 router.get('/api/gm/builder/tables', (req,res)=>{
   ok(res, { tables:Object.keys(TABLES).map(k=>({ key:k, table:TABLES[k].table, keys:keySets(TABLES[k]) })) });
 });
@@ -517,6 +656,74 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   } catch(e) {
     fail(res, 500, 'safe update failed', { detail:String(e && e.message || e) });
   }
+});
+
+
+router.post('/api/gm/builder/cafe24-member-import', express.text({ type:['text/*','application/csv'], limit:'50mb' }), async (req,res)=>{
+  const apply = String(req.query.apply || '').toUpperCase() === 'YES';
+  const db = dbFrom(req);
+  let rows = parseCsv(req.body);
+  if (rows.length > LIMITS.MAX_ROWS) rows = rows.slice(0, LIMITS.MAX_ROWS);
+  const result = [];
+  let processed=0, insertedOrUpdated=0, skipped=0, invalid=0;
+  const cols = ['row_no','member_id','result','member_action','address_action','name','mobile','zipcode','address1','reason'];
+  try {
+    const memberCols = new Set(await getColumns(db, 'gm_member'));
+    const addressCols = new Set(await getColumns(db, 'gm_member_address'));
+    const client = apply ? await db.connect() : null;
+    try {
+      if (client) await client.query('BEGIN');
+      for (const row of rows) {
+        processed++;
+        const mapped = mapCafe24Member(row);
+        const m = mapped.member;
+        const a = mapped.address;
+        if (!m.member_id) {
+          invalid++; skipped++;
+          result.push({row_no:row.__row_no, member_id:'', result:'SKIP', member_action:'', address_action:'', name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:'MISSING_MEMBER_ID'});
+          continue;
+        }
+        const mObj = {};
+        for (const [k,v] of Object.entries(m)) if (memberCols.has(k)) mObj[k]=v;
+        const aObj = {};
+        for (const [k,v] of Object.entries(a)) if (addressCols.has(k)) aObj[k]=v;
+        let memberAction = 'VALID_MEMBER';
+        let addressAction = (a.zipcode || a.address1 || a.address2) ? 'VALID_ADDRESS' : 'NO_ADDRESS';
+        if (apply) {
+          const mr = await upsertObject(client, 'gm_member', mObj, ['member_id']);
+          memberAction = mr.action;
+          if (addressAction !== 'NO_ADDRESS') {
+            // keep only one default address per member
+            if (addressCols.has('is_default')) await client.query(`UPDATE gm_member_address SET is_default='N', updated_at=NOW() WHERE member_id=$1`, [m.member_id]);
+            const ar = await upsertObject(client, 'gm_member_address', aObj, ['address_id']);
+            addressAction = ar.action;
+          }
+        }
+        insertedOrUpdated++;
+        result.push({row_no:row.__row_no, member_id:m.member_id, result:apply?'APPLIED':'VALID', member_action:memberAction, address_action:addressAction, name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:apply?'APPLIED':'DRY_RUN'});
+      }
+      if (client) await client.query('COMMIT');
+    } catch(e) {
+      if (client) await client.query('ROLLBACK').catch(()=>{});
+      throw e;
+    } finally {
+      if (client) client.release();
+    }
+    const csv = toCsv(result, cols);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="cafe24_member_import_${apply?'apply':'dryrun'}_${Date.now()}.csv"`);
+    res.end(csv);
+  } catch(e) {
+    fail(res, 500, 'cafe24 member import failed', { detail:String(e && e.message || e), processed, insertedOrUpdated, skipped, invalid });
+  }
+});
+
+router.get('/api/gm/builder/cafe24-member-template', (req,res)=>{
+  const headers = ['아이디','이름','영문이름','이메일','휴대폰번호','전화번호','국가','국적','우편번호','주소1','주소2','주 (State/Province)','도시 (City)','추천인 아이디','회원등급','회원등급코드','사용가능 적립금','총예치금','환불계좌정보(은행/계좌/예금주)','탈퇴여부','휴면처리일','불량회원'];
+  const csv = headers.join(',') + '\n';
+  res.setHeader('Content-Type','text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="cafe24_member_import_template.csv"`);
+  res.end('\ufeff' + csv);
 });
 
 module.exports = router;
