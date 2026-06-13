@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS gm_member (
   refund_bank_name VARCHAR(80),
   refund_account_no VARCHAR(120),
   refund_account_holder VARCHAR(120),
+  cafe24_raw_json JSONB,
   last_sync_at TIMESTAMP,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -76,3 +77,6 @@ CREATE INDEX IF NOT EXISTS idx_gm_member_ledger_order_no
 
 CREATE INDEX IF NOT EXISTS idx_gm_member_ledger_type_status
   ON gm_member_ledger (type, status);
+
+CREATE INDEX IF NOT EXISTS idx_gm_member_cafe24_raw_json_gin
+  ON gm_member USING GIN (cafe24_raw_json);

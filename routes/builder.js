@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V010_CAFE24_MEMBER_IMPORT_AUTODETECT';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V012_CAFE24_MEMBER_RAW_JSON_TWO_TABLES';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -367,9 +367,49 @@ function resultRow(rowNo, table, key, result, column, value, reason) {
 }
 
 
+
+const CAFE24_MEMBER_HEADERS = [
+  'SNS ID 연동일시','SSO 연동 서비스명','e메일 수신여부','e메일 최근 수신 동의 일자','가입시간','개인인증방법','개인정보 수집 및 이용 동의 여부(주문서 간단 회원가입 시)','개인정보 수집 및 이용 동의 일자(주문서 간단 회원가입 시)','개인정보 제3자 제공 동의 여부','개인정보 제3자 제공 동의 일자','개인정보 처리 위탁 동의 여부','개인정보 처리 위탁 동의 일자','결혼기념일','결혼여부','관심분야','국가','국적','국제면허번호','나이','누적주문건수','답변','도시 (City)','마케팅 목적의 개인정보 수집 및 이용 동의 여부','마케팅 목적의 개인정보 수집 및 이용 동의 일자','모바일 메시지 수신여부','모바일 메시지 최근 수신 동의 일자','모바일앱 이용여부','미가용 적립금','배우자생일','별명','불량회원','사업자구분(P:개인사업자/C:법인사업자)','사업자번호','사용가능 적립금','상호','생년월일','성별','실결제금액','실명인증여부','아이디','양력(T)/음력(F)','업태','여권번호','연동중인 SNS','연소득','영문이름','우편번호','이름','이름(발음)','이메일','인터넷이용장소','자녀','자동차','전화번호','접속 IP','종목','주 (State/Province)','주소1','주소2','지역','직업','직종','총 방문횟수(1년 내)','총 사용 적립금','총 실주문건수','총구매금액','총예치금','총적립금','최종접속일','최종주문일','최종학력','추가사항1','추가사항2','추가사항3','추가사항4','추천인 아이디','탈퇴구분','탈퇴사유','탈퇴여부','탈퇴일','특별회원','평생회원','평생회원 전환일','확인질문','환불계좌정보(은행/계좌/예금주)','회원 가입경로','회원 가입일','회원구분','회원등급','회원등급적용형태','회원등급코드','회원인증여부','휴대폰번호','휴면안내(대량메일) 발송일','휴면처리일','휴면회원 해제일'
+];
+function isBlankCafe24(v) {
+  const x = clean(v);
+  return !x || /^(BLANK|NULL|N\/A|-|없음)$/i.test(x);
+}
+function pickKorRaw(row, names, d='') {
+  for (const n of names) if (row[n] !== undefined && row[n] !== null) return clean(row[n]);
+  return d;
+}
+function moneyOrBlank(v) {
+  if (isBlankCafe24(v)) return '';
+  const n = Number(clean(v).replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(n) ? Math.round(n) : '';
+}
+function intOrBlank(v) { return moneyOrBlank(v); }
+function languageFromCafe24(nationality, country) {
+  const x = (clean(nationality) || clean(country)).toLowerCase();
+  if (!x) return '';
+  const rules = [
+    [/베트남|vietnam|viet/, 'vi'], [/중국|china|chinese|cn/, 'zh'], [/대만|taiwan|tw/, 'tw'], [/일본|japan|jp/, 'ja'],
+    [/태국|thailand|thai/, 'th'], [/우즈베키스탄|uzbek/, 'uz'], [/네팔|nepal/, 'ne'], [/캄보디아|cambodia|khmer/, 'km'],
+    [/인도네시아|indonesia/, 'id'], [/필리핀|philippines|filipino/, 'tl'], [/몽골|mongol/, 'mn'], [/미얀마|myanmar|burma/, 'my'],
+    [/카자흐|kazakh/, 'kk'], [/스리랑카|sri\s*lanka/, 'si'], [/러시아|russia/, 'ru'], [/방글라데시|bangladesh/, 'bn'],
+    [/파키스탄|pakistan|urdu/, 'ur'], [/라오스|laos/, 'lo'], [/인도|india|hindi/, 'hi'], [/튀르키|터키|turkey/, 'tr'],
+    [/이란|iran|persia/, 'fa'], [/스페인|spain|spanish/, 'es'], [/프랑스|france|french/, 'fr'], [/한국|대한민국|korea|kr/, 'ko']
+  ];
+  for (const [re, lang] of rules) if (re.test(x)) return lang;
+  return 'ko';
+}
+function parseRawJson(v){
+  try { if (!v) return {}; if (typeof v === 'object') return v; return JSON.parse(v); } catch(e){ return {}; }
+}
+function rawOrFallback(raw, header, fallback='') {
+  const v = raw && Object.prototype.hasOwnProperty.call(raw, header) ? raw[header] : '';
+  return isBlankCafe24(v) ? fallback : clean(v);
+}
+
 function pickKor(row, names, d='') {
   for (const n of names) {
-    if (row[n] !== undefined && row[n] !== null && clean(row[n]) !== '') return clean(row[n]);
+    if (row[n] !== undefined && row[n] !== null && !isBlankCafe24(row[n])) return clean(row[n]);
   }
   return d;
 }
@@ -395,6 +435,23 @@ function splitRefundInfo(v) {
   }
   return out;
 }
+
+function ynCafe24(v) {
+  const x = clean(v).toUpperCase();
+  if (!x) return '';
+  if (['T','Y','YES','TRUE','1','동의','수신'].includes(x)) return 'Y';
+  if (['F','N','NO','FALSE','0','거부','미수신'].includes(x)) return 'N';
+  return clean(v);
+}
+function intMoney(v) { return money(v); }
+function intMoneyOrBlank(v) { return intOrBlank(v); }
+function dateText(v) { return clean(v); }
+function rawJsonText(row) {
+  try { return JSON.stringify(row || {}); } catch(e) { return '{}'; }
+}
+function refundJoin(bank, account, holder) {
+  return [clean(bank), clean(account), clean(holder)].filter(Boolean).join('/');
+}
 function cafe24Status(row) {
   const withdrawn = pickKor(row, ['탈퇴여부']);
   const dormant = pickKor(row, ['휴면처리일','휴면안내(대량메일) 발송일']);
@@ -418,6 +475,11 @@ function mapCafe24Member(row) {
   const sido = pickKor(row, ['주 (State/Province)','지역']);
   const city = pickKor(row, ['도시 (City)']);
   const refund = splitRefundInfo(pickKor(row, ['환불계좌정보(은행/계좌/예금주)']));
+  const pointUsable = moneyOrBlank(pickKorRaw(row, ['사용가능 적립금']));
+  const pointTotal = moneyOrBlank(pickKorRaw(row, ['총적립금']));
+  const nationality = pickKor(row, ['국적']);
+  const country = pickKor(row, ['국가']);
+  const lang = languageFromCafe24(nationality, country);
   const member = {
     member_id: memberId,
     cafe24_member_id: memberId,
@@ -425,16 +487,16 @@ function mapCafe24Member(row) {
     member_name_en: pickKor(row, ['영문이름']),
     email: pickKor(row, ['이메일','이메일주소']),
     phone: mobile || phone,
-    country_code: pickKor(row, ['국가']),
-    nationality: pickKor(row, ['국적']),
-    language_code: 'ko',
-    cs_language: 'ko',
+    country_code: country,
+    nationality: nationality,
+    language_code: lang,
+    cs_language: lang,
     recommender_id: pickKor(row, ['추천인 아이디']),
     member_grade: pickKor(row, ['회원등급']),
     member_grade_code: pickKor(row, ['회원등급코드']),
     member_status: cafe24Status(row),
-    deposit_balance: money(pickKor(row, ['총예치금'])),
-    point_balance: money(pickKor(row, ['사용가능 적립금','총적립금'])),
+    deposit_balance: moneyOrBlank(pickKorRaw(row, ['총예치금'])),
+    point_balance: pointUsable !== '' ? pointUsable : pointTotal,
     refund_bank_name: refund.bank,
     refund_account_no: refund.account,
     refund_account_holder: refund.holder,
@@ -449,7 +511,10 @@ function mapCafe24Member(row) {
     default_sido: sido,
     default_sigungu: city,
     default_eup_myeon_dong: '',
-    delivery_memo: ''
+    delivery_memo: '',
+    // Cafe24 원본 96개 컬럼은 실제 DB 컬럼을 늘리지 않고 cafe24_raw_json 하나에 100% 보존한다.
+    // gm_member에는 주문/로그인/배송에 바로 필요한 핵심 컬럼만 저장한다.
+    cafe24_raw_json: rawJsonText(row)
   };
   const address = {
     address_id: memberId ? memberId + '_default' : '',
@@ -471,6 +536,34 @@ function mapCafe24Member(row) {
   };
   return { member, address };
 }
+
+function cafe24ImportResultRow(row, m, action, memberAction, addressAction, reason) {
+  return {
+    row_no: row.__row_no,
+    member_id: m.member_id || '',
+    result: action,
+    member_action: memberAction || '',
+    address_action: addressAction || '',
+    name: m.member_name || '',
+    email: m.email || '',
+    phone: m.default_receiver_phone || '',
+    mobile: m.default_receiver_mobile || '',
+    zipcode: m.default_zipcode || '',
+    address1: m.default_address1 || '',
+    address2: m.default_address2 || '',
+    member_grade: m.member_grade || '',
+    member_grade_code: m.member_grade_code || '',
+    deposit_balance: m.deposit_balance === undefined ? '' : m.deposit_balance,
+    point_balance: m.point_balance === undefined ? '' : m.point_balance,
+    refund_account_info: refundJoin(m.refund_bank_name, m.refund_account_no, m.refund_account_holder),
+    total_order_count: intMoneyOrBlank(pickKorRaw(row, ['누적주문건수'])),
+    total_purchase_amount: moneyOrBlank(pickKorRaw(row, ['총구매금액','실결제금액'])),
+    last_login_at: pickKorRaw(row, ['최종접속일']),
+    joined_at: pickKorRaw(row, ['회원 가입일']),
+    reason: reason || ''
+  };
+}
+
 async function upsertObject(client, table, obj, keyCols, allowBlank=false) {
   const cols = Object.keys(obj).filter(k => obj[k] !== undefined && obj[k] !== null && (allowBlank || clean(obj[k]) !== ''));
   if (!cols.length) return { action:'SKIP', reason:'NO_COLUMNS' };
@@ -526,7 +619,7 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   if (spec.table === 'gm_member' && rows.some(r => Object.prototype.hasOwnProperty.call(r, '아이디'))) {
     const result = [];
     let processed=0, insertedOrUpdated=0, skipped=0, invalid=0;
-    const outCols = ['row_no','member_id','result','member_action','address_action','name','mobile','zipcode','address1','reason'];
+    const outCols = ['row_no','member_id','result','member_action','address_action','name','email','phone','mobile','zipcode','address1','address2','member_grade','member_grade_code','deposit_balance','point_balance','refund_account_info','total_order_count','total_purchase_amount','last_login_at','joined_at','reason'];
     try {
       const memberCols = new Set(await getColumns(db, 'gm_member'));
       const addressCols = new Set(await getColumns(db, 'gm_member_address'));
@@ -540,7 +633,7 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
           const a = mapped.address;
           if (!m.member_id) {
             invalid++; skipped++;
-            result.push({row_no:row.__row_no, member_id:'', result:'SKIP', member_action:'', address_action:'', name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:'MISSING_MEMBER_ID'});
+            result.push(cafe24ImportResultRow(row, m, 'SKIP', '', '', 'MISSING_MEMBER_ID'));
             continue;
           }
           const mObj = {};
@@ -559,7 +652,7 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
             }
           }
           insertedOrUpdated++;
-          result.push({row_no:row.__row_no, member_id:m.member_id, result:apply?'APPLIED':'VALID', member_action:memberAction, address_action:addressAction, name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:'CAFE24_AUTO_IMPORT'});
+          result.push(cafe24ImportResultRow(row, m, apply?'APPLIED':'VALID', memberAction, addressAction, apply?'APPLIED':'DRY_RUN'));
         }
         if (client) await client.query('COMMIT');
       } catch(e) {
@@ -722,7 +815,7 @@ router.post('/api/gm/builder/cafe24-member-import', express.text({ type:['text/*
   if (rows.length > LIMITS.MAX_ROWS) rows = rows.slice(0, LIMITS.MAX_ROWS);
   const result = [];
   let processed=0, insertedOrUpdated=0, skipped=0, invalid=0;
-  const cols = ['row_no','member_id','result','member_action','address_action','name','mobile','zipcode','address1','reason'];
+  const cols = ['row_no','member_id','result','member_action','address_action','name','email','phone','mobile','zipcode','address1','address2','member_grade','member_grade_code','deposit_balance','point_balance','refund_account_info','total_order_count','total_purchase_amount','last_login_at','joined_at','reason'];
   try {
     const memberCols = new Set(await getColumns(db, 'gm_member'));
     const addressCols = new Set(await getColumns(db, 'gm_member_address'));
@@ -736,7 +829,7 @@ router.post('/api/gm/builder/cafe24-member-import', express.text({ type:['text/*
         const a = mapped.address;
         if (!m.member_id) {
           invalid++; skipped++;
-          result.push({row_no:row.__row_no, member_id:'', result:'SKIP', member_action:'', address_action:'', name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:'MISSING_MEMBER_ID'});
+          result.push(cafe24ImportResultRow(row, m, 'SKIP', '', '', 'MISSING_MEMBER_ID'));
           continue;
         }
         const mObj = {};
@@ -756,7 +849,7 @@ router.post('/api/gm/builder/cafe24-member-import', express.text({ type:['text/*
           }
         }
         insertedOrUpdated++;
-        result.push({row_no:row.__row_no, member_id:m.member_id, result:apply?'APPLIED':'VALID', member_action:memberAction, address_action:addressAction, name:m.member_name, mobile:m.default_receiver_mobile, zipcode:m.default_zipcode, address1:m.default_address1, reason:apply?'APPLIED':'DRY_RUN'});
+        result.push(cafe24ImportResultRow(row, m, apply?'APPLIED':'VALID', memberAction, addressAction, apply?'APPLIED':'DRY_RUN'));
       }
       if (client) await client.query('COMMIT');
     } catch(e) {
@@ -774,8 +867,84 @@ router.post('/api/gm/builder/cafe24-member-import', express.text({ type:['text/*
   }
 });
 
+
+router.get('/api/gm/builder/cafe24-member-export', async (req,res)=>{
+  const db = dbFrom(req);
+  const limit = Math.min(Math.max(Number(req.query.limit || 50000), 1), 100000);
+  try{
+    const memberCols = new Set(await getColumns(db, 'gm_member'));
+    const addressCols = new Set(await getColumns(db, 'gm_member_address').catch(()=>[]));
+    const rawExpr = memberCols.has('cafe24_raw_json') ? 'm.cafe24_raw_json' : "'{}'::jsonb";
+    const addrSelect = addressCols.has('address_id') ? `
+      LEFT JOIN LATERAL (
+        SELECT * FROM gm_member_address a
+        WHERE a.member_id=m.member_id
+        ORDER BY CASE WHEN a.is_default='Y' THEN 0 ELSE 1 END, a.updated_at DESC NULLS LAST
+        LIMIT 1
+      ) a ON TRUE` : '';
+    const r = await db.query(`
+      SELECT m.*, ${rawExpr} AS cafe24_raw,
+        ${addressCols.has('address_id') ? `a.zipcode AS addr_zipcode, a.address1 AS addr_address1, a.address2 AS addr_address2, a.sido AS addr_sido, a.sigungu AS addr_sigungu, a.receiver_phone AS addr_phone, a.receiver_mobile AS addr_mobile, a.receiver_name AS addr_receiver_name` : `'' AS addr_zipcode, '' AS addr_address1, '' AS addr_address2, '' AS addr_sido, '' AS addr_sigungu, '' AS addr_phone, '' AS addr_mobile, '' AS addr_receiver_name`}
+      FROM gm_member m
+      ${addrSelect}
+      ORDER BY m.updated_at DESC NULLS LAST, m.created_at DESC NULLS LAST
+      LIMIT $1`, [limit]);
+    const rows = r.rows.map(x=>{
+      const raw = parseRawJson(x.cafe24_raw);
+      const fallback = {
+        '아이디':x.member_id,
+        '이름':x.member_name || x.addr_receiver_name,
+        '영문이름':x.member_name_en,
+        '이메일':x.email,
+        '휴대폰번호':x.default_receiver_mobile || x.addr_mobile || x.phone,
+        '전화번호':x.default_receiver_phone || x.addr_phone,
+        '국가':x.country_code,
+        '국적':x.nationality,
+        '우편번호':x.default_zipcode || x.addr_zipcode,
+        '주소1':x.default_address1 || x.addr_address1,
+        '주소2':x.default_address2 || x.addr_address2,
+        '주 (State/Province)':x.default_sido || x.addr_sido,
+        '도시 (City)':x.default_sigungu || x.addr_sigungu,
+        '추천인 아이디':x.recommender_id,
+        '회원등급':x.member_grade,
+        '회원등급코드':x.member_grade_code,
+        '사용가능 적립금':x.point_balance,
+        '총예치금':x.deposit_balance,
+        '환불계좌정보(은행/계좌/예금주)':refundJoin(x.refund_bank_name,x.refund_account_no,x.refund_account_holder),
+        '누적주문건수':'',
+        '총 실주문건수':'',
+        '총구매금액':'',
+        '총 방문횟수(1년 내)':'',
+        '총 사용 적립금':'',
+        '총적립금':'',
+        '미가용 적립금':'',
+        '최종접속일':'',
+        '최종주문일':'',
+        '회원 가입일':'',
+        '가입시간':'',
+        '회원구분':'',
+        '회원 가입경로':'',
+        'e메일 수신여부':'',
+        '모바일 메시지 수신여부':'',
+        '탈퇴여부':'',
+        '탈퇴일':'',
+        '휴면처리일':''
+      };
+      const out = {};
+      for (const h of CAFE24_MEMBER_HEADERS) out[h] = rawOrFallback(raw, h, fallback[h] ?? '');
+      return out;
+    });
+    const csv = toCsv(rows, CAFE24_MEMBER_HEADERS);
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="cafe24_member_export_${Date.now()}.csv"`);
+    res.end(csv);
+  }catch(e){
+    fail(res, 500, 'cafe24 member export failed', { detail:String(e && e.message || e) });
+  }
+});
+
 router.get('/api/gm/builder/cafe24-member-template', (req,res)=>{
-  const headers = ['아이디','이름','영문이름','이메일','휴대폰번호','전화번호','국가','국적','우편번호','주소1','주소2','주 (State/Province)','도시 (City)','추천인 아이디','회원등급','회원등급코드','사용가능 적립금','총예치금','환불계좌정보(은행/계좌/예금주)','탈퇴여부','휴면처리일','불량회원'];
+  const headers = CAFE24_MEMBER_HEADERS;
   const csv = headers.join(',') + '\n';
   res.setHeader('Content-Type','text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="cafe24_member_import_template.csv"`);

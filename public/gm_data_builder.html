@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V008 Sales Aggregate</title>
+<title>GM Safe Update Builder V011 Member Import Export</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -25,7 +25,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V008 Sales Aggregate</h1>
+<h1>GM Safe Update Builder V011 Member Import Export</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -94,11 +94,12 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 
 <div class="card" style="margin-top:16px">
 <h2>Cafe24 회원 CSV 업로드</h2>
-<p class="small">Cafe24 회원명부 CSV를 gm_member / gm_member_address로 변환해 업로드합니다. DRY RUN은 검증 결과 CSV만 다운로드하고, APPLY는 실제 저장 후 결과 CSV를 다운로드합니다.</p>
+<p class="small">Cafe24 회원명부 CSV 96개 컬럼은 cafe24_raw_json에 원본 보존하고, 주문에 필요한 핵심 컬럼만 gm_member / gm_member_address에 반영합니다. BLANK/빈값은 기존 서버값을 덮어쓰지 않습니다. DRY RUN은 검증 결과 CSV만 다운로드하고, APPLY는 실제 저장 후 결과 CSV를 다운로드합니다.</p>
 <input id="memberFile" type="file" accept=".csv,.txt">
 <button onclick="memberDryRun()">회원 DRY RUN</button>
 <button class="red" onclick="memberApply()">회원 APPLY</button>
 <button class="secondary" onclick="downloadMemberTemplate()">회원 업로드 템플릿 다운로드</button>
+<button class="green" onclick="downloadCafe24MemberExport()">Cafe24 형식 회원 다운로드</button>
 </div>
 
 <div class="card" style="margin-top:16px">
@@ -288,6 +289,7 @@ async function uploadCafe24Members(apply){
 function memberDryRun(){ uploadCafe24Members(false); }
 function memberApply(){ uploadCafe24Members(true); }
 function downloadMemberTemplate(){ location.href = `${API}/api/gm/builder/cafe24-member-template`; }
+function downloadCafe24MemberExport(){ location.href = `${API}/api/gm/builder/cafe24-member-export`; }
 
 function dryRun(){ send(false); }
 function applyUpdate(){ send(true); }
