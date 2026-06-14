@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V016_DASHBOARD_OPS';
+const VERSION = 'GLOMART_API_MEMBER_ROUTE_V024';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -167,6 +167,15 @@ async function dbQuery(sql, vals=[]){
   return pool.query(sql, vals);
 }
 
+// V024: register member routes immediately after DB query helper so /api/gm/member/me is active before any later routes.
+app.locals.pool = pool;
+try {
+  app.use(require('./routes/member'));
+  console.log('[GM_MEMBER_ROUTE_V024] routes/member registered early');
+} catch (e) {
+  console.error('[GM_MEMBER_ROUTE_V024] routes/member register failed:', String(e && e.message || e));
+}
+
 async function tableCounts(tableNames){
   const targets = Array.from(new Set((tableNames || []).map(String)));
   if(!targets.length) return {};
@@ -240,7 +249,6 @@ app.locals.pool = pool;
 app.use(require('./routes/health'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
-app.use(require('./routes/member'));
 app.use(require('./routes/interest'));
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
@@ -283,6 +291,10 @@ app.get('/', (req,res)=>ok(res, {
     'GET /api/gm/interest/recent',
     'DELETE /api/gm/basket/item',
     'POST /api/gm/order/create',
+    'POST /api/gm/member/upsert',
+    'GET /api/gm/member/me',
+    'GET /api/gm/member/address/list',
+    'POST /api/gm/member/address/upsert',
     'GET /module/scrap/api/cache/search?q=keyword&page=1'
   ]
 }));

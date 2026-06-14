@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 
-const VERSION = 'GLOMART_API_DB_READY_V016_DASHBOARD_OPS';
+const VERSION = 'GLOMART_API_MEMBER_ROUTE_V024';
 const app = express();
 
 app.use(cors({ origin: true, credentials: false }));
@@ -165,6 +165,15 @@ if(process.env.GM_DB_AUTOINIT !== '0'){
 
 async function dbQuery(sql, vals=[]){
   return pool.query(sql, vals);
+}
+
+// V024: register member routes immediately after DB query helper so /api/gm/member/me is active before any later routes.
+app.locals.pool = pool;
+try {
+  app.use(require('./routes/member'));
+  console.log('[GM_MEMBER_ROUTE_V024] routes/member registered early');
+} catch (e) {
+  console.error('[GM_MEMBER_ROUTE_V024] routes/member register failed:', String(e && e.message || e));
 }
 
 
@@ -1529,7 +1538,7 @@ app.use(require('./routes/health'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
-app.use(require('./routes/member'));
+// V024: routes/member already registered early above.
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
