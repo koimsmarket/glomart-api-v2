@@ -118,6 +118,7 @@ function makePool(){
 }
 
 const pool = makePool();
+app.locals.pool = pool;
 let dbReady = false;
 let dbError = '';
 
@@ -165,6 +166,120 @@ if(process.env.GM_DB_AUTOINIT !== '0'){
 async function dbQuery(sql, vals=[]){
   return pool.query(sql, vals);
 }
+
+
+/* GM_MEMBER_DIRECT_SERVER_V023
+ * Purpose: register member profile API directly in the actual server.js entry.
+ * Reason: routes/member.js exists, but live Cloudtype URL returned 404 for
+ * /api/gm/member/me. This direct route proves the running entry and returns
+ * the member/profile payload needed by GM_MEMBER.js and GM_ORDERFORM.js.
+ */
+function gmMemberClean(v){ return v === undefined || v === null ? '' : String(v).trim(); }
+function gmMemberFirst(){
+  for (const v of arguments) {
+    const x = gmMemberClean(v);
+    if (x) return x;
+  }
+  return '';
+}
+function gmMemberBuildProfile(memberRow, addressRow){
+  const m = memberRow || {};
+  const a = addressRow || {};
+  const receiverName = gmMemberFirst(a.receiver_name, m.default_receiver_name, m.member_name, m.name);
+  const receiverPhone = gmMemberFirst(a.receiver_phone, m.default_receiver_phone, m.phone, m.mobile);
+  const receiverMobile = gmMemberFirst(a.receiver_mobile, m.default_receiver_mobile, m.mobile, m.phone);
+  const receiverZipcode = gmMemberFirst(a.zipcode, m.default_zipcode, m.zipcode);
+  const receiverAddress1 = gmMemberFirst(a.address1, m.default_address1, m.address1, m.addr1);
+  const receiverAddress2 = gmMemberFirst(a.address2, m.default_address2, m.address2, m.addr2);
+  const receiverAddressFull = gmMemberFirst(
+    a.address_full,
+    m.default_address_full,
+    [receiverZipcode ? '[' + receiverZipcode + ']' : '', receiverAddress1, receiverAddress2].filter(Boolean).join(' ')
+  );
+  return {
+    ok: true,
+    source: 'server_direct_v023',
+    member_id: gmMemberFirst(m.member_id, m.cafe24_member_id),
+    cafe24_member_id: gmMemberFirst(m.cafe24_member_id, m.member_id),
+    member_name: gmMemberFirst(m.member_name, m.name, receiverName),
+    email: gmMemberFirst(m.email, m.member_email, m.order_email),
+    phone: gmMemberFirst(m.phone, m.mobile, receiverPhone, receiverMobile),
+    language_code: gmMemberFirst(m.language_code, m.cs_language, 'ko'),
+    country_code: gmMemberFirst(m.country_code, m.country, 'KR'),
+    member_grade: gmMemberFirst(m.member_grade),
+    member_status: gmMemberFirst(m.member_status, 'active'),
+    receiver_name: receiverName,
+    receiver_phone: receiverPhone,
+    receiver_mobile: receiverMobile,
+    receiver_zipcode: receiverZipcode,
+    receiver_address1: receiverAddress1,
+    receiver_address2: receiverAddress2,
+    receiver_address_full: receiverAddressFull,
+    zipcode: receiverZipcode,
+    addr1: receiverAddress1,
+    addr2: receiverAddress2,
+    address1: receiverAddress1,
+    address2: receiverAddress2,
+    address_full: receiverAddressFull,
+    default_receiver_name: gmMemberFirst(m.default_receiver_name, receiverName),
+    default_receiver_phone: gmMemberFirst(m.default_receiver_phone, receiverPhone),
+    default_receiver_mobile: gmMemberFirst(m.default_receiver_mobile, receiverMobile),
+    default_zipcode: gmMemberFirst(m.default_zipcode, receiverZipcode),
+    default_address1: gmMemberFirst(m.default_address1, receiverAddress1),
+    default_address2: gmMemberFirst(m.default_address2, receiverAddress2),
+    default_address_full: gmMemberFirst(m.default_address_full, receiverAddressFull),
+    delivery_memo: gmMemberFirst(a.delivery_memo, m.delivery_memo),
+    default_address: (receiverName || receiverMobile || receiverAddress1) ? {
+      receiver_name: receiverName,
+      receiver_phone: receiverPhone,
+      receiver_mobile: receiverMobile,
+      zipcode: receiverZipcode,
+      address1: receiverAddress1,
+      address2: receiverAddress2,
+      address_full: receiverAddressFull,
+      delivery_memo: gmMemberFirst(a.delivery_memo, m.delivery_memo),
+      is_default: 'Y'
+    } : null
+  };
+}
+
+app.get(['/api/gm/member/diag','/api/member/diag'], async (req, res) => {
+  res.json({
+    ok: true,
+    source: 'server_direct_v023',
+    entry: 'server.js',
+    version: VERSION,
+    hasPool: !!pool,
+    dbReady,
+    dbError
+  });
+});
+
+app.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile'], async (req, res) => {
+  const memberId = gmMemberClean(req.query.member_id || req.query.memberId || req.query.id);
+  if (!memberId) return res.status(400).json({ ok:false, source:'server_direct_v023', error:'member_id is required' });
+  try {
+    const m = await dbQuery('SELECT * FROM gm_member WHERE member_id=$1 OR cafe24_member_id=$1 LIMIT 1', [memberId]);
+    const memberRow = m.rows[0] || null;
+    if (!memberRow) return res.status(404).json({ ok:false, source:'server_direct_v023', error:'member not found', member_id:memberId });
+    let addressRow = null;
+    try {
+      const a = await dbQuery(`
+        SELECT *
+        FROM gm_member_address
+        WHERE member_id=$1
+        ORDER BY CASE WHEN is_default='Y' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT 1
+      `, [memberRow.member_id || memberId]);
+      addressRow = a.rows[0] || null;
+    } catch (addressErr) {
+      addressRow = null;
+    }
+    return res.json(gmMemberBuildProfile(memberRow, addressRow));
+  } catch (e) {
+    return res.status(500).json({ ok:false, source:'server_direct_v023', error:String(e && e.message || e) });
+  }
+});
 
 async function tableCounts(tableNames){
   const targets = Array.from(new Set((tableNames || []).map(String)));
@@ -1387,98 +1502,6 @@ app.get('/module/scrap/api/order/list', (req,res)=>{
 
 /* Compatibility aliases from older sqlite version */
 app.get('/db/status', (req,res)=>res.redirect('/api/gm/db/status'));
-
-
-// GM_MEMBER direct route guard V022
-// Purpose: package.json starts server.js. Keep member profile route directly in server.js
-// so /api/gm/member/me works even when external route modules are not reached.
-function gmMemberS(v, fallback=''){
-  const x = (v === null || v === undefined) ? '' : String(v).trim();
-  return x || fallback;
-}
-function gmMemberFullAddress(zipcode, addr1, addr2, oldAddr){
-  return [addr1, addr2].map(x => gmMemberS(x)).filter(Boolean).join(' ') || gmMemberS(oldAddr);
-}
-function gmMemberProfile(row, addressRows){
-  row = row || null;
-  const rows = Array.isArray(addressRows) ? addressRows : [];
-  const def = rows.find(x => String(x.is_default || '').toUpperCase() === 'Y') || rows[0] || null;
-  const receiverName = gmMemberS((def && def.receiver_name) || (row && row.default_receiver_name) || (row && row.member_name));
-  const receiverPhone = gmMemberS((def && def.receiver_phone) || (row && row.default_receiver_phone) || (row && row.phone));
-  const receiverMobile = gmMemberS((def && def.receiver_mobile) || (row && row.default_receiver_mobile) || receiverPhone || (row && row.phone));
-  const zipcode = gmMemberS((def && def.zipcode) || (row && row.default_zipcode));
-  const address1 = gmMemberS((def && def.address1) || (row && row.default_address1));
-  const address2 = gmMemberS((def && def.address2) || (row && row.default_address2));
-  const addressOld = gmMemberS((def && def.address_old) || (row && row.default_address_old));
-  const addressFull = gmMemberS((def && def.address_full) || (row && row.default_address_full) || gmMemberFullAddress(zipcode, address1, address2, addressOld));
-  const deliveryMemo = gmMemberS((def && def.delivery_memo) || (row && row.delivery_memo));
-  return {
-    ok: true,
-    source: 'server_direct_v022',
-    found: !!row,
-    member_id: gmMemberS(row && row.member_id),
-    cafe24_member_id: gmMemberS(row && row.cafe24_member_id),
-    member_name: gmMemberS(row && row.member_name),
-    order_name: gmMemberS(row && row.member_name),
-    email: gmMemberS(row && row.email),
-    order_email: gmMemberS(row && row.email),
-    phone: gmMemberS(row && row.phone),
-    mobile: receiverMobile || gmMemberS(row && row.phone),
-    country_code: gmMemberS(row && row.country_code),
-    nationality: gmMemberS(row && row.nationality),
-    language_code: gmMemberS(row && row.language_code, 'ko'),
-    cs_language: gmMemberS(row && row.cs_language, 'ko'),
-    receiver_name: receiverName,
-    receiver_phone: receiverPhone,
-    receiver_mobile: receiverMobile,
-    receiver_zipcode: zipcode,
-    receiver_address1: address1,
-    receiver_address2: address2,
-    receiver_address_old: addressOld,
-    receiver_address_full: addressFull,
-    zipcode,
-    address1,
-    address2,
-    address_old: addressOld,
-    address_full: addressFull,
-    delivery_memo: deliveryMemo,
-    member: row || null,
-    addresses: rows,
-    default_address: def || (row ? {
-      member_id: gmMemberS(row.member_id),
-      address_name: '기본배송지',
-      receiver_name: receiverName,
-      receiver_phone: receiverPhone,
-      receiver_mobile: receiverMobile,
-      zipcode,
-      address1,
-      address2,
-      address_old: addressOld,
-      address_full: addressFull,
-      delivery_memo: deliveryMemo,
-      is_default: 'Y'
-    } : null)
-  };
-}
-app.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile'], async (req,res)=>{
-  const memberId = gmMemberS(req.query.member_id || req.query.memberId || req.query.id);
-  if(!memberId) return res.status(400).json({ ok:false, source:'server_direct_v022', error:'member_id is required' });
-  try{
-    const m = await pool.query('SELECT * FROM gm_member WHERE member_id=$1', [memberId]);
-    let addresses = [];
-    try{
-      const a = await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC, created_at DESC', [memberId]);
-      addresses = a.rows || [];
-    }catch(_addrErr){
-      addresses = [];
-    }
-    return res.json(gmMemberProfile(m.rows[0] || null, addresses));
-  }catch(e){
-    return res.status(500).json({ ok:false, source:'server_direct_v022', error:String(e && e.message || e) });
-  }
-});
-app.get('/api/gm/member/diag', (req,res)=>res.json({ ok:true, source:'server_direct_v022', version:VERSION, route:'/api/gm/member/me' }));
-
 app.post('/scrap/save', (req,res)=>res.redirect(307, '/api/gm/product/upsert'));
 app.post('/scrap/save-batch', async (req,res)=>{
   try{
