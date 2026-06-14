@@ -240,6 +240,7 @@ app.locals.pool = pool;
 app.use(require('./routes/health'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
+app.use(require('./routes/member'));
 app.use(require('./routes/interest'));
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
