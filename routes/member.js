@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 let argon2 = null;
 try { argon2 = require('argon2'); } catch (e) { argon2 = null; }
-const crypto = require('crypto');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=''){ return v===undefined||v===null ? d : String(v).trim(); }
 function yn(v){ return String(v || '').toUpperCase() === 'Y' || v === true ? 'Y' : 'N'; }
@@ -27,24 +26,14 @@ function pickPasswordPlain(b){
 async function hashPasswordIfPresent(b){
   const plain = pickPasswordPlain(b);
   if(!plain) return null;
-
-  // Prefer argon2id when the optional dependency is installed.
-  // If the deployment image does not include argon2, do not block member APIs:
-  // use PBKDF2-SHA256 as a safe fallback and mark the algorithm explicitly.
-  if(argon2 && argon2.hash){
-    const hash = await argon2.hash(plain, { type: argon2.argon2id });
-    return { password_hash: hash, password_algo: 'argon2id', password_updated_at: new Date(), password_migrated: 'Y' };
+  if(!argon2 || !argon2.hash) {
+    const crypto = require('crypto');
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.pbkdf2Sync(plain, salt, 120000, 64, 'sha512').toString('hex');
+    return { password_hash: `pbkdf2_sha512$120000$${salt}$${hash}`, password_algo: 'pbkdf2_sha512', password_updated_at: new Date(), password_migrated: 'Y' };
   }
-
-  const salt = crypto.randomBytes(16).toString('hex');
-  const iter = 210000;
-  const dk = crypto.pbkdf2Sync(String(plain), salt, iter, 32, 'sha256').toString('hex');
-  return {
-    password_hash: `pbkdf2_sha256$${iter}$${salt}$${dk}`,
-    password_algo: 'pbkdf2_sha256',
-    password_updated_at: new Date(),
-    password_migrated: 'Y'
-  };
+  const hash = await argon2.hash(plain, { type: argon2.argon2id });
+  return { password_hash: hash, password_algo: 'argon2id', password_updated_at: new Date(), password_migrated: 'Y' };
 }
 function redactMember(row){
   if(!row) return row;
@@ -206,13 +195,91 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   finally{ client.release(); }
 });
 
-router.get(['/api/gm/member/me','/api/member/me'], async (req,res)=>{
+function memberMeResponse(row, addressRows){
+  const member = redactMember(row || null);
+  const rows = Array.isArray(addressRows) ? addressRows : [];
+  const defaultAddress = rows.find(x => x.is_default === 'Y') || rows[0] || null;
+
+  const receiverName = s((defaultAddress && defaultAddress.receiver_name) || (member && member.default_receiver_name) || (member && member.member_name));
+  const receiverPhone = s((defaultAddress && defaultAddress.receiver_phone) || (member && member.default_receiver_phone) || (member && member.phone));
+  const receiverMobile = s((defaultAddress && defaultAddress.receiver_mobile) || (member && member.default_receiver_mobile) || receiverPhone || (member && member.phone));
+  const receiverZipcode = s((defaultAddress && defaultAddress.zipcode) || (member && member.default_zipcode));
+  const receiverAddress1 = s((defaultAddress && defaultAddress.address1) || (member && member.default_address1));
+  const receiverAddress2 = s((defaultAddress && defaultAddress.address2) || (member && member.default_address2));
+  const receiverAddressOld = s((defaultAddress && defaultAddress.address_old) || (member && member.default_address_old));
+  const receiverAddressFull = s((defaultAddress && defaultAddress.address_full) || (member && member.default_address_full) || fullAddress(receiverZipcode, receiverAddress1, receiverAddress2, receiverAddressOld));
+  const deliveryMemo = s((defaultAddress && defaultAddress.delivery_memo) || (member && member.delivery_memo));
+
+  const flat = {
+    ok: true,
+    found: !!member,
+    member_id: s(member && member.member_id),
+    cafe24_member_id: s(member && member.cafe24_member_id),
+    member_name: s(member && member.member_name),
+    order_name: s(member && member.member_name),
+    email: s(member && member.email),
+    order_email: s(member && member.email),
+    phone: s(member && member.phone),
+    mobile: receiverMobile || s(member && member.phone),
+    country_code: s(member && member.country_code),
+    nationality: s(member && member.nationality),
+    language_code: s(member && member.language_code, 'ko'),
+    cs_language: s(member && member.cs_language, 'ko'),
+    member_grade: s(member && member.member_grade),
+    member_grade_code: s(member && member.member_grade_code),
+    member_status: s(member && member.member_status),
+    deposit_balance: member && member.deposit_balance != null ? member.deposit_balance : 0,
+    bonus_balance: member && member.bonus_balance != null ? member.bonus_balance : 0,
+    point_balance: member && member.point_balance != null ? member.point_balance : 0,
+    usable_balance: member && member.usable_balance != null ? member.usable_balance : 0,
+
+    receiver_name: receiverName,
+    receiver_phone: receiverPhone,
+    receiver_mobile: receiverMobile,
+    receiver_zipcode: receiverZipcode,
+    receiver_address1: receiverAddress1,
+    receiver_address2: receiverAddress2,
+    receiver_address_old: receiverAddressOld,
+    receiver_address_full: receiverAddressFull,
+
+    // GM_ORDERFORM older aliases
+    zipcode: receiverZipcode,
+    addr1: receiverAddress1,
+    addr2: receiverAddress2,
+    address1: receiverAddress1,
+    address2: receiverAddress2,
+    address_full: receiverAddressFull,
+    delivery_memo: deliveryMemo,
+    customs_clearance_code: s((defaultAddress && defaultAddress.customs_clearance_code) || (member && member.customs_clearance_code)),
+
+    member,
+    addresses: rows,
+    default_address: defaultAddress || (member ? {
+      member_id: s(member.member_id),
+      address_name: '기본배송지',
+      receiver_name: receiverName,
+      receiver_phone: receiverPhone,
+      receiver_mobile: receiverMobile,
+      zipcode: receiverZipcode,
+      address1: receiverAddress1,
+      address2: receiverAddress2,
+      address_old: receiverAddressOld,
+      address_full: receiverAddressFull,
+      delivery_memo: deliveryMemo,
+      is_default: 'Y'
+    } : null)
+  };
+  return flat;
+}
+
+router.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  const memberId=s(req.query.member_id || req.query.memberId || req.query.id);
+  if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
   try{
     const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1',[memberId]);
-    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC',[memberId]);
-    res.json({ok:true,member:redactMember(m.rows[0]||null),addresses:a.rows,default_address:a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null});
+    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC, created_at DESC',[memberId]);
+    res.json(memberMeResponse(m.rows[0]||null, a.rows));
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -258,22 +325,6 @@ router.get(['/api/gm/member/address/default','/api/member/address/default'], asy
       LIMIT 1
     `,[memberId]);
     res.json({ok:true,address:a.rows[0]||null});
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
-});
-
-
-// Compatibility/read aliases for frontend member profile fetch.
-// GM_MEMBER.js / GM_ORDERFORM.js may call list/profile while the canonical API is /me.
-router.get(['/api/gm/member/list','/api/member/list','/api/gm/member/profile','/api/member/profile'], async (req,res)=>{
-  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const memberId=s(req.query.member_id || req.query.memberId || req.query.id); 
-  if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
-  try{
-    const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1',[memberId]);
-    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC, created_at DESC',[memberId]);
-    const member=redactMember(m.rows[0]||null);
-    const default_address=a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null;
-    res.json({ok:true,member,addresses:a.rows,default_address,items:a.rows});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
