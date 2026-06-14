@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const argon2 = require('argon2');
+let argon2 = null;
+try { argon2 = require('argon2'); } catch (e) { argon2 = null; }
+const crypto = require('crypto');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=''){ return v===undefined||v===null ? d : String(v).trim(); }
 function yn(v){ return String(v || '').toUpperCase() === 'Y' || v === true ? 'Y' : 'N'; }
@@ -25,8 +27,24 @@ function pickPasswordPlain(b){
 async function hashPasswordIfPresent(b){
   const plain = pickPasswordPlain(b);
   if(!plain) return null;
-  const hash = await argon2.hash(plain, { type: argon2.argon2id });
-  return { password_hash: hash, password_algo: 'argon2id', password_updated_at: new Date(), password_migrated: 'Y' };
+
+  // Prefer argon2id when the optional dependency is installed.
+  // If the deployment image does not include argon2, do not block member APIs:
+  // use PBKDF2-SHA256 as a safe fallback and mark the algorithm explicitly.
+  if(argon2 && argon2.hash){
+    const hash = await argon2.hash(plain, { type: argon2.argon2id });
+    return { password_hash: hash, password_algo: 'argon2id', password_updated_at: new Date(), password_migrated: 'Y' };
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const iter = 210000;
+  const dk = crypto.pbkdf2Sync(String(plain), salt, iter, 32, 'sha256').toString('hex');
+  return {
+    password_hash: `pbkdf2_sha256$${iter}$${salt}$${dk}`,
+    password_algo: 'pbkdf2_sha256',
+    password_updated_at: new Date(),
+    password_migrated: 'Y'
+  };
 }
 function redactMember(row){
   if(!row) return row;
@@ -240,6 +258,22 @@ router.get(['/api/gm/member/address/default','/api/member/address/default'], asy
       LIMIT 1
     `,[memberId]);
     res.json({ok:true,address:a.rows[0]||null});
+  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
+});
+
+
+// Compatibility/read aliases for frontend member profile fetch.
+// GM_MEMBER.js / GM_ORDERFORM.js may call list/profile while the canonical API is /me.
+router.get(['/api/gm/member/list','/api/member/list','/api/gm/member/profile','/api/member/profile'], async (req,res)=>{
+  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const memberId=s(req.query.member_id || req.query.memberId || req.query.id); 
+  if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  try{
+    const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1',[memberId]);
+    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC, created_at DESC',[memberId]);
+    const member=redactMember(m.rows[0]||null);
+    const default_address=a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null;
+    res.json({ok:true,member,addresses:a.rows,default_address,items:a.rows});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
