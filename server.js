@@ -1539,9 +1539,11 @@ app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
+app.use(require('./routes/account'));
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
+app.use(require('./routes/network'));
 
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));
