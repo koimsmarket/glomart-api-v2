@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS gm_member (
 
 -- Future Glomart independent login preparation.
 -- Plain passwords must never be stored. Only Argon2id hash metadata is stored.
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS cafe24_raw_json JSONB;
 ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_algo VARCHAR(40);
 ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMP;

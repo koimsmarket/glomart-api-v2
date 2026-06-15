@@ -1,17 +1,12 @@
-# GLOMART Client Collect + Order V6
+GM_MEMBER cafe24_raw_json 컬럼 누락 수정 패치
 
-## 핵심 구조
+원인:
+- 기존 DB에 gm_member 테이블이 이미 존재하면 CREATE TABLE IF NOT EXISTS 내부의 cafe24_raw_json 컬럼 생성이 실행되지 않음.
+- 이후 07_gm_member_wallet.sql 마지막의 GIN INDEX 생성에서 cafe24_raw_json 컬럼을 참조하여 서버 DB 초기화가 실패함.
 
-- 서버가 쿠팡을 직접 수집하지 않음
-- 쿠팡 페이지에서 실행되는 북마클릿이 상품 정보를 읽어 서버로 전송
-- 서버는 JSON 캐시에 저장
-- Glomart는 캐시 검색 결과를 표시
-- 주문 버튼 클릭 시 내부 주문서 생성
+수정:
+- migrations/07_gm_member_wallet.sql 안에 아래 구문을 인덱스 생성 전에 추가함.
+  ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS cafe24_raw_json JSONB;
 
-## 주요 URL
-
-- `/public/collector_bookmarklet.html`
-- `/public/gm_coupang_user_collector.js`
-- `POST /module/scrap/api/collect`
-- `GET /module/scrap/api/cache/search?q=떡볶이`
-- `GET /module/scrap/api/order/list`
+적용:
+- 서버의 기존 migrations/07_gm_member_wallet.sql 파일을 이 파일로 교체 후 재배포.
