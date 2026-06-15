@@ -43,7 +43,6 @@ CREATE TABLE IF NOT EXISTS gm_member (
 
 -- Future Glomart independent login preparation.
 -- Plain passwords must never be stored. Only Argon2id hash metadata is stored.
-ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS cafe24_raw_json JSONB;
 ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_algo VARCHAR(40);
 ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMP;
@@ -79,6 +78,16 @@ CREATE TABLE IF NOT EXISTS gm_member_ledger (
   created_by VARCHAR(80),
   PRIMARY KEY (ledger_id)
 );
+
+-- V002 safety: existing gm_member table may have been created before cafe24_raw_json was added.
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS cafe24_raw_json JSONB;
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS cafe24_member_id VARCHAR(80);
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS recommender_id VARCHAR(80);
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS deposit_balance NUMERIC(14,0) NOT NULL DEFAULT 0;
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS bonus_balance NUMERIC(14,0) NOT NULL DEFAULT 0;
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS usable_balance NUMERIC(14,0) NOT NULL DEFAULT 0;
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS refund_balance NUMERIC(14,0) NOT NULL DEFAULT 0;
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS point_balance NUMERIC(14,0) NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_gm_member_recommender_id
   ON gm_member (recommender_id);
