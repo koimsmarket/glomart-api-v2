@@ -38,8 +38,8 @@ function rowPayload(b){
     amount_type:s(b.amount_type||b.amountType,'unit'),
     delivery_type:s(b.delivery_type||b.deliveryType),
     delivery_fee:n(b.delivery_fee||b.deliveryFee,0),
-    product_url:s(b.product_url||b.productUrl||b.url),
-    thumb_url:s(b.thumb_url||b.thumbUrl||b.thumb_origin_url||b.thumbOriginUrl),
+    product_url:s(b.product_url||b.productUrl||b.url||b.pageUrl||''),
+    thumb_url:s(b.thumb_url||b.thumbUrl||b.thumb_origin_url||b.thumbOriginUrl||b.image||b.mainImage||b.thumbnail||b.thumbnailUrl||''),
     thumb_file_name:s(b.thumb_file_name||b.thumbFileName)
   };
 }
@@ -63,8 +63,9 @@ async function upsertOne(pool,b){
   if(!p.mall_code) throw new Error('mall_code is required');
   if(!p.pi_ii_vi) throw new Error('pi_ii_vi is required');
   if(!p.member_id && !p.guest_key) throw new Error('member_id or guest_key is required');
-  if(!p.product_url) throw new Error('product_url is required');
-  if(!p.thumb_url) throw new Error('thumb_url is required');
+  // 개발 중 외부상품은 URL/썸네일이 누락될 수 있으므로 DB NOT NULL용 빈 문자열로 저장한다.
+  p.product_url = p.product_url || '';
+  p.thumb_url = p.thumb_url || '';
   const sql=`INSERT INTO gm_basket (
       mall_code,member_id,guest_key,pi_ii_vi,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
@@ -89,8 +90,8 @@ async function upsertOne(pool,b){
 
 router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await upsertOne(pool,req.body||{}); await touchProductCart(pool,row); res.json({ok:true,item:row}); }
-  catch(e){ res.status(500).json({ok:false,error:e.message}); }
+  try{ console.log('[GM_BASKET_ROUTE_ADD_REQUEST]', {keys:Object.keys(req.body||{}), member_id:(req.body||{}).member_id, guest_key:(req.body||{}).guest_key, product_uid:(req.body||{}).product_uid}); const row=await upsertOne(pool,req.body||{}); await touchProductCart(pool,row); console.log('[GM_BASKET_ROUTE_ADD_OK]', {product_uid:row&&row.product_uid}); res.json({ok:true,item:row}); }
+  catch(e){ console.error('[GM_BASKET_ROUTE_ADD_ERROR]', e && e.message || e, req.body||{}); res.status(500).json({ok:false,error:e.message}); }
 });
 
 router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req,res)=>{
