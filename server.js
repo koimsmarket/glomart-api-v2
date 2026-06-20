@@ -13,6 +13,23 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(express.static('public'));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
+/* GM_HEALTH_V002_DIRECT
+ * Cloudtype / UptimeRobot keep-alive endpoint.
+ * Must be registered directly in the entry file before route modules.
+ * No DB query: always returns 200 if the Node process is alive.
+ */
+app.get(['/health', '/api/health', '/api/gm/health'], (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: 'glomart-api-v2',
+    health_version: 'GM_HEALTH_V002_DIRECT',
+    version: VERSION,
+    route: req.path,
+    time: new Date().toISOString()
+  });
+});
+
+
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || '/tmp/glomart-data';
 const CACHE_FILE = path.join(DATA_DIR, 'coupang_cache.json');
