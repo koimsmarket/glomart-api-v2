@@ -18,17 +18,20 @@ function itemKey(b){
 }
 function ownerWhere(b){
   const member=s(b.member_id);
-  const guest=s(b.guest_key);
   if(member) return { col:'member_id', val:member };
-  if(guest) return { col:'guest_key', val:guest };
   return null;
+}
+function requireMember(b){
+  const member=s(b && b.member_id);
+  if(!member) throw new Error('member_id is required');
+  return member;
 }
 function rowPayload(b){
   const key=itemKey(b);
   return {
     mall_code:key.mall_code,
     member_id:s(b.member_id),
-    guest_key:s(b.guest_key),
+    guest_key:null,
     pi_ii_vi:key.pi_ii_vi,
     product_name:s(b.product_name||b.productName,''),
     option_name:s(b.option_name||b.optionName),
@@ -75,7 +78,7 @@ async function upsertOne(pool,b){
   const p=rowPayload(b);
   if(!p.mall_code) throw new Error('mall_code is required');
   if(!p.pi_ii_vi) throw new Error('pi_ii_vi is required');
-  if(!p.member_id && !p.guest_key) throw new Error('member_id or guest_key is required');
+  if(!p.member_id) throw new Error('member_id is required');
   if(!p.product_url) throw new Error('product_url is required');
   if(!p.thumb_url) throw new Error('thumb_url is required');
   const sql=`INSERT INTO gm_basket (
@@ -112,17 +115,26 @@ router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
 router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, items=Array.isArray(b.items)?b.items:[];
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const saved=[];
-  try{
-    for(const raw of items){ const row=await upsertOne(pool,Object.assign({},raw,{member_id:b.member_id||raw.member_id,guest_key:b.guest_key||raw.guest_key})); await touchProductCart(pool,row); saved.push(row); }
-    res.json({ok:true,items:saved});
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
+  let memberId='';
+  try{ memberId=requireMember(b); }
+  catch(e){ return res.status(400).json({ok:false,error:e.message}); }
+  const saved=[], errors=[];
+  for(const raw of items){
+    try{
+      const row=await upsertOne(pool,Object.assign({},raw,{member_id:memberId,guest_key:null}));
+      await touchProductCart(pool,row);
+      saved.push(row);
+    }catch(e){
+      errors.push({ product_uid:s(raw&&raw.product_uid), pi_ii_vi:s(raw&&raw.pi_ii_vi), error:e.message });
+    }
+  }
+  res.status(errors.length ? 207 : 200).json({ok:errors.length===0,items:saved,errors});
 });
 
 router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
   const pool=db(req), owner=ownerWhere(req.query||{});
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  if(!owner) return res.status(400).json({ok:false,error:'member_id or guest_key is required'});
+  if(!owner) return res.status(400).json({ok:false,error:'member_id is required'});
   try{ const r=await pool.query(selectSql(`WHERE ${owner.col}=$1 ORDER BY added_at DESC`),[owner.val]); res.json({ok:true,items:r.rows}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
@@ -130,7 +142,7 @@ router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
 router.post(['/api/basket/quantity','/api/gm/basket/update'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, owner=ownerWhere(b), key=itemKey(b), qty=Math.max(1,n(b.quantity,1));
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  if(!owner || !key.mall_code || !key.pi_ii_vi) return res.status(400).json({ok:false,error:'mall_code/pi_ii_vi and member_id/guest_key are required'});
+  if(!owner || !key.mall_code || !key.pi_ii_vi) return res.status(400).json({ok:false,error:'mall_code/pi_ii_vi and member_id are required'});
   try{ const r=await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE mall_code=$2 AND pi_ii_vi=$3 AND ${owner.col}=$4 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.mall_code,key.pi_ii_vi,owner.val]); res.json({ok:true,item:r.rows[0]||null}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
@@ -142,7 +154,7 @@ router.delete(['/api/basket/delete','/api/gm/basket/item'], async (req,res)=>{
   const single=itemKey(b);
   if(single.mall_code && single.pi_ii_vi) keys.push(single);
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  if(!owner || (!productUids.length && !keys.length)) return res.status(400).json({ok:false,error:'basket item key and member_id/guest_key are required'});
+  if(!owner || (!productUids.length && !keys.length)) return res.status(400).json({ok:false,error:'basket item key and member_id are required'});
   try{
     let deleted=[];
     if(productUids.length){
