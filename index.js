@@ -313,6 +313,7 @@ app.get('/', (req,res)=>ok(res, {
     'GET /api/gm/member/me',
     'GET /api/gm/member/address/list',
     'POST /api/gm/member/address/upsert',
+    'POST /api/gm/member/address/sync',
     'GET /api/gm/account/summary',
     'GET /api/gm/account/ledger',
     'GET /module/scrap/api/cache/search?q=keyword&page=1'

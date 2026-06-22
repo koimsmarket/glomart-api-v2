@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 let argon2 = null;
 try { argon2 = require('argon2'); } catch (e) { argon2 = null; }
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -87,6 +88,18 @@ function memberPayload(b){
     delivery_memo: pick(b, ['delivery_memo','deliveryMemo','default_delivery_memo','defaultDeliveryMemo'])
   };
 }
+
+function addressFingerprint(a){
+  a = a || {};
+  const key = [a.member_id, a.receiver_name, a.receiver_mobile || a.receiver_phone, a.zipcode, a.address1, a.address2].map(x=>s(x).toLowerCase()).join('|');
+  return crypto.createHash('sha1').update(key).digest('hex').slice(0,24);
+}
+function stableAddressId(a, memberId){
+  const given = s(a && (a.address_id || a.addressId || a.id || a.ma_idx));
+  if(given) return given;
+  const x = Object.assign({}, a || {}, { member_id: memberId });
+  return `CAF24_${memberId}_${addressFingerprint(x)}`;
+}
 function addressPayload(b, memberId){
   const zipcode = pick(b, ['zipcode','default_zipcode','receiver_zipcode','postcode','zip_code']);
   const address1 = pick(b, ['address1','default_address1','road_address','receiver_address1','addr1']);
@@ -94,7 +107,7 @@ function addressPayload(b, memberId){
   const oldAddress = pick(b, ['address_old','default_address_old','jibun_address','old_address']);
   const addressFull = pick(b, ['address_full','default_address_full','receiver_address_full'], fullAddress(zipcode, address1, address2, oldAddress));
   return {
-    address_id: pick(b, ['address_id','addressId'], id('GMA')),
+    address_id: stableAddressId(b, memberId),
     member_id: memberId,
     address_name: pick(b, ['address_name','addressName'],'기본배송지'),
     receiver_name: pick(b, ['receiver_name','default_receiver_name','receiverName']),
@@ -300,6 +313,56 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
         [memberId,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo]);
     }
     await client.query('COMMIT'); res.json({ok:true,address:ar.rows[0]});
+  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
+  finally{ client.release(); }
+});
+
+
+router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (req,res)=>{
+  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  const input = Array.isArray(b.addresses) ? b.addresses : [];
+  const currentRaw = b.current_address && typeof b.current_address === 'object' ? b.current_address : null;
+  const rawList = input.slice();
+  if(currentRaw) rawList.unshift(Object.assign({}, currentRaw, {is_default:'Y'}));
+  const seen = new Set();
+  const addresses = [];
+  for(const raw of rawList){
+    const a = addressPayload(raw || {}, memberId);
+    if(!a.address1 && !a.zipcode && !a.receiver_name && !a.receiver_mobile) continue;
+    const key = a.address_id || addressFingerprint(a);
+    if(seen.has(key)) continue;
+    seen.add(key);
+    addresses.push(a);
+  }
+  if(!addresses.length) return res.status(400).json({ok:false,error:'no valid addresses'});
+  const deleteMissing = yn(b.delete_missing) === 'Y' || b.delete_missing === true;
+  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
+  try{
+    await client.query('BEGIN');
+    const keepIds=[]; const upserted=[];
+    if(addresses.some(a=>a.is_default==='Y')) await client.query(`UPDATE gm_member_address SET is_default='N', updated_at=NOW() WHERE member_id=$1`, [memberId]);
+    for(let i=0;i<addresses.length;i++){
+      const a = addresses[i];
+      if(i===0 && !addresses.some(x=>x.is_default==='Y')) a.is_default='Y';
+      const ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
+        ON CONFLICT (address_id) DO UPDATE SET address_name=EXCLUDED.address_name,receiver_name=EXCLUDED.receiver_name,receiver_phone=EXCLUDED.receiver_phone,receiver_mobile=EXCLUDED.receiver_mobile,zipcode=EXCLUDED.zipcode,address1=EXCLUDED.address1,address2=EXCLUDED.address2,address_old=EXCLUDED.address_old,address_full=EXCLUDED.address_full,sido=EXCLUDED.sido,sigungu=EXCLUDED.sigungu,eup_myeon_dong=EXCLUDED.eup_myeon_dong,customs_clearance_code=EXCLUDED.customs_clearance_code,delivery_memo=EXCLUDED.delivery_memo,is_default=EXCLUDED.is_default,updated_at=NOW() RETURNING *`,
+        [a.address_id,a.member_id,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
+      keepIds.push(a.address_id); upserted.push(ar.rows[0]);
+    }
+    let deleted=[];
+    if(deleteMissing && keepIds.length){
+      const dr = await client.query(`DELETE FROM gm_member_address WHERE member_id=$1 AND NOT (address_id = ANY($2::text[])) RETURNING address_id`, [memberId, keepIds]);
+      deleted = dr.rows || [];
+    }
+    const def = upserted.find(a=>a.is_default==='Y') || upserted[0];
+    if(def){
+      await client.query(`UPDATE gm_member SET default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,default_zipcode=$5,default_address1=$6,default_address2=$7,default_address_old=$8,default_address_full=$9,default_sido=$10,default_sigungu=$11,default_eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,updated_at=NOW() WHERE member_id=$1`,
+        [memberId,def.receiver_name,def.receiver_phone,def.receiver_mobile,def.zipcode,def.address1,def.address2,def.address_old,def.address_full,def.sido,def.sigungu,def.eup_myeon_dong,def.customs_clearance_code,def.delivery_memo]);
+    }
+    await client.query('COMMIT');
+    res.json({ok:true,upserted_count:upserted.length,deleted_count:deleted.length,items:upserted,deleted});
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
   finally{ client.release(); }
 });
