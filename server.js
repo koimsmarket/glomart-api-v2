@@ -367,10 +367,8 @@ const GM_RESET_TARGETS = [
 
 function owner(b){
   const memberId = cleanText(b.member_id);
-  const guestKey = cleanText(b.guest_key);
   if(memberId) return { col:'member_id', val:memberId };
-  if(guestKey) return { col:'guest_key', val:guestKey };
-  throw new Error('member_id or guest_key required');
+  throw new Error('member_id required');
 }
 
 function splitBasketProductUid(uid){
@@ -394,7 +392,7 @@ function basketPayload(b){
     member_id:cleanText(b.member_id) || null,
     guest_key:cleanText(b.guest_key) || null,
     pi_ii_vi:key.pi_ii_vi,
-    product_name:cleanText(b.product_name || b.productName || b.title || b.name || '외부상품'),
+    product_name:cleanText(b.product_name || b.productName || b.title || b.name || ''),
     option_name:cleanText(b.option_name || b.optionName || b.option_text || b.optionText || '옵션'),
     option_value:cleanText(b.option_value || b.optionValue || ''),
     quantity:Math.max(1, toInt(b.quantity || b.qty, 1)),
@@ -1348,7 +1346,12 @@ app.post('/api/gm/basket/add', async (req,res)=>{
     const own = owner(b);
     const p = basketPayload(b);
     if(!p.mall_code || !p.pi_ii_vi) return fail(res, 400, 'mall_code/pi_ii_vi required', { body_keys:Object.keys(b) });
-    if(!p.product_name) p.product_name = '외부상품';
+    if(!p.member_id) return fail(res, 400, 'member_id required', { body_keys:Object.keys(b) });
+    if(!p.product_name) return fail(res, 400, 'product_name required', { body_keys:Object.keys(b) });
+    if(!p.product_url) return fail(res, 400, 'product_url required', { body_keys:Object.keys(b) });
+    if(!p.thumb_url) return fail(res, 400, 'thumb_url required', { body_keys:Object.keys(b) });
+    if(!p.amount || p.amount <= 0) return fail(res, 400, 'amount required', { body_keys:Object.keys(b) });
+    p.guest_key = null;
 
     console.log('[GM_BASKET_ADD_REQUEST]', {
       member_id:p.member_id, guest_key:p.guest_key, mall_code:p.mall_code, pi_ii_vi:p.pi_ii_vi,
@@ -1394,12 +1397,9 @@ app.post('/api/gm/basket/add', async (req,res)=>{
 app.get('/api/gm/basket/list', async (req,res)=>{
   try{
     const memberId = cleanText(req.query.member_id);
-    const guestKey = cleanText(req.query.guest_key);
-    if(!memberId && !guestKey) return fail(res, 400, 'member_id or guest_key required');
-    const r = memberId
-      ? await dbQuery(basketSelectSql('WHERE member_id=$1 ORDER BY added_at DESC'), [memberId])
-      : await dbQuery(basketSelectSql('WHERE guest_key=$1 ORDER BY added_at DESC'), [guestKey]);
-    console.log('[GM_BASKET_LIST_OK]', { member_id:memberId, guest_key:guestKey, count:r.rows.length });
+    if(!memberId) return fail(res, 400, 'member_id required');
+    const r = await dbQuery(basketSelectSql('WHERE member_id=$1 ORDER BY added_at DESC'), [memberId]);
+    console.log('[GM_BASKET_LIST_OK]', { member_id:memberId, count:r.rows.length });
     ok(res, { items:r.rows });
   }catch(e){
     console.error('[GM_BASKET_LIST_ERROR]', String(e && e.message || e));
