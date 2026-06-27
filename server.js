@@ -75,25 +75,84 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(express.static('public'));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
-/* GM_HEALTH_V003_ALL_METHODS
- * Cloudtype / UptimeRobot keep-alive endpoint.
+/* GM_HEALTH_V004_DB_RUNTIME
+ * Cloudtype / UptimeRobot 운영용 health endpoint.
  * Must be registered directly in the entry file before route modules.
- * No DB query: always returns 200 if the Node process is alive.
- * UptimeRobot may send HEAD, so accept every method explicitly.
+ * - GET: Node + DB + memory + uptime + route count 확인
+ * - HEAD: global HEAD guard에서 200 처리
+ * - OPTIONS: global OPTIONS guard에서 204 처리
  */
-function gmHealthDirectHandler(req, res) {
-  console.log('[GM_HEALTH_DIRECT_HIT_V001]', JSON.stringify({ method: req.method, url: req.originalUrl || req.url, ua: req.headers['user-agent'] || '', time: new Date().toISOString() }));
+function gmFormatMb(bytes){
+  const n = Number(bytes || 0) / 1024 / 1024;
+  return Math.round(n * 10) / 10 + 'MB';
+}
+
+function gmRouteCount(){
+  try{
+    const stack = (app && app._router && Array.isArray(app._router.stack)) ? app._router.stack : [];
+    let count = 0;
+    for(const layer of stack){
+      if(layer && layer.route && layer.route.path) count += 1;
+    }
+    return count;
+  }catch(e){ return null; }
+}
+
+async function gmBuildHealthPayload(req){
+  const started = Date.now();
+  const mem = process.memoryUsage();
   const body = {
     ok: true,
     service: 'glomart-api-v2',
-    health_version: 'GM_HEALTH_V003_ALL_METHODS',
+    health_version: 'GM_HEALTH_V004_DB_RUNTIME',
     version: VERSION,
     route: req.path,
     method: req.method,
+    node: process.version,
+    uptime_sec: Math.round(process.uptime()),
+    memory: {
+      rss: gmFormatMb(mem.rss),
+      heapUsed: gmFormatMb(mem.heapUsed),
+      heapTotal: gmFormatMb(mem.heapTotal),
+      external: gmFormatMb(mem.external)
+    },
+    routes: gmRouteCount(),
+    dbReady,
+    dbError,
+    db: { ok: false, latency_ms: null },
     time: new Date().toISOString()
   };
+
+  try{
+    const dbStarted = Date.now();
+    const r = await pool.query('SELECT 1 AS ok, NOW() AS now');
+    body.db = {
+      ok: true,
+      latency_ms: Date.now() - dbStarted,
+      now: r && r.rows && r.rows[0] ? r.rows[0].now : null
+    };
+    body.dbReady = true;
+    body.dbError = '';
+  }catch(e){
+    body.ok = false;
+    body.db = {
+      ok: false,
+      latency_ms: null,
+      error: String(e && e.message || e)
+    };
+    body.dbReady = false;
+    body.dbError = String(e && e.message || e);
+  }
+  body.latency_ms = Date.now() - started;
+  return body;
+}
+
+async function gmHealthDirectHandler(req, res) {
+  console.log('[GM_HEALTH_DIRECT_HIT_V004]', JSON.stringify({ method: req.method, url: req.originalUrl || req.url, ua: req.headers['user-agent'] || '', time: new Date().toISOString() }));
   if (req.method === 'HEAD') return res.status(200).end();
-  return res.status(200).json(body);
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  const body = await gmBuildHealthPayload(req);
+  return res.status(body.ok ? 200 : 503).json(body);
 }
 app.all(['/health', '/api/health', '/api/gm/health'], gmHealthDirectHandler);
 
