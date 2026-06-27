@@ -7,27 +7,66 @@ const { Pool } = require('pg');
 const VERSION = 'GLOMART_API_BASKET_DIRECT_V027';
 const app = express();
 
+/* GM_MONITOR_REQ_LOG_V001
+ * Temporary diagnostic log for UptimeRobot / Cloudtype monitor mismatch.
+ * Logs root/health requests and UptimeRobot requests with final status code.
+ */
+app.use((req, res, next) => {
+  const ua = String(req.headers['user-agent'] || '');
+  const url = String(req.originalUrl || req.url || '');
+  const isMonitorProbe = /uptimerobot|uptime|monitor/i.test(ua) || url === '/' || /health/i.test(url);
+  if (isMonitorProbe) {
+    const started = Date.now();
+    console.log('[GM_MONITOR_REQ_V001]', JSON.stringify({
+      method: req.method,
+      url,
+      path: req.path,
+      host: req.headers.host || '',
+      ua,
+      accept: req.headers.accept || '',
+      xff: req.headers['x-forwarded-for'] || '',
+      time: new Date().toISOString()
+    }));
+    res.on('finish', () => {
+      console.log('[GM_MONITOR_RES_V001]', JSON.stringify({
+        method: req.method,
+        url,
+        status: res.statusCode,
+        ms: Date.now() - started,
+        time: new Date().toISOString()
+      }));
+    });
+  }
+  next();
+});
+
 app.use(cors({ origin: true, credentials: false }));
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(express.static('public'));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
-/* GM_HEALTH_V002_DIRECT
+/* GM_HEALTH_V003_ALL_METHODS
  * Cloudtype / UptimeRobot keep-alive endpoint.
  * Must be registered directly in the entry file before route modules.
  * No DB query: always returns 200 if the Node process is alive.
+ * UptimeRobot may send HEAD, so accept every method explicitly.
  */
-app.get(['/health', '/api/health', '/api/gm/health'], (req, res) => {
-  res.status(200).json({
+function gmHealthDirectHandler(req, res) {
+  console.log('[GM_HEALTH_DIRECT_HIT_V001]', JSON.stringify({ method: req.method, url: req.originalUrl || req.url, ua: req.headers['user-agent'] || '', time: new Date().toISOString() }));
+  const body = {
     ok: true,
     service: 'glomart-api-v2',
-    health_version: 'GM_HEALTH_V002_DIRECT',
+    health_version: 'GM_HEALTH_V003_ALL_METHODS',
     version: VERSION,
     route: req.path,
+    method: req.method,
     time: new Date().toISOString()
-  });
-});
+  };
+  if (req.method === 'HEAD') return res.status(200).end();
+  return res.status(200).json(body);
+}
+app.all(['/health', '/api/health', '/api/gm/health'], gmHealthDirectHandler);
 
 
 const PORT = Number(process.env.PORT || 3000);

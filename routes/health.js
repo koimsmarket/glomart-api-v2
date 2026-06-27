@@ -24,6 +24,7 @@ function db(req){
  * - HEAD/GET/OPTIONS 등 모든 method를 200으로 허용
  */
 router.all(['/health', '/api/health', '/api/gm/health'], async (req, res) => {
+  console.log('[GM_HEALTH_ROUTE_HIT_V001]', JSON.stringify({ method: req.method, url: req.originalUrl || req.url, ua: req.headers['user-agent'] || '', time: new Date().toISOString() }));
   if (req.method === 'HEAD') return res.status(200).end();
   if (req.method === 'OPTIONS') return res.status(200).end();
 
