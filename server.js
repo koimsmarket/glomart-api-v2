@@ -7,6 +7,35 @@ const { Pool } = require('pg');
 const VERSION = 'GLOMART_API_BASKET_DIRECT_V027';
 const app = express();
 
+/* GM_HEAD_CORS_KEEPALIVE_V001
+ * UptimeRobot/Cloudtype keep-alive safety guard.
+ * Must run before static files and routers.
+ * - CORS headers for browser diagnostics
+ * - OPTIONS always succeeds
+ * - HEAD always succeeds so UptimeRobot HEAD checks never fall through to 404
+ */
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+
+  if (req.method === 'HEAD') {
+    console.log('[GM_HEAD_KEEPALIVE_HIT_V001]', JSON.stringify({
+      url: req.originalUrl || req.url,
+      host: req.headers.host || '',
+      ua: req.headers['user-agent'] || '',
+      time: new Date().toISOString()
+    }));
+    return res.status(200).end();
+  }
+
+  next();
+});
+
 /* GM_MONITOR_REQ_LOG_V001
  * Temporary diagnostic log for UptimeRobot / Cloudtype monitor mismatch.
  * Logs root/health requests and UptimeRobot requests with final status code.
