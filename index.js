@@ -273,6 +273,7 @@ app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
 app.use(require('./routes/smartfit'));
+console.log('[GM_SMARTFIT_ROUTE_V001] routes/smartfit registered');
 
 try{
   require('./workers/product_queue_worker').startProductQueueWorker(pool);
@@ -317,6 +318,18 @@ app.get('/', (req,res)=>ok(res, {
     'POST /api/gm/member/address/sync',
     'GET /api/gm/account/summary',
     'GET /api/gm/account/ledger',
+    'GET /api/gm/smartfit/health',
+    'GET /api/gm/smartfit/category/list',
+    'GET /api/gm/smartfit/category/search',
+    'GET /api/gm/smartfit/template/list',
+    'GET /api/gm/smartfit/template/:template_id',
+    'POST /api/gm/smartfit/template/save',
+    'POST /api/gm/smartfit/template/public',
+    'POST /api/gm/smartfit/collection/add',
+    'GET /api/gm/smartfit/collection/list',
+    'POST /api/gm/smartfit/build-cart',
+    'POST /api/gm/smartfit/event',
+    'GET /api/gm/smartfit/stat/monthly',
     'GET /module/scrap/api/cache/search?q=keyword&page=1'
   ]
 }));

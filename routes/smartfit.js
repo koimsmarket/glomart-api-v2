@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 
 const VERSION = 'GM_SMARTFIT_SERVER_V002';
+console.log('[GM_SMARTFIT_ROUTE] loaded');
 const STAT_TYPES = new Set([
   'view','visit','collection','use','reuse','order','sales',
   'cancel','cancel_amount','return','return_amount',
