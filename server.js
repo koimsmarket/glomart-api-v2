@@ -1753,5 +1753,6 @@ app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
 app.use(require('./routes/network'));
+app.use(require('./routes/smartfit'));
 
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));

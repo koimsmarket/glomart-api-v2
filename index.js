@@ -272,6 +272,7 @@ app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
+app.use(require('./routes/smartfit'));
 
 try{
   require('./workers/product_queue_worker').startProductQueueWorker(pool);
