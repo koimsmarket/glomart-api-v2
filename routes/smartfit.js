@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V002';
+const VERSION = 'GM_SMARTFIT_SERVER_V006';
 console.log('[GM_SMARTFIT_ROUTE] loaded');
 const STAT_TYPES = new Set([
   'view','visit','collection','use','reuse','order','sales',
@@ -153,6 +153,37 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const r=await pool.query(sql, params);
     ok(res,{ items:r.rows, count:r.rowCount, limit, offset });
   }catch(e){ fail(res,500,'template list failed',{ detail:String(e.message||e) }); }
+});
+
+
+router.get('/api/gm/smartfit/product/search', async (req,res)=>{
+  try{
+    const pool=db(req);
+    const q=s(req.query.q || req.query.keyword || '');
+    const category=s(req.query.category_code || req.query.category || '');
+    const mall=s(req.query.mall_code || req.query.mall || '');
+    const limit=Math.min(80, Math.max(1, i(req.query.limit, 30)));
+    const offset=Math.max(0, i(req.query.offset, 0));
+    const params=[]; const where=[];
+    if(q){
+      params.push('%'+q+'%');
+      const pn='$'+params.length;
+      where.push(`(product_name ILIKE ${pn} OR mall_product_name ILIKE ${pn} OR option_name ILIKE ${pn} OR option_value ILIKE ${pn} OR product_uid ILIKE ${pn} OR pi_ii_vi ILIKE ${pn} OR category_keyword ILIKE ${pn})`);
+    }
+    if(category){ params.push(category); where.push(`(glomart_code=$${params.length} OR gm_category=$${params.length})`); }
+    if(mall){ params.push(mall); where.push(`mall_code=$${params.length}`); }
+    params.push(limit); const lim='$'+params.length;
+    params.push(offset); const off='$'+params.length;
+    const sql = `SELECT product_uid, mall_code, pi_ii_vi, glomart_code, gm_category, product_name, mall_product_name,
+        option_name, option_value, mall_sale_price, final_supply_price, delivery_type, delivery_fee,
+        delivery_eta_text, product_url, thumb_origin_url, thumb_file_name, soldout_yn, hit_count, updated_at
+      FROM gm_product
+      ${where.length?'WHERE '+where.join(' AND '):''}
+      ORDER BY COALESCE(updated_at, created_at) DESC NULLS LAST
+      LIMIT ${lim} OFFSET ${off}`;
+    const r=await pool.query(sql, params);
+    ok(res,{ items:r.rows, count:r.rowCount, limit, offset });
+  }catch(e){ fail(res,500,'product search failed',{ detail:String(e.message||e) }); }
 });
 
 router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
@@ -309,6 +340,60 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
     for(const tid of templateIds){ await recordEventInternal(pool, { template_id:tid, member_id:member, stat_type:'use', amount:1, source:'build-cart' }); }
     ok(res,{ batch_id:batchId, template_ids:templateIds, items, count:items.length, note:'no automatic merge; keep template ownership' });
   }catch(e){ fail(res,500,'build cart failed',{ detail:String(e.message||e) }); }
+});
+
+
+router.get('/api/gm/smartfit/media/list', async (req,res)=>{
+  try{
+    const pool=db(req); const targetType=s(req.query.target_type || req.query.targetType || 'template'); const targetId=s(req.query.target_id || req.query.targetId || req.query.template_id || '');
+    if(!targetId) return fail(res,400,'target_id required');
+    const r=await pool.query(`SELECT * FROM gm_smartfit_media WHERE target_type=$1 AND target_id=$2 AND is_active='T' ORDER BY sort_order, media_id`, [targetType, targetId]);
+    ok(res,{ items:r.rows, count:r.rowCount });
+  }catch(e){ fail(res,500,'media list failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/smartfit/media/save', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{}; const targetType=s(b.target_type || b.targetType || 'template'); const targetId=s(b.target_id || b.targetId || b.template_id || '');
+    if(!targetId) return fail(res,400,'target_id required');
+    const list=Array.isArray(b.media) ? b.media : Array.isArray(b.items) ? b.items : [];
+    await client.query('BEGIN');
+    if(b.replace !== false){ await client.query("UPDATE gm_smartfit_media SET is_active='F', updated_at=CURRENT_TIMESTAMP WHERE target_type=$1 AND target_id=$2", [targetType, targetId]); }
+    const saved=[]; let order=0;
+    for(const m of list){
+      const url=s(m.url); if(!url) continue;
+      const r=await client.query(`INSERT INTO gm_smartfit_media (target_type,target_id,media_type,url,thumbnail_url,title,sort_order)
+        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [targetType, targetId, s(m.media_type || m.mediaType || 'image'), url, s(m.thumbnail_url || m.thumbnailUrl || ''), s(m.title || ''), i(m.sort_order, ++order)]);
+      saved.push(r.rows[0]);
+    }
+    await client.query('COMMIT');
+    ok(res,{ items:saved, count:saved.length });
+  }catch(e){ try{ await client.query('ROLLBACK'); }catch(_){} fail(res,500,'media save failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+
+router.get('/api/gm/smartfit/comment/list', async (req,res)=>{
+  try{
+    const pool=db(req); const templateId=i(req.query.template_id || req.query.templateId,0); if(!templateId) return fail(res,400,'template_id required');
+    const r=await pool.query(`SELECT * FROM gm_smartfit_comment WHERE template_id=$1 AND is_active='T' ORDER BY created_at DESC LIMIT 200`, [templateId]);
+    ok(res,{ items:r.rows, count:r.rowCount });
+  }catch(e){ fail(res,500,'comment list failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/smartfit/comment/add', async (req,res)=>{
+  try{
+    const pool=db(req); const b=req.body||{}; const templateId=i(b.template_id || b.templateId,0); const member=s(b.member_id || b.memberId || '');
+    if(!templateId) return fail(res,400,'template_id required');
+    const ratingRaw=b.rating === undefined || b.rating === null || b.rating === '' ? null : n(b.rating,0);
+    const r=await pool.query(`INSERT INTO gm_smartfit_comment (template_id,member_id,parent_id,rating,body,is_creator_reply)
+      VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, [templateId, member, b.parent_id || b.parentId || null, ratingRaw, s(b.body || b.comment || ''), s(b.is_creator_reply || b.isCreatorReply || 'F') === 'T'?'T':'F']);
+    if(ratingRaw !== null){
+      await recordEventInternal(pool, { template_id:templateId, member_id:member, stat_type:'review', amount:1, source:'comment' });
+      await recordEventInternal(pool, { template_id:templateId, member_id:member, stat_type:'rating', amount:ratingRaw, source:'comment' });
+    }
+    ok(res,{ comment:r.rows[0] });
+  }catch(e){ fail(res,500,'comment add failed',{ detail:String(e.message||e) }); }
 });
 
 async function recordEventInternal(pool, body){
