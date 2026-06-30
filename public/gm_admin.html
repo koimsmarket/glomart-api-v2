@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Glomart Admin Home</title>
+  <style>
+    :root{--bg:#f5f7fb;--card:#fff;--line:#dfe5ef;--text:#1f2937;--muted:#6b7280;--brand:#1769ff;--ok:#12a150;--warn:#b45309;--dark:#111827;}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;}
+    .wrap{max-width:1180px;margin:0 auto;padding:18px 14px 40px;}
+    .top{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:14px;}
+    h1{font-size:24px;margin:0;font-weight:800;letter-spacing:-.03em}.sub{font-size:13px;color:var(--muted);margin-top:4px;line-height:1.4}
+    .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 10px;font-size:12px;color:var(--muted);white-space:nowrap;}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+    .card{display:flex;flex-direction:column;min-height:170px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;text-decoration:none;color:inherit;box-shadow:0 3px 12px rgba(17,24,39,.04);}
+    .card:hover{border-color:#a9c7ff;box-shadow:0 8px 24px rgba(23,105,255,.10);transform:translateY(-1px)}
+    .tag{display:inline-flex;align-self:flex-start;border-radius:999px;padding:5px 8px;font-size:11px;font-weight:700;background:#eef4ff;color:#174ea6;margin-bottom:10px;}
+    .tag.green{background:#ecfdf3;color:#087443}.tag.gray{background:#f3f4f6;color:#4b5563}.tag.orange{background:#fff7ed;color:#9a3412}.tag.dark{background:#111827;color:white}
+    .title{font-size:18px;font-weight:800;margin-bottom:6px;letter-spacing:-.02em}.desc{font-size:13px;color:var(--muted);line-height:1.45;flex:1}.url{font-size:12px;color:#2563eb;margin-top:12px;word-break:break-all;}
+    .section{font-size:15px;font-weight:800;margin:22px 0 10px;letter-spacing:-.02em}.footer{margin-top:22px;font-size:12px;color:var(--muted);line-height:1.5}
+    .status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0 18px}.stat{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px}.stat b{display:block;font-size:13px}.stat span{display:block;font-size:12px;color:var(--muted);margin-top:4px}
+    @media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));}.status{grid-template-columns:repeat(2,minmax(0,1fr));}}
+    @media(max-width:560px){.wrap{padding:14px 10px 28px}.top{align-items:flex-start}.pill{display:none}h1{font-size:21px}.grid{grid-template-columns:1fr}.card{min-height:142px;border-radius:14px;padding:14px}.status{grid-template-columns:1fr}.title{font-size:17px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>Glomart 관리자 통합 홈</h1>
+        <div class="sub">기존 빌더는 그대로 두고, 여기에서 메뉴로 직접 연결합니다. 주문 처리는 별도 via 페이지를 통해 진행합니다.</div>
+      </div>
+      <a class="pill" href="/api/gm/health" target="_blank" rel="noopener">API Health</a>
+    </div>
+
+    <div class="status">
+      <div class="stat"><b>PC/모바일 공통</b><span>반응형 관리자 홈</span></div>
+      <div class="stat"><b>기존 빌더 유지</b><span>파일 이동/폐기 없음</span></div>
+      <div class="stat"><b>직접 연결</b><span>대시보드·DB·상품 빌더</span></div>
+      <div class="stat"><b>주문만 VIA</b><span>주문 처리 흐름 분리</span></div>
+    </div>
+
+    <div class="section">주문 처리</div>
+    <div class="grid">
+      <a class="card" href="/gm_order_via.html">
+        <span class="tag dark">VIA</span>
+        <div class="title">주문 처리 Via</div>
+        <div class="desc">주문번호 기준으로 주문/상품을 읽고, mall_code와 source_url 기준으로 내부·쿠팡·알리·향후 빌더 처리 흐름을 연결하는 중간 페이지입니다.</div>
+        <div class="url">/gm_order_via.html</div>
+      </a>
+      <a class="card" href="/api/order/" onclick="alert('주문 조회는 /api/order/{주문번호} 형식입니다. 주문 Via 페이지를 사용하세요.');return false;">
+        <span class="tag gray">API</span>
+        <div class="title">주문 조회 API</div>
+        <div class="desc">단건 주문 조회 API입니다. 직접 호출보다 주문 Via 페이지에서 주문번호를 입력해서 확인하는 흐름으로 사용합니다.</div>
+        <div class="url">/api/order/{order_no}</div>
+      </a>
+    </div>
+
+    <div class="section">기존 빌더 직접 연결</div>
+    <div class="grid">
+      <a class="card" href="/gm_data_builder.html">
+        <span class="tag green">BUILDER</span>
+        <div class="title">DB Data Builder</div>
+        <div class="desc">DB Safe Update, Export, 회원 Import 등 기존 데이터 빌더 페이지입니다. 기존 페이지를 그대로 직접 연결합니다.</div>
+        <div class="url">/gm_data_builder.html</div>
+      </a>
+      <a class="card" href="/gm_dashboard.html">
+        <span class="tag green">DASHBOARD</span>
+        <div class="title">GM Dashboard</div>
+        <div class="desc">서버 현황, 상품, 주문, 큐 상태를 확인하는 기존 대시보드입니다.</div>
+        <div class="url">/gm_dashboard.html</div>
+      </a>
+      <a class="card" href="/product_data_builder.html">
+        <span class="tag green">BUILDER</span>
+        <div class="title">Product Data Builder</div>
+        <div class="desc">루트에 있던 product_data_builder.html을 기존 파일 그대로 노출해서 직접 연결합니다.</div>
+        <div class="url">/product_data_builder.html</div>
+      </a>
+    </div>
+
+    <div class="section">서버 기능 / 확장 빌더</div>
+    <div class="grid">
+      <a class="card" href="/api/gm/smartfit/health" target="_blank" rel="noopener">
+        <span class="tag orange">SMARTFIT</span>
+        <div class="title">SmartFit API</div>
+        <div class="desc">SmartFit 템플릿·공간·컬렉션·장바구니 빌드 API 상태 확인입니다. 화면 빌더가 추가되면 이 메뉴에서 직접 연결합니다.</div>
+        <div class="url">/api/gm/smartfit/health</div>
+      </a>
+      <a class="card" href="/api/gm/network/periods" target="_blank" rel="noopener">
+        <span class="tag orange">NETWORK</span>
+        <div class="title">Network Incentive</div>
+        <div class="desc">네트워크 인센티브 월간/연간 테이블 기준 기간 확인 API입니다. 전용 화면 추가 전까지 API 메뉴로 연결합니다.</div>
+        <div class="url">/api/gm/network/periods</div>
+      </a>
+      <a class="card" href="/collector_bookmarklet.html">
+        <span class="tag gray">LEGACY</span>
+        <div class="title">Collector Tool</div>
+        <div class="desc">기존 수집/테스트 도구입니다. 통합 관리자에서는 Legacy 메뉴로 분리합니다.</div>
+        <div class="url">/collector_bookmarklet.html</div>
+      </a>
+    </div>
+
+    <div class="footer">
+      GM_ADMIN_HOME_V001 · 기존 빌더 삭제 없음 · 주문은 via 페이지 경유 · 모바일/PC 접속 대응
+    </div>
+  </div>
+</body>
+</html>

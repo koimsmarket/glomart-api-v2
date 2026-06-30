@@ -1734,6 +1734,20 @@ app.get('/module/scrap/api/order/list', (req,res)=>{
   ok(res, { action:'order.list', total:orders.orders.length, orders:orders.orders });
 });
 
+
+/* GM_ADMIN_HOME_V001
+ * Admin integration shell.
+ * - Existing builder pages are kept as-is and linked directly from /gm_admin.html.
+ * - /admin and /gm_admin route to the static admin home.
+ * - product_data_builder.html is preserved in project root, so expose it directly without moving the original file.
+ */
+app.get(['/admin', '/admin/', '/gm_admin'], (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'gm_admin.html'));
+});
+app.get('/product_data_builder.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'product_data_builder.html'));
+});
+
 /* Compatibility aliases from older sqlite version */
 app.get('/db/status', (req,res)=>res.redirect('/api/gm/db/status'));
 app.post('/scrap/save', (req,res)=>res.redirect(307, '/api/gm/product/upsert'));
