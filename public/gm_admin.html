@@ -45,13 +45,13 @@
       <a class="card" href="/gm_order_via.html">
         <span class="tag dark">VIA</span>
         <div class="title">주문 처리 Via</div>
-        <div class="desc">주문번호 기준으로 주문/상품을 읽고, mall_code와 source_url 기준으로 내부·쿠팡·알리·향후 빌더 처리 흐름을 연결하는 중간 페이지입니다.</div>
+        <div class="desc">서버 미처리 주문 Queue를 불러오고, 주문 Lock/상태변경/source_code별 Builder 시작까지 연결하는 중간 페이지입니다.</div>
         <div class="url">/gm_order_via.html</div>
       </a>
       <a class="card" href="/api/order/" onclick="alert('주문 조회는 /api/order/{주문번호} 형식입니다. 주문 Via 페이지를 사용하세요.');return false;">
         <span class="tag gray">API</span>
         <div class="title">주문 조회 API</div>
-        <div class="desc">단건 주문 조회 API입니다. 직접 호출보다 주문 Via 페이지에서 주문번호를 입력해서 확인하는 흐름으로 사용합니다.</div>
+        <div class="desc">단건 주문 조회는 보조 기능입니다. 대량 처리는 주문 Via의 미처리 Queue 리스트에서 순차 처리합니다.</div>
         <div class="url">/api/order/{order_no}</div>
       </a>
     </div>
@@ -101,7 +101,7 @@
     </div>
 
     <div class="footer">
-      GM_ADMIN_HOME_V003 · 기존 빌더 삭제 없음 · 주문은 via 페이지 경유 · 모바일/PC 접속 대응
+      GM_ADMIN_HOME_V004 · 기존 빌더 삭제 없음 · 주문은 via 페이지 경유 · 모바일/PC 접속 대응
     </div>
   </div>
 </body>

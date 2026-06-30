@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Glomart 주문 처리 Via</title>
+  <title>Glomart 주문 처리 Via V004</title>
   <style>
     :root{--bg:#f5f7fb;--card:#fff;--line:#dfe5ef;--text:#1f2937;--muted:#6b7280;--brand:#1769ff;--danger:#dc2626;--ok:#16a34a;}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;color:var(--text)}
@@ -17,7 +17,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="top"><div><h1>주문 처리 Via</h1><div class="sub">서버에 저장된 미처리 주문을 Queue 리스트로 불러와 순차 처리합니다. 주문번호 직접 입력은 보조 조회만 사용합니다.</div></div><a class="home" href="/gm_admin.html">관리자 홈</a></div>
+  <div class="top"><div><h1>주문 처리 Via V004</h1><div class="sub">서버에 저장된 미처리 주문을 Queue 리스트로 불러와 순차 처리합니다. 주문번호 직접 입력은 보조 조회만 사용합니다.</div></div><a class="home" href="/gm_admin.html">관리자 홈</a></div>
   <div class="panel">
     <div class="toolbar">
       <select id="status"><option value="unprocessed">미처리/상품준비중</option><option value="all">전체</option><option value="complete">완료</option><option value="error">오류/보류</option></select>
@@ -26,7 +26,7 @@
       <input id="manualNo" placeholder="보조 조회: 주문번호" autocomplete="off">
       <button class="gray" onclick="loadDetailByManual()">단건 조회</button>
     </div>
-    <div class="hint">기본 API: /api/gm/admin/orders?status=unprocessed · 상세: /api/gm/admin/orders/{order_no}</div><div id="msg" class="msg"></div>
+    <div class="hint">기본 API: /api/gm/admin/orders?status=unprocessed · 상세: /api/gm/admin/orders/{order_no} · Lock/Builder: V004</div><div id="msg" class="msg"></div>
   </div>
   <div class="layout">
     <div><div class="panel"><b>처리 대기 주문</b><div id="orderList" class="list"><div class="empty">주문내역을 불러오는 중...</div></div></div></div>
@@ -46,7 +46,7 @@ function urlOf(item){return t(item.product_url||item.source_url||item.url||item.
 async function loadQueue(autoSelect){
   const msg=document.getElementById('msg'), list=document.getElementById('orderList'); const st=document.getElementById('status').value;
   msg.textContent='주문내역 조회 중...'; list.innerHTML='<div class="empty">조회 중...</div>';
-  try{ const r=await fetch('/api/gm/admin/orders?status='+encodeURIComponent(st)+'&limit=100',{cache:'no-store'}); const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){throw new Error('API가 JSON이 아니라 HTML/텍스트를 반환했습니다. server.js V003 배포 여부를 확인하세요. 응답 앞부분: '+txt.slice(0,80));} if(!j.ok) throw new Error(j.error||j.message||'조회 실패'); ORDERS=j.items||[]; renderQueue(j); msg.innerHTML='<b>'+ORDERS.length+'</b>건 표시 / 전체 '+(j.total||ORDERS.length)+'건'; if(autoSelect && ORDERS.length) loadDetail(ORDERS[0].order_no); }
+  try{ const r=await fetch('/api/gm/admin/orders?status='+encodeURIComponent(st)+'&limit=100',{cache:'no-store'}); const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){throw new Error('API가 JSON이 아니라 HTML/텍스트를 반환했습니다. server.js V004 배포 여부를 확인하세요. 응답 앞부분: '+txt.slice(0,80));} if(!j.ok) throw new Error(j.error||j.message||'조회 실패'); ORDERS=j.items||[]; renderQueue(j); msg.innerHTML='<b>'+ORDERS.length+'</b>건 표시 / 전체 '+(j.total||ORDERS.length)+'건'; if(autoSelect && ORDERS.length) loadDetail(ORDERS[0].order_no); }
   catch(e){ msg.textContent='주문내역 조회 실패: '+(e&&e.message?e.message:e); list.innerHTML='<div class="empty">조회 실패</div>'; }
 }
 function renderQueue(j){
@@ -57,16 +57,45 @@ function selectFirstPending(){ if(ORDERS.length) loadDetail(ORDERS[0].order_no);
 function loadDetailByManual(){ const no=t(document.getElementById('manualNo').value); if(no) loadDetail(no); }
 async function loadDetail(no){
   CURRENT=t(no); history.replaceState(null,'','/gm_order_via.html?order_no='+encodeURIComponent(CURRENT)); renderQueue({items:ORDERS}); const out=document.getElementById('result'); out.innerHTML='<div class="panel empty">주문 상세 조회 중...</div>';
-  try{ const r=await fetch('/api/gm/admin/orders/'+encodeURIComponent(CURRENT),{cache:'no-store'}); const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){throw new Error('상세 API가 JSON이 아니라 HTML/텍스트를 반환했습니다. server.js V003 배포 여부를 확인하세요. 응답 앞부분: '+txt.slice(0,80));} if(!j.ok) throw new Error(j.error||j.message||'조회 실패'); renderDetail(j.order,j.items||[]); }
+  try{ const r=await fetch('/api/gm/admin/orders/'+encodeURIComponent(CURRENT),{cache:'no-store'}); const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){throw new Error('상세 API가 JSON이 아니라 HTML/텍스트를 반환했습니다. server.js V004 배포 여부를 확인하세요. 응답 앞부분: '+txt.slice(0,80));} if(!j.ok) throw new Error(j.error||j.message||'조회 실패'); renderDetail(j.order,j.items||[]); }
   catch(e){ out.innerHTML='<div class="panel empty">상세 조회 실패: '+esc(e&&e.message?e.message:e)+'</div>'; }
+}
+
+async function startOrder(){
+  if(!CURRENT){alert('선택된 주문이 없습니다.');return;}
+  const out=document.getElementById('msg'); out.textContent='주문 Lock 처리 중...';
+  try{
+    const r=await fetch('/api/gm/admin/orders/'+encodeURIComponent(CURRENT)+'/lock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'auto_processing',operator:'admin'})});
+    const j=await r.json(); if(!j.ok) throw new Error(j.error||'lock failed');
+    out.innerHTML='주문 <b>'+esc(CURRENT)+'</b> Lock 완료: '+esc(j.updated?'상태 갱신':'상태컬럼 없음/미갱신')+' · '+esc(j.next_status||'auto_processing');
+    await loadDetail(CURRENT);
+  }catch(e){ out.textContent='주문 Lock 실패: '+(e&&e.message?e.message:e); }
+}
+async function setOrderStatus(status){
+  if(!CURRENT){alert('선택된 주문이 없습니다.');return;}
+  try{
+    const r=await fetch('/api/gm/admin/orders/'+encodeURIComponent(CURRENT)+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});
+    const j=await r.json(); if(!j.ok) throw new Error(j.error||'status failed');
+    document.getElementById('msg').innerHTML='주문 <b>'+esc(CURRENT)+'</b> 상태 변경: '+esc(status)+' / '+esc(j.updated?'갱신':'미갱신');
+    await loadDetail(CURRENT);
+  }catch(e){ alert('상태 변경 실패: '+(e&&e.message?e.message:e)); }
+}
+async function startBuilder(sourceCode, count){
+  if(!CURRENT){alert('선택된 주문이 없습니다.');return;}
+  const msg=document.getElementById('msg'); msg.textContent=sourceCode+' Builder 시작 준비 중...';
+  try{
+    const r=await fetch('/api/gm/admin/orders/'+encodeURIComponent(CURRENT)+'/builder/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_code:sourceCode,item_count:count})});
+    const j=await r.json(); if(!j.ok) throw new Error(j.error||'builder start failed');
+    msg.innerHTML='<b>'+esc(j.builder_code)+'</b> 준비 완료 · '+esc(j.phase)+' · 상품 '+esc(j.item_count)+'개';
+  }catch(e){ msg.textContent='Builder 시작 실패: '+(e&&e.message?e.message:e); }
 }
 function renderDetail(order,items){
   const out=document.getElementById('result'); if(!order){out.innerHTML='<div class="panel empty">주문을 찾지 못했습니다.</div>';return;}
   const groups={}; items.forEach(it=>{const k=detectSource(it); (groups[k]=groups[k]||[]).push(it);});
   const sumQty=items.reduce((a,it)=>a+Number(it.quantity||it.qty||0),0);
   let html='<div class="panel"><div class="summary">'+
-    '<div class="box"><b>주문번호</b><span>'+esc(order.order_no)+'</span></div>'+ '<div class="box"><b>회원/게스트</b><span>'+(esc(order.member_id)||esc(order.guest_key)||'-')+'</span></div>'+ '<div class="box"><b>주문상태</b><span>'+esc(order.order_status||'-')+'</span></div>'+ '<div class="box"><b>상품/수량</b><span>'+items.length+' / '+sumQty+'</span></div>'+ '</div><div class="actions"><button class="primary" onclick="alert(\'다음 V003 단계: 선택 주문 Lock → mall_code/source_url별 구매 빌더 순차 실행으로 연결\')">선택 주문 처리 시작</button><button onclick="selectNext()">다음 주문</button><a href="/gm_dashboard.html">대시보드</a></div><div class="warn">현재 V003은 미처리 주문 Queue 리스트와 상세 묶음 확인 단계입니다. 실제 구매 자동화는 다음 단계에서 Lock/상태변경 API와 연결합니다.</div></div>';
-  Object.keys(groups).sort().forEach(k=>{ const arr=groups[k]; html+='<div class="group"><div class="ghead"><span>'+esc(k)+'</span><small>'+arr.length+'개 상품</small></div>'; arr.forEach(it=>{const im=imgOf(it);const u=urlOf(it); html+='<div class="item">'+(im?'<img class="thumb" src="'+esc(im)+'" onerror="this.style.display=\'none\'">':'<div class="thumb"></div>')+'<div><div class="name">'+esc(it.product_name||it.name||'-')+'</div><div class="opt">'+esc([t(it.option_name),t(it.option_value)].filter(Boolean).join(' / '))+'</div>'+(u?'<div class="url">'+esc(u)+'</div>':'')+'</div><div class="qty">수량 '+esc(it.quantity||it.qty||1)+'</div><div class="price">'+won(it.customer_order_price||it.mall_sale_price||it.product_amount)+'</div></div>'; }); html+='</div>'; });
+    '<div class="box"><b>주문번호</b><span>'+esc(order.order_no)+'</span></div>'+ '<div class="box"><b>회원/게스트</b><span>'+(esc(order.member_id)||esc(order.guest_key)||'-')+'</span></div>'+ '<div class="box"><b>주문상태</b><span>'+esc(order.order_status||'-')+'</span></div>'+ '<div class="box"><b>상품/수량</b><span>'+items.length+' / '+sumQty+'</span></div>'+ '</div><div class="actions"><button class="primary" onclick="startOrder()">선택 주문 Lock</button><button onclick="setOrderStatus('builder_wait')">Builder 대기</button><button onclick="setOrderStatus('payment_wait')">결제대기</button><button onclick="selectNext()">다음 주문</button><a href="/gm_dashboard.html">대시보드</a></div><div class="warn">현재 V004는 주문 Lock/상태변경 API와 source_code별 Builder 시작 API까지 연결합니다. 실제 장바구니 자동담기는 다음 단계에서 builder_code별 모듈에 붙입니다.</div></div>';
+  Object.keys(groups).sort().forEach(k=>{ const arr=groups[k]; html+='<div class="group"><div class="ghead"><span>'+esc(k)+'</span><small>'+arr.length+'개 상품 · <button style="margin-left:8px;border:0;border-radius:8px;padding:5px 8px;font-weight:800;cursor:pointer" onclick="startBuilder(\''+esc(k)+'\','+arr.length+')">Builder 시작</button></small></div>'; arr.forEach(it=>{const im=imgOf(it);const u=urlOf(it); html+='<div class="item">'+(im?'<img class="thumb" src="'+esc(im)+'" onerror="this.style.display=\'none\'">':'<div class="thumb"></div>')+'<div><div class="name">'+esc(it.product_name||it.name||'-')+'</div><div class="opt">'+esc([t(it.option_name),t(it.option_value)].filter(Boolean).join(' / '))+'</div>'+(u?'<div class="url">'+esc(u)+'</div>':'')+'</div><div class="qty">수량 '+esc(it.quantity||it.qty||1)+'</div><div class="price">'+won(it.customer_order_price||it.mall_sale_price||it.product_amount)+'</div></div>'; }); html+='</div>'; });
   out.innerHTML=html;
 }
 function selectNext(){ const idx=ORDERS.findIndex(o=>t(o.order_no)===CURRENT); if(idx>=0 && idx<ORDERS.length-1) loadDetail(ORDERS[idx+1].order_no); else alert('다음 주문이 없습니다.'); }

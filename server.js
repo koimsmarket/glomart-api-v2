@@ -1719,6 +1719,97 @@ app.get('/api/gm/admin/orders/:order_no', async (req,res)=>{
   }
 });
 
+
+/* GM_ADMIN_ORDER_PROCESS_V004
+ * 주문 Queue 처리용 상태/Lock/Builder 시작 API.
+ * - 기존 gm_order/gm_orders, gm_order_item/gm_order_items 자동 인식 유지
+ * - 존재하는 상태 컬럼만 안전하게 UPDATE
+ * - Builder 실제 자동구매 연결 전 단계: 주문번호 + source_code + 상품수 기준 실행 계획 반환
+ */
+function gmOrderStatusColumn(cols){
+  for(const n of ['order_status','status','total_status','item_order_status']){
+    if(cols.includes(n)) return n;
+  }
+  return '';
+}
+async function gmUpdateOrderStatusSafe(orderNo, nextStatus, extra){
+  const orderTable = await firstExistingTable(['gm_order','gm_orders']);
+  if(!orderTable) return { updated:false, reason:'order table not found' };
+  const cols = await tableColumnNames(orderTable);
+  const orderNoColExpr = colExpr('o', cols, ['order_no','order_id','cafe24_order_id','gm_order_id'], "''");
+  const statusCol = gmOrderStatusColumn(cols);
+  if(!statusCol) return { updated:false, reason:'status column not found', order_table:orderTable };
+  const sets = [qIdent(statusCol) + '=$2'];
+  const vals = [orderNo, cleanText(nextStatus || 'auto_processing')];
+  let idx = 3;
+  if(cols.includes('updated_at')) sets.push('updated_at=now()');
+  const by = cleanText(extra && (extra.admin_id || extra.adminId || extra.operator || extra.locked_by));
+  for(const c of ['locked_by','processing_by','admin_id','operator_id']){
+    if(by && cols.includes(c)) { sets.push(qIdent(c) + '=$' + idx); vals.push(by); idx++; break; }
+  }
+  for(const c of ['locked_at','processing_started_at','started_at']){
+    if(cols.includes(c)) { sets.push(qIdent(c) + '=now()'); break; }
+  }
+  const sql = `UPDATE ${qIdent(orderTable)} o SET ${sets.join(', ')} WHERE ${orderNoColExpr}::text=$1 RETURNING *`;
+  const r = await dbQuery(sql, vals);
+  return { updated:r.rowCount > 0, row:r.rows[0] || null, order_table:orderTable, status_column:statusCol, next_status:nextStatus };
+}
+function gmBuilderCodeFromSource(sourceCode){
+  const s = cleanText(sourceCode).toUpperCase();
+  if(s === 'CPKR') return 'CPKR_BUILDER';
+  if(s === 'ALKR') return 'ALKR_BUILDER';
+  if(s === 'TEMU') return 'TEMU_BUILDER';
+  if(s === 'NPKR') return 'NAVER_BUILDER';
+  if(s === 'CAFE24' || s === 'INTERNAL') return 'INTERNAL_OR_MANUAL_BUILDER';
+  return (s || 'UNKNOWN') + '_BUILDER';
+}
+app.post('/api/gm/admin/orders/:order_no/lock', async (req,res)=>{
+  try{
+    const orderNo = cleanText(req.params.order_no);
+    if(!orderNo) return fail(res, 400, 'order_no required', { version:'GM_ADMIN_ORDER_PROCESS_V004' });
+    const result = await gmUpdateOrderStatusSafe(orderNo, cleanText(req.body && req.body.status || 'auto_processing'), req.body || {});
+    ok(res, { action:'admin.order.lock', order_no:orderNo, ...result, version:'GM_ADMIN_ORDER_PROCESS_V004' });
+  }catch(e){
+    console.error('[GM_ADMIN_ORDER_LOCK_ERROR_V004]', String(e && e.message || e));
+    fail(res, 500, 'admin order lock failed', { detail:String(e && e.message || e), version:'GM_ADMIN_ORDER_PROCESS_V004' });
+  }
+});
+app.post('/api/gm/admin/orders/:order_no/status', async (req,res)=>{
+  try{
+    const orderNo = cleanText(req.params.order_no);
+    const status = cleanText(req.body && (req.body.status || req.body.order_status || req.body.next_status));
+    if(!orderNo || !status) return fail(res, 400, 'order_no/status required', { version:'GM_ADMIN_ORDER_PROCESS_V004' });
+    const result = await gmUpdateOrderStatusSafe(orderNo, status, req.body || {});
+    ok(res, { action:'admin.order.status', order_no:orderNo, ...result, version:'GM_ADMIN_ORDER_PROCESS_V004' });
+  }catch(e){
+    console.error('[GM_ADMIN_ORDER_STATUS_ERROR_V004]', String(e && e.message || e));
+    fail(res, 500, 'admin order status failed', { detail:String(e && e.message || e), version:'GM_ADMIN_ORDER_PROCESS_V004' });
+  }
+});
+app.post('/api/gm/admin/orders/:order_no/builder/start', async (req,res)=>{
+  try{
+    const orderNo = cleanText(req.params.order_no);
+    const sourceCode = cleanText(req.body && (req.body.source_code || req.body.mall_code || req.body.builder_source)).toUpperCase();
+    if(!orderNo || !sourceCode) return fail(res, 400, 'order_no/source_code required', { version:'GM_ADMIN_ORDER_PROCESS_V004' });
+    const itemCount = toInt(req.body && req.body.item_count, 0);
+    const builderCode = gmBuilderCodeFromSource(sourceCode);
+    ok(res, {
+      action:'admin.order.builder.start',
+      order_no:orderNo,
+      source_code:sourceCode,
+      item_count:itemCount,
+      builder_code:builderCode,
+      phase:'READY_TO_CONNECT',
+      next_action:'CONNECT_ANDROID_OR_WEB_BUILDER',
+      note:'V004는 주문 Lock 후 source_code별 Builder 실행 계획까지 반환합니다. 실제 장바구니 자동담기는 다음 단계에서 builder_code별 모듈에 연결합니다.',
+      version:'GM_ADMIN_ORDER_PROCESS_V004'
+    });
+  }catch(e){
+    console.error('[GM_ADMIN_ORDER_BUILDER_START_ERROR_V004]', String(e && e.message || e));
+    fail(res, 500, 'admin order builder start failed', { detail:String(e && e.message || e), version:'GM_ADMIN_ORDER_PROCESS_V004' });
+  }
+});
+
 app.post('/api/gm/order/create', async (req,res)=>{
   const o = req.body || {};
   const items = Array.isArray(o.items) ? o.items : [];
