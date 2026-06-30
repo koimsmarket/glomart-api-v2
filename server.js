@@ -1572,76 +1572,111 @@ app.delete('/api/gm/basket/item', async (req,res)=>{
 });
 
 
-/* GM_ADMIN_ORDER_QUEUE_V002
+/* GM_ADMIN_ORDER_QUEUE_V003
  * 관리자 주문처리용 Queue API.
  * 목적: 주문번호 직접 입력이 아니라 서버에 쌓인 미처리 주문을 리스트로 불러와 순차/대량 처리한다.
- * - gm_order/gm_order_item 원본 테이블은 그대로 사용
- * - 기본 status=unprocessed 는 ordered/ready/pending/상품준비중 계열을 우선 조회
- * - 상세는 order_no 기준으로 주문 헤더 + 상품 목록을 반환
+ * V003 보강:
+ * - gm_order/gm_orders, gm_order_item/gm_order_items 둘 다 자동 인식
+ * - 실제 존재하는 칼럼만 SELECT/집계해서 컬럼 차이로 죽지 않게 처리
+ * - API가 없어서 HTML이 반환되는 문제를 피하기 위해 server.js 안에 직접 라우트 유지
  */
-function gmOrderStatusSql(status){
+function qIdent(name){ return '"' + String(name).replace(/"/g,'""') + '"'; }
+function colExpr(alias, cols, names, fallback){
+  const arr = Array.isArray(names) ? names : [names];
+  for(const n of arr){ if(cols.includes(n)) return alias + '.' + qIdent(n); }
+  return fallback || "''";
+}
+function numColExpr(alias, cols, names){
+  const e = colExpr(alias, cols, names, '0');
+  return `COALESCE(${e},0)`;
+}
+async function firstExistingTable(names){
+  for(const n of names){ if(await tableExists(n)) return n; }
+  return '';
+}
+function gmOrderStatusSql(status, orderCols){
   const st = cleanText(status || 'unprocessed').toLowerCase();
+  const statusExpr = colExpr('o', orderCols, ['order_status','status','total_status','item_order_status'], "'ordered'");
+  const low = `lower(COALESCE(${statusExpr}::text,'ordered'))`;
   if(st === 'all') return { sql:'', vals:[] };
-  if(st === 'complete' || st === 'completed') return { sql:`WHERE lower(COALESCE(o.order_status,'')) IN ('complete','completed','done','purchased','paid','delivered','주문완료','처리완료','발주완료')`, vals:[] };
-  if(st === 'error' || st === 'failed') return { sql:`WHERE lower(COALESCE(o.order_status,'')) IN ('error','failed','hold','cancel','cancelled','취소','오류','보류')`, vals:[] };
-  if(st && st !== 'unprocessed' && st !== 'ready' && st !== 'pending') return { sql:`WHERE lower(COALESCE(o.order_status,'')) = $1`, vals:[st] };
+  if(st === 'complete' || st === 'completed') return { sql:`WHERE ${low} IN ('complete','completed','done','purchased','paid','delivered','주문완료','처리완료','발주완료')`, vals:[] };
+  if(st === 'error' || st === 'failed') return { sql:`WHERE ${low} IN ('error','failed','hold','cancel','cancelled','취소','오류','보류')`, vals:[] };
+  if(st && st !== 'unprocessed' && st !== 'ready' && st !== 'pending') return { sql:`WHERE ${low} = $1`, vals:[st] };
   return {
-    sql:`WHERE lower(COALESCE(o.order_status,'ordered')) NOT IN ('complete','completed','done','purchased','paid','delivered','cancel','cancelled','error','failed','주문완료','처리완료','발주완료','취소','오류')`,
+    sql:`WHERE ${low} NOT IN ('complete','completed','done','purchased','paid','delivered','cancel','cancelled','error','failed','주문완료','처리완료','발주완료','취소','오류')`,
     vals:[]
   };
 }
 
 app.get('/api/gm/admin/orders', async (req,res)=>{
   try{
-    if(!(await tableExists('gm_order'))) return ok(res, { items:[], total:0, note:'gm_order table not found' });
+    const orderTable = await firstExistingTable(['gm_order','gm_orders']);
+    const itemTable = await firstExistingTable(['gm_order_item','gm_order_items']);
+    if(!orderTable) return ok(res, { items:[], total:0, note:'gm_order/gm_orders table not found', version:'GM_ADMIN_ORDER_QUEUE_V003' });
+    const orderCols = await tableColumnNames(orderTable);
+    const itemCols = itemTable ? await tableColumnNames(itemTable) : [];
+    const orderNoExpr = colExpr('o', orderCols, ['order_no','order_id','cafe24_order_id','gm_order_id'], "''");
+    const orderDateExpr = colExpr('o', orderCols, ['ordered_at','created_at','order_date','createdAt','updated_at'], 'now()');
+    const statusExpr = colExpr('o', orderCols, ['order_status','status','total_status','item_order_status'], "'ordered'");
+    const st = gmOrderStatusSql(req.query.status || 'unprocessed', orderCols);
     const limit = Math.min(Math.max(toInt(req.query.limit, 50), 1), 200);
     const offset = Math.max(toInt(req.query.offset, 0), 0);
-    const st = gmOrderStatusSql(req.query.status || 'unprocessed');
+    let joinSql = `LEFT JOIN (SELECT NULL::text AS order_no, 0::int AS item_count, 0::int AS total_qty, 0::bigint AS total_item_amount, ''::text AS mall_codes, ''::text AS source_codes WHERE false) i ON false`;
+    if(itemTable && itemCols.length){
+      const itemOrderNo = colExpr('gi', itemCols, ['order_no','order_id','cafe24_order_id','gm_order_id'], "''");
+      const qtyExpr = numColExpr('gi', itemCols, ['quantity','qty','order_qty','product_qty']);
+      const amountExpr = numColExpr('gi', itemCols, ['product_amount','customer_order_price','mall_sale_price','price','sale_price','total_price']);
+      const mallExpr = colExpr('gi', itemCols, ['mall_code','mallCode','source_mall_code'], "'CAFE24'");
+      const urlExpr = colExpr('gi', itemCols, ['product_url','source_url','url','productUrl'], "''");
+      joinSql = `
+        LEFT JOIN (
+          SELECT
+            ${itemOrderNo}::text AS order_no,
+            COUNT(*)::int AS item_count,
+            SUM(${qtyExpr})::int AS total_qty,
+            SUM(${amountExpr})::bigint AS total_item_amount,
+            string_agg(DISTINCT COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24'), ',' ORDER BY COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24')) AS mall_codes,
+            string_agg(DISTINCT CASE
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%coupang.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%temu.com%' THEN 'TEMU'
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%shopping.naver.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%smartstore.naver.com%' THEN 'NPKR'
+              ELSE COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24')
+            END, ',' ORDER BY CASE
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%coupang.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%temu.com%' THEN 'TEMU'
+              WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%shopping.naver.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%smartstore.naver.com%' THEN 'NPKR'
+              ELSE COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24')
+            END) AS source_codes
+          FROM ${qIdent(itemTable)} gi
+          GROUP BY ${itemOrderNo}
+        ) i ON i.order_no=${orderNoExpr}::text`;
+    }
     const vals = [...st.vals, limit, offset];
     const limitIdx = st.vals.length + 1;
     const offsetIdx = st.vals.length + 2;
     const listSql = `
       SELECT
         o.*,
+        ${orderNoExpr}::text AS order_no,
+        ${statusExpr}::text AS order_status,
         COALESCE(i.item_count,0)::int AS item_count,
         COALESCE(i.total_qty,0)::int AS total_qty,
         COALESCE(i.total_item_amount,0)::bigint AS total_item_amount,
         COALESCE(i.mall_codes,'') AS mall_codes,
         COALESCE(i.source_codes,'') AS source_codes
-      FROM gm_order o
-      LEFT JOIN (
-        SELECT
-          order_no,
-          COUNT(*) AS item_count,
-          SUM(COALESCE(quantity,0)) AS total_qty,
-          SUM(COALESCE(product_amount,0)) AS total_item_amount,
-          string_agg(DISTINCT COALESCE(NULLIF(mall_code,''),'CAFE24'), ',' ORDER BY COALESCE(NULLIF(mall_code,''),'CAFE24')) AS mall_codes,
-          string_agg(DISTINCT CASE
-            WHEN lower(COALESCE(product_url,'')) LIKE '%coupang.com%' OR lower(COALESCE(product_url,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
-            WHEN lower(COALESCE(product_url,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
-            WHEN lower(COALESCE(product_url,'')) LIKE '%temu.com%' THEN 'TEMU'
-            WHEN lower(COALESCE(product_url,'')) LIKE '%shopping.naver.com%' OR lower(COALESCE(product_url,'')) LIKE '%smartstore.naver.com%' THEN 'NPKR'
-            ELSE COALESCE(NULLIF(mall_code,''),'CAFE24')
-          END, ',' ORDER BY CASE
-            WHEN lower(COALESCE(product_url,'')) LIKE '%coupang.com%' OR lower(COALESCE(product_url,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
-            WHEN lower(COALESCE(product_url,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
-            WHEN lower(COALESCE(product_url,'')) LIKE '%temu.com%' THEN 'TEMU'
-            WHEN lower(COALESCE(product_url,'')) LIKE '%shopping.naver.com%' OR lower(COALESCE(product_url,'')) LIKE '%smartstore.naver.com%' THEN 'NPKR'
-            ELSE COALESCE(NULLIF(mall_code,''),'CAFE24')
-          END) AS source_codes
-        FROM gm_order_item
-        GROUP BY order_no
-      ) i ON i.order_no=o.order_no
+      FROM ${qIdent(orderTable)} o
+      ${joinSql}
       ${st.sql}
-      ORDER BY COALESCE(o.ordered_at,o.created_at,o.updated_at,now()) ASC
-      LIMIT $${limitIdx} OFFSET $${offsetIdx}
-    `;
-    const countSql = `SELECT COUNT(*)::int AS total FROM gm_order o ${st.sql}`;
+      ORDER BY COALESCE(${orderDateExpr},now()) ASC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}`;
+    const countSql = `SELECT COUNT(*)::int AS total FROM ${qIdent(orderTable)} o ${st.sql}`;
     const [list,count] = await Promise.all([dbQuery(listSql, vals), dbQuery(countSql, st.vals)]);
-    ok(res, { items:list.rows, total:count.rows[0] ? count.rows[0].total : list.rows.length, limit, offset, status:cleanText(req.query.status || 'unprocessed') });
+    ok(res, { items:list.rows, total:count.rows[0] ? count.rows[0].total : list.rows.length, limit, offset, status:cleanText(req.query.status || 'unprocessed'), order_table:orderTable, item_table:itemTable, version:'GM_ADMIN_ORDER_QUEUE_V003' });
   }catch(e){
-    console.error('[GM_ADMIN_ORDER_QUEUE_LIST_ERROR_V002]', String(e && e.message || e));
-    fail(res, 500, 'admin order list failed', { detail:String(e && e.message || e) });
+    console.error('[GM_ADMIN_ORDER_QUEUE_LIST_ERROR_V003]', String(e && e.message || e));
+    fail(res, 500, 'admin order list failed', { detail:String(e && e.message || e), version:'GM_ADMIN_ORDER_QUEUE_V003' });
   }
 });
 
@@ -1649,24 +1684,38 @@ app.get('/api/gm/admin/orders/:order_no', async (req,res)=>{
   try{
     const orderNo = cleanText(req.params.order_no);
     if(!orderNo) return fail(res, 400, 'order_no required');
-    const oh = await dbQuery(`SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1`, [orderNo]);
+    const orderTable = await firstExistingTable(['gm_order','gm_orders']);
+    const itemTable = await firstExistingTable(['gm_order_item','gm_order_items']);
+    if(!orderTable) return fail(res, 404, 'gm_order/gm_orders table not found');
+    const orderCols = await tableColumnNames(orderTable);
+    const orderNoExpr = colExpr('o', orderCols, ['order_no','order_id','cafe24_order_id','gm_order_id'], "''");
+    const oh = await dbQuery(`SELECT o.*, ${orderNoExpr}::text AS order_no FROM ${qIdent(orderTable)} o WHERE ${orderNoExpr}::text=$1 LIMIT 1`, [orderNo]);
     if(!oh.rows.length) return fail(res, 404, 'order not found');
-    const it = await dbQuery(`
-      SELECT *, CASE
-        WHEN lower(COALESCE(product_url,'')) LIKE '%coupang.com%' OR lower(COALESCE(product_url,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
-        WHEN lower(COALESCE(product_url,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
-        WHEN lower(COALESCE(product_url,'')) LIKE '%temu.com%' THEN 'TEMU'
-        WHEN lower(COALESCE(product_url,'')) LIKE '%shopping.naver.com%' OR lower(COALESCE(product_url,'')) LIKE '%smartstore.naver.com%' THEN 'NPKR'
-        ELSE COALESCE(NULLIF(mall_code,''),'CAFE24')
-      END AS source_code
-      FROM gm_order_item
-      WHERE order_no=$1
-      ORDER BY COALESCE(created_at,updated_at,now()) ASC, pi_ii_vi ASC
-    `, [orderNo]);
-    ok(res, { order:oh.rows[0], items:it.rows });
+    let items = [];
+    if(itemTable){
+      const itemCols = await tableColumnNames(itemTable);
+      const itemOrderNo = colExpr('gi', itemCols, ['order_no','order_id','cafe24_order_id','gm_order_id'], "''");
+      const mallExpr = colExpr('gi', itemCols, ['mall_code','mallCode','source_mall_code'], "'CAFE24'");
+      const urlExpr = colExpr('gi', itemCols, ['product_url','source_url','url','productUrl'], "''");
+      const sortExpr = colExpr('gi', itemCols, ['created_at','updated_at','id'], '1');
+      const it = await dbQuery(`
+        SELECT gi.*, CASE
+          WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%coupang.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
+          WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
+          WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%temu.com%' THEN 'TEMU'
+          WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%shopping.naver.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%smartstore.naver.com%' THEN 'NPKR'
+          ELSE COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24')
+        END AS source_code
+        FROM ${qIdent(itemTable)} gi
+        WHERE ${itemOrderNo}::text=$1
+        ORDER BY ${sortExpr} ASC
+      `, [orderNo]);
+      items = it.rows;
+    }
+    ok(res, { order:oh.rows[0], items, order_table:orderTable, item_table:itemTable, version:'GM_ADMIN_ORDER_QUEUE_V003' });
   }catch(e){
-    console.error('[GM_ADMIN_ORDER_QUEUE_DETAIL_ERROR_V002]', String(e && e.message || e));
-    fail(res, 500, 'admin order detail failed', { detail:String(e && e.message || e) });
+    console.error('[GM_ADMIN_ORDER_QUEUE_DETAIL_ERROR_V003]', String(e && e.message || e));
+    fail(res, 500, 'admin order detail failed', { detail:String(e && e.message || e), version:'GM_ADMIN_ORDER_QUEUE_V003' });
   }
 });
 

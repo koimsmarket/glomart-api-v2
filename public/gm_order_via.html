@@ -46,7 +46,7 @@ function urlOf(item){return t(item.product_url||item.source_url||item.url||item.
 async function loadQueue(autoSelect){
   const msg=document.getElementById('msg'), list=document.getElementById('orderList'); const st=document.getElementById('status').value;
   msg.textContent='주문내역 조회 중...'; list.innerHTML='<div class="empty">조회 중...</div>';
-  try{ const r=await fetch('/api/gm/admin/orders?status='+encodeURIComponent(st)+'&limit=100',{cache:'no-store'}); const j=await r.json(); if(!j.ok) throw new Error(j.error||'조회 실패'); ORDERS=j.items||[]; renderQueue(j); msg.innerHTML='<b>'+ORDERS.length+'</b>건 표시 / 전체 '+(j.total||ORDERS.length)+'건'; if(autoSelect && ORDERS.length) loadDetail(ORDERS[0].order_no); }
+  try{ const r=await fetch('/api/gm/admin/orders?status='+encodeURIComponent(st)+'&limit=100',{cache:'no-store'}); const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){throw new Error('API가 JSON이 아니라 HTML/텍스트를 반환했습니다. server.js V003 배포 여부를 확인하세요. 응답 앞부분: '+txt.slice(0,80));} if(!j.ok) throw new Error(j.error||j.message||'조회 실패'); ORDERS=j.items||[]; renderQueue(j); msg.innerHTML='<b>'+ORDERS.length+'</b>건 표시 / 전체 '+(j.total||ORDERS.length)+'건'; if(autoSelect && ORDERS.length) loadDetail(ORDERS[0].order_no); }
   catch(e){ msg.textContent='주문내역 조회 실패: '+(e&&e.message?e.message:e); list.innerHTML='<div class="empty">조회 실패</div>'; }
 }
 function renderQueue(j){
@@ -57,7 +57,7 @@ function selectFirstPending(){ if(ORDERS.length) loadDetail(ORDERS[0].order_no);
 function loadDetailByManual(){ const no=t(document.getElementById('manualNo').value); if(no) loadDetail(no); }
 async function loadDetail(no){
   CURRENT=t(no); history.replaceState(null,'','/gm_order_via.html?order_no='+encodeURIComponent(CURRENT)); renderQueue({items:ORDERS}); const out=document.getElementById('result'); out.innerHTML='<div class="panel empty">주문 상세 조회 중...</div>';
-  try{ const r=await fetch('/api/gm/admin/orders/'+encodeURIComponent(CURRENT),{cache:'no-store'}); const j=await r.json(); if(!j.ok) throw new Error(j.error||'조회 실패'); renderDetail(j.order,j.items||[]); }
+  try{ const r=await fetch('/api/gm/admin/orders/'+encodeURIComponent(CURRENT),{cache:'no-store'}); const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){throw new Error('상세 API가 JSON이 아니라 HTML/텍스트를 반환했습니다. server.js V003 배포 여부를 확인하세요. 응답 앞부분: '+txt.slice(0,80));} if(!j.ok) throw new Error(j.error||j.message||'조회 실패'); renderDetail(j.order,j.items||[]); }
   catch(e){ out.innerHTML='<div class="panel empty">상세 조회 실패: '+esc(e&&e.message?e.message:e)+'</div>'; }
 }
 function renderDetail(order,items){
@@ -65,7 +65,7 @@ function renderDetail(order,items){
   const groups={}; items.forEach(it=>{const k=detectSource(it); (groups[k]=groups[k]||[]).push(it);});
   const sumQty=items.reduce((a,it)=>a+Number(it.quantity||it.qty||0),0);
   let html='<div class="panel"><div class="summary">'+
-    '<div class="box"><b>주문번호</b><span>'+esc(order.order_no)+'</span></div>'+ '<div class="box"><b>회원/게스트</b><span>'+(esc(order.member_id)||esc(order.guest_key)||'-')+'</span></div>'+ '<div class="box"><b>주문상태</b><span>'+esc(order.order_status||'-')+'</span></div>'+ '<div class="box"><b>상품/수량</b><span>'+items.length+' / '+sumQty+'</span></div>'+ '</div><div class="actions"><button class="primary" onclick="alert(\'다음 V003 단계: 선택 주문 Lock → mall_code/source_url별 구매 빌더 순차 실행으로 연결\')">선택 주문 처리 시작</button><button onclick="selectNext()">다음 주문</button><a href="/gm_dashboard.html">대시보드</a></div><div class="warn">현재 V002는 미처리 주문 Queue 리스트와 상세 묶음 확인 단계입니다. 실제 구매 자동화는 다음 단계에서 Lock/상태변경 API와 연결합니다.</div></div>';
+    '<div class="box"><b>주문번호</b><span>'+esc(order.order_no)+'</span></div>'+ '<div class="box"><b>회원/게스트</b><span>'+(esc(order.member_id)||esc(order.guest_key)||'-')+'</span></div>'+ '<div class="box"><b>주문상태</b><span>'+esc(order.order_status||'-')+'</span></div>'+ '<div class="box"><b>상품/수량</b><span>'+items.length+' / '+sumQty+'</span></div>'+ '</div><div class="actions"><button class="primary" onclick="alert(\'다음 V003 단계: 선택 주문 Lock → mall_code/source_url별 구매 빌더 순차 실행으로 연결\')">선택 주문 처리 시작</button><button onclick="selectNext()">다음 주문</button><a href="/gm_dashboard.html">대시보드</a></div><div class="warn">현재 V003은 미처리 주문 Queue 리스트와 상세 묶음 확인 단계입니다. 실제 구매 자동화는 다음 단계에서 Lock/상태변경 API와 연결합니다.</div></div>';
   Object.keys(groups).sort().forEach(k=>{ const arr=groups[k]; html+='<div class="group"><div class="ghead"><span>'+esc(k)+'</span><small>'+arr.length+'개 상품</small></div>'; arr.forEach(it=>{const im=imgOf(it);const u=urlOf(it); html+='<div class="item">'+(im?'<img class="thumb" src="'+esc(im)+'" onerror="this.style.display=\'none\'">':'<div class="thumb"></div>')+'<div><div class="name">'+esc(it.product_name||it.name||'-')+'</div><div class="opt">'+esc([t(it.option_name),t(it.option_value)].filter(Boolean).join(' / '))+'</div>'+(u?'<div class="url">'+esc(u)+'</div>':'')+'</div><div class="qty">수량 '+esc(it.quantity||it.qty||1)+'</div><div class="price">'+won(it.customer_order_price||it.mall_sale_price||it.product_amount)+'</div></div>'; }); html+='</div>'; });
   out.innerHTML=html;
 }
