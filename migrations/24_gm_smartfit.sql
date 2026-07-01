@@ -1,4 +1,4 @@
--- GM SmartFit Phase1 Server Schema V009
+-- GM SmartFit Phase1 Server Schema V010
 -- Template is a shared measuring template. Users reference template_id; template items are not copied per user.
 -- Delete = trash move. Permanent delete is allowed only when there is no other-user reference.
 
@@ -26,6 +26,18 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_space (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- Compatibility ALTERs must run before indexes because existing V004/V007 tables may lack new columns.
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS owner_member_id VARCHAR(80) NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS author_nickname VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS real_name_public CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS search_visible CHAR(1) NOT NULL DEFAULT 'T';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS youtube_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(80);
+UPDATE gm_smartfit_space SET owner_member_id=creator_member_id WHERE COALESCE(owner_member_id,'')='';
+
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_creator ON gm_smartfit_space (creator_member_id);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_owner ON gm_smartfit_space (owner_member_id, is_deleted, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_public ON gm_smartfit_space (visibility, search_visible, is_deleted, updated_at DESC);
