@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V006';
+const VERSION = 'GM_SMARTFIT_SERVER_V009';
 console.log('[GM_SMARTFIT_ROUTE] loaded');
 const STAT_TYPES = new Set([
   'view','visit','collection','use','reuse','order','sales',
@@ -56,7 +56,7 @@ async function getMember(pool, memberId){
   const id = s(memberId);
   if(!id) return null;
   try{
-    const r = await pool.query('SELECT member_id, member_grade, member_grade_code, member_status FROM gm_member WHERE member_id=$1 LIMIT 1', [id]);
+    const r = await pool.query('SELECT member_id, member_name, member_name_en, member_nickname, member_grade, member_grade_code, member_status FROM gm_member WHERE member_id=$1 LIMIT 1', [id]);
     return r.rows[0] || null;
   }catch(e){ return null; }
 }
@@ -66,6 +66,35 @@ async function canPublic(pool, memberId, template){
   const purchaseCount = i(template && template.purchase_count, 0);
   if(purchaseCount >= 1) return { ok:true, admin:false, reason:'purchase_verified' };
   return { ok:false, admin:false, reason:'purchase_count_required' };
+}
+function yn(v, def='F'){
+  const x=s(v || '').toUpperCase();
+  if(['T','Y','YES','TRUE','1','PUBLIC'].includes(x)) return 'T';
+  if(['F','N','NO','FALSE','0','PRIVATE','HIDDEN'].includes(x)) return 'F';
+  return def;
+}
+function visibilityOf(v, def='private'){
+  const x=s(v || def).toLowerCase();
+  return VIS.has(x) ? x : def;
+}
+function publicVisibility(v){ return visibilityOf(v, 'private') === 'public' ? 'T' : 'F'; }
+function displayAuthor(row){
+  row=row||{};
+  return {
+    member_id:s(row.creator_member_id || row.owner_member_id || row.member_id),
+    nickname:s(row.author_nickname || row.member_nickname || ''),
+    real_name_public:s(row.real_name_public)==='T'?'T':'F',
+    real_name:s(row.real_name_public)==='T' ? s(row.member_name || '') : ''
+  };
+}
+async function memberNickname(pool, memberId){
+  const m=await getMember(pool, memberId);
+  return s(m && (m.member_nickname || m.member_name_en || m.member_name || m.member_id));
+}
+async function isOwnerOrAdmin(pool, memberId, ownerId){
+  if(s(memberId) && s(memberId)===s(ownerId)) return true;
+  const mem=await getMember(pool, memberId);
+  return isAdminMember(mem);
 }
 
 async function ensureMonthlyTable(pool, tableName, keyCol){
@@ -141,17 +170,19 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const mine = s(req.query.mine || '') === '1' || s(req.query.scope) === 'mine';
     const limit=Math.min(100, Math.max(1, i(req.query.limit, 30)));
     const offset=Math.max(0, i(req.query.offset, 0));
-    const params=[]; const where=[`t.is_active='T'`];
+    const params=[]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
     if(q){ params.push('%'+q+'%'); where.push(searchWhere('q','t').replace(/\$1/g, '$'+params.length)); }
     if(category){ params.push(category); where.push(`t.category_code=$${params.length}`); }
     if(mine && memberId){ params.push(memberId); where.push(`t.creator_member_id=$${params.length}`); }
-    else { where.push(`t.visibility='public'`); }
+    else { where.push(`t.visibility='public'`); where.push(`COALESCE(t.search_visible,'T')='T'`); }
     params.push(limit); const lim='$'+params.length; params.push(offset); const off='$'+params.length;
-    const sql = `SELECT t.*, c.category_name_ko, c.category_name_en FROM gm_smartfit_template t
+    const sql = `SELECT t.*, c.category_name_ko, c.category_name_en, sp.space_title, sp.author_nickname, sp.real_name_public, m.member_name, m.member_nickname FROM gm_smartfit_template t
       LEFT JOIN gm_smartfit_category c ON c.category_code=t.category_code
+      LEFT JOIN gm_smartfit_space sp ON sp.space_id=t.space_id
+      LEFT JOIN gm_member m ON m.member_id=t.creator_member_id
       WHERE ${where.join(' AND ')} ORDER BY t.updated_at DESC LIMIT ${lim} OFFSET ${off}`;
     const r=await pool.query(sql, params);
-    ok(res,{ items:r.rows, count:r.rowCount, limit, offset });
+    ok(res,{ items:r.rows.map(x=>Object.assign({}, x, { author:displayAuthor(x) })), count:r.rowCount, limit, offset });
   }catch(e){ fail(res,500,'template list failed',{ detail:String(e.message||e) }); }
 });
 
@@ -191,7 +222,7 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
     const pool=db(req); const id=i(req.params.template_id,0);
     const r=await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active=$2', [id,'T']);
     const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
-    const items=await pool.query('SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 ORDER BY sort_order,item_id', [id,'T']);
+    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_order,item_id", [id,'T']);
     const media=await pool.query("SELECT * FROM gm_smartfit_media WHERE target_type='template' AND target_id=$1 AND is_active='T' ORDER BY sort_order, media_id", [String(id)]);
     ok(res,{ template, items:items.rows, media:media.rows });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
@@ -204,7 +235,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     const templateId=i(b.template_id || b.templateId, 0);
     const creator=s(b.creator_member_id || b.creatorMemberId || b.member_id || b.memberId);
     if(!creator) return fail(res,400,'creator_member_id required');
-    let visibility=s(b.visibility || 'draft'); if(!VIS.has(visibility)) visibility='draft';
+    let visibility=visibilityOf(b.visibility || 'draft', 'draft');
     await client.query('BEGIN');
     let existing=null;
     if(templateId){
@@ -221,8 +252,16 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const pub = await canPublic(client, creator, base);
       if(!pub.ok) throw new Error('public requires purchase_count >= 1 or admin');
     }
+    let spaceId = b.space_id || b.spaceId || null;
+    const spaceName = s(b.space_name || b.spaceName || b.space_title || b.spaceTitle || '');
+    if(!spaceId && spaceName){
+      const nick = s(b.author_nickname || b.authorNickname || '') || await memberNickname(client, creator);
+      const sr = await client.query(`INSERT INTO gm_smartfit_space (creator_member_id, owner_member_id, author_nickname, real_name_public, space_title, visibility, search_visible)
+        VALUES ($1,$1,$2,$3,$4,$5,$6) RETURNING *`, [creator, nick, yn(b.real_name_public || b.realNamePublic, 'F'), spaceName, visibilityOf(b.space_visibility || b.spaceVisibility || 'private','private'), publicVisibility(b.space_visibility || b.spaceVisibility || 'private')]);
+      spaceId = sr.rows[0].space_id;
+    }
     const vals = {
-      space_id: b.space_id || b.spaceId || null,
+      space_id: spaceId,
       creator_member_id: creator,
       category_code: s(b.category_code || b.categoryCode || ''),
       template_title_ko: s(b.template_title_ko || b.title_ko || b.title || ''),
@@ -236,7 +275,8 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       creator_intro_gm_lang: s(b.creator_intro_gm_lang || ''),
       search_ko: s(b.search_ko || ''), search_en: s(b.search_en || ''), search_gm_lang: s(b.search_gm_lang || ''),
       search_ru: s(b.search_ru || ''), search_hi: s(b.search_hi || ''), search_fr: s(b.search_fr || ''), search_es: s(b.search_es || ''),
-      visibility
+      visibility,
+      search_visible: publicVisibility(visibility)
     };
     let saved;
     if(templateId){
@@ -244,30 +284,31 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         space_id=$1, category_code=$2, template_title_ko=$3, template_title_en=$4, template_title_gm_lang=$5,
         template_desc_ko=$6, template_desc_en=$7, template_desc_gm_lang=$8, creator_intro_ko=$9, creator_intro_en=$10, creator_intro_gm_lang=$11,
         search_ko=$12, search_en=$13, search_gm_lang=$14, search_ru=$15, search_hi=$16, search_fr=$17, search_es=$18,
-        visibility=$19, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
+        visibility=$19, search_visible=$20, updated_at=CURRENT_TIMESTAMP WHERE template_id=$21 RETURNING *`,
         [vals.space_id, vals.category_code, vals.template_title_ko, vals.template_title_en, vals.template_title_gm_lang,
          vals.template_desc_ko, vals.template_desc_en, vals.template_desc_gm_lang, vals.creator_intro_ko, vals.creator_intro_en, vals.creator_intro_gm_lang,
-         vals.search_ko, vals.search_en, vals.search_gm_lang, vals.search_ru, vals.search_hi, vals.search_fr, vals.search_es, vals.visibility, templateId]);
+         vals.search_ko, vals.search_en, vals.search_gm_lang, vals.search_ru, vals.search_hi, vals.search_fr, vals.search_es, vals.visibility, vals.search_visible, templateId]);
       saved=r.rows[0];
     }else{
       const r=await client.query(`INSERT INTO gm_smartfit_template (
         space_id, creator_member_id, category_code, template_title_ko, template_title_en, template_title_gm_lang,
         template_desc_ko, template_desc_en, template_desc_gm_lang, creator_intro_ko, creator_intro_en, creator_intro_gm_lang,
-        search_ko, search_en, search_gm_lang, search_ru, search_hi, search_fr, search_es, visibility
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`,
+        search_ko, search_en, search_gm_lang, search_ru, search_hi, search_fr, search_es, visibility, search_visible
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,
         [vals.space_id, vals.creator_member_id, vals.category_code, vals.template_title_ko, vals.template_title_en, vals.template_title_gm_lang,
          vals.template_desc_ko, vals.template_desc_en, vals.template_desc_gm_lang, vals.creator_intro_ko, vals.creator_intro_en, vals.creator_intro_gm_lang,
-         vals.search_ko, vals.search_en, vals.search_gm_lang, vals.search_ru, vals.search_hi, vals.search_fr, vals.search_es, vals.visibility]);
+         vals.search_ko, vals.search_en, vals.search_gm_lang, vals.search_ru, vals.search_hi, vals.search_fr, vals.search_es, vals.visibility, vals.search_visible]);
       saved=r.rows[0];
     }
     if(Array.isArray(b.items)){
-      // Creator editing replaces item list. User selection qty=0 is NOT stored here.
-      await client.query('UPDATE gm_smartfit_item SET is_active=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2', ['F', saved.template_id]);
+      // Creator editing soft-removes absent items. User selection qty=0 is NOT stored here.
+      await client.query("UPDATE gm_smartfit_item SET is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2", [creator, saved.template_id]);
       let order=0;
       for(const it of b.items){
         const productUid=s(it.product_uid || it.productUid); if(!productUid) continue;
-        await client.query(`INSERT INTO gm_smartfit_item (template_id,item_role,mall_code,product_uid,qty,default_checked,required_yn,creator_tip,sort_order)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [saved.template_id, s(it.item_role || it.role || 'ETC'), s(it.mall_code || it.mallCode || ''), productUid, Math.max(1,i(it.qty,1)), s(it.default_checked || it.defaultChecked || 'T') === 'F'?'F':'T', s(it.required_yn || it.requiredYn || 'F') === 'T'?'T':'F', s(it.creator_tip || it.tip || ''), i(it.sort_order, ++order)]);
+        await client.query(`INSERT INTO gm_smartfit_item (template_id,item_role,mall_code,product_uid,qty,default_checked,required_yn,creator_tip,sort_order,is_deleted,deleted_at,deleted_by)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'F',NULL,NULL)
+          ON CONFLICT (template_id,mall_code,product_uid) DO UPDATE SET item_role=EXCLUDED.item_role, qty=EXCLUDED.qty, default_checked=EXCLUDED.default_checked, required_yn=EXCLUDED.required_yn, creator_tip=EXCLUDED.creator_tip, sort_order=EXCLUDED.sort_order, is_deleted='F', deleted_at=NULL, deleted_by=NULL, is_active='T', updated_at=CURRENT_TIMESTAMP`, [saved.template_id, s(it.item_role || it.role || 'ETC'), s(it.mall_code || it.mallCode || ''), productUid, Math.max(1,i(it.qty,1)), s(it.default_checked || it.defaultChecked || 'T') === 'F'?'F':'T', s(it.required_yn || it.requiredYn || 'F') === 'T'?'T':'F', s(it.creator_tip || it.tip || ''), i(it.sort_order, ++order)]);
       }
     }
     await client.query('COMMIT');
@@ -283,7 +324,7 @@ router.post('/api/gm/smartfit/template/public', async (req,res)=>{
     const t=r.rows[0]; if(!t) return fail(res,404,'template not found');
     if(t.creator_member_id !== memberId){ const mem=await getMember(pool, memberId); if(!isAdminMember(mem)) return fail(res,403,'permission denied'); }
     const pub=await canPublic(pool, memberId, t); if(!pub.ok) return fail(res,403,'public not allowed',{ reason:pub.reason, purchase_count:t.purchase_count });
-    const rr=await pool.query("UPDATE gm_smartfit_template SET visibility='public', updated_at=CURRENT_TIMESTAMP WHERE template_id=$1 RETURNING *", [templateId]);
+    const rr=await pool.query("UPDATE gm_smartfit_template SET visibility='public', search_visible='T', updated_at=CURRENT_TIMESTAMP WHERE template_id=$1 RETURNING *", [templateId]);
     ok(res,{ template:rr.rows[0], reason:pub.reason });
   }catch(e){ fail(res,500,'public failed',{ detail:String(e.message||e) }); }
 });
@@ -292,8 +333,8 @@ router.post('/api/gm/smartfit/collection/add', async (req,res)=>{
   try{
     const pool=db(req); const member=s(req.body?.member_id || req.body?.memberId); const tid=i(req.body?.template_id || req.body?.templateId,0);
     if(!member || !tid) return fail(res,400,'member_id/template_id required');
-    const r=await pool.query(`INSERT INTO gm_smartfit_collection (member_id,template_id) VALUES ($1,$2)
-      ON CONFLICT(member_id,template_id) DO UPDATE SET updated_at=CURRENT_TIMESTAMP RETURNING *`, [member, tid]);
+    const r=await pool.query(`INSERT INTO gm_smartfit_collection (member_id,template_id,is_active,is_deleted,deleted_at,deleted_by) VALUES ($1,$2,'T','F',NULL,NULL)
+      ON CONFLICT(member_id,template_id) DO UPDATE SET is_active='T', is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP RETURNING *`, [member, tid]);
     await recordEventInternal(pool, { template_id:tid, member_id:member, stat_type:'collection', amount:1, source:'collection' });
     ok(res,{ collection:r.rows[0] });
   }catch(e){ fail(res,500,'collection add failed',{ detail:String(e.message||e) }); }
@@ -304,7 +345,7 @@ router.get('/api/gm/smartfit/collection/list', async (req,res)=>{
     const pool=db(req); const member=s(req.query.member_id || req.query.memberId); if(!member) return fail(res,400,'member_id required');
     const r=await pool.query(`SELECT c.*, t.template_title_ko, t.template_title_en, t.template_title_gm_lang, t.category_code, t.creator_member_id
       FROM gm_smartfit_collection c JOIN gm_smartfit_template t ON t.template_id=c.template_id
-      WHERE c.member_id=$1 AND t.is_active='T' ORDER BY c.updated_at DESC`, [member]);
+      WHERE c.member_id=$1 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T' AND t.is_active='T' ORDER BY c.updated_at DESC`, [member]);
     ok(res,{ items:r.rows, count:r.rowCount });
   }catch(e){ fail(res,500,'collection list failed',{ detail:String(e.message||e) }); }
 });
@@ -315,7 +356,7 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
     const templateIds = (Array.isArray(req.body?.template_ids) ? req.body.template_ids : Array.isArray(req.body?.templateIds) ? req.body.templateIds : [req.body?.template_id || req.body?.templateId]).map(x=>i(x,0)).filter(Boolean);
     if(!templateIds.length) return fail(res,400,'template_ids required');
     const r=await pool.query(`SELECT t.template_id, t.creator_member_id, t.category_code, t.template_title_ko, i.item_id, i.item_role, i.mall_code, i.product_uid, i.qty, i.default_checked, i.required_yn, i.creator_tip, i.sort_order
-      FROM gm_smartfit_template t JOIN gm_smartfit_item i ON i.template_id=t.template_id AND i.is_active='T'
+      FROM gm_smartfit_template t JOIN gm_smartfit_item i ON i.template_id=t.template_id AND i.is_active='T' AND COALESCE(i.is_deleted,'F')<>'T'
       WHERE t.template_id = ANY($1::bigint[]) AND t.is_active='T'
       ORDER BY array_position($1::bigint[], t.template_id), i.sort_order, i.item_id`, [templateIds]);
     const batchId = 'SFB_' + Date.now() + '_' + Math.random().toString(16).slice(2,8);
@@ -347,7 +388,7 @@ router.get('/api/gm/smartfit/media/list', async (req,res)=>{
   try{
     const pool=db(req); const targetType=s(req.query.target_type || req.query.targetType || 'template'); const targetId=s(req.query.target_id || req.query.targetId || req.query.template_id || '');
     if(!targetId) return fail(res,400,'target_id required');
-    const r=await pool.query(`SELECT * FROM gm_smartfit_media WHERE target_type=$1 AND target_id=$2 AND is_active='T' ORDER BY sort_order, media_id`, [targetType, targetId]);
+    const r=await pool.query(`SELECT * FROM gm_smartfit_media WHERE target_type=$1 AND target_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_order, media_id`, [targetType, targetId]);
     ok(res,{ items:r.rows, count:r.rowCount });
   }catch(e){ fail(res,500,'media list failed',{ detail:String(e.message||e) }); }
 });
@@ -376,7 +417,7 @@ router.post('/api/gm/smartfit/media/save', async (req,res)=>{
 router.get('/api/gm/smartfit/comment/list', async (req,res)=>{
   try{
     const pool=db(req); const templateId=i(req.query.template_id || req.query.templateId,0); if(!templateId) return fail(res,400,'template_id required');
-    const r=await pool.query(`SELECT * FROM gm_smartfit_comment WHERE template_id=$1 AND is_active='T' ORDER BY created_at DESC LIMIT 200`, [templateId]);
+    const r=await pool.query(`SELECT * FROM gm_smartfit_comment WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY created_at DESC LIMIT 200`, [templateId]);
     ok(res,{ items:r.rows, count:r.rowCount });
   }catch(e){ fail(res,500,'comment list failed',{ detail:String(e.message||e) }); }
 });
@@ -440,6 +481,137 @@ router.get('/api/gm/smartfit/stat/monthly', async (req,res)=>{
     const r=await pool.query(`SELECT * FROM ${qident(table)} ${where} ORDER BY total DESC LIMIT 500`, params);
     ok(res,{ ym, target, items:r.rows, count:r.rowCount });
   }catch(e){ fail(res,500,'monthly stat failed',{ detail:String(e.message||e) }); }
+});
+
+
+router.post('/api/gm/smartfit/space/save', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.owner_member_id);
+    if(!member) return fail(res,400,'member_id required');
+    const spaceId=i(b.space_id || b.spaceId,0);
+    const visibility=visibilityOf(b.visibility || 'private','private');
+    const nick=s(b.author_nickname || b.authorNickname || '') || await memberNickname(client, member);
+    await client.query('BEGIN');
+    let saved;
+    if(spaceId){
+      const old=(await client.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 FOR UPDATE',[spaceId])).rows[0];
+      if(!old) throw new Error('space not found');
+      if(!(await isOwnerOrAdmin(client, member, old.owner_member_id || old.creator_member_id))) throw new Error('permission denied');
+      const r=await client.query(`UPDATE gm_smartfit_space SET author_nickname=$1, real_name_public=$2, space_title=$3, space_title_en=$4, space_title_gm_lang=$5,
+        space_desc=$6, space_desc_en=$7, space_desc_gm_lang=$8, youtube_url=$9, image_url=$10, visibility=$11, search_visible=$12, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP
+        WHERE space_id=$13 RETURNING *`, [nick, yn(b.real_name_public || b.realNamePublic,'F'), s(b.space_title || b.spaceTitle || b.space_name || b.spaceName || ''), s(b.space_title_en || b.spaceTitleEn || ''), s(b.space_title_gm_lang || b.spaceTitleGmLang || ''), s(b.space_desc || b.description || ''), s(b.space_desc_en || ''), s(b.space_desc_gm_lang || ''), s(b.youtube_url || b.youtubeUrl || ''), s(b.image_url || b.imageUrl || ''), visibility, publicVisibility(visibility), spaceId]);
+      saved=r.rows[0];
+    }else{
+      const r=await client.query(`INSERT INTO gm_smartfit_space (creator_member_id,owner_member_id,author_nickname,real_name_public,space_title,space_title_en,space_title_gm_lang,space_desc,space_desc_en,space_desc_gm_lang,youtube_url,image_url,visibility,search_visible)
+        VALUES ($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [member, nick, yn(b.real_name_public || b.realNamePublic,'F'), s(b.space_title || b.spaceTitle || b.space_name || b.spaceName || ''), s(b.space_title_en || b.spaceTitleEn || ''), s(b.space_title_gm_lang || b.spaceTitleGmLang || ''), s(b.space_desc || b.description || ''), s(b.space_desc_en || ''), s(b.space_desc_gm_lang || ''), s(b.youtube_url || b.youtubeUrl || ''), s(b.image_url || b.imageUrl || ''), visibility, publicVisibility(visibility)]);
+      saved=r.rows[0];
+    }
+    await client.query('COMMIT');
+    ok(res,{ space:saved, author:displayAuthor(saved) });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'space save failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+
+router.get('/api/gm/smartfit/space/list', async (req,res)=>{
+  try{
+    const pool=db(req); const member=s(req.query.member_id || req.query.memberId || ''); const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine';
+    const params=[]; const where=[`sp.is_active='T'`, `COALESCE(sp.is_deleted,'F')<>'T'`];
+    if(mine && member){ params.push(member); where.push(`sp.owner_member_id=$${params.length}`); }
+    else { where.push(`sp.visibility='public'`); where.push(`COALESCE(sp.search_visible,'T')='T'`); }
+    const r=await pool.query(`SELECT sp.*, m.member_name, m.member_nickname FROM gm_smartfit_space sp LEFT JOIN gm_member m ON m.member_id=sp.owner_member_id WHERE ${where.join(' AND ')} ORDER BY sp.updated_at DESC LIMIT 200`, params);
+    ok(res,{ items:r.rows.map(x=>Object.assign({}, x, { author:displayAuthor(x) })), count:r.rowCount });
+  }catch(e){ fail(res,500,'space list failed',{ detail:String(e.message||e) }); }
+});
+
+async function referenceCount(client, type, id, owner){
+  if(type==='template'){
+    const r=await client.query(`SELECT COUNT(*)::int AS cnt FROM gm_smartfit_collection WHERE template_id=$1 AND member_id<>$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'`, [id, owner]);
+    return i(r.rows[0] && r.rows[0].cnt,0);
+  }
+  if(type==='space'){
+    const r=await client.query(`SELECT COUNT(*)::int AS cnt FROM gm_smartfit_collection c JOIN gm_smartfit_template t ON t.template_id=c.template_id WHERE t.space_id=$1 AND c.member_id<>$2 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'`, [id, owner]);
+    return i(r.rows[0] && r.rows[0].cnt,0);
+  }
+  if(type==='item'){
+    const r=await client.query(`SELECT COUNT(*)::int AS cnt FROM gm_smartfit_collection c JOIN gm_smartfit_item i ON i.template_id=c.template_id JOIN gm_smartfit_template t ON t.template_id=i.template_id WHERE i.item_id=$1 AND c.member_id<>$2 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'`, [id, owner]);
+    return i(r.rows[0] && r.rows[0].cnt,0);
+  }
+  return 0;
+}
+async function trashTarget(client, type, id){
+  if(type==='space') return (await client.query('SELECT space_id AS id, owner_member_id AS owner_id, creator_member_id FROM gm_smartfit_space WHERE space_id=$1',[id])).rows[0];
+  if(type==='template') return (await client.query('SELECT template_id AS id, creator_member_id AS owner_id FROM gm_smartfit_template WHERE template_id=$1',[id])).rows[0];
+  if(type==='item') return (await client.query('SELECT i.item_id AS id, t.creator_member_id AS owner_id, i.template_id FROM gm_smartfit_item i JOIN gm_smartfit_template t ON t.template_id=i.template_id WHERE i.item_id=$1',[id])).rows[0];
+  return null;
+}
+async function updateTrashState(client, type, id, member, deleted){
+  if(deleted){
+    if(type==='space') return client.query(`UPDATE gm_smartfit_space SET is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1, search_visible='F', updated_at=CURRENT_TIMESTAMP WHERE space_id=$2 RETURNING *`, [member, id]);
+    if(type==='template') return client.query(`UPDATE gm_smartfit_template SET is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1, search_visible='F', updated_at=CURRENT_TIMESTAMP WHERE template_id=$2 RETURNING *`, [member, id]);
+    if(type==='item') return client.query(`UPDATE gm_smartfit_item SET is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1, updated_at=CURRENT_TIMESTAMP WHERE item_id=$2 RETURNING *`, [member, id]);
+  }else{
+    if(type==='space') return client.query(`UPDATE gm_smartfit_space SET is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$1 RETURNING *`, [id]);
+    if(type==='template') return client.query(`UPDATE gm_smartfit_template SET is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$1 RETURNING *`, [id]);
+    if(type==='item') return client.query(`UPDATE gm_smartfit_item SET is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE item_id=$1 RETURNING *`, [id]);
+  }
+  throw new Error('invalid target_type');
+}
+router.post('/api/gm/smartfit/trash/move', async (req,res)=>{
+  const client=await db(req).connect();
+  try{
+    const type=s(req.body?.target_type || req.body?.type); const id=i(req.body?.target_id || req.body?.id,0); const member=s(req.body?.member_id || req.body?.memberId);
+    if(!type || !id || !member) return fail(res,400,'target_type/target_id/member_id required');
+    await client.query('BEGIN');
+    const target=await trashTarget(client,type,id); if(!target) throw new Error('target not found');
+    if(!(await isOwnerOrAdmin(client, member, target.owner_id))) throw new Error('permission denied');
+    const r=await updateTrashState(client,type,id,member,true);
+    await client.query('COMMIT');
+    ok(res,{ item:r.rows[0], message:'삭제되었습니다. 추후 복원 메뉴에서 복원할 수 있습니다.' });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'trash move failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+router.post('/api/gm/smartfit/trash/restore', async (req,res)=>{
+  const client=await db(req).connect();
+  try{
+    const type=s(req.body?.target_type || req.body?.type); const ids=(Array.isArray(req.body?.target_ids)?req.body.target_ids:[req.body?.target_id || req.body?.id]).map(x=>i(x,0)).filter(Boolean); const member=s(req.body?.member_id || req.body?.memberId);
+    if(!type || !ids.length || !member) return fail(res,400,'target_type/target_ids/member_id required');
+    await client.query('BEGIN'); const out=[];
+    for(const id of ids){ const target=await trashTarget(client,type,id); if(!target) continue; if(!(await isOwnerOrAdmin(client, member, target.owner_id))) throw new Error('permission denied'); const r=await updateTrashState(client,type,id,member,false); out.push(r.rows[0]); }
+    await client.query('COMMIT'); ok(res,{ items:out, count:out.length });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'trash restore failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+router.post('/api/gm/smartfit/trash/permanent-delete', async (req,res)=>{
+  const client=await db(req).connect();
+  try{
+    const type=s(req.body?.target_type || req.body?.type); const ids=(Array.isArray(req.body?.target_ids)?req.body.target_ids:[req.body?.target_id || req.body?.id]).map(x=>i(x,0)).filter(Boolean); const member=s(req.body?.member_id || req.body?.memberId);
+    if(!type || !ids.length || !member) return fail(res,400,'target_type/target_ids/member_id required');
+    await client.query('BEGIN'); const deleted=[]; const blocked=[];
+    for(const id of ids){
+      const target=await trashTarget(client,type,id); if(!target) continue;
+      if(!(await isOwnerOrAdmin(client, member, target.owner_id))) throw new Error('permission denied');
+      const refs=await referenceCount(client,type,id,target.owner_id);
+      if(refs>0){ blocked.push({id, refs, reason:'used_by_other_member'}); continue; }
+      if(type==='space'){ await client.query('DELETE FROM gm_smartfit_item WHERE template_id IN (SELECT template_id FROM gm_smartfit_template WHERE space_id=$1)',[id]); await client.query('DELETE FROM gm_smartfit_template WHERE space_id=$1',[id]); await client.query('DELETE FROM gm_smartfit_space WHERE space_id=$1',[id]); }
+      else if(type==='template'){ await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[id]); await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1',[id]); }
+      else if(type==='item'){ await client.query('DELETE FROM gm_smartfit_item WHERE item_id=$1',[id]); }
+      deleted.push(id);
+    }
+    await client.query('COMMIT'); ok(res,{ deleted, blocked, message:blocked.length?'다른 사용자가 사용 중인 항목은 영구삭제하지 않았습니다.':'' });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'permanent delete failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+router.get('/api/gm/smartfit/trash/list', async (req,res)=>{
+  try{
+    const pool=db(req); const member=s(req.query.member_id || req.query.memberId); const type=s(req.query.target_type || req.query.type || 'template');
+    if(!member) return fail(res,400,'member_id required');
+    let sql, params=[member];
+    if(type==='space') sql="SELECT * FROM gm_smartfit_space WHERE owner_member_id=$1 AND COALESCE(is_deleted,'F')='T' ORDER BY deleted_at DESC";
+    else if(type==='item') sql="SELECT i.* FROM gm_smartfit_item i JOIN gm_smartfit_template t ON t.template_id=i.template_id WHERE t.creator_member_id=$1 AND COALESCE(i.is_deleted,'F')='T' ORDER BY i.deleted_at DESC";
+    else sql="SELECT * FROM gm_smartfit_template WHERE creator_member_id=$1 AND COALESCE(is_deleted,'F')='T' ORDER BY deleted_at DESC";
+    const r=await pool.query(sql, params); ok(res,{ items:r.rows, count:r.rowCount, target_type:type });
+  }catch(e){ fail(res,500,'trash list failed',{ detail:String(e.message||e) }); }
 });
 
 module.exports = router;

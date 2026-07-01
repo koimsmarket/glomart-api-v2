@@ -1,23 +1,34 @@
--- GM SmartFit Phase1 Server Schema V002
--- Template = Product concept. Category + Template both keep global search columns.
--- Dynamic monthly stat tables are created by routes/smartfit.js when events occur.
+-- GM SmartFit Phase1 Server Schema V009
+-- Template is a shared measuring template. Users reference template_id; template items are not copied per user.
+-- Delete = trash move. Permanent delete is allowed only when there is no other-user reference.
 
 CREATE TABLE IF NOT EXISTS gm_smartfit_space (
   space_id BIGSERIAL PRIMARY KEY,
   creator_member_id VARCHAR(80) NOT NULL,
+  owner_member_id VARCHAR(80) NOT NULL DEFAULT '',
+  author_nickname VARCHAR(120) NOT NULL DEFAULT '',
+  real_name_public CHAR(1) NOT NULL DEFAULT 'F',
   space_title VARCHAR(200) NOT NULL DEFAULT '',
   space_title_en VARCHAR(200) NOT NULL DEFAULT '',
   space_title_gm_lang VARCHAR(200) NOT NULL DEFAULT '',
   space_desc TEXT NOT NULL DEFAULT '',
   space_desc_en TEXT NOT NULL DEFAULT '',
   space_desc_gm_lang TEXT NOT NULL DEFAULT '',
+  youtube_url TEXT NOT NULL DEFAULT '',
+  image_url TEXT NOT NULL DEFAULT '',
   visibility VARCHAR(20) NOT NULL DEFAULT 'private', -- draft/private/public
+  search_visible CHAR(1) NOT NULL DEFAULT 'T',
   sort_order INTEGER NOT NULL DEFAULT 0,
   is_active CHAR(1) NOT NULL DEFAULT 'T',
+  is_deleted CHAR(1) NOT NULL DEFAULT 'F',
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(80),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_creator ON gm_smartfit_space (creator_member_id);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_owner ON gm_smartfit_space (owner_member_id, is_deleted, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_public ON gm_smartfit_space (visibility, search_visible, is_deleted, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS gm_smartfit_category (
   category_code VARCHAR(30) PRIMARY KEY,
@@ -70,6 +81,7 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_template (
   search_fr TEXT NOT NULL DEFAULT '',
   search_es TEXT NOT NULL DEFAULT '',
   visibility VARCHAR(20) NOT NULL DEFAULT 'draft', -- draft/private/public
+  search_visible CHAR(1) NOT NULL DEFAULT 'T',
   purchase_count INTEGER NOT NULL DEFAULT 0,
   view_count BIGINT NOT NULL DEFAULT 0,
   visit_count BIGINT NOT NULL DEFAULT 0,
@@ -88,12 +100,17 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_template (
   rating_sum NUMERIC(18,2) NOT NULL DEFAULT 0,
   rating_avg NUMERIC(8,4) NOT NULL DEFAULT 0,
   is_active CHAR(1) NOT NULL DEFAULT 'T',
+  is_deleted CHAR(1) NOT NULL DEFAULT 'F',
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(80),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_creator ON gm_smartfit_template (creator_member_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_category ON gm_smartfit_template (category_code, visibility, is_active);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_visibility ON gm_smartfit_template (visibility, is_active, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_public_v009 ON gm_smartfit_template (visibility, search_visible, is_deleted, is_active, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_trash ON gm_smartfit_template (creator_member_id, is_deleted, deleted_at DESC);
 
 CREATE TABLE IF NOT EXISTS gm_smartfit_item (
   item_id BIGSERIAL PRIMARY KEY,
@@ -106,24 +123,35 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_item (
   required_yn CHAR(1) NOT NULL DEFAULT 'F',
   creator_tip TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0,
+  use_count BIGINT NOT NULL DEFAULT 0,
+  last_used_at TIMESTAMP,
   is_active CHAR(1) NOT NULL DEFAULT 'T',
+  is_deleted CHAR(1) NOT NULL DEFAULT 'F',
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(80),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(template_id, item_id)
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_smartfit_item_template_product ON gm_smartfit_item (template_id, mall_code, product_uid);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_template ON gm_smartfit_item (template_id, sort_order, item_id);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_product ON gm_smartfit_item (mall_code, product_uid);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_trash ON gm_smartfit_item (template_id, is_deleted, deleted_at DESC);
 
 CREATE TABLE IF NOT EXISTS gm_smartfit_collection (
   member_id VARCHAR(80) NOT NULL,
   template_id BIGINT NOT NULL,
   use_count BIGINT NOT NULL DEFAULT 0,
   last_used_at TIMESTAMP,
+  is_active CHAR(1) NOT NULL DEFAULT 'T',
+  is_deleted CHAR(1) NOT NULL DEFAULT 'F',
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(80),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(member_id, template_id)
 );
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_collection_template ON gm_smartfit_collection (template_id);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_collection_ref_v009 ON gm_smartfit_collection (template_id, member_id, is_active, is_deleted);
 
 CREATE TABLE IF NOT EXISTS gm_smartfit_media (
   media_id BIGSERIAL PRIMARY KEY,
@@ -135,6 +163,9 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_media (
   title VARCHAR(240) NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0,
   is_active CHAR(1) NOT NULL DEFAULT 'T',
+  is_deleted CHAR(1) NOT NULL DEFAULT 'F',
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(80),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -149,6 +180,9 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_comment (
   body TEXT NOT NULL DEFAULT '',
   is_creator_reply CHAR(1) NOT NULL DEFAULT 'F',
   is_active CHAR(1) NOT NULL DEFAULT 'T',
+  is_deleted CHAR(1) NOT NULL DEFAULT 'F',
+  deleted_at TIMESTAMP,
+  deleted_by VARCHAR(80),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -158,6 +192,7 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_event (
   event_id BIGSERIAL PRIMARY KEY,
   space_id BIGINT,
   template_id BIGINT,
+  item_id BIGINT,
   category_code VARCHAR(30) NOT NULL DEFAULT '',
   creator_member_id VARCHAR(80) NOT NULL DEFAULT '',
   member_id VARCHAR(80) NOT NULL DEFAULT '',
@@ -173,6 +208,37 @@ CREATE INDEX IF NOT EXISTS idx_gm_smartfit_event_template ON gm_smartfit_event (
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_event_category ON gm_smartfit_event (category_code, stat_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_event_member ON gm_smartfit_event (member_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_event_creator ON gm_smartfit_event (creator_member_id, created_at DESC);
+
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS member_nickname VARCHAR(120);
+-- Safety ALTERs for older deployments that already created V002/V004/V007 tables.
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS owner_member_id VARCHAR(80) NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS author_nickname VARCHAR(120) NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS real_name_public CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS search_visible CHAR(1) NOT NULL DEFAULT 'T';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS youtube_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(80);
+UPDATE gm_smartfit_space SET owner_member_id=creator_member_id WHERE COALESCE(owner_member_id,'')='';
+
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS search_visible CHAR(1) NOT NULL DEFAULT 'T';
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(80);
+
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(80);
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS use_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP;
+
+ALTER TABLE gm_smartfit_collection ADD COLUMN IF NOT EXISTS is_active CHAR(1) NOT NULL DEFAULT 'T';
+ALTER TABLE gm_smartfit_collection ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_collection ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
+ALTER TABLE gm_smartfit_collection ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(80);
+
+ALTER TABLE gm_smartfit_event ADD COLUMN IF NOT EXISTS item_id BIGINT;
 
 -- Basic seed. Detailed category CSV can overwrite these later.
 INSERT INTO gm_smartfit_category (category_code,parent_code,depth,leaf_yn,display_order,category_name_ko,category_name_en,search_ko,search_en)

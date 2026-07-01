@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS gm_member (
   cafe24_member_id VARCHAR(80),
   member_name VARCHAR(120),
   member_name_en VARCHAR(120),
+  member_nickname VARCHAR(120),
   email VARCHAR(180),
   phone VARCHAR(40),
   country_code VARCHAR(20),
@@ -78,6 +79,9 @@ CREATE TABLE IF NOT EXISTS gm_member_ledger (
   created_by VARCHAR(80),
   PRIMARY KEY (ledger_id)
 );
+
+-- V009 SmartFit author privacy: default nickname source for Space author_nickname.
+ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS member_nickname VARCHAR(120);
 
 -- V002 safety: existing gm_member table may have been created before cafe24_raw_json was added.
 ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS cafe24_raw_json JSONB;
