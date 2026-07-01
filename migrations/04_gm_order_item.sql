@@ -4,6 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS gm_order_item (
   order_no TEXT NOT NULL,
+  cafe24_order_no TEXT,
   pi_ii_vi TEXT NOT NULL,
   product_name TEXT NOT NULL,
   option_name TEXT,
@@ -17,6 +18,8 @@ CREATE TABLE IF NOT EXISTS gm_order_item (
   delivery_fee INTEGER,
   extra_area_delivery_fee INTEGER,
   mall_code TEXT NOT NULL,
+  source_mall TEXT,
+  source_uid TEXT,
   supplier_id TEXT,
   supplier_name TEXT,
   product_url TEXT NOT NULL,

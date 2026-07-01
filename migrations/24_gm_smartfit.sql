@@ -1,5 +1,6 @@
--- GM SmartFit Phase1 Server Schema V011
+-- GM SmartFit Phase1 Server Schema V012
 -- Template is a shared measuring template. Users reference template_id; template items are not copied per user.
+-- Template stats are usage/copy/review metrics only. Actual purchase/order quantities belong to basket/order tables.
 -- Delete = trash move. Permanent delete is allowed only when there is no other-user reference.
 
 CREATE TABLE IF NOT EXISTS gm_smartfit_space (
@@ -94,20 +95,13 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_template (
   search_es TEXT NOT NULL DEFAULT '',
   visibility VARCHAR(20) NOT NULL DEFAULT 'draft', -- draft/private/public
   search_visible CHAR(1) NOT NULL DEFAULT 'T',
-  purchase_count INTEGER NOT NULL DEFAULT 0,
   view_count BIGINT NOT NULL DEFAULT 0,
   visit_count BIGINT NOT NULL DEFAULT 0,
   collection_count BIGINT NOT NULL DEFAULT 0,
   use_count BIGINT NOT NULL DEFAULT 0,
   reuse_count BIGINT NOT NULL DEFAULT 0,
-  order_count BIGINT NOT NULL DEFAULT 0,
-  sales_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
-  cancel_count BIGINT NOT NULL DEFAULT 0,
-  cancel_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
-  return_count BIGINT NOT NULL DEFAULT 0,
-  return_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
-  incentive_confirm_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
-  incentive_cancel_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  build_cart_count BIGINT NOT NULL DEFAULT 0,
+  item_add_count BIGINT NOT NULL DEFAULT 0,
   review_count BIGINT NOT NULL DEFAULT 0,
   rating_sum NUMERIC(18,2) NOT NULL DEFAULT 0,
   rating_avg NUMERIC(8,4) NOT NULL DEFAULT 0,
@@ -123,6 +117,18 @@ ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS search_visible CHAR(1)
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(80);
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS build_cart_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS item_add_count BIGINT NOT NULL DEFAULT 0;
+-- Actual purchase/order/sales stats are not stored on templates. Template is only a measuring/reference tool.
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS purchase_count;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS order_count;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS sales_amount;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS cancel_count;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS cancel_amount;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS return_count;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS return_amount;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS incentive_confirm_amount;
+ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS incentive_cancel_amount;
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_creator ON gm_smartfit_template (creator_member_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_category ON gm_smartfit_template (category_code, visibility, is_active);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_visibility ON gm_smartfit_template (visibility, is_active, updated_at DESC);

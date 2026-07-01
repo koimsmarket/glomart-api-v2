@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS gm_product (
   gm_category TEXT NOT NULL,
   category_keyword TEXT,
   mall_code TEXT NOT NULL,
+  source_mall TEXT,
+  source_uid TEXT,
   mall_category TEXT,
   product_id TEXT NOT NULL,
   item_id TEXT,

@@ -2,12 +2,10 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V009';
+const VERSION = 'GM_SMARTFIT_SERVER_V012';
 console.log('[GM_SMARTFIT_ROUTE] loaded');
 const STAT_TYPES = new Set([
-  'view','visit','collection','use','reuse','order','sales',
-  'cancel','cancel_amount','return','return_amount',
-  'incentive_confirm','incentive_cancel','review','rating'
+  'view','visit','collection','use','reuse','build_cart','item_add','review','rating'
 ]);
 const LANGS = new Set(['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr','ot']);
 const VIS = new Set(['draft','private','public']);
@@ -63,9 +61,10 @@ async function getMember(pool, memberId){
 async function canPublic(pool, memberId, template){
   const mem = await getMember(pool, memberId);
   if(isAdminMember(mem)) return { ok:true, admin:true, reason:'admin' };
-  const purchaseCount = i(template && template.purchase_count, 0);
-  if(purchaseCount >= 1) return { ok:true, admin:false, reason:'purchase_verified' };
-  return { ok:false, admin:false, reason:'purchase_count_required' };
+  // Template is a measuring/reference tool, not an order source.
+  // Public permission is owner/admin based; purchase/order counts are intentionally not used here.
+  if(template && s(template.creator_member_id) && s(template.creator_member_id) === s(memberId)) return { ok:true, admin:false, reason:'owner' };
+  return { ok:false, admin:false, reason:'permission_required' };
 }
 function yn(v, def='F'){
   const x=s(v || '').toUpperCase();
@@ -125,14 +124,12 @@ async function incrementCounters(pool, templateId, statType, amount){
   const a = n(amount, 1);
   const map = {
     view:'view_count', visit:'visit_count', collection:'collection_count', use:'use_count', reuse:'reuse_count',
-    order:'order_count', sales:'sales_amount', cancel:'cancel_count', cancel_amount:'cancel_amount',
-    return:'return_count', return_amount:'return_amount', incentive_confirm:'incentive_confirm_amount', incentive_cancel:'incentive_cancel_amount',
+    build_cart:'build_cart_count', item_add:'item_add_count',
     review:'review_count', rating:'rating_sum'
   };
   const col = map[statType];
   if(!col) return;
   await pool.query(`UPDATE gm_smartfit_template SET ${col}=${col}+$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2`, [a, templateId]);
-  if(statType === 'order') await pool.query('UPDATE gm_smartfit_template SET purchase_count=purchase_count+1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$1', [templateId]);
   if(statType === 'rating') await pool.query('UPDATE gm_smartfit_template SET rating_avg = CASE WHEN review_count > 0 THEN rating_sum / review_count ELSE 0 END WHERE template_id=$1', [templateId]);
 }
 
@@ -248,9 +245,9 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       }
     }
     if(visibility === 'public'){
-      const base = existing || { purchase_count:0 };
+      const base = existing || { creator_member_id: creator };
       const pub = await canPublic(client, creator, base);
-      if(!pub.ok) throw new Error('public requires purchase_count >= 1 or admin');
+      if(!pub.ok) throw new Error('public permission denied');
     }
     let spaceId = b.space_id || b.spaceId || null;
     const spaceName = s(b.space_name || b.spaceName || b.space_title || b.spaceTitle || '');
@@ -323,7 +320,7 @@ router.post('/api/gm/smartfit/template/public', async (req,res)=>{
     const r=await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1', [templateId]);
     const t=r.rows[0]; if(!t) return fail(res,404,'template not found');
     if(t.creator_member_id !== memberId){ const mem=await getMember(pool, memberId); if(!isAdminMember(mem)) return fail(res,403,'permission denied'); }
-    const pub=await canPublic(pool, memberId, t); if(!pub.ok) return fail(res,403,'public not allowed',{ reason:pub.reason, purchase_count:t.purchase_count });
+    const pub=await canPublic(pool, memberId, t); if(!pub.ok) return fail(res,403,'public not allowed',{ reason:pub.reason });
     const rr=await pool.query("UPDATE gm_smartfit_template SET visibility='public', search_visible='T', updated_at=CURRENT_TIMESTAMP WHERE template_id=$1 RETURNING *", [templateId]);
     ok(res,{ template:rr.rows[0], reason:pub.reason });
   }catch(e){ fail(res,500,'public failed',{ detail:String(e.message||e) }); }
@@ -378,7 +375,11 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
       sort_order:row.sort_order
     }));
     // No UID merge here. JS/order page may set selected_qty=0 before final order.
-    for(const tid of templateIds){ await recordEventInternal(pool, { template_id:tid, member_id:member, stat_type:'use', amount:1, source:'build-cart' }); }
+    for(const tid of templateIds){
+      const itemCount = items.filter(x => Number(x.template_id) === Number(tid)).length;
+      await recordEventInternal(pool, { template_id:tid, member_id:member, stat_type:'build_cart', amount:1, source:'build-cart' });
+      if(itemCount > 0) await recordEventInternal(pool, { template_id:tid, member_id:member, stat_type:'item_add', amount:itemCount, source:'build-cart' });
+    }
     ok(res,{ batch_id:batchId, template_ids:templateIds, items, count:items.length, note:'no automatic merge; keep template ownership' });
   }catch(e){ fail(res,500,'build cart failed',{ detail:String(e.message||e) }); }
 });

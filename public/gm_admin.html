@@ -37,10 +37,10 @@
       <div class="stat"><b>PC/모바일 공통</b><span>반응형 관리자 홈</span></div>
       <div class="stat"><b>기존 빌더 유지</b><span>파일 이동/폐기 없음</span></div>
       <div class="stat"><b>직접 연결</b><span>대시보드·DB·상품 빌더</span></div>
-      <div class="stat"><b>주문만 VIA</b><span>주문 처리 흐름 분리</span></div>
+      <div class="stat"><b>주문은 VIA</b><span>자동주문 흐름 분리</span></div>
     </div>
 
-    <div class="section">주문 처리</div>
+    <div class="section">자동주문 / 주문 처리</div>
     <div class="grid">
       <a class="card" href="/gm_order_via.html">
         <span class="tag dark">VIA</span>
@@ -48,11 +48,17 @@
         <div class="desc">서버 미처리 주문 Queue를 불러오고, 주문 Lock/상태변경/source_code별 Builder 시작까지 연결하는 중간 페이지입니다.</div>
         <div class="url">/gm_order_via.html</div>
       </a>
-      <a class="card" href="/api/order/" onclick="alert('주문 조회는 /api/order/{주문번호} 형식입니다. 주문 Via 페이지를 사용하세요.');return false;">
-        <span class="tag gray">API</span>
-        <div class="title">주문 조회 API</div>
-        <div class="desc">단건 주문 조회는 보조 기능입니다. 대량 처리는 주문 Via의 미처리 Queue 리스트에서 순차 처리합니다.</div>
-        <div class="url">/api/order/{order_no}</div>
+      <a class="card" href="/api/gm/admin/orders?status=unprocessed" target="_blank" rel="noopener">
+        <span class="tag gray">QUEUE</span>
+        <div class="title">미처리 주문 Queue API</div>
+        <div class="desc">Via 화면이 사용하는 미처리 주문 리스트 API입니다. 배포 후 주문 데이터/상태값 확인용으로 직접 열어볼 수 있습니다.</div>
+        <div class="url">/api/gm/admin/orders?status=unprocessed</div>
+      </a>
+      <a class="card" href="/api/gm/db/table-counts?tables=gm_order,gm_order_item,gm_product,gm_keyword_relation" target="_blank" rel="noopener">
+        <span class="tag gray">CHECK</span>
+        <div class="title">주문/상품 테이블 점검</div>
+        <div class="desc">자동주문 대상 주문·상품·연관키워드 주요 테이블 카운트를 확인합니다. 전용 점검 빌더 추가 전까지 API로 연결합니다.</div>
+        <div class="url">/api/gm/db/table-counts?tables=gm_order,gm_order_item,gm_product,gm_keyword_relation</div>
       </a>
     </div>
 
@@ -80,11 +86,11 @@
 
     <div class="section">서버 기능 / 확장 빌더</div>
     <div class="grid">
-      <a class="card" href="/api/gm/smartfit/health" target="_blank" rel="noopener">
+      <a class="card" href="/gm_smartfit.html">
         <span class="tag orange">SMARTFIT</span>
         <div class="title">SmartFit API</div>
-        <div class="desc">SmartFit 템플릿·공간·컬렉션·장바구니 빌드 API 상태 확인입니다. 화면 빌더가 추가되면 이 메뉴에서 직접 연결합니다.</div>
-        <div class="url">/api/gm/smartfit/health</div>
+        <div class="desc">SmartFit 공간·Template·컬렉션·휴지통을 관리하는 전용 페이지입니다. 주문/자동주문 흐름과 분리되어 있습니다.</div>
+        <div class="url">/gm_smartfit.html</div>
       </a>
       <a class="card" href="/api/gm/network/periods" target="_blank" rel="noopener">
         <span class="tag orange">NETWORK</span>
@@ -101,7 +107,7 @@
     </div>
 
     <div class="footer">
-      GM_ADMIN_HOME_V004 · 기존 빌더 삭제 없음 · 주문은 via 페이지 경유 · 모바일/PC 접속 대응
+      GM_ADMIN_HOME_V009_SMARTFIT_AUTO_ORDER_MERGE · 기존 빌더 삭제 없음 · 주문은 via 페이지 경유 · 모바일/PC 접속 대응
     </div>
   </div>
 </body>

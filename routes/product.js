@@ -54,9 +54,61 @@ function makeRequestId(p, items){
   const base = 'GMQ_' + mall + '_' + Date.now() + '_' + Math.abs(h);
   return chunkIndex > 0 ? base + '_C' + String(chunkIndex).padStart(3,'0') : base;
 }
+
+function normalizeKeywordValue(v){
+  return cleanText(v).toLowerCase().replace(/\s+/g, '');
+}
+function pickSearchKeyword(p, parent){
+  return cleanText(
+    p.keyword || p.q || p.search_keyword || p.searchKeyword || p.keyword_original || p.keywordOriginal ||
+    (parent && (parent.keyword || parent.q || parent.search_keyword || parent.searchKeyword)) || ''
+  );
+}
+function pickRelatedKeywords(p, parent){
+  const raw = p.related_keywords || p.relatedKeywords || p.suggest_keywords || p.suggestKeywords ||
+    p.recommend_keywords || p.recommendKeywords || p.coupang_related_keywords || p.coupangRelatedKeywords ||
+    (parent && (parent.related_keywords || parent.relatedKeywords || parent.suggest_keywords || parent.suggestKeywords));
+  let arr = [];
+  if(Array.isArray(raw)) arr = raw;
+  else if(typeof raw === 'string') arr = raw.split(/[|,\n\t]+/g);
+  return arr.map(cleanText).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(0,50);
+}
+async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relatedKeywords){
+  keyword = cleanText(keyword);
+  if(productUid && keyword){
+    try{
+      await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keyword, productUid]);
+    }catch(e){ /* migration not applied yet */ }
+  }
+  if(!keyword || !relatedKeywords || !relatedKeywords.length) return;
+  const keyNorm = normalizeKeywordValue(keyword);
+  const mall = cleanText(mallCode || '').toUpperCase();
+  for(let i=0;i<relatedKeywords.length;i++){
+    const rk = cleanText(relatedKeywords[i]);
+    const rkNorm = normalizeKeywordValue(rk);
+    if(!rk || !rkNorm || rkNorm === keyNorm) continue;
+    try{
+      await pool.query(`
+        INSERT INTO gm_keyword_relation (
+          mall_code, keyword, keyword_normalized, related_keyword, related_keyword_normalized,
+          related_order, source, hit_count, first_seen_at, last_seen_at, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,'search_suggest',1,now(),now(),now(),now())
+        ON CONFLICT (mall_code, keyword_normalized, related_keyword_normalized) DO UPDATE SET
+          keyword=EXCLUDED.keyword,
+          related_keyword=EXCLUDED.related_keyword,
+          related_order=LEAST(gm_keyword_relation.related_order, EXCLUDED.related_order),
+          hit_count=COALESCE(gm_keyword_relation.hit_count,0)+1,
+          last_seen_at=now(),
+          updated_at=now()
+      `, [mall, keyword, keyNorm, rk, rkNorm, i+1]);
+    }catch(e){ /* migration not applied yet */ }
+  }
+}
+
 function ids(b){
   const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
   const isAliMall = mallCode === 'ALI' || mallCode === 'ALKR' || /^AL/.test(mallCode);
+  const isCoupangMall = mallCode === 'CPKR' || mallCode === 'COUPANG' || /^CP/.test(mallCode);
 
   // ALI/ALKR often arrives with product_url only. Parse /item/1005....html before giving up.
   const urlText = normalizeUrl(
@@ -70,14 +122,31 @@ function ids(b){
     if(m) aliUrlId = m[1];
   }
 
+  // GM_ID_SPLIT_FIX_V006
+  // CPKR의 product_id는 itemId로 대체하면 안 된다.
+  // product_id / item_id / vendor_item_id는 pi_ii_vi(productId_itemId_vendorItemId)를 최우선 기준으로 복원한다.
   let productId = cleanText(
     b.product_id || b.productId || b.productID || b.ali_product_id || b.aliProductId || b.aliProductID ||
-    b.itemId || b.item_id || b.item_id_ali || b.ali_item_id || b.aliItemId || aliUrlId
+    (isAliMall ? (b.item_id_ali || b.ali_item_id || b.aliItemId || aliUrlId) : '')
   );
   let itemId = cleanText(b.item_id || b.itemId || b.sku_id || b.skuId || b.ali_sku_id || b.aliSkuId);
   let vendorItemId = cleanText(b.vendor_item_id || b.vendorItemId || b.venderItemId || b.offer_id || b.offerId || b.ali_offer_id || b.aliOfferId);
 
-  let pi = cleanText(b.pi_ii_vi || b.piIiVi || b.ali_key || b.aliKey || b.product_key || b.productKey);
+  let pi = cleanText(
+    b.pi_ii_vi || b.piIiVi || b.coupang_key || b.coupangKey || b.coupang_product_key || b.coupangProductKey ||
+    b.ali_key || b.aliKey || b.product_key || b.productKey
+  );
+
+  if(isCoupangMall && pi){
+    const parts = String(pi).split('_').map(cleanText).filter(Boolean);
+    if(parts.length >= 3){
+      productId = parts[0];
+      itemId = parts[1];
+      vendorItemId = parts[2];
+      pi = [productId, itemId, vendorItemId].join('_');
+    }
+  }
+
   if(!pi){
     if(isAliMall) pi = productId || [productId, itemId, vendorItemId].filter(Boolean).join('_');
     else pi = [productId, itemId, vendorItemId].filter(Boolean).join('_');
@@ -89,7 +158,7 @@ function ids(b){
     if(!vendorItemId) vendorItemId = productId;
     if(!pi) pi = productId;
   }
-  if(!vendorItemId && productId && !itemId) vendorItemId = productId;
+  if(!isCoupangMall && !vendorItemId && productId && !itemId) vendorItemId = productId;
 
   const uid = cleanText(b.product_uid || b.productUid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
   return { productId, itemId, vendorItemId, mallCode, pi, uid, source_url:urlText };
@@ -160,6 +229,27 @@ function pickAny(p, names){
   }
   return '';
 }
+function sourceMallFrom(p, uid, url, mallCode){
+  const direct = cleanText(p.source_mall || p.sourceMall || p.source_code || p.sourceCode || '').toUpperCase();
+  if(direct) return direct;
+  const u = cleanText(uid || p.source_uid || p.sourceUid || '').toUpperCase();
+  if(u.indexOf('_') > 0) return u.split('_')[0];
+  const x = String(url || '').toLowerCase();
+  if(x.includes('coupang.com') || x.includes('link.coupang.com')) return 'CPKR';
+  if(x.includes('aliexpress.com')) return 'ALKR';
+  if(x.includes('temu.com')) return 'TEMU';
+  if(x.includes('shopping.naver.com') || x.includes('smartstore.naver.com')) return 'NPKR';
+  const m = cleanText(mallCode || '').toUpperCase();
+  return (m === 'CAFE24' || m === 'INTERNAL') ? '' : m;
+}
+function sourceUidFrom(p, sourceMall){
+  const direct = cleanText(p.source_uid || p.sourceUid || '');
+  if(direct) return direct;
+  const key = cleanText(p.source_key || p.sourceKey || p.source_id || p.sourceId || '');
+  const sm = cleanText(sourceMall || '').toUpperCase();
+  if(key && sm && key.indexOf(sm + '_') !== 0) return sm + '_' + key;
+  return key;
+}
 function normalizeProductPayload(raw, parent={}){
   const p = { ...(raw || {}) };
   if(!p.mall_code && !p.mallCode) p.mall_code = parent.mall_code || parent.mallCode || parent.source || parent.mall || 'CPKR';
@@ -212,7 +302,7 @@ async function upsertProduct(pool, raw, parent={}){
   }
   const sql=`
     INSERT INTO gm_product (
-      product_uid, glomart_code, gm_category, category_keyword, mall_code, mall_category,
+      product_uid, glomart_code, gm_category, category_keyword, mall_code, source_mall, source_uid, mall_category,
       product_id, item_id, vendor_item_id, pi_ii_vi, internal_product_code,
       product_name, mall_product_name, option_count, option_name, option_value,
       origin_country, mall_sale_price, final_supply_price, normal_price, discount_price,
@@ -226,12 +316,14 @@ async function upsertProduct(pool, raw, parent={}){
       soldout_yn, hit_count, detail_view_count, cart_count, wish_count, order_count, order_qty_total,
       sale_status, last_seen_at, expire_at, created_at, updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-      $27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,
-      $39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,
-      1,0,0,0,0,0,$52,now(),now() + INTERVAL '30 days',now(),now()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
+      $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
+      $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,
+      1,0,0,0,0,0,$54,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
+      source_mall=EXCLUDED.source_mall,
+      source_uid=EXCLUDED.source_uid,
       product_name=EXCLUDED.product_name,
       mall_product_name=EXCLUDED.mall_product_name,
       option_count=EXCLUDED.option_count,
@@ -284,9 +376,13 @@ async function upsertProduct(pool, raw, parent={}){
   const deliveryType = pickDeliveryType(p);
   const supplierId = pickSupplierId(p);
   const supplierName = pickSupplierName(p);
+  const sourceMall = sourceMallFrom(p, p.source_uid || p.sourceUid, productUrl, id.mallCode);
+  const sourceUid = sourceUidFrom(p, sourceMall);
+  const searchKeyword = pickSearchKeyword(p, parent);
+  const relatedKeywords = pickRelatedKeywords(p, parent);
   const vals=[
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
-    cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, cleanText(p.mall_category || p.mallCategory),
+    cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, sourceMall, sourceUid, cleanText(p.mall_category || p.mallCategory),
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanText(p.mall_product_name || p.mallProductName || productName), toInt(p.option_count || p.optionCount, optionName || optionValue ? 1 : 0),
     optionName, optionValue,
@@ -315,6 +411,7 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.return_contact || p.returnContact || ''), cleanText(p.exchange_contact || p.exchangeContact || ''),
     cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active')
   ];  const r=await pool.query(sql, vals);
+  await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords);
   return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:r.rows[0] };
 }
 

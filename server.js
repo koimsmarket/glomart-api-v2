@@ -170,6 +170,35 @@ function writeJson(file, data){ fs.writeFileSync(file, JSON.stringify(data, null
 function ok(res, data){ res.json({ ok:true, version:VERSION, ...data }); }
 function fail(res, status, message, extra={}){ res.status(status).json({ ok:false, version:VERSION, error:message, ...extra }); }
 function toInt(v, def=0){ const n = Number(v); return Number.isFinite(n) ? Math.round(n) : def; }
+function gmAutoOrderNo(){
+  const d = new Date();
+  const p = x => String(x).padStart(2,'0');
+  return `GM${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${String(Date.now()).slice(-4)}`;
+}
+function gmSourceMallFrom(v, uid, url, mallCode){
+  const direct = cleanText(v).toUpperCase();
+  if(direct) return direct;
+  const u = cleanText(uid).toUpperCase();
+  if(u.indexOf('_') > 0) return u.split('_')[0];
+  const x = String(url || '').toLowerCase();
+  if(x.includes('coupang.com') || x.includes('link.coupang.com')) return 'CPKR';
+  if(x.includes('aliexpress.com')) return 'ALKR';
+  if(x.includes('temu.com')) return 'TEMU';
+  if(x.includes('shopping.naver.com') || x.includes('smartstore.naver.com')) return 'NPKR';
+  const m = cleanText(mallCode).toUpperCase();
+  return (m === 'CAFE24' || m === 'INTERNAL') ? '' : m;
+}
+function gmSourceUidFrom(v, sourceMall, key){
+  const direct = cleanText(v);
+  if(direct) return direct;
+  const k = cleanText(key);
+  const sm = cleanText(sourceMall).toUpperCase();
+  if(k && sm && k.indexOf(sm + '_') !== 0) return sm + '_' + k;
+  return k;
+}
+function gmCafe24OrderNo(o){
+  return cleanText(o && (o.cafe24_order_no || o.cafe24OrderNo || o.cafe24_order_id || o.cafe24OrderId || o.internal_order_no || o.internalOrderNo || ''));
+}
 function normalizeUrl(url){ url = cleanText(url); if(url.startsWith('//')) return 'https:' + url; return url; }
 function idsFromUrl(url){
   const s = String(url || '');
@@ -1409,7 +1438,7 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
 
     const r = await dbQuery(`
       INSERT INTO gm_product (
-        product_uid, glomart_code, gm_category, category_keyword, mall_code, mall_category,
+        product_uid, glomart_code, gm_category, category_keyword, mall_code, source_mall, source_uid, mall_category,
         product_id, item_id, vendor_item_id, pi_ii_vi, internal_product_code,
         product_name, mall_product_name, option_count, option_name, option_value,
         origin_country, mall_sale_price, final_supply_price, normal_price, discount_price,
@@ -1420,9 +1449,11 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
         return_address, exchange_address, return_contact, exchange_contact,
         soldout_yn, sale_status, last_seen_at, created_at, updated_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,now(),now(),now()
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,now(),now(),now()
       )
       ON CONFLICT (product_uid) DO UPDATE SET
+        source_mall=EXCLUDED.source_mall,
+        source_uid=EXCLUDED.source_uid,
         product_name=EXCLUDED.product_name,
         mall_product_name=EXCLUDED.mall_product_name,
         option_count=EXCLUDED.option_count,
@@ -1459,7 +1490,7 @@ app.post('/api/gm/product/upsert', async (req,res)=>{
       RETURNING product_uid, pi_ii_vi
     `, [
       uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
-      cleanText(p.category_keyword || p.categoryKeyword), mallCode, cleanText(p.mall_category || p.mallCategory),
+      cleanText(p.category_keyword || p.categoryKeyword), mallCode, gmSourceMallFrom(p.source_mall || p.sourceMall || p.source_code || p.sourceCode, p.source_uid || p.sourceUid, p.product_url || p.url, mallCode), gmSourceUidFrom(p.source_uid || p.sourceUid, p.source_mall || p.sourceMall || p.source_code || p.sourceCode, p.source_key || p.sourceKey), cleanText(p.mall_category || p.mallCategory),
       productId, itemId, vendorItemId, pi, cleanText(p.internal_product_code),
       productName, cleanText(p.mall_product_name || p.mallProductName), toInt(p.option_count, 0),
       cleanText(p.option_name || p.optionName), cleanText(p.option_value || p.optionValue),
@@ -1626,7 +1657,9 @@ app.get('/api/gm/admin/orders', async (req,res)=>{
       const itemOrderNo = colExpr('gi', itemCols, ['order_no','order_id','cafe24_order_id','gm_order_id'], "''");
       const qtyExpr = numColExpr('gi', itemCols, ['quantity','qty','order_qty','product_qty']);
       const amountExpr = numColExpr('gi', itemCols, ['product_amount','customer_order_price','mall_sale_price','price','sale_price','total_price']);
-      const mallExpr = colExpr('gi', itemCols, ['mall_code','mallCode','source_mall_code'], "'CAFE24'");
+      const mallExpr = colExpr('gi', itemCols, ['mall_code','mallCode'], "'CAFE24'");
+      const sourceMallExpr = colExpr('gi', itemCols, ['source_mall','sourceMall','source_code','sourceCode','source_mall_code'], "''");
+      const sourceUidExpr = colExpr('gi', itemCols, ['source_uid','sourceUid'], "''");
       const urlExpr = colExpr('gi', itemCols, ['product_url','source_url','url','productUrl'], "''");
       joinSql = `
         LEFT JOIN (
@@ -1637,12 +1670,22 @@ app.get('/api/gm/admin/orders', async (req,res)=>{
             SUM(${amountExpr})::bigint AS total_item_amount,
             string_agg(DISTINCT COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24'), ',' ORDER BY COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24')) AS mall_codes,
             string_agg(DISTINCT CASE
+              WHEN COALESCE(NULLIF(${sourceMallExpr}::text,''),'') <> '' THEN upper(${sourceMallExpr}::text)
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'CPKR_%' THEN 'CPKR'
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'ALKR_%' THEN 'ALKR'
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'TEMU_%' THEN 'TEMU'
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'NPKR_%' THEN 'NPKR'
               WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%coupang.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
               WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
               WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%temu.com%' THEN 'TEMU'
               WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%shopping.naver.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%smartstore.naver.com%' THEN 'NPKR'
               ELSE COALESCE(NULLIF(${mallExpr}::text,''),'CAFE24')
             END, ',' ORDER BY CASE
+              WHEN COALESCE(NULLIF(${sourceMallExpr}::text,''),'') <> '' THEN upper(${sourceMallExpr}::text)
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'CPKR_%' THEN 'CPKR'
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'ALKR_%' THEN 'ALKR'
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'TEMU_%' THEN 'TEMU'
+              WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'NPKR_%' THEN 'NPKR'
               WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%coupang.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
               WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
               WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%temu.com%' THEN 'TEMU'
@@ -1695,11 +1738,18 @@ app.get('/api/gm/admin/orders/:order_no', async (req,res)=>{
     if(itemTable){
       const itemCols = await tableColumnNames(itemTable);
       const itemOrderNo = colExpr('gi', itemCols, ['order_no','order_id','cafe24_order_id','gm_order_id'], "''");
-      const mallExpr = colExpr('gi', itemCols, ['mall_code','mallCode','source_mall_code'], "'CAFE24'");
+      const mallExpr = colExpr('gi', itemCols, ['mall_code','mallCode'], "'CAFE24'");
+      const sourceMallExpr = colExpr('gi', itemCols, ['source_mall','sourceMall','source_code','sourceCode','source_mall_code'], "''");
+      const sourceUidExpr = colExpr('gi', itemCols, ['source_uid','sourceUid'], "''");
       const urlExpr = colExpr('gi', itemCols, ['product_url','source_url','url','productUrl'], "''");
       const sortExpr = colExpr('gi', itemCols, ['created_at','updated_at','id'], '1');
       const it = await dbQuery(`
         SELECT gi.*, CASE
+          WHEN COALESCE(NULLIF(${sourceMallExpr}::text,''),'') <> '' THEN upper(${sourceMallExpr}::text)
+          WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'CPKR_%' THEN 'CPKR'
+          WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'ALKR_%' THEN 'ALKR'
+          WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'TEMU_%' THEN 'TEMU'
+          WHEN upper(COALESCE(${sourceUidExpr}::text,'')) LIKE 'NPKR_%' THEN 'NPKR'
           WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%coupang.com%' OR lower(COALESCE(${urlExpr}::text,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
           WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
           WHEN lower(COALESCE(${urlExpr}::text,'')) LIKE '%temu.com%' THEN 'TEMU'
@@ -1813,14 +1863,16 @@ app.post('/api/gm/admin/orders/:order_no/builder/start', async (req,res)=>{
 app.post('/api/gm/order/create', async (req,res)=>{
   const o = req.body || {};
   const items = Array.isArray(o.items) ? o.items : [];
-  if(!cleanText(o.order_no) || !items.length) return fail(res, 400, 'order_no/items required');
+  if(!items.length) return fail(res, 400, 'items required');
+  const orderNo = cleanText(o.gm_order_no || o.order_no) || gmAutoOrderNo();
+  const cafe24OrderNo = gmCafe24OrderNo(o);
 
   const client = await pool.connect();
   try{
     await client.query('BEGIN');
     await client.query(`
       INSERT INTO gm_order (
-        order_no, member_id, guest_key, orderer_name, orderer_phone, orderer_mobile, orderer_email,
+        order_no, cafe24_order_no, member_id, guest_key, orderer_name, orderer_phone, orderer_mobile, orderer_email,
         receiver_name, receiver_phone, receiver_mobile, receiver_safe_phone,
         receiver_zipcode, receiver_address1, receiver_address2, delivery_memo,
         customs_required_yn, customs_clearance_code, customs_name, customs_mobile,
@@ -1830,11 +1882,11 @@ app.post('/api/gm/order/create', async (req,res)=>{
         total_payment_price, order_status, payment_status, shipping_status, cs_status,
         ordered_at, created_at, updated_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,now(),now(),now()
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,now(),now(),now()
       )
       ON CONFLICT (order_no) DO NOTHING
     `, [
-      cleanText(o.order_no), cleanText(o.member_id) || null, cleanText(o.guest_key) || null,
+      orderNo, cafe24OrderNo || null, cleanText(o.member_id) || null, cleanText(o.guest_key) || null,
       cleanText(o.orderer_name), cleanText(o.orderer_phone), cleanText(o.orderer_mobile), cleanText(o.orderer_email),
       cleanText(o.receiver_name), cleanText(o.receiver_phone), cleanText(o.receiver_mobile), cleanText(o.receiver_safe_phone),
       cleanText(o.receiver_zipcode), cleanText(o.receiver_address1), cleanText(o.receiver_address2), cleanText(o.delivery_memo),
@@ -1851,26 +1903,26 @@ app.post('/api/gm/order/create', async (req,res)=>{
     for(const it of items){
       await client.query(`
         INSERT INTO gm_order_item (
-          order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
+          order_no, cafe24_order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
           mall_sale_price, customer_order_price, final_supply_price, product_amount,
-          delivery_type, delivery_fee, extra_area_delivery_fee, mall_code, supplier_id, supplier_name,
+          delivery_type, delivery_fee, extra_area_delivery_fee, mall_code, source_mall, source_uid, supplier_id, supplier_name,
           product_url, thumb_file_name, hs_code, origin_country, carrier_name, tracking_number,
           item_order_status, item_shipping_status, created_at, updated_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,now(),now()
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,now(),now()
         )
         ON CONFLICT (order_no, pi_ii_vi) DO UPDATE SET
           quantity=EXCLUDED.quantity,
           product_amount=EXCLUDED.product_amount,
           updated_at=now()
       `, [
-        cleanText(o.order_no), cleanText(it.pi_ii_vi), cleanText(it.product_name),
+        orderNo, cleanText(it.cafe24_order_no || it.cafe24OrderNo || cafe24OrderNo) || null, cleanText(it.pi_ii_vi), cleanText(it.product_name),
         cleanText(it.option_name), cleanText(it.option_value), Math.max(1, toInt(it.quantity, 1)),
         toInt(it.mall_sale_price, 0), toInt(it.customer_order_price, 0),
         it.final_supply_price == null ? null : toInt(it.final_supply_price, 0),
         toInt(it.product_amount, 0), cleanText(it.delivery_type), toInt(it.delivery_fee, 0),
-        toInt(it.extra_area_delivery_fee, 0), cleanText(it.mall_code), cleanText(it.supplier_id),
-        cleanText(it.supplier_name), normalizeUrl(it.product_url), cleanText(it.thumb_file_name),
+        toInt(it.extra_area_delivery_fee, 0), cleanText(it.mall_code), gmSourceMallFrom(it.source_mall || it.sourceMall || it.source_code || it.sourceCode, it.source_uid || it.sourceUid, it.product_url || it.source_url || it.url, it.mall_code), gmSourceUidFrom(it.source_uid || it.sourceUid, it.source_mall || it.sourceMall || it.source_code || it.sourceCode, it.source_key || it.sourceKey), cleanText(it.supplier_id),
+        cleanText(it.supplier_name), normalizeUrl(it.product_url || it.source_url || it.url), cleanText(it.thumb_file_name),
         cleanText(it.hs_code), cleanText(it.origin_country), cleanText(it.carrier_name),
         cleanText(it.tracking_number), cleanText(it.item_order_status || 'ordered'),
         cleanText(it.item_shipping_status || 'pending')
@@ -1879,7 +1931,7 @@ app.post('/api/gm/order/create', async (req,res)=>{
     }
 
     await client.query('COMMIT');
-    ok(res, { order_no:cleanText(o.order_no), item_count:items.length });
+    ok(res, { order_no:orderNo, cafe24_order_no:cafe24OrderNo, item_count:items.length });
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
     fail(res, 500, 'order create failed', { detail:String(e && e.message || e) });

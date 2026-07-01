@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Glomart SmartFit 관리</title>
+  <style>
+    :root{--bg:#f5f7fb;--card:#fff;--line:#dfe5ef;--text:#1f2937;--muted:#6b7280;--brand:#1d7180;--brand2:#238d9b;--danger:#b91c1c;--ok:#087443;--warn:#b45309;--dark:#4b5567;}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;}
+    .wrap{max-width:1180px;margin:0 auto;padding:18px 14px 60px}.top{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;margin-bottom:14px}
+    h1{font-size:24px;margin:0;font-weight:900;letter-spacing:-.04em}.sub{font-size:13px;color:var(--muted);line-height:1.45;margin-top:5px}.back{display:inline-block;border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 10px;text-decoration:none;color:var(--muted);font-size:12px;white-space:nowrap}
+    .panel{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px;box-shadow:0 3px 12px rgba(17,24,39,.04)}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{min-width:0} label{display:block;font-size:12px;color:var(--muted);margin:0 0 5px 2px}.field{flex:1;min-width:180px}.field.sm{flex:0 0 140px}.field.md{flex:0 0 220px}
+    input,select,textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:#fff;padding:10px 11px;font-size:14px;color:var(--text)} textarea{min-height:76px;resize:vertical}.btn{border:0;border-radius:10px;background:var(--dark);color:#fff;font-weight:800;padding:10px 13px;font-size:14px;cursor:pointer}.btn.brand{background:var(--brand)}.btn.danger{background:var(--danger)}.btn.ghost{background:#fff;color:var(--text);border:1px solid var(--line)}.btn.small{font-size:12px;padding:7px 9px;border-radius:8px}.btn:disabled{opacity:.5;cursor:not-allowed}
+    .tabs{display:flex;gap:6px;overflow:auto;margin:8px 0 12px}.tab{border:1px solid var(--line);background:#fff;color:var(--muted);border-radius:999px;padding:9px 12px;font-weight:800;font-size:13px;white-space:nowrap;cursor:pointer}.tab.on{background:var(--brand);border-color:var(--brand);color:#fff}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px}.card h3{margin:0 0 8px;font-size:17px}.desc{font-size:13px;color:var(--muted);line-height:1.45}.list{display:flex;flex-direction:column;gap:8px;margin-top:10px}.item{border:1px solid var(--line);border-radius:12px;padding:12px;background:#fff}.itemTop{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.title{font-size:15px;font-weight:900;letter-spacing:-.02em}.meta{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.45}.tag{display:inline-flex;align-items:center;border-radius:999px;padding:3px 7px;font-size:11px;font-weight:800;background:#eef4ff;color:#174ea6;margin-right:4px}.tag.ok{background:#ecfdf3;color:var(--ok)}.tag.warn{background:#fff7ed;color:var(--warn)}.tag.del{background:#fef2f2;color:var(--danger)}
+    .hidden{display:none!important}.notice{background:#eefafa;border:1px solid #b8e3e6;color:#24555c;border-radius:12px;padding:10px 12px;font-size:13px;line-height:1.5;margin-bottom:12px}.warnbox{background:#fff7ed;border:1px solid #fed7aa;color:#7c2d12;border-radius:12px;padding:10px 12px;font-size:13px;line-height:1.5;margin:10px 0}.log{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#111827;color:#d1d5db;border-radius:12px;padding:12px;font-size:12px;white-space:pre-wrap;min-height:80px;max-height:260px;overflow:auto}.sectionTitle{font-size:15px;font-weight:900;margin:18px 0 8px}.actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.count{font-weight:900;color:var(--brand)}
+    @media(max-width:760px){.wrap{padding:14px 10px 50px}.top{display:block}.back{margin-top:10px}.grid{grid-template-columns:1fr}.field,.field.sm,.field.md{flex:1 1 100%}.btn{width:100%}.actions .btn{width:auto}h1{font-size:21px}.panel{border-radius:14px;padding:12px}.card{padding:12px}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1>SmartFit 관리</h1>
+      <div class="sub">공간·Template·컬렉션·휴지통 관리 페이지입니다. SmartFit는 장바구니/주문/자동주문 흐름과 분리되어 동작합니다.</div>
+    </div>
+    <a class="back" href="/gm_admin.html">관리자 홈으로</a>
+  </div>
+
+  <div class="notice">
+    <b>정책 확인:</b> Template는 계량/참조 도구입니다. 사용자는 Template를 복제하지 않고 <b>template_id만 컬렉션에 등록</b>하며, 실행 시 내 장바구니로 옮겨 담습니다.
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <div class="field md"><label>회원 ID</label><input id="memberId" placeholder="예: koims.market" autocomplete="off"></div>
+      <div class="field sm"><label>조회 범위</label><select id="scope"><option value="mine">내 SmartFit</option><option value="public">공개 SmartFit</option></select></div>
+      <button class="btn brand" id="btnLoad">조회</button>
+      <button class="btn ghost" id="btnHealth">API 확인</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab on" data-tab="templates">Template</button>
+    <button class="tab" data-tab="spaces">공간</button>
+    <button class="tab" data-tab="collections">내 컬렉션</button>
+    <button class="tab" data-tab="trash">휴지통</button>
+    <button class="tab" data-tab="tools">API 로그</button>
+  </div>
+
+  <section id="tab-templates">
+    <div class="grid">
+      <div class="card">
+        <h3>Template 생성/수정</h3>
+        <div class="desc">장바구니 저장 API 연결 전까지 서버 저장 API를 직접 검증하는 용도입니다.</div>
+        <div class="row" style="margin-top:10px">
+          <div class="field sm"><label>Template ID(수정 시)</label><input id="tplId" placeholder="비우면 신규"></div>
+          <div class="field sm"><label>Space ID</label><input id="tplSpaceId" placeholder="선택"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Template명</label><input id="tplTitle" placeholder="예: 아침식단"></div>
+          <div class="field sm"><label>공개여부</label><select id="tplVisibility"><option value="private">비공개</option><option value="draft">초안</option><option value="public">공개</option></select></div>
+        </div>
+        <div class="field"><label>검색어</label><input id="tplSearch" placeholder="예: 라면, 계란, 우유"></div>
+        <div class="field"><label>소개글</label><textarea id="tplDesc" placeholder="Template 설명"></textarea></div>
+        <div class="field"><label>상품 JSON(선택)</label><textarea id="tplItems" placeholder='[{"mall_code":"CPKR","product_uid":"CPKR_...","qty":1}]'></textarea></div>
+        <div class="actions"><button class="btn brand" id="btnSaveTemplate">Template 저장</button><button class="btn ghost" id="btnClearTemplate">입력 초기화</button></div>
+      </div>
+      <div class="card">
+        <h3>Template 목록 <span class="count" id="tplCount">0</span></h3>
+        <div class="desc">공개 목록 또는 내 목록을 조회합니다. 삭제는 휴지통 이동이며 복원 가능합니다.</div>
+        <div id="templateList" class="list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-spaces" class="hidden">
+    <div class="grid">
+      <div class="card">
+        <h3>공간 생성/수정</h3>
+        <div class="row" style="margin-top:10px">
+          <div class="field sm"><label>Space ID(수정 시)</label><input id="spaceId" placeholder="비우면 신규"></div>
+          <div class="field"><label>공간명</label><input id="spaceTitle" placeholder="예: 우리집"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>공간 닉네임</label><input id="spaceNick" placeholder="예: 와인추천러"></div>
+          <div class="field sm"><label>실명 공개</label><select id="realNamePublic"><option value="F">비공개</option><option value="T">공개</option></select></div>
+          <div class="field sm"><label>공개여부</label><select id="spaceVisibility"><option value="private">비공개</option><option value="draft">초안</option><option value="public">공개</option></select></div>
+        </div>
+        <div class="field"><label>유튜브 링크</label><input id="spaceYoutube" placeholder="https://youtube.com/..."></div>
+        <div class="field"><label>대표 이미지</label><input id="spaceImage" placeholder="https://..."></div>
+        <div class="field"><label>소개글</label><textarea id="spaceDesc" placeholder="공간 소개"></textarea></div>
+        <div class="actions"><button class="btn brand" id="btnSaveSpace">공간 저장</button><button class="btn ghost" id="btnClearSpace">입력 초기화</button></div>
+      </div>
+      <div class="card">
+        <h3>공간 목록 <span class="count" id="spaceCount">0</span></h3>
+        <div id="spaceList" class="list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-collections" class="hidden">
+    <div class="card">
+      <h3>내 컬렉션</h3>
+      <div class="desc">사용자가 빌려 쓰는 Template 번호 목록입니다. 원본 Template와 상품목록은 복제하지 않습니다.</div>
+      <div id="collectionList" class="list"></div>
+    </div>
+  </section>
+
+  <section id="tab-trash" class="hidden">
+    <div class="grid">
+      <div class="card">
+        <h3>휴지통 조회</h3>
+        <div class="row">
+          <div class="field sm"><label>대상</label><select id="trashType"><option value="template">Template</option><option value="space">공간</option><option value="item">상품</option></select></div>
+          <button class="btn brand" id="btnTrashLoad">휴지통 조회</button>
+        </div>
+        <div class="warnbox">삭제된 항목은 추후 복원할 수 있습니다. 영구삭제는 다른 사용자가 사용 중이면 차단됩니다.</div>
+      </div>
+      <div class="card">
+        <h3>삭제 항목 <span class="count" id="trashCount">0</span></h3>
+        <div id="trashList" class="list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-tools" class="hidden">
+    <div class="card">
+      <h3>API 로그</h3>
+      <div class="actions"><button class="btn ghost" id="btnClearLog">로그 지우기</button></div>
+      <pre id="log" class="log">대기중</pre>
+    </div>
+  </section>
+</div>
+<script>
+(function(){
+  'use strict';
+  const $ = (id)=>document.getElementById(id);
+  const state = { templates:[], spaces:[], collections:[], trash:[] };
+  const apiBase = '';
+  function member(){ return ($('memberId').value||'').trim(); }
+  function log(msg, data){ const t=new Date().toLocaleTimeString(); const line='['+t+'] '+msg+(data!==undefined?'\n'+JSON.stringify(data,null,2):''); $('log').textContent = ($('log').textContent==='대기중'?'':$('log').textContent+'\n') + line; }
+  async function req(path, opt){
+    const res = await fetch(apiBase+path, Object.assign({headers:{'Content-Type':'application/json'}}, opt||{}));
+    const text = await res.text(); let json; try{ json=JSON.parse(text); }catch(e){ json={ok:false,error:text}; }
+    if(!res.ok || json.ok===false) throw new Error(json.detail || json.error || ('HTTP '+res.status));
+    return json;
+  }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+  function titleOf(t){ return t.template_title_ko || t.template_title_en || t.template_title_gm_lang || t.template_title || ('Template #'+t.template_id); }
+  function spaceTitleOf(s){ return s.space_title || s.space_name || s.space_title_ko || ('Space #'+s.space_id); }
+  function visibilityTag(v){ const x=v||'private'; return '<span class="tag '+(x==='public'?'ok':x==='draft'?'warn':'')+'">'+esc(x)+'</span>'; }
+  function deletedTag(x){ return x==='T'?'<span class="tag del">deleted</span>':''; }
+  function setTab(name){ document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on', b.dataset.tab===name)); ['templates','spaces','collections','trash','tools'].forEach(k=>$('tab-'+k).classList.toggle('hidden', k!==name)); }
+  async function loadAll(){ await Promise.allSettled([loadSpaces(), loadTemplates(), loadCollections()]); }
+  async function loadSpaces(){
+    const mine = $('scope').value==='mine'; const q = mine ? ('?scope=mine&member_id='+encodeURIComponent(member())) : '?scope=public';
+    if(mine && !member()) { renderSpaces([]); return; }
+    const j=await req('/api/gm/smartfit/space/list'+q); state.spaces=j.items||[]; renderSpaces(state.spaces); log('space/list', {count:j.count});
+  }
+  async function loadTemplates(){
+    const mine = $('scope').value==='mine'; const q = mine ? ('?scope=mine&member_id='+encodeURIComponent(member())) : '?scope=public';
+    if(mine && !member()) { renderTemplates([]); return; }
+    const j=await req('/api/gm/smartfit/template/list'+q); state.templates=j.items||[]; renderTemplates(state.templates); log('template/list', {count:j.count});
+  }
+  async function loadCollections(){
+    if(!member()) { renderCollections([]); return; }
+    const j=await req('/api/gm/smartfit/collection/list?member_id='+encodeURIComponent(member())); state.collections=j.items||[]; renderCollections(state.collections); log('collection/list', {count:j.count});
+  }
+  function renderSpaces(items){
+    $('spaceCount').textContent=items.length; $('spaceList').innerHTML=items.length?'':'<div class="desc">공간이 없습니다.</div>';
+    for(const sp of items){
+      const div=document.createElement('div'); div.className='item';
+      div.innerHTML='<div class="itemTop"><div><div class="title">'+esc(spaceTitleOf(sp))+'</div><div class="meta">Space ID: '+esc(sp.space_id)+' · owner: '+esc(sp.owner_member_id||sp.creator_member_id||'')+' · nick: '+esc(sp.author_nickname||'')+'</div></div><div>'+visibilityTag(sp.visibility)+deletedTag(sp.is_deleted)+'</div></div><div class="actions"><button class="btn small ghost" data-edit-space="'+sp.space_id+'">수정</button><button class="btn small ghost" data-select-space="'+sp.space_id+'">Template에 사용</button><button class="btn small danger" data-trash="space:'+sp.space_id+'">삭제</button></div>';
+      $('spaceList').appendChild(div);
+    }
+  }
+  function renderTemplates(items){
+    $('tplCount').textContent=items.length; $('templateList').innerHTML=items.length?'':'<div class="desc">Template가 없습니다.</div>';
+    for(const t of items){
+      const div=document.createElement('div'); div.className='item';
+      div.innerHTML='<div class="itemTop"><div><div class="title">'+esc(titleOf(t))+'</div><div class="meta">Template ID: '+esc(t.template_id)+' · Space: '+esc(t.space_id||'')+' · 작성자: '+esc(t.creator_member_id||'')+'</div></div><div>'+visibilityTag(t.visibility)+deletedTag(t.is_deleted)+'</div></div><div class="actions"><button class="btn small ghost" data-detail="'+t.template_id+'">상세</button><button class="btn small ghost" data-edit-tpl="'+t.template_id+'">수정</button><button class="btn small brand" data-collect="'+t.template_id+'">내 컬렉션 추가</button><button class="btn small brand" data-build="'+t.template_id+'">장바구니 빌드</button><button class="btn small danger" data-trash="template:'+t.template_id+'">삭제</button></div>';
+      $('templateList').appendChild(div);
+    }
+  }
+  function renderCollections(items){
+    $('collectionList').innerHTML=items.length?'':'<div class="desc">컬렉션이 없습니다.</div>';
+    for(const c of items){
+      const div=document.createElement('div'); div.className='item';
+      div.innerHTML='<div class="itemTop"><div><div class="title">'+esc(titleOf(c))+'</div><div class="meta">Template ID: '+esc(c.template_id)+' · 등록회원: '+esc(c.member_id||member())+'</div></div><div>'+deletedTag(c.is_deleted)+'</div></div><div class="actions"><button class="btn small brand" data-build="'+c.template_id+'">장바구니 빌드</button><button class="btn small ghost" data-detail="'+c.template_id+'">상세</button></div>';
+      $('collectionList').appendChild(div);
+    }
+  }
+  function renderTrash(items, type){
+    $('trashCount').textContent=items.length; $('trashList').innerHTML=items.length?'':'<div class="desc">휴지통 항목이 없습니다.</div>';
+    for(const x of items){
+      const id=x.space_id || x.template_id || x.item_id; const name=x.space_title || titleOf(x) || x.product_uid || ('#'+id);
+      const div=document.createElement('div'); div.className='item';
+      div.innerHTML='<div class="itemTop"><div><div class="title">'+esc(name)+'</div><div class="meta">'+esc(type)+' ID: '+esc(id)+' · 삭제일: '+esc(x.deleted_at||'')+'</div></div><div>'+deletedTag('T')+'</div></div><div class="actions"><button class="btn small brand" data-restore="'+type+':'+id+'">복원</button><button class="btn small danger" data-permanent="'+type+':'+id+'">영구삭제</button></div>';
+      $('trashList').appendChild(div);
+    }
+  }
+  async function saveSpace(){
+    if(!member()) throw new Error('회원 ID가 필요합니다.');
+    const body={ member_id:member(), space_id:$('spaceId').value||undefined, space_title:$('spaceTitle').value, author_nickname:$('spaceNick').value, real_name_public:$('realNamePublic').value, visibility:$('spaceVisibility').value, youtube_url:$('spaceYoutube').value, image_url:$('spaceImage').value, space_desc:$('spaceDesc').value };
+    const j=await req('/api/gm/smartfit/space/save',{method:'POST',body:JSON.stringify(body)}); log('space/save', j); clearSpace(); await loadSpaces();
+  }
+  async function saveTemplate(){
+    if(!member()) throw new Error('회원 ID가 필요합니다.');
+    let items; const raw=$('tplItems').value.trim(); if(raw){ items=JSON.parse(raw); if(!Array.isArray(items)) throw new Error('상품 JSON은 배열이어야 합니다.'); }
+    const body={ member_id:member(), creator_member_id:member(), template_id:$('tplId').value||undefined, space_id:$('tplSpaceId').value||undefined, title:$('tplTitle').value, template_title_ko:$('tplTitle').value, description:$('tplDesc').value, search_ko:$('tplSearch').value, visibility:$('tplVisibility').value, items };
+    const j=await req('/api/gm/smartfit/template/save',{method:'POST',body:JSON.stringify(body)}); log('template/save', j); clearTemplate(); await loadTemplates();
+  }
+  function clearSpace(){ ['spaceId','spaceTitle','spaceNick','spaceYoutube','spaceImage','spaceDesc'].forEach(id=>$(id).value=''); $('realNamePublic').value='F'; $('spaceVisibility').value='private'; }
+  function clearTemplate(){ ['tplId','tplSpaceId','tplTitle','tplSearch','tplDesc','tplItems'].forEach(id=>$(id).value=''); $('tplVisibility').value='private'; }
+  async function detail(tid){ const j=await req('/api/gm/smartfit/template/'+tid); log('template/detail '+tid, j); setTab('tools'); }
+  async function collect(tid){ if(!member()) throw new Error('회원 ID가 필요합니다.'); const j=await req('/api/gm/smartfit/collection/add',{method:'POST',body:JSON.stringify({member_id:member(),template_id:tid})}); log('collection/add', j); await loadCollections(); }
+  async function buildCart(tid){ if(!member()) throw new Error('회원 ID가 필요합니다.'); const j=await req('/api/gm/smartfit/build-cart',{method:'POST',body:JSON.stringify({member_id:member(),template_id:tid})}); log('build-cart', j); setTab('tools'); }
+  async function trashMove(type,id){ if(!member()) throw new Error('회원 ID가 필요합니다.'); if(!confirm('삭제하시겠습니까?\n추후 복원 메뉴에서 복원할 수 있습니다.')) return; const j=await req('/api/gm/smartfit/trash/move',{method:'POST',body:JSON.stringify({member_id:member(),target_type:type,target_id:id})}); log('trash/move', j); await loadAll(); }
+  async function trashRestore(type,id){ const j=await req('/api/gm/smartfit/trash/restore',{method:'POST',body:JSON.stringify({member_id:member(),target_type:type,target_ids:[id]})}); log('trash/restore', j); await trashLoad(); }
+  async function trashPermanent(type,id){ if(!confirm('정말 영구삭제하시겠습니까?\n영구삭제된 데이터는 복구할 수 없습니다.')) return; const j=await req('/api/gm/smartfit/trash/permanent-delete',{method:'POST',body:JSON.stringify({member_id:member(),target_type:type,target_ids:[id]})}); log('trash/permanent-delete', j); await trashLoad(); }
+  async function trashLoad(){ if(!member()) throw new Error('회원 ID가 필요합니다.'); const type=$('trashType').value; const j=await req('/api/gm/smartfit/trash/list?member_id='+encodeURIComponent(member())+'&target_type='+encodeURIComponent(type)); state.trash=j.items||[]; renderTrash(state.trash,type); log('trash/list', {type,count:j.count}); }
+  async function health(){ const j=await req('/api/gm/smartfit/health'); log('health', j); setTab('tools'); }
+  document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
+  $('memberId').value = localStorage.getItem('gm_smartfit_member_id') || '';
+  $('memberId').addEventListener('change',()=>localStorage.setItem('gm_smartfit_member_id', member()));
+  $('btnLoad').onclick=()=>loadAll().catch(e=>log('ERROR',e.message)); $('btnHealth').onclick=()=>health().catch(e=>log('ERROR',e.message)); $('btnSaveSpace').onclick=()=>saveSpace().catch(e=>alert(e.message)); $('btnSaveTemplate').onclick=()=>saveTemplate().catch(e=>alert(e.message)); $('btnClearSpace').onclick=clearSpace; $('btnClearTemplate').onclick=clearTemplate; $('btnTrashLoad').onclick=()=>trashLoad().catch(e=>alert(e.message)); $('btnClearLog').onclick=()=>{$('log').textContent='대기중'};
+  document.body.addEventListener('click', e=>{
+    const el=e.target.closest('button'); if(!el) return;
+    const ds=el.dataset;
+    if(ds.selectSpace){ $('tplSpaceId').value=ds.selectSpace; setTab('templates'); return; }
+    if(ds.editSpace){ const sp=state.spaces.find(x=>String(x.space_id)===String(ds.editSpace)); if(sp){ $('spaceId').value=sp.space_id||''; $('spaceTitle').value=spaceTitleOf(sp); $('spaceNick').value=sp.author_nickname||''; $('realNamePublic').value=sp.real_name_public==='T'?'T':'F'; $('spaceVisibility').value=sp.visibility||'private'; $('spaceYoutube').value=sp.youtube_url||''; $('spaceImage').value=sp.image_url||''; $('spaceDesc').value=sp.space_desc||''; setTab('spaces'); } return; }
+    if(ds.editTpl){ const t=state.templates.find(x=>String(x.template_id)===String(ds.editTpl)); if(t){ $('tplId').value=t.template_id||''; $('tplSpaceId').value=t.space_id||''; $('tplTitle').value=titleOf(t); $('tplSearch').value=t.search_ko||''; $('tplDesc').value=t.template_desc_ko||''; $('tplVisibility').value=t.visibility||'private'; setTab('templates'); } return; }
+    if(ds.detail) return detail(ds.detail).catch(e=>alert(e.message));
+    if(ds.collect) return collect(ds.collect).catch(e=>alert(e.message));
+    if(ds.build) return buildCart(ds.build).catch(e=>alert(e.message));
+    if(ds.trash){ const [type,id]=ds.trash.split(':'); return trashMove(type,id).catch(e=>alert(e.message)); }
+    if(ds.restore){ const [type,id]=ds.restore.split(':'); return trashRestore(type,id).catch(e=>alert(e.message)); }
+    if(ds.permanent){ const [type,id]=ds.permanent.split(':'); return trashPermanent(type,id).catch(e=>alert(e.message)); }
+  });
+  health().catch(()=>{});
+})();
+</script>
+</body>
+</html>
