@@ -615,7 +615,9 @@ router.get('/api/gm/builder/export', async (req,res)=>{
   try {
     let cols = await getColumns(db, spec.table);
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
-    const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
+    const dateOnlyTables = new Set(['gm_keyword_relation','gm_keyword_translate']);
+    const selectCols = cols.map(c => (dateOnlyTables.has(spec.table) && c === 'updated_at') ? `${qIdent(c)}::date::text AS ${qIdent(c)}` : qIdent(c));
+    const r = await db.query(`SELECT ${selectCols.join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
     if (format === 'json') return ok(res, { table:spec.table, count:r.rows.length, columns:cols, rows:r.rows });
 
     const csv = toCsv(r.rows, cols);

@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS gm_keyword_relation (
   related_keyword_fa TEXT DEFAULT '',
   related_keyword_es TEXT DEFAULT '',
   related_keyword_fr TEXT DEFAULT '',
-  updated_at TIMESTAMP NOT NULL DEFAULT now(),
+  updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
   PRIMARY KEY (keyword_ko, related_keyword_ko)
 );
 
@@ -121,3 +121,6 @@ BEGIN
     $fmt$, yy);
   END LOOP;
 END $$;
+
+-- Ensure existing deployments store only date in updated_at.
+ALTER TABLE IF EXISTS gm_keyword_relation ALTER COLUMN updated_at TYPE DATE USING updated_at::date;

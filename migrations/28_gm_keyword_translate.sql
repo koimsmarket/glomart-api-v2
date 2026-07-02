@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS gm_keyword_translate (
   input_keyword TEXT NOT NULL,
   main_keyword_ko TEXT NOT NULL,
   hit_count INTEGER NOT NULL DEFAULT 1,
-  updated_at TIMESTAMP NOT NULL DEFAULT now(),
+  updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
   PRIMARY KEY (lang, input_keyword)
 );
 
@@ -15,3 +15,6 @@ COMMENT ON COLUMN gm_keyword_translate.lang IS 'Input language code, such as ko,
 COMMENT ON COLUMN gm_keyword_translate.input_keyword IS 'User-entered keyword or translated alias in the given language.';
 COMMENT ON COLUMN gm_keyword_translate.main_keyword_ko IS 'Korean normalized main search keyword.';
 COMMENT ON COLUMN gm_keyword_translate.hit_count IS 'Number of times this alias mapping was observed or saved.';
+
+-- Ensure existing deployments store only date in updated_at.
+ALTER TABLE IF EXISTS gm_keyword_translate ALTER COLUMN updated_at TYPE DATE USING updated_at::date;

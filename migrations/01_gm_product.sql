@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS gm_product (
   last_cart_at TIMESTAMP,
   last_wish_at TIMESTAMP,
   last_order_at TIMESTAMP,
-  expire_at TIMESTAMP,
+  expire_at DATE,
   registered_our_product_yn TEXT,
   created_at TIMESTAMP NOT NULL,
   updated_at TIMESTAMP,

@@ -131,9 +131,13 @@ async function ensureKeywordTranslateTable(pool){
     input_keyword TEXT NOT NULL,
     main_keyword_ko TEXT NOT NULL,
     hit_count INTEGER NOT NULL DEFAULT 1,
-    updated_at TIMESTAMP NOT NULL DEFAULT now(),
+    updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
     PRIMARY KEY (lang, input_keyword)
   )`);
+  try{ await pool.query(`ALTER TABLE gm_keyword_translate ALTER COLUMN updated_at TYPE DATE USING updated_at::date`); }catch(e){}
+}
+async function ensureKeywordRelationDateColumn(pool){
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ALTER COLUMN updated_at TYPE DATE USING updated_at::date`); }catch(e){}
 }
 function pickLang(p){
   return cleanText(p.lang || p.gm_lang || p.ui_lang_code || p.lang_code || p.country_lang || (p.searchKeywordMeta && (p.searchKeywordMeta.lang || p.searchKeywordMeta.gm_lang)) || 'ko').toLowerCase() || 'ko';
@@ -142,16 +146,17 @@ async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, i
   lang = cleanText(lang).toLowerCase(); inputKeyword = cleanText(inputKeyword); mainKeywordKo = cleanText(mainKeywordKo);
   if(!lang || !inputKeyword || !mainKeywordKo) return false;
   await pool.query(`INSERT INTO gm_keyword_translate (lang,input_keyword,main_keyword_ko,hit_count,updated_at)
-    VALUES ($1,$2,$3,$4,now())
+    VALUES ($1,$2,$3,$4,CURRENT_DATE)
     ON CONFLICT (lang,input_keyword) DO UPDATE SET
       main_keyword_ko=EXCLUDED.main_keyword_ko,
       hit_count=gm_keyword_translate.hit_count + EXCLUDED.hit_count,
-      updated_at=now()`, [lang, inputKeyword, mainKeywordKo, Math.max(1, toInt(inc,1))]);
+      updated_at=CURRENT_DATE`, [lang, inputKeyword, mainKeywordKo, Math.max(1, toInt(inc,1))]);
   return true;
 }
 async function saveKeywordTranslatePayload(pool, payload){
   payload = payload || {};
   await ensureKeywordTranslateTable(pool);
+  await ensureKeywordRelationDateColumn(pool);
   const meta = pickKeywordMeta(payload);
   const mainKeywordKo = meta.mainKeyword;
   const inputKeyword = meta.inputKeyword || payload.inputKeyword || payload.input_keyword || '';
@@ -212,7 +217,7 @@ async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
   const sql = `INSERT INTO gm_keyword_relation (${cols.join(',')}) VALUES (${placeholders})
     ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET
       ${updateCols.map(c => `${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END`).join(',')},
-      updated_at=now()`;
+      updated_at=CURRENT_DATE`;
   await pool.query(sql, vals);
   return true;
 }
@@ -237,6 +242,7 @@ async function saveKeywordRelationStats(pool, keywordKo, relatedKo, categoryMain
   }catch(e){}
 }
 async function saveKeywordMetaPayload(pool, payload){
+  await ensureKeywordRelationDateColumn(pool);
   const meta = pickKeywordMeta(payload || {});
   const keywordKo = meta.mainKeyword;
   const related = meta.relatedKeywords;
@@ -480,7 +486,7 @@ async function upsertProduct(pool, raw, parent={}){
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
       $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
       $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,
-      1,0,0,0,0,0,$54,now(),now() + INTERVAL '30 days',now(),now()
+      1,0,0,0,0,0,$54,now(),CURRENT_DATE + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=EXCLUDED.source_mall,
@@ -525,7 +531,7 @@ async function upsertProduct(pool, raw, parent={}){
       sale_status=EXCLUDED.sale_status,
       hit_count=COALESCE(gm_product.hit_count,0)+1,
       last_seen_at=now(),
-      expire_at=now() + INTERVAL '30 days',
+      expire_at=CURRENT_DATE + INTERVAL '30 days',
       updated_at=now()
     RETURNING product_uid, pi_ii_vi, mall_code, hit_count, (xmax = 0) AS inserted
   `;
