@@ -8,6 +8,87 @@ function toInt(v, def=0){
   const n = m ? Number(m[0]) : Number(raw);
   return Number.isFinite(n) ? Math.round(n) : def;
 }
+
+function firstNonEmpty(obj, names){
+  obj = obj || {};
+  for(const name of names){
+    if(Object.prototype.hasOwnProperty.call(obj, name) && obj[name] !== undefined && obj[name] !== null){
+      const v = cleanText(obj[name]);
+      if(v) return v;
+    }
+  }
+  return '';
+}
+function parseMoney(v, def=0){
+  if(v === null || v === undefined) return def;
+  if(typeof v === 'number') return Number.isFinite(v) ? Math.round(v) : def;
+  let s = cleanText(v);
+  if(!s) return def;
+  s = s.replace(/₩|￦|원|KRW/gi, '').replace(/,/g, '').trim();
+  const nums = s.match(/\d+(?:\.\d+)?/g);
+  if(!nums || !nums.length) return def;
+  return Math.round(Number(nums[0])) || def;
+}
+function parseCount(v){
+  if(v === null || v === undefined) return null;
+  if(typeof v === 'number') return Number.isFinite(v) ? Math.round(v) : null;
+  let s = cleanText(v);
+  if(!s) return null;
+  let mult = 1;
+  if(/만/.test(s)) mult = 10000;
+  else if(/[kK]/.test(s)) mult = 1000;
+  s = s.replace(/리뷰|상품평|댓글|평가|개|건|판매|명|\+/g,'').replace(/,/g,'').trim();
+  const m = s.match(/\d+(?:\.\d+)?/);
+  if(!m) return null;
+  return Math.round(Number(m[0]) * mult);
+}
+function parseRating(v){
+  const s = cleanText(v);
+  if(!s) return '';
+  const m = s.match(/(?:평점|별점|rating)?\s*([0-5](?:\.\d+)?)/i);
+  return m ? m[1] : s;
+}
+function isBadProductNameCandidate(v){
+  const s = cleanText(v);
+  if(!s) return true;
+  if(s.length < 2) return true;
+  if(/^https?:\/\//i.test(s)) return true;
+  if(/[₩￦]/.test(s) && /(가격인하|무료 배송|판매|리뷰|도착|배송)/.test(s)) return true;
+  if((s.match(/[₩￦]/g)||[]).length >= 2) return true;
+  if(s.length > 180 && /(가격인하|무료 배송|판매|리뷰|도착|배송|장바구니|할인)/.test(s)) return true;
+  return false;
+}
+function cleanProductNameCandidate(v){
+  let s = cleanText(v);
+  if(!s) return '';
+  s = s.replace(/\s+(?:₩|￦)\s*\d[\d,]*(?:\.\d+)?[\s\S]*$/,'').trim();
+  s = s.replace(/\s+\d+\s*판매[\s\S]*$/,'').trim();
+  s = s.replace(/\s+(?:무료\s*)?배송[\s\S]*$/,'').trim();
+  s = s.replace(/\s+가격인하[\s\S]*$/,'').trim();
+  return cleanText(s);
+}
+function bestProductName(p){
+  const names = [
+    'searchProductName','search_product_name','cleanProductName','clean_product_name',
+    'productName','product_name','mallProductName','mall_product_name',
+    'name','itemName','item_name','productTitle','product_title','itemTitle','item_title',
+    'title','subject'
+  ];
+  const candidates=[];
+  for(const n of names){
+    if(p && p[n] !== undefined && p[n] !== null){
+      const c = cleanProductNameCandidate(p[n]);
+      if(c) candidates.push(c);
+    }
+  }
+  candidates.sort((a,b)=>{
+    const ab=isBadProductNameCandidate(a)?1:0, bb=isBadProductNameCandidate(b)?1:0;
+    if(ab!==bb) return ab-bb;
+    return a.length-b.length;
+  });
+  return candidates[0] || '';
+}
+
 function normalizeUrl(url){ url = cleanText(url); if(url.startsWith('//')) return 'https:' + url; return url; }
 function fail(res, status, message, extra={}){ res.status(status).json({ ok:false, error:message, ...extra }); }
 function ok(res, data){ res.json({ ok:true, ...data }); }
@@ -349,43 +430,36 @@ function ids(b){
   return { productId, itemId, vendorItemId, mallCode, pi, uid, source_url:urlText };
 }
 function pickProductName(p){
-  return cleanText(
-    p.product_name || p.productName || p.mall_product_name || p.mallProductName ||
-    p.title || p.name || p.subject || p.item_title || p.itemTitle || p.product_title || p.productTitle
-  );
+  return bestProductName(p);
 }
 function pickPrice(p){
-  return toInt(
-    p.mall_sale_price || p.mallSalePrice ||
-    p.gm_price || p.gmPrice || p.search_price || p.searchPrice || p.searchPriceText ||
-    p.price_text || p.priceText || p.display_price || p.displayPrice ||
-    p.price || p.real_price || p.realPrice || p.rawPrice || p.raw_price ||
-    p.sale_price || p.salePrice || p.final_price || p.finalPrice || p.ali_price || p.aliPrice || p.min_price || p.minPrice,
-    0
-  );
+  return parseMoney(firstNonEmpty(p, [
+    'mall_sale_price','mallSalePrice','priceMain','displayPrice','display_price',
+    'gm_price','gmPrice','searchPrice','search_price','searchPriceText',
+    'price_text','priceText','rawPrice','raw_price','sale_price','salePrice',
+    'final_price','finalPrice','ali_price','aliPrice','min_price','minPrice','price'
+  ]), 0);
 }
 function pickNormalPrice(p){
-  const v = p.normal_price || p.normalPrice || p.rawPrice || p.raw_price || p.original_price || p.originalPrice || p.list_price || p.listPrice || p.base_price || p.basePrice || '';
-  return v === '' || v == null ? null : toInt(v, 0);
+  const v = firstNonEmpty(p, ['normal_price','normalPrice','original_price','originalPrice','list_price','listPrice','base_price','basePrice','rawOriginalPrice','raw_original_price']);
+  return v ? parseMoney(v, 0) : null;
 }
 function pickDiscountPrice(p){
-  const v = p.discount_price || p.discountPrice || p.coupon_price || p.couponPrice || p.instant_discount || p.instantDiscount || '';
-  return v === '' || v == null ? null : toInt(v, 0);
+  const v = firstNonEmpty(p, ['discount_price','discountPrice','coupon_price','couponPrice','instant_discount','instantDiscount']);
+  return v ? parseMoney(v, 0) : null;
 }
 function pickDeliveryFee(p){
-  return toInt(
-    p.delivery_fee || p.deliveryFee || p.shipping_fee || p.shippingFee ||
-    p.deliveryFeeText || p.shippingFeeText || p.delivery_fee_text || p.shipping_fee_text || 0,
-    0
-  );
+  const v = firstNonEmpty(p, ['delivery_fee','deliveryFee','shipping_fee','shippingFee','gm_shipping_fee','gmShippingFee','deliveryFeeText','shippingFeeText','searchShippingFeeText','searchDeliveryFeeText','delivery_fee_text','shipping_fee_text']);
+  if(/무료/.test(v)) return 0;
+  return parseMoney(v, 0);
 }
 function pickReviewCount(p){
-  const v = p.review_count || p.reviewCount || p.searchReviewCount || p.comment_count || p.commentCount || p.rating_count || p.ratingCount || p.review_text || p.reviewText || '';
-  return v === '' || v == null ? null : toInt(v, 0);
+  const v = firstNonEmpty(p, ['review_count','reviewCount','searchReviewCount','comment_count','commentCount','rating_count','ratingCount','review_text','reviewText','review','reviews','commentText']);
+  return v ? parseCount(v) : null;
 }
 function pickRatingScore(p){
-  const v = p.rating_score || p.ratingScore || p.rating || p.searchRating || p.star_score || p.starScore || p.product_grade || p.productGrade || '';
-  return cleanText(v);
+  const v = firstNonEmpty(p, ['rating_score','ratingScore','rating','searchRating','star_score','starScore','product_grade','productGrade','grade','score']);
+  return parseRating(v);
 }
 function cleanDupMallProductName(productName, mallProductName){
   productName = cleanText(productName); mallProductName = cleanText(mallProductName);
@@ -416,17 +490,10 @@ function pickOptionValue(p){
   );
 }
 function pickDeliveryText(p){
-  return cleanText(
-    p.delivery_eta_text || p.deliveryEtaText || p.deliveryText || p.delivery_text ||
-    p.shipping_text || p.shippingText || p.shipping_message || p.shippingMessage ||
-    p.arrival_text || p.arrivalText || p.eta_text || p.etaText || ''
-  );
+  return firstNonEmpty(p, ['delivery_eta_text','deliveryEtaText','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
 }
 function pickDeliveryType(p){
-  return cleanText(
-    p.delivery_type || p.deliveryType || p.shipping_type || p.shippingType ||
-    p.delivery_badge || p.deliveryBadge || p.shipping_badge || p.shippingBadge || ''
-  );
+  return cleanText(firstNonEmpty(p, ['delivery_type','deliveryType','searchDeliveryType','shipping_type','shippingType','shipLabel','shippingLabel','delivery_badge','deliveryBadge','shipping_badge','shippingBadge']));
 }
 function pickSupplierName(p){
   return cleanText(
@@ -466,7 +533,8 @@ function sourceUidFrom(p, sourceMall){
   return key;
 }
 function normalizeProductPayload(raw, parent={}){
-  const p = { ...(raw || {}) };
+  const rawObj = (raw && typeof raw.raw_json === 'object' && !Array.isArray(raw.raw_json)) ? raw.raw_json : {};
+  const p = { ...rawObj, ...(raw || {}) };
   if(!p.mall_code && !p.mallCode) p.mall_code = parent.mall_code || parent.mallCode || parent.source || parent.mall || 'CPKR';
   if(!p.keyword && parent.keyword) p.keyword = parent.keyword;
   if(!p.requestId && parent.requestId) p.requestId = parent.requestId;
@@ -529,12 +597,12 @@ async function upsertProduct(pool, raw, parent={}){
       return_shipping_fee, exchange_shipping_fee, return_period_days, exchange_period_days,
       return_address, exchange_address, return_contact, exchange_contact,
       soldout_yn, hit_count, detail_view_count, cart_count, wish_count, order_count, order_qty_total,
-      sale_status, product_grade, last_seen_at, expire_at, created_at, updated_at
+      sale_status, product_grade, sale_unit_text, unit_price_text, unit_price_value, unit_base_qty, unit_base_unit, unit_norm_qty, unit_norm_unit, unit_norm_price, unit_parse_status, unit_sortable_yn, last_seen_at, expire_at, created_at, updated_at
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
       $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
       $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,
-      1,0,0,0,0,0,$54,$55,now(),now() + INTERVAL '30 days',now(),now()
+      1,0,0,0,0,0,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=EXCLUDED.source_mall,
@@ -579,6 +647,16 @@ async function upsertProduct(pool, raw, parent={}){
       soldout_yn=EXCLUDED.soldout_yn,
       sale_status=EXCLUDED.sale_status,
       product_grade=EXCLUDED.product_grade,
+      sale_unit_text=EXCLUDED.sale_unit_text,
+      unit_price_text=EXCLUDED.unit_price_text,
+      unit_price_value=EXCLUDED.unit_price_value,
+      unit_base_qty=EXCLUDED.unit_base_qty,
+      unit_base_unit=EXCLUDED.unit_base_unit,
+      unit_norm_qty=EXCLUDED.unit_norm_qty,
+      unit_norm_unit=EXCLUDED.unit_norm_unit,
+      unit_norm_price=EXCLUDED.unit_norm_price,
+      unit_parse_status=EXCLUDED.unit_parse_status,
+      unit_sortable_yn=EXCLUDED.unit_sortable_yn,
       hit_count=COALESCE(gm_product.hit_count,0)+1,
       last_seen_at=now(),
       expire_at=now() + INTERVAL '30 days',
@@ -626,7 +704,17 @@ async function upsertProduct(pool, raw, parent={}){
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0),
     cleanText(p.return_address || p.returnAddress || ''), cleanText(p.exchange_address || p.exchangeAddress || ''),
     cleanText(p.return_contact || p.returnContact || ''), cleanText(p.exchange_contact || p.exchangeContact || ''),
-    cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active'), pickRatingScore(p)
+    cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active'), pickRatingScore(p),
+    firstNonEmpty(p, ['sale_unit_text','saleUnitText','unitSaleText']),
+    firstNonEmpty(p, ['unit_price_text','unitPriceText','searchUnitPriceText','unitPrice','unitPriceDisplay']),
+    firstNonEmpty(p, ['unit_price_value','unitPriceValue']) ? Number(firstNonEmpty(p, ['unit_price_value','unitPriceValue'])) : null,
+    firstNonEmpty(p, ['unit_base_qty','unitBaseQty']) ? Number(firstNonEmpty(p, ['unit_base_qty','unitBaseQty'])) : null,
+    firstNonEmpty(p, ['unit_base_unit','unitBaseUnit']),
+    firstNonEmpty(p, ['unit_norm_qty','unitNormQty']) ? Number(firstNonEmpty(p, ['unit_norm_qty','unitNormQty'])) : null,
+    firstNonEmpty(p, ['unit_norm_unit','unitNormUnit']),
+    firstNonEmpty(p, ['unit_norm_price','unitNormPrice']) ? Number(firstNonEmpty(p, ['unit_norm_price','unitNormPrice'])) : null,
+    firstNonEmpty(p, ['unit_parse_status','unitParseStatus']),
+    firstNonEmpty(p, ['unit_sortable_yn','unitSortableYn'])
   ];  const r=await pool.query(sql, vals);
   await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords, Object.assign({}, parent || {}, p || {}));
   return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:r.rows[0] };
