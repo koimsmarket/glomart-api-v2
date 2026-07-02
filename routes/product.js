@@ -356,10 +356,40 @@ function pickProductName(p){
 }
 function pickPrice(p){
   return toInt(
-    p.mall_sale_price || p.mallSalePrice || p.price || p.real_price || p.realPrice ||
+    p.mall_sale_price || p.mallSalePrice ||
+    p.gm_price || p.gmPrice || p.search_price || p.searchPrice || p.searchPriceText ||
+    p.price_text || p.priceText || p.display_price || p.displayPrice ||
+    p.price || p.real_price || p.realPrice || p.rawPrice || p.raw_price ||
     p.sale_price || p.salePrice || p.final_price || p.finalPrice || p.ali_price || p.aliPrice || p.min_price || p.minPrice,
     0
   );
+}
+function pickNormalPrice(p){
+  const v = p.normal_price || p.normalPrice || p.rawPrice || p.raw_price || p.original_price || p.originalPrice || p.list_price || p.listPrice || p.base_price || p.basePrice || '';
+  return v === '' || v == null ? null : toInt(v, 0);
+}
+function pickDiscountPrice(p){
+  const v = p.discount_price || p.discountPrice || p.coupon_price || p.couponPrice || p.instant_discount || p.instantDiscount || '';
+  return v === '' || v == null ? null : toInt(v, 0);
+}
+function pickDeliveryFee(p){
+  return toInt(
+    p.delivery_fee || p.deliveryFee || p.shipping_fee || p.shippingFee ||
+    p.deliveryFeeText || p.shippingFeeText || p.delivery_fee_text || p.shipping_fee_text || 0,
+    0
+  );
+}
+function pickReviewCount(p){
+  const v = p.review_count || p.reviewCount || p.searchReviewCount || p.comment_count || p.commentCount || p.rating_count || p.ratingCount || p.review_text || p.reviewText || '';
+  return v === '' || v == null ? null : toInt(v, 0);
+}
+function pickRatingScore(p){
+  const v = p.rating_score || p.ratingScore || p.rating || p.searchRating || p.star_score || p.starScore || p.product_grade || p.productGrade || '';
+  return cleanText(v);
+}
+function cleanDupMallProductName(productName, mallProductName){
+  productName = cleanText(productName); mallProductName = cleanText(mallProductName);
+  return productName && mallProductName && productName === mallProductName ? '' : mallProductName;
 }
 function pickProductUrl(p){
   return normalizeUrl(p.product_url || p.productUrl || p.url || p.link || p.href || p.detail_url || p.detailUrl || p.ali_url || p.aliUrl);
@@ -491,7 +521,7 @@ async function upsertProduct(pool, raw, parent={}){
       product_id, item_id, vendor_item_id, pi_ii_vi, internal_product_code,
       product_name, mall_product_name, option_count, option_name, option_value,
       origin_country, mall_sale_price, final_supply_price, normal_price, discount_price,
-      delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn,
+      delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn, review_count,
       supplier_id, supplier_name_snapshot, business_number_snapshot, online_sales_number_snapshot,
       ceo_name_snapshot, supplier_mobile_snapshot, supplier_phone_snapshot, supplier_email_snapshot, supplier_address_snapshot,
       product_url, thumb_origin_url, thumb_file_name,
@@ -499,12 +529,12 @@ async function upsertProduct(pool, raw, parent={}){
       return_shipping_fee, exchange_shipping_fee, return_period_days, exchange_period_days,
       return_address, exchange_address, return_contact, exchange_contact,
       soldout_yn, hit_count, detail_view_count, cart_count, wish_count, order_count, order_qty_total,
-      sale_status, last_seen_at, expire_at, created_at, updated_at
+      sale_status, product_grade, last_seen_at, expire_at, created_at, updated_at
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
       $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
       $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,
-      1,0,0,0,0,0,$54,now(),now() + INTERVAL '30 days',now(),now()
+      1,0,0,0,0,0,$54,$55,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=EXCLUDED.source_mall,
@@ -521,6 +551,7 @@ async function upsertProduct(pool, raw, parent={}){
       delivery_fee=EXCLUDED.delivery_fee,
       delivery_eta_text=EXCLUDED.delivery_eta_text,
       delivery_type=EXCLUDED.delivery_type,
+      review_count=EXCLUDED.review_count,
       supplier_id=EXCLUDED.supplier_id,
       supplier_name_snapshot=EXCLUDED.supplier_name_snapshot,
       business_number_snapshot=EXCLUDED.business_number_snapshot,
@@ -547,6 +578,7 @@ async function upsertProduct(pool, raw, parent={}){
       exchange_contact=EXCLUDED.exchange_contact,
       soldout_yn=EXCLUDED.soldout_yn,
       sale_status=EXCLUDED.sale_status,
+      product_grade=EXCLUDED.product_grade,
       hit_count=COALESCE(gm_product.hit_count,0)+1,
       last_seen_at=now(),
       expire_at=now() + INTERVAL '30 days',
@@ -569,15 +601,15 @@ async function upsertProduct(pool, raw, parent={}){
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, sourceMall, sourceUid, cleanText(p.mall_category || p.mallCategory),
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
-    productName, cleanText(p.mall_product_name || p.mallProductName || productName), toInt(p.option_count || p.optionCount, optionName || optionValue ? 1 : 0),
+    productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), toInt(p.option_count || p.optionCount, optionName || optionValue ? 1 : 0),
     optionName, optionValue,
     cleanText(p.origin_country || p.originCountry), pickPrice(p),
     p.final_supply_price == null && p.finalSupplyPrice == null ? null : toInt(p.final_supply_price || p.finalSupplyPrice, 0),
-    p.normal_price == null && p.normalPrice == null ? null : toInt(p.normal_price || p.normalPrice, 0),
-    p.discount_price == null && p.discountPrice == null ? null : toInt(p.discount_price || p.discountPrice, 0),
-    toInt(p.delivery_fee || p.deliveryFee || p.shipping_fee || p.shippingFee, 0), deliveryText,
+    pickNormalPrice(p),
+    pickDiscountPrice(p),
+    pickDeliveryFee(p), deliveryText,
     deliveryType, cleanText(p.tax_type || p.taxType),
-    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), supplierId, supplierName,
+    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), supplierId, supplierName,
     pickAny(p,['business_number_snapshot','businessNumberSnapshot','business_number','businessNumber','seller_business_number','sellerBusinessNumber']),
     pickAny(p,['online_sales_number_snapshot','onlineSalesNumberSnapshot','online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber']),
     pickAny(p,['ceo_name_snapshot','ceoNameSnapshot','ceo_name','ceoName','representative_name','representativeName']),
@@ -594,7 +626,7 @@ async function upsertProduct(pool, raw, parent={}){
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0),
     cleanText(p.return_address || p.returnAddress || ''), cleanText(p.exchange_address || p.exchangeAddress || ''),
     cleanText(p.return_contact || p.returnContact || ''), cleanText(p.exchange_contact || p.exchangeContact || ''),
-    cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active')
+    cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active'), pickRatingScore(p)
   ];  const r=await pool.query(sql, vals);
   await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords, Object.assign({}, parent || {}, p || {}));
   return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:r.rows[0] };
