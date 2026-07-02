@@ -567,59 +567,37 @@ function basketSelectSql(where){
   return `SELECT *, (mall_code || '_' || pi_ii_vi) AS product_uid FROM gm_basket ${where || ''}`;
 }
 
-app.get('/', (req,res)=>ok(res, {
-  service:'glomart-api',
-  mode:'json-cache-plus-postgresql',
-  dbReady,
-  dbError,
-  routes:[
-    'GET /health',
-    'GET /api/gm/health',
-    'POST /api/gm/db/init',
-    'POST /api/gm/db/reset',
-    'GET /api/gm/db/table-counts',
-    'GET /api/gm/dashboard/realtime',
-    'POST /api/gm/dashboard/snapshot',
-    'POST /api/gm/search/log',
-    'POST /api/gm/product/archive',
-    'GET /api/gm/search/summary',
-    'GET /api/gm/search/monthly',
-    'GET /api/gm/sales/summary',
-    'POST /api/gm/product/upsert',
-    'POST /api/gm/basket/add',
-    'GET /api/gm/basket/list',
-    'POST /api/gm/interest/visit',
-    'POST /api/gm/interest/wish',
-    'GET /api/gm/interest/recent',
-    'DELETE /api/gm/basket/item',
-    'POST /api/gm/order/create',
-    'POST /api/gm/member/upsert',
-    'GET /api/gm/member/me',
-    'GET /api/gm/member/address/list',
-    'POST /api/gm/member/address/upsert',
-    'POST /api/gm/member/address/sync',
-    'GET /api/gm/account/summary',
-    'GET /api/gm/account/ledger',
-    'GET /api/gm/smartfit/health',
-    'GET /api/gm/smartfit/category/list',
-    'GET /api/gm/smartfit/category/search',
-    'GET /api/gm/smartfit/template/list',
-    'GET /api/gm/smartfit/template/:template_id',
-    'GET /api/gm/smartfit/product/search',
-    'POST /api/gm/smartfit/template/save',
-    'POST /api/gm/smartfit/template/public',
-    'GET /api/gm/smartfit/media/list',
-    'POST /api/gm/smartfit/media/save',
-    'GET /api/gm/smartfit/comment/list',
-    'POST /api/gm/smartfit/comment/add',
-    'POST /api/gm/smartfit/collection/add',
-    'GET /api/gm/smartfit/collection/list',
-    'POST /api/gm/smartfit/build-cart',
-    'POST /api/gm/smartfit/event',
-    'GET /api/gm/smartfit/stat/monthly',
-    'GET /module/scrap/api/cache/search?q=keyword&page=1'
-  ]
-}));
+app.get('/', (req,res)=>{
+  const routes = [
+    'GET /health','GET /api/gm/health','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
+    'GET /api/gm/dashboard/realtime','POST /api/gm/dashboard/snapshot','POST /api/gm/search/log',
+    'POST /api/gm/product/queue','POST /api/gm/product/upsert','POST /api/gm/keyword/translate','GET /api/gm/keyword/lookup',
+    'GET /api/gm/builder/export','GET /api/gm/builder/export-all','GET /gm_data_builder.html'
+  ];
+  const wantsJson = /application\/json/i.test(String(req.headers.accept||'')) && !/text\/html/i.test(String(req.headers.accept||''));
+  if(wantsJson) return ok(res,{ service:'glomart-api', mode:'json-cache-plus-postgresql', dbReady, dbError, routes });
+  const esc = v => String(v==null?'':v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const routeHtml = routes.map(r=>{ const m=String(r).match(/^(GET|POST)\s+(.+)$/); const path=m?m[2]:r; const isGet=/^GET /.test(r); return `<li><b>${esc(m?m[1]:'')}</b> ${isGet?`<a href="${esc(path)}">${esc(path)}</a>`:esc(path)}</li>`; }).join('');
+  res.setHeader('Content-Type','text/html; charset=utf-8');
+  res.end(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Glomart API Status</title>
+  <style>body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;color:#111}.wrap{max-width:980px;margin:30px auto;padding:0 18px}.card{background:#fff;border:1px solid #dde3ea;border-radius:16px;padding:22px;margin:14px 0;box-shadow:0 6px 22px rgba(0,0,0,.06)}h1{margin:0 0 16px}.grid{display:grid;grid-template-columns:160px 1fr;gap:10px 14px}.ok{color:#078a2f;font-weight:900}.ng{color:#c1121f;font-weight:900}.btn{display:inline-block;padding:10px 14px;margin:4px 6px 4px 0;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:800}.gray{background:#4b5563}.red{background:#b91c1c}ul{columns:2;line-height:1.8}code{word-break:break-all}</style></head><body><div class="wrap">
+  <div class="card"><h1>Glomart API Status</h1><div class="grid">
+  <b>서버 상태</b><span class="ok">OK</span>
+  <b>DB 상태</b><span class="${dbReady?'ok':'ng'}">${dbReady?'OK':'ERROR'}</span>
+  <b>DB 오류</b><code>${esc(dbError||'-')}</code>
+  <b>버전</b><code>${esc(VERSION)}</code>
+  </div><p><a class="btn" href="/api/gm/health">Health 확인</a><a class="btn gray" href="/gm_data_builder.html">Data Builder 열기</a><a class="btn red" href="/api/gm/builder/export-all?limit=50000">전체 CSV ZIP</a></p></div>
+  <div class="card"><h2>주요 라우트</h2><ul>${routeHtml}</ul></div>
+  </div></body></html>`);
+})
+
+
+app.get('/api/gm/status', (req,res)=>ok(res,{ service:'glomart-api', version:VERSION, mode:'json-cache-plus-postgresql', dbReady, dbError, routes:[
+  'GET /','GET /health','GET /api/gm/health','GET /api/gm/status','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
+  'GET /api/gm/dashboard/realtime','POST /api/gm/dashboard/snapshot','POST /api/gm/search/log',
+  'POST /api/gm/product/queue','POST /api/gm/product/upsert','POST /api/gm/keyword/translate','GET /api/gm/keyword/lookup',
+  'GET /api/gm/builder/export','GET /api/gm/builder/export-all','GET /gm_data_builder.html'
+]}));
 
 app.get('/health', (req,res)=>ok(res,{status:'running', dbReady, dbError}));
 

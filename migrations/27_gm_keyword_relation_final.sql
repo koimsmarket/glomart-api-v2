@@ -122,5 +122,6 @@ BEGIN
   END LOOP;
 END $$;
 
--- Ensure existing deployments store only date in updated_at.
-ALTER TABLE IF EXISTS gm_keyword_relation ALTER COLUMN updated_at TYPE DATE USING updated_at::date;
+-- Existing DB 보정: 기존 TIMESTAMP/문자열 updated_at을 DATE로 정리한다.
+ALTER TABLE gm_keyword_relation ALTER COLUMN updated_at TYPE DATE USING updated_at::date;
+ALTER TABLE gm_keyword_relation ALTER COLUMN updated_at SET DEFAULT CURRENT_DATE;

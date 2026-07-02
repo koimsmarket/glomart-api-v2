@@ -16,5 +16,6 @@ COMMENT ON COLUMN gm_keyword_translate.input_keyword IS 'User-entered keyword or
 COMMENT ON COLUMN gm_keyword_translate.main_keyword_ko IS 'Korean normalized main search keyword.';
 COMMENT ON COLUMN gm_keyword_translate.hit_count IS 'Number of times this alias mapping was observed or saved.';
 
--- Ensure existing deployments store only date in updated_at.
-ALTER TABLE IF EXISTS gm_keyword_translate ALTER COLUMN updated_at TYPE DATE USING updated_at::date;
+-- Existing DB 보정: 기존 TIMESTAMP/문자열 updated_at을 DATE로 정리한다.
+ALTER TABLE gm_keyword_translate ALTER COLUMN updated_at TYPE DATE USING updated_at::date;
+ALTER TABLE gm_keyword_translate ALTER COLUMN updated_at SET DEFAULT CURRENT_DATE;

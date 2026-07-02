@@ -194,10 +194,34 @@ function download(){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
   location.href = `${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=${encodeURIComponent(f)}`;
 }
-function downloadAll(){
-  const keys=Object.keys(tables);
-  keys.forEach((k,i)=>setTimeout(()=>{ window.open(`${API}/api/gm/builder/export?table=${encodeURIComponent(k)}&format=csv`, '_blank'); }, i*500));
-  log('전체 CSV 다운로드 요청: '+keys.join(', '));
+async function downloadAll(){
+  const url = `${API}/api/gm/builder/export-all?limit=50000&t=${Date.now()}`;
+  log('전체 CSV ZIP 생성 요청 중...');
+  try{
+    const r = await fetch(url, { method:'GET', cache:'no-store' });
+    if(!r.ok){
+      const txt = await r.text().catch(()=>String(r.status));
+      log('전체 ZIP 다운로드 실패: '+r.status+' '+txt);
+      return;
+    }
+    const blob = await r.blob();
+    const ct = (r.headers.get('content-type')||'').toLowerCase();
+    if(!ct.includes('zip') && !ct.includes('octet-stream')){
+      const txt = await blob.text().catch(()=>'<binary>');
+      log('ZIP 응답이 아닙니다: '+txt.slice(0,1000));
+      return;
+    }
+    const a = document.createElement('a');
+    const objectUrl = URL.createObjectURL(blob);
+    a.href = objectUrl;
+    a.download = `gm_all_tables_${Date.now()}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(objectUrl); a.remove(); }, 1000);
+    log({ action:'export_all_zip.downloaded', bytes:blob.size, url });
+  }catch(e){
+    log('전체 ZIP 다운로드 오류: '+(e&&e.message||e));
+  }
 }
 async function preview(){
   const t=document.getElementById('downTable').value;

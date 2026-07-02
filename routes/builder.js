@@ -286,6 +286,55 @@ function toCsv(rows, columns) {
   for (const r of rows) lines.push(columns.map(c => csvEscape(r[c])).join(','));
   return '\ufeff' + lines.join('\n');
 }
+
+// GM_BUILDER_EXPORT_ALL_ZIP_V001
+// 외부 라이브러리 없이 CSV 여러 개를 ZIP으로 묶는다.
+function crc32Buffer(buf){
+  let table = crc32Buffer.table;
+  if(!table){
+    table = crc32Buffer.table = new Uint32Array(256);
+    for(let i=0;i<256;i++){
+      let c=i;
+      for(let k=0;k<8;k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      table[i]=c>>>0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for(let i=0;i<buf.length;i++) crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function dosDateTime(d=new Date()){
+  const time = ((d.getHours() & 31) << 11) | ((d.getMinutes() & 63) << 5) | (Math.floor(d.getSeconds()/2) & 31);
+  const date = (((d.getFullYear()-1980) & 127) << 9) | (((d.getMonth()+1) & 15) << 5) | (d.getDate() & 31);
+  return {time,date};
+}
+function u16(n){ const b=Buffer.alloc(2); b.writeUInt16LE(n & 0xFFFF,0); return b; }
+function u32(n){ const b=Buffer.alloc(4); b.writeUInt32LE(n >>> 0,0); return b; }
+function makeZip(files){
+  const local=[], central=[];
+  let offset=0;
+  const dt=dosDateTime();
+  for(const f of files){
+    const nameBuf=Buffer.from(f.name,'utf8');
+    const data=Buffer.isBuffer(f.data)?f.data:Buffer.from(String(f.data||''),'utf8');
+    const crc=crc32Buffer(data);
+    const lh=Buffer.concat([
+      u32(0x04034b50), u16(20), u16(0), u16(0), u16(dt.time), u16(dt.date),
+      u32(crc), u32(data.length), u32(data.length), u16(nameBuf.length), u16(0), nameBuf
+    ]);
+    local.push(lh,data);
+    const ch=Buffer.concat([
+      u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(dt.time), u16(dt.date),
+      u32(crc), u32(data.length), u32(data.length), u16(nameBuf.length), u16(0), u16(0),
+      u16(0), u16(0), u32(0), u32(offset), nameBuf
+    ]);
+    central.push(ch);
+    offset += lh.length + data.length;
+  }
+  const centralSize=central.reduce((a,b)=>a+b.length,0);
+  const end=Buffer.concat([u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(centralSize),u32(offset),u16(0)]);
+  return Buffer.concat([...local,...central,end]);
+}
 function parseCsv(text) {
   text = String(text || '').replace(/^\ufeff/, '');
   const rows = [];
@@ -615,9 +664,7 @@ router.get('/api/gm/builder/export', async (req,res)=>{
   try {
     let cols = await getColumns(db, spec.table);
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
-    const dateOnlyTables = new Set(['gm_keyword_relation','gm_keyword_translate']);
-    const selectCols = cols.map(c => (dateOnlyTables.has(spec.table) && c === 'updated_at') ? `${qIdent(c)}::date::text AS ${qIdent(c)}` : qIdent(c));
-    const r = await db.query(`SELECT ${selectCols.join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
+    const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
     if (format === 'json') return ok(res, { table:spec.table, count:r.rows.length, columns:cols, rows:r.rows });
 
     const csv = toCsv(r.rows, cols);
@@ -626,6 +673,42 @@ router.get('/api/gm/builder/export', async (req,res)=>{
     res.end(csv);
   } catch(e) {
     fail(res, 500, 'export failed', { detail:String(e && e.message || e) });
+  }
+});
+
+
+// 전체 테이블 CSV를 한 번에 ZIP으로 다운로드한다.
+router.get('/api/gm/builder/export-all', async (req,res)=>{
+  const db = dbFrom(req);
+  const limit = Math.min(Math.max(Number(req.query.limit || 50000), 1), 50000);
+  try{
+    const files=[];
+    const errors=[];
+    for(const key of Object.keys(TABLES)){
+      const spec = TABLES[key];
+      try{
+        let cols = await getColumns(db, spec.table);
+        if(!cols.length){ errors.push({key, table:spec.table, error:'no columns'}); continue; }
+        if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
+        const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
+        files.push({ name: `${spec.table}.csv`, data: toCsv(r.rows, cols) });
+      }catch(e){
+        errors.push({ key, table:spec.table, error:String(e && e.message || e) });
+      }
+    }
+    if(errors.length){
+      files.push({ name:'_export_errors.json', data: JSON.stringify({ ok:false, errors }, null, 2) });
+    }
+    const zip = makeZip(files);
+    const fname = `gm_all_tables_${Date.now()}.zip`;
+    res.setHeader('Content-Type','application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    res.setHeader('Content-Length', String(zip.length));
+    res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
+    res.setHeader('X-Content-Type-Options','nosniff');
+    res.end(zip);
+  }catch(e){
+    fail(res, 500, 'export all failed', { detail:String(e && e.message || e) });
   }
 });
 

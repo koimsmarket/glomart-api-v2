@@ -115,14 +115,38 @@ function pickKeywordTranslations(p, meta){
 function pickRelatedTranslations(p, meta){
   p = p || {}; meta = meta || {};
   const root = p.relatedKeywordTranslations || p.related_keyword_translations ||
-    (p.keywordTranslations && (p.keywordTranslations.relatedKeywordTranslations || p.keywordTranslations.related_keywords)) ||
-    (meta.relatedKeywordTranslations || meta.related_keyword_translations) || {};
+    p.relatedKeywordRows || p.related_keyword_rows ||
+    (p.keywordTranslations && (p.keywordTranslations.relatedKeywordTranslations || p.keywordTranslations.relatedKeywordRows || p.keywordTranslations.related_keywords)) ||
+    (meta.relatedKeywordTranslations || meta.related_keyword_translations || meta.relatedKeywordRows || meta.related_keyword_rows) || {};
+  if(Array.isArray(root)){
+    const out = {};
+    root.forEach(row => {
+      const ko = cleanText(row && (row.relatedKeywordKo || row.related_keyword_ko || row.ko || row.keyword));
+      const tr = row && (row.translations || row.relatedKeywordTranslations || row.related_keyword_translations || row);
+      if(ko) out[ko] = tr || {};
+    });
+    return out;
+  }
   return root && typeof root === 'object' ? root : {};
 }
 function relatedTransFor(relatedTranslations, relatedKo){
   relatedTranslations = relatedTranslations || {};
-  const direct = relatedTranslations[relatedKo] || relatedTranslations[normalizeKeywordValue(relatedKo)] || {};
+  relatedKo = cleanText(relatedKo);
+  const norm = normalizeKeywordValue(relatedKo);
+  let direct = relatedTranslations[relatedKo] || relatedTranslations[norm] || {};
+  if(!direct && Array.isArray(relatedTranslations)){
+    direct = relatedTranslations.find(x => normalizeKeywordValue(x.related_keyword_ko || x.relatedKeywordKo || x.ko || x.keyword || '') === norm) || {};
+  }
+  if(direct && typeof direct === 'object'){
+    // {ko:'숟가락', en:'spoon'} 또는 {relatedKeywordTranslations:{...}} 모두 허용
+    direct = direct.translations || direct.relatedKeywordTranslations || direct.related_keyword_translations || direct;
+  }
   return direct && typeof direct === 'object' ? direct : {};
+}
+function enrichTranslationKo(t, ko){
+  t = Object.assign({}, t || {});
+  if(!cleanText(t.ko)) t.ko = cleanText(ko);
+  return t;
 }
 
 async function ensureKeywordTranslateTable(pool){
@@ -134,10 +158,6 @@ async function ensureKeywordTranslateTable(pool){
     updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
     PRIMARY KEY (lang, input_keyword)
   )`);
-  try{ await pool.query(`ALTER TABLE gm_keyword_translate ALTER COLUMN updated_at TYPE DATE USING updated_at::date`); }catch(e){}
-}
-async function ensureKeywordRelationDateColumn(pool){
-  try{ await pool.query(`ALTER TABLE gm_keyword_relation ALTER COLUMN updated_at TYPE DATE USING updated_at::date`); }catch(e){}
 }
 function pickLang(p){
   return cleanText(p.lang || p.gm_lang || p.ui_lang_code || p.lang_code || p.country_lang || (p.searchKeywordMeta && (p.searchKeywordMeta.lang || p.searchKeywordMeta.gm_lang)) || 'ko').toLowerCase() || 'ko';
@@ -156,7 +176,6 @@ async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, i
 async function saveKeywordTranslatePayload(pool, payload){
   payload = payload || {};
   await ensureKeywordTranslateTable(pool);
-  await ensureKeywordRelationDateColumn(pool);
   const meta = pickKeywordMeta(payload);
   const mainKeywordKo = meta.mainKeyword;
   const inputKeyword = meta.inputKeyword || payload.inputKeyword || payload.input_keyword || '';
@@ -205,7 +224,7 @@ async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
   relatedKo = cleanText(relatedKo);
   if(!keywordKo || !relatedKo) return false;
   const categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
-  const trans = options.translations || {};
+  const trans = enrichTranslationKo(options.translations || {}, relatedKo);
   const cols = ['category_main_keyword_ko','keyword_ko','related_keyword_ko'];
   const vals = [categoryMainKeywordKo, keywordKo, relatedKo];
   KEYWORD_LANGS.filter(l => l !== 'ko').forEach(lang => {
@@ -242,7 +261,6 @@ async function saveKeywordRelationStats(pool, keywordKo, relatedKo, categoryMain
   }catch(e){}
 }
 async function saveKeywordMetaPayload(pool, payload){
-  await ensureKeywordRelationDateColumn(pool);
   const meta = pickKeywordMeta(payload || {});
   const keywordKo = meta.mainKeyword;
   const related = meta.relatedKeywords;
@@ -486,7 +504,7 @@ async function upsertProduct(pool, raw, parent={}){
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
       $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
       $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,
-      1,0,0,0,0,0,$54,now(),CURRENT_DATE + INTERVAL '30 days',now(),now()
+      1,0,0,0,0,0,$54,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=EXCLUDED.source_mall,
@@ -531,7 +549,7 @@ async function upsertProduct(pool, raw, parent={}){
       sale_status=EXCLUDED.sale_status,
       hit_count=COALESCE(gm_product.hit_count,0)+1,
       last_seen_at=now(),
-      expire_at=CURRENT_DATE + INTERVAL '30 days',
+      expire_at=now() + INTERVAL '30 days',
       updated_at=now()
     RETURNING product_uid, pi_ii_vi, mall_code, hit_count, (xmax = 0) AS inserted
   `;
