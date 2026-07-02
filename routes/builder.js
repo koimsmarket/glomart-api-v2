@@ -207,6 +207,30 @@ const TABLES = {
   category_sales_yearly: { table:'gm_category_sales_yearly', key:['yyyy','category_no'], order:'yyyy DESC, sales_amount DESC', critical:['yyyy','category_no'], numeric:['sales_id','sales_qty','sales_amount','purchase_amount','gross_profit','margin_rate'], defaults:{sales_qty:'0',sales_amount:'0',purchase_amount:'0'}, enums:{}, blocked:['sales_id','created_at'] },
   category_country_sales_monthly: { table:'gm_category_country_sales_monthly', key:['yyyymm','category_no','country_code'], order:'yyyymm DESC, sales_amount DESC', critical:['yyyymm','category_no','country_code'], numeric:['sales_id','sales_qty','sales_amount','purchase_amount'], defaults:{sales_qty:'0',sales_amount:'0',purchase_amount:'0'}, enums:{}, blocked:['sales_id','created_at'] },
   category_country_sales_yearly: { table:'gm_category_country_sales_yearly', key:['yyyy','category_no','country_code'], order:'yyyy DESC, sales_amount DESC', critical:['yyyy','category_no','country_code'], numeric:['sales_id','sales_qty','sales_amount','purchase_amount'], defaults:{sales_qty:'0',sales_amount:'0',purchase_amount:'0'}, enums:{}, blocked:['sales_id','created_at'] },
+
+
+  keyword_translate: {
+    table: 'gm_keyword_translate',
+    key: ['lang','input_keyword'],
+    order: 'updated_at DESC NULLS LAST, hit_count DESC, lang ASC, input_keyword ASC',
+    critical: ['lang','input_keyword','main_keyword_ko'],
+    numeric: ['hit_count'],
+    defaults: { hit_count:'1' },
+    enums: {},
+    blocked: ['updated_at'],
+    allowInsert: true
+  },
+  keyword_relation: {
+    table: 'gm_keyword_relation',
+    key: ['keyword_ko','related_keyword_ko'],
+    order: 'updated_at DESC NULLS LAST, keyword_ko ASC, related_keyword_ko ASC',
+    critical: ['keyword_ko','related_keyword_ko'],
+    numeric: [],
+    defaults: { category_main_keyword_ko:'' },
+    enums: {},
+    blocked: ['updated_at'],
+    allowInsert: true
+  },
   search_log: {
     table: 'gm_search_log',
     key: ['search_id'],

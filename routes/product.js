@@ -73,37 +73,198 @@ function pickRelatedKeywords(p, parent){
   else if(typeof raw === 'string') arr = raw.split(/[|,\n\t]+/g);
   return arr.map(cleanText).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(0,50);
 }
-async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relatedKeywords){
-  keyword = cleanText(keyword);
-  if(productUid && keyword){
-    try{
-      await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keyword, productUid]);
-    }catch(e){ /* migration not applied yet */ }
-  }
-  if(!keyword || !relatedKeywords || !relatedKeywords.length) return;
-  const keyNorm = normalizeKeywordValue(keyword);
-  const mall = cleanText(mallCode || '').toUpperCase();
-  for(let i=0;i<relatedKeywords.length;i++){
-    const rk = cleanText(relatedKeywords[i]);
-    const rkNorm = normalizeKeywordValue(rk);
-    if(!rk || !rkNorm || rkNorm === keyNorm) continue;
-    try{
-      await pool.query(`
-        INSERT INTO gm_keyword_relation (
-          mall_code, keyword, keyword_normalized, related_keyword, related_keyword_normalized,
-          related_order, source, hit_count, first_seen_at, last_seen_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,'search_suggest',1,now(),now(),now(),now())
-        ON CONFLICT (mall_code, keyword_normalized, related_keyword_normalized) DO UPDATE SET
-          keyword=EXCLUDED.keyword,
-          related_keyword=EXCLUDED.related_keyword,
-          related_order=LEAST(gm_keyword_relation.related_order, EXCLUDED.related_order),
-          hit_count=COALESCE(gm_keyword_relation.hit_count,0)+1,
-          last_seen_at=now(),
-          updated_at=now()
-      `, [mall, keyword, keyNorm, rk, rkNorm, i+1]);
-    }catch(e){ /* migration not applied yet */ }
-  }
+
+const KEYWORD_LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+function uniqClean(arr){
+  const seen = new Set();
+  return (Array.isArray(arr) ? arr : (typeof arr === 'string' ? arr.split(/[|,\n\t]+/g) : []))
+    .map(cleanText).filter(Boolean).filter(v => { const k=v.toLowerCase(); if(seen.has(k)) return false; seen.add(k); return true; });
 }
+function pickKeywordMeta(p){
+  p = p || {};
+  const meta = p.searchKeywordMeta || p.keywordMeta || p.keyword_meta || p.search_keyword_meta || {};
+  const inputKeyword = cleanText(meta.inputKeyword || meta.input_keyword || p.inputKeyword || p.input_keyword || p.keyword || p.q || '');
+  const correctedKeyword = cleanText(meta.correctedKeyword || meta.corrected_keyword || p.correctedKeyword || p.corrected_keyword || '');
+  const mainKeyword = cleanText(meta.mainKeyword || meta.mainSearchKeyword || meta.main_search_keyword || meta.normalizedKeyword || meta.normalized_keyword || p.mainKeyword || p.mainSearchKeyword || p.normalized || p.normalizedKeyword || correctedKeyword || inputKeyword);
+  const originalKeyword = cleanText(meta.originalKeyword || meta.original_keyword || p.originalKeyword || p.original_keyword || inputKeyword);
+  const relatedKeywords = uniqClean(meta.relatedKeywords || meta.related_keywords || p.relatedKeywords || p.related_keywords || p.suggestKeywords || p.suggest_keywords);
+  const categoryMainKeywordKo = cleanText(meta.categoryMainKeywordKo || meta.category_main_keyword_ko || p.categoryMainKeywordKo || p.category_main_keyword_ko || '');
+  return { inputKeyword, correctedKeyword, originalKeyword, mainKeyword, relatedKeywords, categoryMainKeywordKo, raw:meta };
+}
+function pickTranslationValue(src, lang, baseKey){
+  src = src || {};
+  baseKey = baseKey || '';
+  return cleanText(
+    src[lang] || src[baseKey + '_' + lang] || src[baseKey + lang.toUpperCase()] ||
+    (src[baseKey] && src[baseKey][lang]) || ''
+  );
+}
+function pickKeywordTranslations(p, meta){
+  p = p || {}; meta = meta || {};
+  const root = p.keywordTranslations || p.keyword_translations || p.translations || p.translation ||
+    (p.mainKeywordTranslations ? { mainKeywordTranslations:p.mainKeywordTranslations } : null) ||
+    meta.keywordTranslations || meta.keyword_translations || meta.translations || {};
+  const main = root.mainKeywordTranslations || root.main_keyword_translations || root.mainKeyword || root.main_keyword || root.keyword || root;
+  const out = {};
+  KEYWORD_LANGS.forEach(lang => {
+    const v = lang === 'ko' ? (meta.mainKeyword || '') : pickTranslationValue(main, lang, 'keyword');
+    if(v) out[lang] = v;
+  });
+  return out;
+}
+function pickRelatedTranslations(p, meta){
+  p = p || {}; meta = meta || {};
+  const root = p.relatedKeywordTranslations || p.related_keyword_translations ||
+    (p.keywordTranslations && (p.keywordTranslations.relatedKeywordTranslations || p.keywordTranslations.related_keywords)) ||
+    (meta.relatedKeywordTranslations || meta.related_keyword_translations) || {};
+  return root && typeof root === 'object' ? root : {};
+}
+function relatedTransFor(relatedTranslations, relatedKo){
+  relatedTranslations = relatedTranslations || {};
+  const direct = relatedTranslations[relatedKo] || relatedTranslations[normalizeKeywordValue(relatedKo)] || {};
+  return direct && typeof direct === 'object' ? direct : {};
+}
+
+async function ensureKeywordTranslateTable(pool){
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_translate (
+    lang TEXT NOT NULL,
+    input_keyword TEXT NOT NULL,
+    main_keyword_ko TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    updated_at TIMESTAMP NOT NULL DEFAULT now(),
+    PRIMARY KEY (lang, input_keyword)
+  )`);
+}
+function pickLang(p){
+  return cleanText(p.lang || p.gm_lang || p.ui_lang_code || p.lang_code || p.country_lang || (p.searchKeywordMeta && (p.searchKeywordMeta.lang || p.searchKeywordMeta.gm_lang)) || 'ko').toLowerCase() || 'ko';
+}
+async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, inc=1){
+  lang = cleanText(lang).toLowerCase(); inputKeyword = cleanText(inputKeyword); mainKeywordKo = cleanText(mainKeywordKo);
+  if(!lang || !inputKeyword || !mainKeywordKo) return false;
+  await pool.query(`INSERT INTO gm_keyword_translate (lang,input_keyword,main_keyword_ko,hit_count,updated_at)
+    VALUES ($1,$2,$3,$4,now())
+    ON CONFLICT (lang,input_keyword) DO UPDATE SET
+      main_keyword_ko=EXCLUDED.main_keyword_ko,
+      hit_count=gm_keyword_translate.hit_count + EXCLUDED.hit_count,
+      updated_at=now()`, [lang, inputKeyword, mainKeywordKo, Math.max(1, toInt(inc,1))]);
+  return true;
+}
+async function saveKeywordTranslatePayload(pool, payload){
+  payload = payload || {};
+  await ensureKeywordTranslateTable(pool);
+  const meta = pickKeywordMeta(payload);
+  const mainKeywordKo = meta.mainKeyword;
+  const inputKeyword = meta.inputKeyword || payload.inputKeyword || payload.input_keyword || '';
+  const lang = pickLang(payload);
+  const translations = pickKeywordTranslations(payload, Object.assign({}, meta.raw || {}, { mainKeyword:mainKeywordKo }));
+  const relatedTranslations = pickRelatedTranslations(payload, meta.raw || {});
+  let alias_saved = 0, relation_saved = 0, relation_skipped = 0;
+
+  if(inputKeyword && mainKeywordKo){
+    const inputLooksKo = /[가-힣]/.test(inputKeyword);
+    const useLang = inputLooksKo ? 'ko' : lang;
+    if(await upsertKeywordTranslate(pool, useLang, inputKeyword, mainKeywordKo, 1)) alias_saved++;
+  }
+
+  for(const l of KEYWORD_LANGS){
+    if(l === 'ko') continue;
+    const v = cleanText(translations[l] || '');
+    if(v && mainKeywordKo){
+      if(await upsertKeywordTranslate(pool, l, v, mainKeywordKo, 0)) alias_saved++;
+    }
+  }
+
+  for(const rk of meta.relatedKeywords){
+    const t = relatedTransFor(relatedTranslations, rk);
+    try{
+      const ok = await saveKeywordRelationRow(pool, mainKeywordKo, rk, { categoryMainKeywordKo:meta.categoryMainKeywordKo, translations:t });
+      if(ok){ relation_saved++; await saveKeywordRelationStats(pool, mainKeywordKo, rk, meta.categoryMainKeywordKo); }
+      else relation_skipped++;
+    }catch(e){ relation_skipped++; }
+  }
+
+  return {
+    mainKeyword: mainKeywordKo,
+    inputKeyword,
+    lang,
+    alias_saved,
+    relation_saved,
+    relation_skipped,
+    related_count: meta.relatedKeywords.length,
+    mainKeywordTranslations: translations,
+    relatedKeywordTranslations: relatedTranslations
+  };
+}
+async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
+  keywordKo = cleanText(keywordKo);
+  relatedKo = cleanText(relatedKo);
+  if(!keywordKo || !relatedKo) return false;
+  const categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
+  const trans = options.translations || {};
+  const cols = ['category_main_keyword_ko','keyword_ko','related_keyword_ko'];
+  const vals = [categoryMainKeywordKo, keywordKo, relatedKo];
+  KEYWORD_LANGS.filter(l => l !== 'ko').forEach(lang => {
+    cols.push('related_keyword_' + lang);
+    vals.push(cleanText(trans[lang] || ''));
+  });
+  const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
+  const updateCols = cols.filter(c => c !== 'keyword_ko' && c !== 'related_keyword_ko');
+  const sql = `INSERT INTO gm_keyword_relation (${cols.join(',')}) VALUES (${placeholders})
+    ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET
+      ${updateCols.map(c => `${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END`).join(',')},
+      updated_at=now()`;
+  await pool.query(sql, vals);
+  return true;
+}
+async function saveKeywordRelationStats(pool, keywordKo, relatedKo, categoryMainKeywordKo){
+  keywordKo = cleanText(keywordKo); relatedKo = cleanText(relatedKo);
+  if(!keywordKo || !relatedKo) return;
+  const d = new Date();
+  const ym = String(d.getFullYear()) + String(d.getMonth()+1).padStart(2,'0');
+  const yy = String(d.getFullYear());
+  const dayCol = 'day_' + String(d.getDate()).padStart(2,'0');
+  const monCol = 'month_' + String(d.getMonth()+1).padStart(2,'0');
+  const category = cleanText(categoryMainKeywordKo || '');
+  try{
+    await pool.query(`INSERT INTO gm_keyword_relation_${ym} (category_main_keyword_ko,keyword_ko,related_keyword_ko,${dayCol},month_total)
+      VALUES ($1,$2,$3,1,1)
+      ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET ${dayCol}=gm_keyword_relation_${ym}.${dayCol}+1, month_total=gm_keyword_relation_${ym}.month_total+1`, [category, keywordKo, relatedKo]);
+  }catch(e){}
+  try{
+    await pool.query(`INSERT INTO gm_keyword_relation_${yy} (category_main_keyword_ko,keyword_ko,related_keyword_ko,${monCol},year_total)
+      VALUES ($1,$2,$3,1,1)
+      ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET ${monCol}=gm_keyword_relation_${yy}.${monCol}+1, year_total=gm_keyword_relation_${yy}.year_total+1`, [category, keywordKo, relatedKo]);
+  }catch(e){}
+}
+async function saveKeywordMetaPayload(pool, payload){
+  const meta = pickKeywordMeta(payload || {});
+  const keywordKo = meta.mainKeyword;
+  const related = meta.relatedKeywords;
+  const relatedTranslations = pickRelatedTranslations(payload || {}, meta.raw || {});
+  let saved = 0, skipped = 0;
+  if(!keywordKo) return { keyword_ko:'', saved, skipped, related_count:0 };
+  for(const rk of related){
+    const t = relatedTransFor(relatedTranslations, rk);
+    try{
+      const ok = await saveKeywordRelationRow(pool, keywordKo, rk, { categoryMainKeywordKo:meta.categoryMainKeywordKo, translations:t });
+      if(ok){ saved++; await saveKeywordRelationStats(pool, keywordKo, rk, meta.categoryMainKeywordKo); }
+      else skipped++;
+    }catch(e){ skipped++; }
+  }
+  return { keyword_ko:keywordKo, input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:related.length, saved, skipped };
+}
+async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relatedKeywords, parentPayload){
+  const payload = Object.assign({}, parentPayload || {});
+  if(keyword && !payload.keyword) payload.keyword = keyword;
+  if(relatedKeywords && !payload.relatedKeywords) payload.relatedKeywords = relatedKeywords;
+  const meta = pickKeywordMeta(payload);
+  const keywordKo = meta.mainKeyword || cleanText(keyword);
+  if(productUid && keywordKo){
+    try{ await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keywordKo, productUid]); }catch(e){}
+  }
+  return saveKeywordMetaPayload(pool, Object.assign({}, payload, { mainKeyword:keywordKo, relatedKeywords:meta.relatedKeywords }));
+}
+
 
 function ids(b){
   const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
@@ -411,10 +572,43 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.return_contact || p.returnContact || ''), cleanText(p.exchange_contact || p.exchangeContact || ''),
     cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active')
   ];  const r=await pool.query(sql, vals);
-  await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords);
+  await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords, Object.assign({}, parent || {}, p || {}));
   return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:r.rows[0] };
 }
 
+
+
+router.post('/api/gm/keyword/translate', async (req,res)=>{
+  const pool=db(req), p=req.body||{};
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    const result = await saveKeywordTranslatePayload(pool, p);
+    return ok(res, result);
+  }catch(e){
+    console.error('[GM_KEYWORD_TRANSLATE_SAVE_ERROR]', e);
+    return fail(res, 500, 'keyword translate save failed', { detail:String(e && e.message || e) });
+  }
+});
+
+router.get('/api/gm/keyword/lookup', async (req,res)=>{
+  const pool=db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    await ensureKeywordTranslateTable(pool);
+    const input=cleanText(req.query.input_keyword || req.query.keyword || req.query.q || '');
+    const lang=cleanText(req.query.lang || req.query.gm_lang || '').toLowerCase();
+    if(!input) return fail(res, 400, 'input_keyword required');
+    let r;
+    if(lang){
+      r=await pool.query('SELECT lang,input_keyword,main_keyword_ko,hit_count,updated_at FROM gm_keyword_translate WHERE lang=$1 AND input_keyword=$2', [lang,input]);
+      if(r.rows[0]) return ok(res, { found:true, item:r.rows[0] });
+    }
+    r=await pool.query('SELECT lang,input_keyword,main_keyword_ko,hit_count,updated_at FROM gm_keyword_translate WHERE input_keyword=$1 ORDER BY hit_count DESC, updated_at DESC LIMIT 1', [input]);
+    return ok(res, { found:!!r.rows[0], item:r.rows[0]||null });
+  }catch(e){
+    return fail(res, 500, 'keyword lookup failed', { detail:String(e && e.message || e) });
+  }
+});
 
 router.post('/api/gm/product/queue', async (req,res)=>{
   const pool=db(req), p=req.body||{};

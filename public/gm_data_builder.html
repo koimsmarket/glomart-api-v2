@@ -135,6 +135,7 @@ const tables = {
   category_sales_yearly:'카테고리 연간 판매 gm_category_sales_yearly',
   category_country_sales_monthly:'카테고리 국가별 월별 판매 gm_category_country_sales_monthly',
   category_country_sales_yearly:'카테고리 국가별 연간 판매 gm_category_country_sales_yearly',
+  keyword_relation:'연관검색어 gm_keyword_relation', keyword_translate:'외국어검색어 gm_keyword_translate',
   search_log:'검색 로그 gm_search_log',
   dashboard_snapshot:'대시보드 스냅샷 gm_dashboard_snapshot'
 };
@@ -143,7 +144,7 @@ const tableNameMap = {
   gm_category:'category', gm_category_keyword:'category_keyword',
   gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',
   gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
-  gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
+  gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_keyword_relation:'keyword_relation', gm_keyword_translate:'keyword_translate', gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
 };
 function fill(){
   for(const id of ['downTable','upTable']){
@@ -161,7 +162,7 @@ async function loadDashboard(save){
     if(!j.ok){ log(j); return; }
     const cur=j.current||{}, counts=cur.counts||{}, diff=cur.diff_from_previous||{}, q=cur.queue||{}, db=cur.db_size||{};
     document.getElementById('statusTime').textContent = `현재 조회: ${cur.server_time||cur.snapshot_at||''}` + (j.previous&&j.previous.snapshot_at ? ` / 직전 스냅샷: ${j.previous.snapshot_at}` : '');
-    const order=['gm_product','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_search_log','gm_dashboard_snapshot'];
+    const order=['gm_product','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_keyword_relation','gm_keyword_translate','gm_search_log','gm_dashboard_snapshot'];
     document.getElementById('tableStatus').innerHTML = order.map(t=>`<tr><td>${t}</td><td class="num">${fmt(counts[t])}</td><td class="num">${diffHtml(diff[t])}</td></tr>`).join('');
     document.getElementById('queueStatus').innerHTML = `
       <tr><th>pending</th><td class="num">${fmt(q.pending)}</td></tr>
@@ -213,7 +214,7 @@ async function send(apply){
 function inferTableFromFileName(name){
   const n=String(name||'').toLowerCase();
   const pairs=[
-    ['gm_dashboard_snapshot','dashboard_snapshot'],['gm_search_log','search_log'],
+    ['gm_dashboard_snapshot','dashboard_snapshot'],['gm_keyword_relation','keyword_relation'],['gm_keyword_translate','keyword_translate'],['gm_search_log','search_log'],
     ['gm_search_keyword_stat','search_keyword_stat'],['gm_category_search_stat','category_search_stat'],['gm_category_search_monthly','category_search_monthly'],['gm_category_search_yearly','category_search_yearly'],['gm_product_sales_monthly','product_sales_monthly'],['gm_product_sales_yearly','product_sales_yearly'],['gm_product_country_sales_monthly','product_country_sales_monthly'],['gm_product_country_sales_yearly','product_country_sales_yearly'],['gm_category_sales_monthly','category_sales_monthly'],['gm_category_sales_yearly','category_sales_yearly'],['gm_category_country_sales_monthly','category_country_sales_monthly'],['gm_category_country_sales_yearly','category_country_sales_yearly'],
     ['gm_category_keyword','category_keyword'],['gm_category','category'],
     ['gm_product_archive','product_archive'],['gm_order_item','order_items'],['gm_cs_message','cs_messages'],
