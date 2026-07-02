@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS gm_product (
   last_cart_at TIMESTAMP,
   last_wish_at TIMESTAMP,
   last_order_at TIMESTAMP,
-  expire_at DATE,
+  expire_at TIMESTAMP,
   registered_our_product_yn TEXT,
   created_at TIMESTAMP NOT NULL,
   updated_at TIMESTAMP,
@@ -82,3 +82,8 @@ CREATE TABLE IF NOT EXISTS gm_product (
   unit_sortable_yn TEXT,
   PRIMARY KEY (product_uid)
 );
+
+-- Patch: keep original gm_product schema and ensure existing old deployments have mall_code.
+-- This does not change expire_at/created_at/updated_at definitions.
+ALTER TABLE IF EXISTS gm_product
+  ADD COLUMN IF NOT EXISTS mall_code TEXT NOT NULL DEFAULT 'CPKR';
