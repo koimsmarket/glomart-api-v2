@@ -100,29 +100,31 @@ function normalizeQueueItems(p){
 function makeRequestId(p, items){
   const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
-  const chunkTotal = toInt(p.chunk_total || p.chunkTotal, 0);
   const searchRunId = cleanText(p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || '');
+  const mall = cleanText(p.mall_code || p.mallCode || p.source || (items && items[0] && (items[0].mall_code || items[0].mallCode)) || 'UNKNOWN').toUpperCase() || 'UNKNOWN';
 
-  // Queue 작업 식별자는 상품 UID와 절대 섞지 않는다.
-  // 같은 검색을 10개 단위 chunk로 보내면 request_id가 동일할 수 있으므로,
-  // 서버에서 chunk_index를 붙여 queue row 단위로 유일하게 보정한다.
-  // 예: REQ123 + chunk_index 2 => REQ123_C002
-  const withChunk = function(base){
+  // Queue row의 request_id는 같은 검색 내에서도 mall별/chunk별로 반드시 달라야 한다.
+  // 기존: REQ123_C001  -> CPKR/ALKR가 같은 key로 충돌하여 ALKR queue가 덮이거나 스킵될 수 있음.
+  // 변경: REQ123_CPKR_C001 / REQ123_ALKR_C001
+  const withMallChunk = function(base){
     base = cleanText(base);
     if(!base) return '';
-    if(chunkIndex > 0){
-      return /_C\d{1,4}$/i.test(base) ? base : base + '_C' + String(chunkIndex).padStart(3,'0');
+    let out = base;
+    if(!new RegExp('_(?:' + mall + ')_', 'i').test(out) && !new RegExp('_(?:' + mall + ')$', 'i').test(out)){
+      out += '_' + mall;
     }
-    return base;
+    if(chunkIndex > 0 && !/_C\d{1,4}$/i.test(out)){
+      out += '_C' + String(chunkIndex).padStart(3,'0');
+    }
+    return out;
   };
 
-  const fromRaw = withChunk(raw);
+  const fromRaw = withMallChunk(raw);
   if(fromRaw) return fromRaw;
 
-  const fromRun = withChunk(searchRunId);
+  const fromRun = withMallChunk(searchRunId);
   if(fromRun) return fromRun;
 
-  const mall = cleanText(p.mall_code || p.mallCode || p.source || 'UNKNOWN').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || '');
   const keyText = items.map(function(it){
     return cleanText(it.product_uid || it.productUid || it.pi_ii_vi || it.vendor_item_id || it.vendorItemId || it.url || it.product_url || it.productName || it.product_name);
