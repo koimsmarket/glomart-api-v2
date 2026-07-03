@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS gm_product (
   product_name TEXT NOT NULL,
   mall_product_name TEXT,
   option_count INTEGER,
+  option_json JSONB NOT NULL DEFAULT '{"default_uid":"","option_count":0,"updated_at":null,"options":[]}'::jsonb,
+  thumb_json JSONB NOT NULL DEFAULT '[]'::jsonb,
   option_name TEXT,
   option_value TEXT,
   origin_country TEXT,

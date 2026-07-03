@@ -566,6 +566,83 @@ function normalizeProductPayload(raw, parent={}){
   const productName = pickProductName(p);
   return { p, id:{ productId, itemId, vendorItemId, mallCode, pi, uid }, productName };
 }
+
+function jsonCleanText(v){ return cleanText(v); }
+function pickOptPrice(row, names){
+  row=row||{};
+  for(const n of names){
+    if(row[n] !== undefined && row[n] !== null && cleanText(row[n]) !== '') return parseMoney(row[n], 0);
+  }
+  return 0;
+}
+function normalizeThumbJson(p){
+  p=p||{};
+  const out=[]; const seen=new Set();
+  function add(v, source){
+    if(v && typeof v === 'object') v = v.url || v.src || v.image || v.thumb || '';
+    v = normalizeUrl(v);
+    if(!v || seen.has(v)) return;
+    seen.add(v);
+    out.push({ url:v, source:source || 'payload', index:out.length });
+  }
+  [p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.skuThumbnailImages].forEach((a)=>{
+    if(Array.isArray(a)) a.forEach(x=>add(x,'array'));
+  });
+  add(p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl || p.thumbnail || p.image || p.mainImage, 'main');
+  return out;
+}
+function normalizeOptionJson(p, id){
+  p=p||{}; id=id||{};
+  const arrays=[];
+  ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>{
+    if(Array.isArray(p[k])) arrays.push(p[k]);
+  });
+  const rows=[]; const seen=new Set();
+  arrays.forEach(arr=>arr.forEach((r)=>{
+    if(!r || typeof r !== 'object') return;
+    const productId = cleanText(r.productId || r.product_id || id.productId || p.productId || p.product_id || '');
+    const itemId = cleanText(r.itemId || r.item_id || r.skuId || r.sku_id || (id.mallCode==='ALKR' ? (r.skuIdStr || r.sku_id_str || '') : '') || '');
+    const vendorItemId = cleanText(r.vendorItemId || r.venderItemId || r.vendor_item_id || r.skuId || r.sku_id || itemId || id.vendorItemId || '');
+    const pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || cleanText(r.key || r.uid || r.option_uid || '');
+    const uid = cleanText(r.uid || r.option_uid || (id.mallCode && pi ? id.mallCode + '_' + pi : pi));
+    const name = cleanText(r.fullOptionName || r.displayOptionName || r.optionName || r.option_name || r.name || r.value || r.title || '');
+    if(!uid && !name) return;
+    const sig = uid || (name + '|' + vendorItemId + '|' + itemId);
+    if(seen.has(sig)) return; seen.add(sig);
+    const mallPrice = pickOptPrice(r, ['mall_price','mallPrice','raw_price','rawPrice','rawCoupangOptionPrice','rawOptionPrice','coupangPrice','basePrice','basePriceText']);
+    const salePrice = pickOptPrice(r, ['sale_price','salePrice','sell_price','sellPrice','calculatedPrice','optionPrice','optionPriceText','price','priceText','finalPriceText']);
+    const feeText = cleanText(r.delivery_fee_text || r.deliveryFeeText || r.optionShippingFeeText || r.shippingFeeText || r.baseShippingFeeText || r.deliveryFee || '');
+    const fee = r.delivery_fee !== undefined ? parseMoney(r.delivery_fee, 0) : parseMoney(feeText, 0);
+    const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.shipType || '');
+    rows.push({
+      uid, item_id:itemId, vendor_item_id:vendorItemId, product_id:productId, option_name:name,
+      mall_price:mallPrice, sale_price:salePrice,
+      delivery_badge:cleanText(r.delivery_badge || r.deliveryBadge || r.shipType || r.optionShipType || ''),
+      delivery_badge_text:badgeText,
+      delivery_fee:fee,
+      delivery_fee_text:feeText,
+      delivery_free_yn: feeText ? (/무료/.test(feeText) || fee===0) : (fee===0),
+      delivery_eta_text:cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || ''),
+      option_image_url:normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.image || r.thumbnail || r.thumb || ''),
+      soldout_yn: !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || ''))),
+      source:cleanText(r.source || '')
+    });
+  }));
+  const selectedUid = cleanText(p.default_uid || p.defaultUid || p.selectedOptionUid || p.selected_option_uid || id.uid || '');
+  const defaultUid = rows.some(r=>r.uid===selectedUid) ? selectedUid : (rows[0] && rows[0].uid || selectedUid);
+  return { default_uid:defaultUid, option_count:rows.length, updated_at:new Date().toISOString(), options:rows };
+}
+function pickTaxType(p){
+  p=p||{};
+  const direct=cleanText(p.tax_type || p.taxType || p.vat_type || p.vatType || '');
+  if(direct) return direct;
+  const blob=cleanText([p.vatText,p.vat_text,p.taxText,p.tax_text,p.productName,p.title].join(' '));
+  if(/면세/.test(blob)) return 'EXEMPT';
+  if(/과세|부가세\s*포함|VAT\s*included/i.test(blob)) return 'TAXABLE';
+  if(/영세/.test(blob)) return 'ZERO';
+  return '';
+}
+
 async function upsertProduct(pool, raw, parent={}){
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
@@ -722,8 +799,17 @@ async function upsertProduct(pool, raw, parent={}){
     firstNonEmpty(p, ['unit_parse_status','unitParseStatus']),
     firstNonEmpty(p, ['unit_sortable_yn','unitSortableYn'])
   ];  const r=await pool.query(sql, vals);
+  const optionJson = normalizeOptionJson(p, id);
+  const thumbJson = normalizeThumbJson(p);
+  const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
+  const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
+  try{
+    await pool.query(`UPDATE gm_product SET option_json=$1, thumb_json=$2, option_count=$3, tax_type=COALESCE(NULLIF($4,''), tax_type), updated_at=now() WHERE product_uid=$5`, [optionJson, thumbJson, optionCount, taxType, id.uid]);
+  }catch(e){
+    console.error('[GM_PRODUCT_JSON_UPDATE_ERROR]', e && e.message || e);
+  }
   await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords, Object.assign({}, parent || {}, p || {}));
-  return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:r.rows[0] };
+  return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:Object.assign({}, r.rows[0] || {}, { option_count:optionCount }) };
 }
 
 
