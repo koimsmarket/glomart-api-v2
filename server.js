@@ -1966,6 +1966,7 @@ try{
   console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
 }
 app.use(require('./routes/health'));
+app.use(require('./routes/product_event'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
