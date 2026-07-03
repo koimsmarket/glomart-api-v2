@@ -803,7 +803,7 @@ async function saveDashboardSnapshot(current){
       db_size_bytes, db_size_mb, db_size_percent, db_size_limit_mb, api_response_ms,
       created_at
     ) VALUES (
-      now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33, now()
+      now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, $22,$25,$26,$27,$28,$29,$30,$31,$32,$33, now()
     )
   `, [
     nz(c.gm_product), nz(c.gm_product_archive), nz(c.gm_category), nz(c.gm_category_keyword),
@@ -1152,12 +1152,14 @@ app.post('/api/gm/search/log', async (req,res)=>{
     const requestId = cleanText(b.request_id || b.requestId || '');
     const rawJsonText = JSON.stringify({ ...b, ui_lang_code:uiLangCode, keyword_lang_code:keywordLangCode, matched_category_keyword: match || null });
     let existingSearchId = '';
-    if(requestId && row.keyword_normalized && row.mall_code){
+    if(requestId && row.keyword_normalized){
+      // search_id는 검색 1회 단위 서버 일련번호다.
+      // 같은 request_id + normalized_keyword이면 CPKR/ALKR가 따로 들어와도 같은 search_id 행을 갱신한다.
       const ex = await dbQuery(`
         SELECT search_id FROM gm_search_log
-        WHERE request_id=$1 AND keyword_normalized=$2 AND COALESCE(mall_code,'')=$3
+        WHERE request_id=$1 AND keyword_normalized=$2
         ORDER BY search_id ASC LIMIT 1
-      `, [requestId, row.keyword_normalized, row.mall_code]);
+      `, [requestId, row.keyword_normalized]);
       existingSearchId = ex.rows && ex.rows[0] && ex.rows[0].search_id;
     }
     if(existingSearchId){
@@ -1167,6 +1169,12 @@ app.post('/api/gm/search/log', async (req,res)=>{
           lang_code=$3, ui_lang_code=$4, keyword_lang_code=$5,
           country_code=$6, member_country_code=$7,
           category_code=$8, category_no=$9, category_name=$10,
+          mall_code=CASE
+            WHEN COALESCE(mall_code,'')='' THEN  $22
+            WHEN  $22='' THEN mall_code
+            WHEN POSITION($22 IN mall_code)>0 THEN mall_code
+            ELSE mall_code || ',' ||  $22
+          END,
           result_count=GREATEST(COALESCE(result_count,0),$11),
           db_insert_count=GREATEST(COALESCE(db_insert_count,0),$12),
           queue_send_count=GREATEST(COALESCE(queue_send_count,0),$13),
@@ -1183,7 +1191,7 @@ app.post('/api/gm/search/log', async (req,res)=>{
         row.result_count, row.db_insert_count, row.queue_send_count,
         row.cache_used, cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
         cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''),
-        rawJsonText, existingSearchId
+        rawJsonText, existingSearchId, row.mall_code
       ]);
       return ok(res, { action:'search.log', inserted:false, deduped:true, search_id:existingSearchId, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
     }
@@ -1808,7 +1816,7 @@ app.post('/api/gm/order/create', async (req,res)=>{
         total_payment_price, order_status, payment_status, shipping_status, cs_status,
         ordered_at, created_at, updated_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,now(),now(),now()
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, $22,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,now(),now(),now()
       )
       ON CONFLICT (order_no) DO NOTHING
     `, [
@@ -1835,7 +1843,7 @@ app.post('/api/gm/order/create', async (req,res)=>{
           product_url, thumb_file_name, hs_code, origin_country, carrier_name, tracking_number,
           item_order_status, item_shipping_status, created_at, updated_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,now(),now()
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, $22,$25,$26,$27,now(),now()
         )
         ON CONFLICT (order_no, pi_ii_vi) DO UPDATE SET
           quantity=EXCLUDED.quantity,

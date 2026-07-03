@@ -457,11 +457,14 @@ function pickProductName(p){
   return bestProductName(p);
 }
 function pickPrice(p){
+  // mall_sale_price는 외부몰 원 판매가 저장용이다. 화면 표시/알고리즘 적용가(priceText/searchPrice/gm_price)는 normal_price에서 처리한다.
   return parseMoney(firstNonEmpty(p, [
-    'mall_sale_price','mallSalePrice','priceMain','displayPrice','display_price',
-    'gm_price','gmPrice','searchPrice','search_price','searchPriceText',
-    'price_text','priceText','rawPrice','raw_price','sale_price','salePrice',
-    'final_price','finalPrice','ali_price','aliPrice','min_price','minPrice','price'
+    'mall_sale_price','mallSalePrice','mall_sale_price_text','mallSalePriceText',
+    'raw_price','rawPrice','raw_price_text','rawPriceText','rawCoupangPrice','rawCoupangOptionPrice','rawOptionPrice',
+    'base_price','basePrice','basePriceText','origin_price','originPrice','original_mall_price','originalMallPrice',
+    'ali_price','aliPrice','min_price','minPrice',
+    // legacy fallback only: old payloads may not have raw fields
+    'priceMain','displayPrice','display_price','sale_price','salePrice','final_price','finalPrice','price_text','priceText','price'
   ]), 0);
 }
 function pickNormalPrice(p){
@@ -645,6 +648,11 @@ async function upsertProduct(pool, raw, parent={}){
       $54,1,0,0,0,0,0,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
+      product_id=EXCLUDED.product_id,
+      item_id=EXCLUDED.item_id,
+      vendor_item_id=EXCLUDED.vendor_item_id,
+      pi_ii_vi=EXCLUDED.pi_ii_vi,
+      mall_code=EXCLUDED.mall_code,
       source_mall=EXCLUDED.source_mall,
       source_uid=EXCLUDED.source_uid,
       product_name=EXCLUDED.product_name,
