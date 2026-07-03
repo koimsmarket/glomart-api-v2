@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS gm_product (
   tax_type TEXT,
   overseas_direct_yn TEXT,
   review_count INTEGER,
+  mall_sales_count TEXT,
   certification_no_1 TEXT,
   certification_no_2 TEXT,
   supplier_id TEXT,
@@ -87,3 +88,8 @@ CREATE TABLE IF NOT EXISTS gm_product (
 -- This does not change expire_at/created_at/updated_at definitions.
 ALTER TABLE IF EXISTS gm_product
   ADD COLUMN IF NOT EXISTS mall_code TEXT NOT NULL DEFAULT 'CPKR';
+
+
+-- Patch: mall sales count is part of base product schema.
+ALTER TABLE IF EXISTS gm_product
+  ADD COLUMN IF NOT EXISTS mall_sales_count TEXT;

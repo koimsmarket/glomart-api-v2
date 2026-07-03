@@ -102,7 +102,6 @@ function makeRequestId(p, items){
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
   const chunkTotal = toInt(p.chunk_total || p.chunkTotal, 0);
   const searchRunId = cleanText(p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || '');
-  const mallForRequest = cleanText(p.mall_code || p.mallCode || p.source || (items && items[0] && (items[0].mall_code || items[0].mallCode)) || 'UNKNOWN').toUpperCase();
 
   // Queue 작업 식별자는 상품 UID와 절대 섞지 않는다.
   // 같은 검색을 10개 단위 chunk로 보내면 request_id가 동일할 수 있으므로,
@@ -111,12 +110,10 @@ function makeRequestId(p, items){
   const withChunk = function(base){
     base = cleanText(base);
     if(!base) return '';
-    const mallPart = mallForRequest || 'UNKNOWN';
-    const baseWithMall = new RegExp('(?:^|_)' + mallPart + '(?:_|$)', 'i').test(base) ? base : base + '_' + mallPart;
     if(chunkIndex > 0){
-      return /_C\d{1,4}$/i.test(baseWithMall) ? baseWithMall : baseWithMall + '_C' + String(chunkIndex).padStart(3,'0');
+      return /_C\d{1,4}$/i.test(base) ? base : base + '_C' + String(chunkIndex).padStart(3,'0');
     }
-    return baseWithMall;
+    return base;
   };
 
   const fromRaw = withChunk(raw);
@@ -159,23 +156,6 @@ function pickRelatedKeywords(p, parent){
 }
 
 const KEYWORD_LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
-const GM_KEYWORD_HIT_ONCE = new Map();
-function gmKeywordHitOnceKey(requestId, lang, inputKeyword, mainKeywordKo){
-  const d = new Date().toISOString().slice(0,10);
-  const req = cleanText(requestId || '');
-  if(req) return [d, req, cleanText(lang).toLowerCase(), cleanText(inputKeyword), cleanText(mainKeywordKo)].join('|');
-  return [d, Math.floor(Date.now()/30000), cleanText(lang).toLowerCase(), cleanText(inputKeyword), cleanText(mainKeywordKo)].join('|');
-}
-function gmKeywordHitInc(requestId, lang, inputKeyword, mainKeywordKo){
-  const key = gmKeywordHitOnceKey(requestId, lang, inputKeyword, mainKeywordKo);
-  if(GM_KEYWORD_HIT_ONCE.has(key)) return 0;
-  GM_KEYWORD_HIT_ONCE.set(key, Date.now());
-  if(GM_KEYWORD_HIT_ONCE.size > 5000){
-    const now = Date.now();
-    for(const [k,t] of GM_KEYWORD_HIT_ONCE){ if(now - t > 24*60*60*1000) GM_KEYWORD_HIT_ONCE.delete(k); }
-  }
-  return 1;
-}
 function uniqClean(arr){
   const seen = new Set();
   return (Array.isArray(arr) ? arr : (typeof arr === 'string' ? arr.split(/[|,\n\t]+/g) : []))
@@ -190,8 +170,7 @@ function pickKeywordMeta(p){
   const originalKeyword = cleanText(meta.originalKeyword || meta.original_keyword || p.originalKeyword || p.original_keyword || inputKeyword);
   const relatedKeywords = uniqClean(meta.relatedKeywords || meta.related_keywords || p.relatedKeywords || p.related_keywords || p.suggestKeywords || p.suggest_keywords);
   const categoryMainKeywordKo = cleanText(meta.categoryMainKeywordKo || meta.category_main_keyword_ko || p.categoryMainKeywordKo || p.category_main_keyword_ko || '');
-  const requestId = cleanText(meta.requestId || meta.request_id || p.requestId || p.request_id || p.searchRequestId || p.search_request_id || '');
-  return { inputKeyword, correctedKeyword, originalKeyword, mainKeyword, relatedKeywords, categoryMainKeywordKo, requestId, raw:meta };
+  return { inputKeyword, correctedKeyword, originalKeyword, mainKeyword, relatedKeywords, categoryMainKeywordKo, raw:meta };
 }
 function pickTranslationValue(src, lang, baseKey){
   src = src || {};
@@ -272,7 +251,7 @@ async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, i
     ON CONFLICT (lang,input_keyword) DO UPDATE SET
       main_keyword_ko=EXCLUDED.main_keyword_ko,
       hit_count=gm_keyword_translate.hit_count + EXCLUDED.hit_count,
-      updated_at=CURRENT_DATE`, [lang, inputKeyword, mainKeywordKo, Math.max(0, toInt(inc,1))]);
+      updated_at=CURRENT_DATE`, [lang, inputKeyword, mainKeywordKo, Math.max(1, toInt(inc,1))]);
   return true;
 }
 async function saveKeywordTranslatePayload(pool, payload){
@@ -284,15 +263,12 @@ async function saveKeywordTranslatePayload(pool, payload){
   const lang = pickLang(payload);
   const translations = pickKeywordTranslations(payload, Object.assign({}, meta.raw || {}, { mainKeyword:mainKeywordKo }));
   const relatedTranslations = pickRelatedTranslations(payload, meta.raw || {});
-  const requestId = meta.requestId || cleanText(payload.requestId || payload.request_id || '');
-  let alias_saved = 0, relation_saved = 0, relation_skipped = 0, hit_counted = false;
+  let alias_saved = 0, relation_saved = 0, relation_skipped = 0;
 
   if(inputKeyword && mainKeywordKo){
     const inputLooksKo = /[가-힣]/.test(inputKeyword);
     const useLang = inputLooksKo ? 'ko' : lang;
-    const inc = gmKeywordHitInc(requestId, useLang, inputKeyword, mainKeywordKo);
-    hit_counted = inc > 0;
-    if(await upsertKeywordTranslate(pool, useLang, inputKeyword, mainKeywordKo, inc)) alias_saved++;
+    if(await upsertKeywordTranslate(pool, useLang, inputKeyword, mainKeywordKo, 1)) alias_saved++;
   }
 
   for(const l of KEYWORD_LANGS){
@@ -457,25 +433,15 @@ function pickProductName(p){
   return bestProductName(p);
 }
 function pickPrice(p){
-  // mall_sale_price는 외부몰 원 판매가 저장용이다. 화면 표시/알고리즘 적용가(priceText/searchPrice/gm_price)는 normal_price에서 처리한다.
   return parseMoney(firstNonEmpty(p, [
-    'mall_sale_price','mallSalePrice','mall_sale_price_text','mallSalePriceText',
-    'raw_price','rawPrice','raw_price_text','rawPriceText','rawCoupangPrice','rawCoupangOptionPrice','rawOptionPrice',
-    'base_price','basePrice','basePriceText','origin_price','originPrice','original_mall_price','originalMallPrice',
-    'ali_price','aliPrice','min_price','minPrice',
-    // legacy fallback only: old payloads may not have raw fields
-    'priceMain','displayPrice','display_price','sale_price','salePrice','final_price','finalPrice','price_text','priceText','price'
+    'mall_sale_price','mallSalePrice','priceMain','displayPrice','display_price',
+    'gm_price','gmPrice','searchPrice','search_price','searchPriceText',
+    'price_text','priceText','rawPrice','raw_price','sale_price','salePrice',
+    'final_price','finalPrice','ali_price','aliPrice','min_price','minPrice','price'
   ]), 0);
 }
 function pickNormalPrice(p){
-  const v = firstNonEmpty(p, [
-    'normal_price','normalPrice',
-    // Collector-calculated Glomart 판매가 aliases
-    'sell_price','sellPrice','calculatedPrice','calculated_price','gm_price','gmPrice',
-    // fallback names used by existing search/detail payloads
-    'searchPrice','search_price','searchPriceText','price_text','priceText','price',
-    'original_price','originalPrice','list_price','listPrice','base_price','basePrice','rawOriginalPrice','raw_original_price'
-  ]);
+  const v = firstNonEmpty(p, ['normal_price','normalPrice','original_price','originalPrice','list_price','listPrice','base_price','basePrice','rawOriginalPrice','raw_original_price']);
   return v ? parseMoney(v, 0) : null;
 }
 function pickDiscountPrice(p){
@@ -488,15 +454,11 @@ function pickDeliveryFee(p){
   return parseMoney(v, 0);
 }
 function pickReviewCount(p){
-  // ALI는 검색결과에 리뷰수 대신 판매량(예: 2,000+ 판매)이 들어온다.
-  // 집계 필드는 기존 review_count를 사용한다.
-  const v = firstNonEmpty(p, [
-    'review_count','reviewCount','searchReviewCount',
-    'sales_count_text','salesCountText','searchSalesCountText','saleCountText','onlineSaleText','salesText',
-    'sales_count','salesCount','sale_count','saleCount',
-    'comment_count','commentCount','rating_count','ratingCount','review_text','reviewText','review','reviews','commentText'
-  ]);
+  const v = firstNonEmpty(p, ['review_count','reviewCount','searchReviewCount','comment_count','commentCount','rating_count','ratingCount','review_text','reviewText','review','reviews','commentText']);
   return v ? parseCount(v) : null;
+}
+function pickMallSalesCount(p){
+  return cleanText(firstNonEmpty(p, ['mall_sales_count','mallSalesCount','salesCountText','sales_count_text','searchSalesCountText','onlineSaleText','saleCountText','sales_count','salesCount','sold_count_text','soldCountText']));
 }
 function pickRatingScore(p){
   const v = firstNonEmpty(p, ['rating_score','ratingScore','rating','searchRating','star_score','starScore','product_grade','productGrade','grade','score']);
@@ -589,24 +551,15 @@ function normalizeProductPayload(raw, parent={}){
     const prefix = id0.mallCode + '_';
     pi = id0.uid.indexOf(prefix) === 0 ? id0.uid.slice(prefix.length) : id0.uid;
   }
-  const mallCode = cleanText(id0.mallCode || 'CPKR').toUpperCase();
-  const isCoupangMall = mallCode === 'CPKR' || mallCode === 'COUPANG' || /^CP/.test(mallCode);
-  if(pi){
-    const parts = String(pi).split('_').map(cleanText).filter(Boolean);
-    if(isCoupangMall && parts.length >= 3){
-      // 최종 저장 직전에도 pi_ii_vi(productId_itemId_vendorItemId)를 절대 기준으로 강제 복원한다.
-      productId = parts[0];
-      itemId = parts[1];
-      vendorItemId = parts[2];
-      pi = [productId, itemId, vendorItemId].join('_');
-    }else if(!productId || !vendorItemId){
-      if(!productId) productId = cleanText(parts[0]);
-      if(!itemId && parts.length > 2) itemId = cleanText(parts[1]);
-      if(!vendorItemId) vendorItemId = cleanText(parts[parts.length - 1]);
-    }
+  if(pi && (!productId || !vendorItemId)){
+    const parts = String(pi).split('_');
+    if(!productId) productId = cleanText(parts[0]);
+    if(!itemId && parts.length > 2) itemId = cleanText(parts[1]);
+    if(!vendorItemId) vendorItemId = cleanText(parts[parts.length - 1]);
   }
   if(!pi && productId) pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || productId;
   if(!vendorItemId && productId) vendorItemId = productId;
+  const mallCode = cleanText(id0.mallCode || 'CPKR').toUpperCase();
   const uid = cleanText(id0.uid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
   const productName = pickProductName(p);
   return { p, id:{ productId, itemId, vendorItemId, mallCode, pi, uid }, productName };
@@ -639,7 +592,7 @@ async function upsertProduct(pool, raw, parent={}){
       product_id, item_id, vendor_item_id, pi_ii_vi, internal_product_code,
       product_name, mall_product_name, option_count, option_name, option_value,
       origin_country, mall_sale_price, final_supply_price, normal_price, discount_price,
-      delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn, review_count,
+      delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn, review_count, mall_sales_count,
       supplier_id, supplier_name_snapshot, business_number_snapshot, online_sales_number_snapshot,
       ceo_name_snapshot, supplier_mobile_snapshot, supplier_phone_snapshot, supplier_email_snapshot, supplier_address_snapshot,
       product_url, thumb_origin_url, thumb_file_name,
@@ -650,16 +603,11 @@ async function upsertProduct(pool, raw, parent={}){
       sale_status, product_grade, sale_unit_text, unit_price_text, unit_price_value, unit_base_qty, unit_base_unit, unit_norm_qty, unit_norm_unit, unit_norm_price, unit_parse_status, unit_sortable_yn, last_seen_at, expire_at, created_at, updated_at
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
-      $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
-      $41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,
-      $54,1,0,0,0,0,0,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,now(),now() + INTERVAL '30 days',now(),now()
+      $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
+      $42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,
+      $55,1,0,0,0,0,0,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,now(),now() + INTERVAL '30 days',now(),now()
     )
     ON CONFLICT (product_uid) DO UPDATE SET
-      product_id=EXCLUDED.product_id,
-      item_id=EXCLUDED.item_id,
-      vendor_item_id=EXCLUDED.vendor_item_id,
-      pi_ii_vi=EXCLUDED.pi_ii_vi,
-      mall_code=EXCLUDED.mall_code,
       source_mall=EXCLUDED.source_mall,
       source_uid=EXCLUDED.source_uid,
       product_name=EXCLUDED.product_name,
@@ -675,6 +623,7 @@ async function upsertProduct(pool, raw, parent={}){
       delivery_eta_text=EXCLUDED.delivery_eta_text,
       delivery_type=EXCLUDED.delivery_type,
       review_count=EXCLUDED.review_count,
+      mall_sales_count=EXCLUDED.mall_sales_count,
       supplier_id=EXCLUDED.supplier_id,
       supplier_name_snapshot=EXCLUDED.supplier_name_snapshot,
       business_number_snapshot=EXCLUDED.business_number_snapshot,
@@ -742,7 +691,7 @@ async function upsertProduct(pool, raw, parent={}){
     pickDiscountPrice(p),
     pickDeliveryFee(p), deliveryText,
     deliveryType, cleanText(p.tax_type || p.taxType),
-    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), supplierId, supplierName,
+    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p), supplierId, supplierName,
     pickAny(p,['business_number_snapshot','businessNumberSnapshot','business_number','businessNumber','seller_business_number','sellerBusinessNumber']),
     pickAny(p,['online_sales_number_snapshot','onlineSalesNumberSnapshot','online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber']),
     pickAny(p,['ceo_name_snapshot','ceoNameSnapshot','ceo_name','ceoName','representative_name','representativeName']),
