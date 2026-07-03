@@ -431,19 +431,44 @@ function ids(b){
   const uid = cleanText(b.product_uid || b.productUid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
   return { productId, itemId, vendorItemId, mallCode, pi, uid, source_url:urlText };
 }
+
+function pickFinalSupplyPrice(p, mallSalePrice){
+  const v = firstNonEmpty(p, ['final_supply_price','finalSupplyPrice','supply_price','supplyPrice','purchase_price','purchasePrice','cost_price','costPrice']);
+  return v ? parseMoney(v, 0) : null;
+}
+
 function pickProductName(p){
   return bestProductName(p);
 }
 function pickPrice(p){
+  // mall_sale_price는 몰 원가/원판매가만 저장한다.
+  // collector가 화면 표시용으로 price/priceText/gm_price에 우리 판매가를 넣기 때문에
+  // raw/mall 계열을 먼저 보고, 없을 때만 과거 payload 호환 필드를 사용한다.
   return parseMoney(firstNonEmpty(p, [
-    'mall_sale_price','mallSalePrice','priceMain','displayPrice','display_price',
-    'gm_price','gmPrice','searchPrice','search_price','searchPriceText',
-    'price_text','priceText','rawPrice','raw_price','sale_price','salePrice',
-    'final_price','finalPrice','ali_price','aliPrice','min_price','minPrice','price'
+    'mall_sale_price','mallSalePrice','mall_sale_price_text','mallSalePriceText',
+    'raw_price','rawPrice','raw_price_text','rawPriceText',
+    'basePrice','base_price','basePriceText','base_price_text',
+    'rawCoupangPrice','rawCoupangOptionPrice','rawOptionPrice','coupangPrice',
+    'aliRawPriceText','aliBaseRawPriceText','aliBaseRawPrice',
+    'priceMain','displayPrice','display_price','sale_price','salePrice',
+    'final_price','finalPrice','ali_price','aliPrice','min_price','minPrice','price_text','priceText','price'
   ]), 0);
 }
 function pickNormalPrice(p){
-  const v = firstNonEmpty(p, ['normal_price','normalPrice','original_price','originalPrice','list_price','listPrice','base_price','basePrice','rawOriginalPrice','raw_original_price']);
+  // normal_price는 collector가 계산해서 보낸 우리 판매가만 저장한다.
+  // 서버에서는 절대 재계산하지 않고, 숫자/텍스트 payload를 그대로 money parse만 한다.
+  const v = firstNonEmpty(p, [
+    'normal_price','normalPrice','normal_price_text','normalPriceText',
+    'glomart_price','glomartPrice','glomart_price_text','glomartPriceText',
+    'our_price','ourPrice','our_price_text','ourPriceText',
+    'gm_normal_price','gmNormalPrice','gm_normal_price_text','gmNormalPriceText',
+    'gm_sale_price','gmSalePrice','gm_sale_price_text','gmSalePriceText',
+    'customer_sale_price','customerSalePrice','customer_sale_price_text','customerSalePriceText',
+    'sell_price','sellPrice','sell_price_text','sellPriceText',
+    'calculatedPrice','calculated_price','calculatedPriceText','calculated_price_text',
+    'gm_price','gmPrice','gm_price_text','gmPriceText',
+    'displayPriceText','finalDisplayPriceText','finalPriceText','searchDisplayPrice','searchPrice','priceText','price'
+  ]);
   return v ? parseMoney(v, 0) : null;
 }
 function pickDiscountPrice(p){
@@ -695,8 +720,8 @@ async function upsertProduct(pool, raw, parent={}){
       option_name=EXCLUDED.option_name,
       option_value=EXCLUDED.option_value,
       mall_sale_price=EXCLUDED.mall_sale_price,
-      final_supply_price=EXCLUDED.final_supply_price,
-      normal_price=EXCLUDED.normal_price,
+      final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product.final_supply_price),
+      normal_price=COALESCE(EXCLUDED.normal_price, gm_product.normal_price),
       discount_price=EXCLUDED.discount_price,
       delivery_fee=EXCLUDED.delivery_fee,
       delivery_eta_text=EXCLUDED.delivery_eta_text,
@@ -758,15 +783,18 @@ async function upsertProduct(pool, raw, parent={}){
   const sourceUid = sourceUidFrom(p, sourceMall);
   const searchKeyword = pickSearchKeyword(p, parent);
   const relatedKeywords = pickRelatedKeywords(p, parent);
+  const mallSalePrice = pickPrice(p);
+  const finalSupplyPrice = pickFinalSupplyPrice(p, mallSalePrice);
+  const normalPrice = pickNormalPrice(p);
   const vals=[
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, sourceMall, sourceUid, cleanText(p.mall_category || p.mallCategory),
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), toInt(p.option_count || p.optionCount, optionName || optionValue ? 1 : 0),
     optionName, optionValue,
-    cleanText(p.origin_country || p.originCountry), pickPrice(p),
-    p.final_supply_price == null && p.finalSupplyPrice == null ? null : toInt(p.final_supply_price || p.finalSupplyPrice, 0),
-    pickNormalPrice(p),
+    cleanText(p.origin_country || p.originCountry), mallSalePrice,
+    finalSupplyPrice,
+    normalPrice,
     pickDiscountPrice(p),
     pickDeliveryFee(p), deliveryText,
     deliveryType, cleanText(p.tax_type || p.taxType),
