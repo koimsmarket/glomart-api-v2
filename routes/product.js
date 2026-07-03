@@ -102,6 +102,7 @@ function makeRequestId(p, items){
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
   const chunkTotal = toInt(p.chunk_total || p.chunkTotal, 0);
   const searchRunId = cleanText(p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || '');
+  const mallForRequest = cleanText(p.mall_code || p.mallCode || p.source || (items && items[0] && (items[0].mall_code || items[0].mallCode)) || 'UNKNOWN').toUpperCase();
 
   // Queue 작업 식별자는 상품 UID와 절대 섞지 않는다.
   // 같은 검색을 10개 단위 chunk로 보내면 request_id가 동일할 수 있으므로,
@@ -110,10 +111,12 @@ function makeRequestId(p, items){
   const withChunk = function(base){
     base = cleanText(base);
     if(!base) return '';
+    const mallPart = mallForRequest || 'UNKNOWN';
+    const baseWithMall = new RegExp('(?:^|_)' + mallPart + '(?:_|$)', 'i').test(base) ? base : base + '_' + mallPart;
     if(chunkIndex > 0){
-      return /_C\d{1,4}$/i.test(base) ? base : base + '_C' + String(chunkIndex).padStart(3,'0');
+      return /_C\d{1,4}$/i.test(baseWithMall) ? baseWithMall : baseWithMall + '_C' + String(chunkIndex).padStart(3,'0');
     }
-    return base;
+    return baseWithMall;
   };
 
   const fromRaw = withChunk(raw);
@@ -555,15 +558,24 @@ function normalizeProductPayload(raw, parent={}){
     const prefix = id0.mallCode + '_';
     pi = id0.uid.indexOf(prefix) === 0 ? id0.uid.slice(prefix.length) : id0.uid;
   }
-  if(pi && (!productId || !vendorItemId)){
-    const parts = String(pi).split('_');
-    if(!productId) productId = cleanText(parts[0]);
-    if(!itemId && parts.length > 2) itemId = cleanText(parts[1]);
-    if(!vendorItemId) vendorItemId = cleanText(parts[parts.length - 1]);
+  const mallCode = cleanText(id0.mallCode || 'CPKR').toUpperCase();
+  const isCoupangMall = mallCode === 'CPKR' || mallCode === 'COUPANG' || /^CP/.test(mallCode);
+  if(pi){
+    const parts = String(pi).split('_').map(cleanText).filter(Boolean);
+    if(isCoupangMall && parts.length >= 3){
+      // 최종 저장 직전에도 pi_ii_vi(productId_itemId_vendorItemId)를 절대 기준으로 강제 복원한다.
+      productId = parts[0];
+      itemId = parts[1];
+      vendorItemId = parts[2];
+      pi = [productId, itemId, vendorItemId].join('_');
+    }else if(!productId || !vendorItemId){
+      if(!productId) productId = cleanText(parts[0]);
+      if(!itemId && parts.length > 2) itemId = cleanText(parts[1]);
+      if(!vendorItemId) vendorItemId = cleanText(parts[parts.length - 1]);
+    }
   }
   if(!pi && productId) pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || productId;
   if(!vendorItemId && productId) vendorItemId = productId;
-  const mallCode = cleanText(id0.mallCode || 'CPKR').toUpperCase();
   const uid = cleanText(id0.uid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
   const productName = pickProductName(p);
   return { p, id:{ productId, itemId, vendorItemId, mallCode, pi, uid }, productName };
