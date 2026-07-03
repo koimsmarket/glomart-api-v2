@@ -159,6 +159,23 @@ function pickRelatedKeywords(p, parent){
 }
 
 const KEYWORD_LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+const GM_KEYWORD_HIT_ONCE = new Map();
+function gmKeywordHitOnceKey(requestId, lang, inputKeyword, mainKeywordKo){
+  const d = new Date().toISOString().slice(0,10);
+  const req = cleanText(requestId || '');
+  if(req) return [d, req, cleanText(lang).toLowerCase(), cleanText(inputKeyword), cleanText(mainKeywordKo)].join('|');
+  return [d, Math.floor(Date.now()/30000), cleanText(lang).toLowerCase(), cleanText(inputKeyword), cleanText(mainKeywordKo)].join('|');
+}
+function gmKeywordHitInc(requestId, lang, inputKeyword, mainKeywordKo){
+  const key = gmKeywordHitOnceKey(requestId, lang, inputKeyword, mainKeywordKo);
+  if(GM_KEYWORD_HIT_ONCE.has(key)) return 0;
+  GM_KEYWORD_HIT_ONCE.set(key, Date.now());
+  if(GM_KEYWORD_HIT_ONCE.size > 5000){
+    const now = Date.now();
+    for(const [k,t] of GM_KEYWORD_HIT_ONCE){ if(now - t > 24*60*60*1000) GM_KEYWORD_HIT_ONCE.delete(k); }
+  }
+  return 1;
+}
 function uniqClean(arr){
   const seen = new Set();
   return (Array.isArray(arr) ? arr : (typeof arr === 'string' ? arr.split(/[|,\n\t]+/g) : []))
@@ -173,7 +190,8 @@ function pickKeywordMeta(p){
   const originalKeyword = cleanText(meta.originalKeyword || meta.original_keyword || p.originalKeyword || p.original_keyword || inputKeyword);
   const relatedKeywords = uniqClean(meta.relatedKeywords || meta.related_keywords || p.relatedKeywords || p.related_keywords || p.suggestKeywords || p.suggest_keywords);
   const categoryMainKeywordKo = cleanText(meta.categoryMainKeywordKo || meta.category_main_keyword_ko || p.categoryMainKeywordKo || p.category_main_keyword_ko || '');
-  return { inputKeyword, correctedKeyword, originalKeyword, mainKeyword, relatedKeywords, categoryMainKeywordKo, raw:meta };
+  const requestId = cleanText(meta.requestId || meta.request_id || p.requestId || p.request_id || p.searchRequestId || p.search_request_id || '');
+  return { inputKeyword, correctedKeyword, originalKeyword, mainKeyword, relatedKeywords, categoryMainKeywordKo, requestId, raw:meta };
 }
 function pickTranslationValue(src, lang, baseKey){
   src = src || {};
@@ -266,12 +284,15 @@ async function saveKeywordTranslatePayload(pool, payload){
   const lang = pickLang(payload);
   const translations = pickKeywordTranslations(payload, Object.assign({}, meta.raw || {}, { mainKeyword:mainKeywordKo }));
   const relatedTranslations = pickRelatedTranslations(payload, meta.raw || {});
-  let alias_saved = 0, relation_saved = 0, relation_skipped = 0;
+  const requestId = meta.requestId || cleanText(payload.requestId || payload.request_id || '');
+  let alias_saved = 0, relation_saved = 0, relation_skipped = 0, hit_counted = false;
 
   if(inputKeyword && mainKeywordKo){
     const inputLooksKo = /[가-힣]/.test(inputKeyword);
     const useLang = inputLooksKo ? 'ko' : lang;
-    if(await upsertKeywordTranslate(pool, useLang, inputKeyword, mainKeywordKo, 1)) alias_saved++;
+    const inc = gmKeywordHitInc(requestId, useLang, inputKeyword, mainKeywordKo);
+    hit_counted = inc > 0;
+    if(await upsertKeywordTranslate(pool, useLang, inputKeyword, mainKeywordKo, inc)) alias_saved++;
   }
 
   for(const l of KEYWORD_LANGS){

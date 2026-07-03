@@ -1149,7 +1149,45 @@ app.post('/api/gm/search/log', async (req,res)=>{
       cache_used: !!(b.cache_used || b.cacheUsed),
       yyyymm: cleanText(b.yyyymm || b.year_month || b.yearMonth || '')
     };
-    await dbQuery(`
+    const requestId = cleanText(b.request_id || b.requestId || '');
+    const rawJsonText = JSON.stringify({ ...b, ui_lang_code:uiLangCode, keyword_lang_code:keywordLangCode, matched_category_keyword: match || null });
+    let existingSearchId = '';
+    if(requestId && row.keyword_normalized && row.mall_code){
+      const ex = await dbQuery(`
+        SELECT search_id FROM gm_search_log
+        WHERE request_id=$1 AND keyword_normalized=$2 AND COALESCE(mall_code,'')=$3
+        ORDER BY search_id ASC LIMIT 1
+      `, [requestId, row.keyword_normalized, row.mall_code]);
+      existingSearchId = ex.rows && ex.rows[0] && ex.rows[0].search_id;
+    }
+    if(existingSearchId){
+      await dbQuery(`
+        UPDATE gm_search_log SET
+          keyword_original=$1, keyword_canonical=$2,
+          lang_code=$3, ui_lang_code=$4, keyword_lang_code=$5,
+          country_code=$6, member_country_code=$7,
+          category_code=$8, category_no=$9, category_name=$10,
+          result_count=GREATEST(COALESCE(result_count,0),$11),
+          db_insert_count=GREATEST(COALESCE(db_insert_count,0),$12),
+          queue_send_count=GREATEST(COALESCE(queue_send_count,0),$13),
+          cache_used=cache_used OR $14,
+          cache_key=$15, search_source=$16,
+          member_id=$17, guest_key=$18, device_type=$19,
+          raw_json=$20::jsonb
+        WHERE search_id=$21
+      `, [
+        row.keyword_original, row.keyword_canonical,
+        row.lang_code, uiLangCode, keywordLangCode,
+        row.country_code, row.member_country_code,
+        row.category_code, row.category_no, row.category_name,
+        row.result_count, row.db_insert_count, row.queue_send_count,
+        row.cache_used, cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
+        cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''),
+        rawJsonText, existingSearchId
+      ]);
+      return ok(res, { action:'search.log', inserted:false, deduped:true, search_id:existingSearchId, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
+    }
+    const ins = await dbQuery(`
       INSERT INTO gm_search_log (
         search_at, keyword_original, keyword_normalized, keyword_canonical,
         lang_code, ui_lang_code, keyword_lang_code, country_code, member_country_code,
@@ -1159,18 +1197,18 @@ app.post('/api/gm/search/log', async (req,res)=>{
         member_id, guest_key, device_type, request_id, raw_json, created_at
       ) VALUES (
         now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,now()
-      )
+      ) RETURNING search_id
     `, [
       row.keyword_original, row.keyword_normalized, row.keyword_canonical,
       row.lang_code, uiLangCode, keywordLangCode, row.country_code, row.member_country_code,
       row.category_code, row.category_no, row.category_name,
       row.mall_code, row.result_count, row.db_insert_count, row.queue_send_count,
       row.cache_used, cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
-      cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''), cleanText(b.request_id || b.requestId || ''),
-      JSON.stringify({ ...b, ui_lang_code:uiLangCode, keyword_lang_code:keywordLangCode, matched_category_keyword: match || null })
+      cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''), requestId,
+      rawJsonText
     ]);
     await upsertSearchStats(row);
-    ok(res, { action:'search.log', inserted:true, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
+    ok(res, { action:'search.log', inserted:true, search_id:ins.rows && ins.rows[0] && ins.rows[0].search_id, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
   }catch(e){
     fail(res, 500, 'search log failed', { detail:String(e && e.message || e) });
   }
