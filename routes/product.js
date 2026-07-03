@@ -600,6 +600,39 @@ function pickOptPrice(row, names){
   }
   return 0;
 }
+
+function normalizeMallCategoryJson(p){
+  p=p||{};
+  let src = p.mall_category_json || p.mallCategoryJson || p.mall_category_path_json || p.mallCategoryPathJson || [];
+  if(typeof src === 'string'){
+    try{ src = JSON.parse(src); }catch(e){ src = []; }
+  }
+  if(!Array.isArray(src)) src = [];
+  const out=[]; const seen=new Set();
+  src.forEach((r)=>{
+    if(!r || typeof r !== 'object') return;
+    const id = cleanText(r.id || r.category_id || r.categoryId || r.cate_no || r.cateNo || '');
+    const name = cleanText(r.name || r.category_name || r.categoryName || r.title || '');
+    if(!id && !name) return;
+    const sig=(id||'')+'|'+name;
+    if(seen.has(sig)) return; seen.add(sig);
+    out.push({ depth: out.length + 1, id, name });
+  });
+  return out;
+}
+function pickMallCategoryLeaf(p, mallCategoryJson){
+  p=p||{};
+  const arr = Array.isArray(mallCategoryJson) ? mallCategoryJson : normalizeMallCategoryJson(p);
+  const leaf = arr.length ? arr[arr.length-1] : null;
+  const leafId = cleanText((leaf && leaf.id) || p.mall_category_id || p.mallCategoryId || '');
+  if(leafId) return leafId;
+  const direct = cleanText(p.mall_category || p.mallCategory || '');
+  if(/^\d+$/.test(direct)) return direct;
+  const m = direct.match(/\((\d{3,})\)\s*$/) || direct.match(/(\d{3,})\s*$/);
+  if(m) return m[1];
+  return direct;
+}
+
 function normalizeThumbJson(p){
   p=p||{};
   const out=[]; const seen=new Set();
@@ -786,9 +819,11 @@ async function upsertProduct(pool, raw, parent={}){
   const mallSalePrice = pickPrice(p);
   const finalSupplyPrice = pickFinalSupplyPrice(p, mallSalePrice);
   const normalPrice = pickNormalPrice(p);
+  const mallCategoryJson = normalizeMallCategoryJson(p);
+  const mallCategoryLeaf = pickMallCategoryLeaf(p, mallCategoryJson);
   const vals=[
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
-    cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, sourceMall, sourceUid, cleanText(p.mall_category || p.mallCategory),
+    cleanText(p.category_keyword || p.categoryKeyword || p.keyword), id.mallCode, sourceMall, sourceUid, mallCategoryLeaf,
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), toInt(p.option_count || p.optionCount, optionName || optionValue ? 1 : 0),
     optionName, optionValue,
@@ -832,7 +867,7 @@ async function upsertProduct(pool, raw, parent={}){
   const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   try{
-    await pool.query(`UPDATE gm_product SET option_json=$1, thumb_json=$2, option_count=$3, tax_type=COALESCE(NULLIF($4,''), tax_type), updated_at=now() WHERE product_uid=$5`, [optionJson, thumbJson, optionCount, taxType, id.uid]);
+    await pool.query(`UPDATE gm_product SET option_json=$1, thumb_json=$2, option_count=$3, tax_type=COALESCE(NULLIF($4,''), tax_type), mall_category=COALESCE(NULLIF($5,''), mall_category), mall_category_json=$6, updated_at=now() WHERE product_uid=$7`, [optionJson, thumbJson, optionCount, taxType, mallCategoryLeaf, mallCategoryJson, id.uid]);
   }catch(e){
     console.error('[GM_PRODUCT_JSON_UPDATE_ERROR]', e && e.message || e);
   }

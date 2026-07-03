@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS gm_product (
   source_mall TEXT,
   source_uid TEXT,
   mall_category TEXT,
+  mall_category_json JSONB NOT NULL DEFAULT '[]'::jsonb,
   product_id TEXT NOT NULL,
   item_id TEXT,
   vendor_item_id TEXT NOT NULL,
@@ -85,3 +86,13 @@ CREATE TABLE IF NOT EXISTS gm_product (
   unit_sortable_yn TEXT,
   PRIMARY KEY (product_uid)
 );
+
+-- Patch: keep original gm_product schema and ensure existing old deployments have mall_code.
+-- This does not change expire_at/created_at/updated_at definitions.
+ALTER TABLE IF EXISTS gm_product
+  ADD COLUMN IF NOT EXISTS mall_code TEXT NOT NULL DEFAULT 'CPKR';
+
+
+-- Patch: mall sales count is part of base product schema.
+ALTER TABLE IF EXISTS gm_product
+  ADD COLUMN IF NOT EXISTS mall_sales_count TEXT;
