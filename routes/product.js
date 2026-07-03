@@ -488,7 +488,14 @@ function pickDeliveryFee(p){
   return parseMoney(v, 0);
 }
 function pickReviewCount(p){
-  const v = firstNonEmpty(p, ['review_count','reviewCount','searchReviewCount','comment_count','commentCount','rating_count','ratingCount','review_text','reviewText','review','reviews','commentText']);
+  // ALI는 검색결과에 리뷰수 대신 판매량(예: 2,000+ 판매)이 들어온다.
+  // 집계 필드는 기존 review_count를 사용한다.
+  const v = firstNonEmpty(p, [
+    'review_count','reviewCount','searchReviewCount',
+    'sales_count_text','salesCountText','searchSalesCountText','saleCountText','onlineSaleText','salesText',
+    'sales_count','salesCount','sale_count','saleCount',
+    'comment_count','commentCount','rating_count','ratingCount','review_text','reviewText','review','reviews','commentText'
+  ]);
   return v ? parseCount(v) : null;
 }
 function pickRatingScore(p){
