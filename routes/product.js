@@ -251,7 +251,7 @@ async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, i
     ON CONFLICT (lang,input_keyword) DO UPDATE SET
       main_keyword_ko=EXCLUDED.main_keyword_ko,
       hit_count=gm_keyword_translate.hit_count + EXCLUDED.hit_count,
-      updated_at=CURRENT_DATE`, [lang, inputKeyword, mainKeywordKo, Math.max(1, toInt(inc,1))]);
+      updated_at=CURRENT_DATE`, [lang, inputKeyword, mainKeywordKo, Math.max(0, toInt(inc,1))]);
   return true;
 }
 async function saveKeywordTranslatePayload(pool, payload){
@@ -441,7 +441,14 @@ function pickPrice(p){
   ]), 0);
 }
 function pickNormalPrice(p){
-  const v = firstNonEmpty(p, ['normal_price','normalPrice','original_price','originalPrice','list_price','listPrice','base_price','basePrice','rawOriginalPrice','raw_original_price']);
+  const v = firstNonEmpty(p, [
+    'normal_price','normalPrice',
+    // Collector-calculated Glomart 판매가 aliases
+    'sell_price','sellPrice','calculatedPrice','calculated_price','gm_price','gmPrice',
+    // fallback names used by existing search/detail payloads
+    'searchPrice','search_price','searchPriceText','price_text','priceText','price',
+    'original_price','originalPrice','list_price','listPrice','base_price','basePrice','rawOriginalPrice','raw_original_price'
+  ]);
   return v ? parseMoney(v, 0) : null;
 }
 function pickDiscountPrice(p){
