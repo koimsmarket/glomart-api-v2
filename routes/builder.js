@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V012_CAFE24_MEMBER_RAW_JSON_TWO_TABLES';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V013_GM_CATEGORY_CP_CODE_KEY';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -140,15 +140,19 @@ const TABLES = {
   },
   category: {
     table: 'gm_category',
-    key: ['category_no'],
-    order: 'depth ASC, sort_order ASC, category_no ASC',
-    critical: ['category_no'],
-    numeric: ['depth','sort_order','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
+    // DEV: use Coupang category no as the upsert key. Before official launch this can be changed to ['gm_code'].
+    key: ['cp_code'],
+    keyAny: [['cp_code'], ['gm_code']],
+    order: 'depth ASC, sort_order ASC, gm_code ASC',
+    critical: ['cp_code','gm_code','name_ko'],
+    numeric: ['category_id','depth','sort_order','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
     defaults: { leaf_yn:'N', display_yn:'Y', depth:'0', sort_order:'0' },
     enums: { leaf_yn:['Y','N'], display_yn:['Y','N'] },
-    blocked: ['created_at'],
+    // Do not overwrite AI/runtime learning columns or counters from translation uploads.
+    blocked: ['category_id','created_at','cp_id','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount','last_search_at','last_view_at','last_order_at','last_return_at','last_exchange_at','last_ad_view_at','last_ad_order_at'],
     allowInsert: true
   },
+
   category_keyword: {
     table: 'gm_category_keyword',
     key: ['keyword_normalized','lang_code','country_code','category_no'],
