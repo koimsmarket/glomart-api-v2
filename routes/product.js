@@ -1001,6 +1001,38 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });
+
+    // GM_QUEUE_INLINE_UPSERT_V016
+    // Cloudtype에서 queue row는 정상 생성되는데 worker가 실행되지 않거나
+    // 스키마 변경 후 worker가 조용히 실패하면 gm_product가 계속 비는 문제가 있었다.
+    // 검색 chunk는 보통 10개 단위이므로 queue 수신 즉시 같은 프로세스에서 upsert까지 수행한다.
+    // 기존 queue 테이블은 진단/재처리용으로 유지한다.
+    const inlineResults = [];
+    for(const item of items){
+      try{
+        inlineResults.push(await upsertProduct(pool, item, p));
+      }catch(e){
+        inlineResults.push({ ok:false, error:String(e && e.message || e), title_sample:cleanText(item && (item.title || item.name || item.productName || item.product_name || '')).slice(0,120) });
+      }
+    }
+    const inlineSaved = inlineResults.filter(x=>x && x.ok).length;
+    const inlineSkipped = inlineResults.length - inlineSaved;
+    const inlineStatus = inlineSaved > 0 ? 'done' : 'failed';
+    const inlineError = inlineSaved > 0 ? null : (inlineResults.find(x=>x && (x.error || x.reason)) || {}).error || (inlineResults.find(x=>x && x.reason) || {}).reason || 'inline upsert saved 0 rows';
+    try{
+      await pool.query(`
+        UPDATE gm_product_upsert_queue
+        SET status=$2,
+            processed_at=now(),
+            error_message=$3,
+            result_json=$4::jsonb
+        WHERE queue_id=$1
+      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, sample:inlineResults.slice(0,10) })]);
+    }catch(_qe){
+      console.warn('[GM_PRODUCT_QUEUE] inline result update failed', String(_qe && _qe.message || _qe));
+    }
+    console.log('[GM_PRODUCT_QUEUE] inline upsert done', { saved:inlineSaved, skipped:inlineSkipped, status:inlineStatus, queue_id:r.rows[0] && r.rows[0].queue_id, sample:inlineResults.slice(0,3) });
+
     ok(res,{
       action:'product.queue',
       queued:true,
@@ -1009,6 +1041,11 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       request_id:r.rows[0] && r.rows[0].request_id,
       item_count:r.rows[0] && r.rows[0].item_count,
       received:items.length,
+      saved:inlineSaved,
+      skipped:inlineSkipped,
+      inline_upsert:true,
+      inline_status:inlineStatus,
+      inline_sample:inlineResults.slice(0,5),
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });
