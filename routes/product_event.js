@@ -1,3 +1,4 @@
+// GM_PRODUCT_EVENT_V017_NO_EXPIRE_AT
 const express = require('express');
 const router = express.Router();
 
@@ -46,19 +47,23 @@ router.post(['/api/gm/product/event','/api/product/event'], async (req,res)=>{
   const vals = key.product_uid ? [key.product_uid] : [key.mall_code,key.pi_ii_vi];
   let setSql='';
   if(type==='detail' || type==='view'){
-    setSql = "detail_view_count=COALESCE(detail_view_count,0)+1, view_count=COALESCE(view_count,0)+1, last_view_at=NOW(), expire_at=GREATEST(COALESCE(expire_at,NOW()), NOW()+INTERVAL '90 days')";
+    setSql = "detail_view_count=COALESCE(detail_view_count,0)+1, view_count=COALESCE(view_count,0)+1, last_view_at=NOW()";
   }else if(type==='cart'){
-    setSql = "cart_count=COALESCE(cart_count,0)+1, last_cart_at=NOW(), expire_at=GREATEST(COALESCE(expire_at,NOW()), NOW()+INTERVAL '180 days')";
+    setSql = "cart_count=COALESCE(cart_count,0)+1, last_cart_at=NOW()";
   }else if(type==='wish'){
-    setSql = "wish_count=COALESCE(wish_count,0)+1, last_wish_at=NOW(), expire_at=GREATEST(COALESCE(expire_at,NOW()), NOW()+INTERVAL '180 days')";
+    setSql = "wish_count=COALESCE(wish_count,0)+1, last_wish_at=NOW()";
   }else if(type==='order'){
-    setSql = "order_count=COALESCE(order_count,0)+1, order_qty_total=COALESCE(order_qty_total,0)+"+qty+", sales_qty=COALESCE(sales_qty,0)+"+qty+", sales_amount=COALESCE(sales_amount,0)+"+amount+", last_order_at=NOW(), expire_at=GREATEST(COALESCE(expire_at,NOW()), NOW()+INTERVAL '730 days')";
+    setSql = "order_count=COALESCE(order_count,0)+1, order_qty_total=COALESCE(order_qty_total,0)+"+qty+", sales_qty=COALESCE(sales_qty,0)+"+qty+", sales_amount=COALESCE(sales_amount,0)+"+amount+", last_order_at=NOW()";
   }else if(type==='return'){
     setSql = "return_count=COALESCE(return_count,0)+1, last_return_at=NOW()";
   }else if(type==='exchange'){
     setSql = "exchange_count=COALESCE(exchange_count,0)+1, last_exchange_at=NOW()";
+  }else if(type==='ad_view'){
+    setSql = "ad_view_count=COALESCE(ad_view_count,0)+1, last_ad_view_at=NOW()";
+  }else if(type==='ad_sale'){
+    setSql = "ad_order_count=COALESCE(ad_order_count,0)+1, ad_sales_qty=COALESCE(ad_sales_qty,0)+"+qty+", ad_sales_amount=COALESCE(ad_sales_amount,0)+"+amount+", last_ad_order_at=NOW()";
   }else{
-    return fail(res,400,'event_type must be detail/cart/wish/order/return/exchange');
+    return fail(res,400,'event_type must be detail/cart/wish/order/return/exchange/ad_view/ad_sale');
   }
   try{
     const r=await pool.query(`UPDATE gm_product SET ${setSql}, updated_at=NOW() WHERE ${where} RETURNING product_uid,mall_code,pi_ii_vi,detail_view_count,cart_count,wish_count,order_count,order_qty_total,sales_qty,sales_amount`, vals);

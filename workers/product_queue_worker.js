@@ -1,4 +1,5 @@
 'use strict';
+// GM_PRODUCT_QUEUE_WORKER_V017_DIAG_NO_HARD_ZERO_SAVE_THROW
 
 const productRouter = require('../routes/product');
 
@@ -100,9 +101,10 @@ async function processRow(pool, row){
   const result = { received: items.length, saved, inserted, updated, skipped, skip_reason_count, samples, errors: errors.slice(0, 5) };
   console.log('[GM_PRODUCT_QUEUE_WORKER_RESULT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...result });
   if(items.length && saved === 0){
-    const e = new Error('queue processed but no gm_product rows saved: ' + (Object.keys(skip_reason_count).join(' | ') || 'unknown mapping error'));
-    e.result = result;
-    throw e;
+    // V017: worker가 0건 저장일 때 route/DB 상태 확인을 위해 failed 재시도 루프만 만들지 않고
+    // done_with_zero로 남긴다. 실제 원인은 result_json.skip_reason_count / samples에서 확인한다.
+    result.zero_saved = true;
+    result.warning = 'queue processed but no gm_product rows saved: ' + (Object.keys(skip_reason_count).join(' | ') || 'unknown mapping error');
   }
   return result;
 }
