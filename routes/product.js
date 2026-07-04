@@ -656,32 +656,44 @@ function normalizeOptionJson(p, id){
     if(Array.isArray(p[k])) arrays.push(p[k]);
   });
   const rows=[]; const seen=new Set();
+  const commonSupplierId = pickSupplierId(p);
+  const commonSupplierName = pickSupplierName(p);
+  const commonOrigin = cleanText(p.origin_country || p.originCountry || p.originText || '');
+  const commonCert = cleanText(p.certification_no_1 || p.certificationNo1 || p.certification_no_2 || p.certificationNo2 || p.certification || p.certificationText || '');
+  const commonTax = pickTaxType(p) || cleanText(p.tax_type || p.taxType || p.vat_type || p.vatType || '');
+  const commonVatText = cleanText(p.vat_text || p.vatText || p.tax_text || p.taxText || '');
   arrays.forEach(arr=>arr.forEach((r)=>{
     if(!r || typeof r !== 'object') return;
     const productId = cleanText(r.productId || r.product_id || id.productId || p.productId || p.product_id || '');
-    const itemId = cleanText(r.itemId || r.item_id || r.skuId || r.sku_id || (id.mallCode==='ALKR' ? (r.skuIdStr || r.sku_id_str || '') : '') || '');
-    const vendorItemId = cleanText(r.vendorItemId || r.venderItemId || r.vendor_item_id || r.skuId || r.sku_id || itemId || id.vendorItemId || '');
+    const itemId = cleanText(r.itemId || r.item_id || r.skuIdStr || r.sku_id_str || r.skuId || r.sku_id || (id.mallCode==='ALKR' ? (r.aliSkuId || r.optionId || '') : '') || '');
+    const vendorItemId = cleanText(r.vendorItemId || r.venderItemId || r.vendor_item_id || r.skuId || r.sku_id || r.aliSkuId || r.optionId || itemId || id.vendorItemId || '');
     const pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || cleanText(r.key || r.uid || r.option_uid || '');
     const uid = cleanText(r.uid || r.option_uid || (id.mallCode && pi ? id.mallCode + '_' + pi : pi));
-    const name = cleanText(r.fullOptionName || r.displayOptionName || r.optionName || r.option_name || r.name || r.value || r.title || '');
+    const name = cleanText(r.fullOptionName || r.displayOptionName || r.selectedOptionText || r.optionText || r.optionName || r.option_name || r.name || r.value || r.title || '');
     if(!uid && !name) return;
     const sig = uid || (name + '|' + vendorItemId + '|' + itemId);
     if(seen.has(sig)) return; seen.add(sig);
-    const mallPrice = pickOptPrice(r, ['mall_price','mallPrice','raw_price','rawPrice','rawCoupangOptionPrice','rawOptionPrice','coupangPrice','basePrice','basePriceText']);
-    const salePrice = pickOptPrice(r, ['sale_price','salePrice','sell_price','sellPrice','calculatedPrice','optionPrice','optionPriceText','price','priceText','finalPriceText']);
-    const feeText = cleanText(r.delivery_fee_text || r.deliveryFeeText || r.optionShippingFeeText || r.shippingFeeText || r.baseShippingFeeText || r.deliveryFee || '');
+    const mallPrice = pickOptPrice(r, ['mall_price','mallPrice','raw_price','rawPrice','rawCoupangOptionPrice','rawOptionPrice','rawOptionPriceText','coupangPrice','aliRawPrice','aliRawPriceText','basePrice','basePriceText']);
+    const normalPrice = pickOptPrice(r, ['normal_price','normalPrice','sell_price','sellPrice','calculatedPrice','gm_price','gmPrice','optionPrice','optionPriceText','price','priceText','finalPriceText']);
+    const feeText = cleanText(r.delivery_fee_text || r.deliveryFeeText || r.optionShippingFeeText || r.shippingFeeText || r.baseShippingFeeText || r.deliveryFee || p.deliveryFeeText || p.shippingFeeText || '');
     const fee = r.delivery_fee !== undefined ? parseMoney(r.delivery_fee, 0) : parseMoney(feeText, 0);
-    const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.shipType || '');
+    const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.shipType || p.shippingLabel || p.deliveryType || '');
     rows.push({
       uid, item_id:itemId, vendor_item_id:vendorItemId, product_id:productId, option_name:name,
-      mall_price:mallPrice, sale_price:salePrice,
-      delivery_badge:cleanText(r.delivery_badge || r.deliveryBadge || r.shipType || r.optionShipType || ''),
+      mall_price:mallPrice, normal_price:normalPrice, sale_price:normalPrice,
+      delivery_badge:cleanText(r.delivery_badge || r.deliveryBadge || r.shipType || r.optionShipType || r.deliveryType || ''),
       delivery_badge_text:badgeText,
       delivery_fee:fee,
       delivery_fee_text:feeText,
       delivery_free_yn: feeText ? (/무료/.test(feeText) || fee===0) : (fee===0),
-      delivery_eta_text:cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || ''),
-      option_image_url:normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.image || r.thumbnail || r.thumb || ''),
+      delivery_eta_text:cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || p.deliveryDateText || p.arrivalText || ''),
+      option_image_url:normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.colorImage || r.image || r.thumbnail || r.thumb || ''),
+      supplier_id:cleanText(r.supplier_id || r.supplierId || '') || commonSupplierId,
+      supplier_name:cleanText(r.supplier_name || r.supplierName || r.sellerName || '') || commonSupplierName,
+      origin_country:cleanText(r.origin_country || r.originCountry || r.originText || '') || commonOrigin,
+      certification:cleanText(r.certification || r.certificationText || r.certification_no_1 || r.certificationNo1 || '') || commonCert,
+      tax_type:cleanText(r.tax_type || r.taxType || r.vat_type || r.vatType || '') || commonTax,
+      vat_text:cleanText(r.vat_text || r.vatText || r.tax_text || r.taxText || '') || commonVatText,
       soldout_yn: !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || ''))),
       source:cleanText(r.source || '')
     });

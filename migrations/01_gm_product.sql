@@ -1,8 +1,10 @@
 -- 01_gm_product.sql
--- Source sheet: product_db
--- Column structure is preserved from the uploaded workbook.
+-- 개발용 즉시 테스트 스키마. 정식 스타트 전까지는 배포 시 gm_product를 DROP/CREATE 한다.
+-- 데이터는 보존하지 않는다. 운영용 보관본은 GitHub/migration_operating/01_gm_product.sql에 별도 유지한다.
 
-CREATE TABLE IF NOT EXISTS gm_product (
+DROP TABLE IF EXISTS gm_product CASCADE;
+
+CREATE TABLE gm_product (
   product_uid TEXT NOT NULL,
   glomart_code TEXT NOT NULL,
   gm_category TEXT NOT NULL,
@@ -86,13 +88,3 @@ CREATE TABLE IF NOT EXISTS gm_product (
   unit_sortable_yn TEXT,
   PRIMARY KEY (product_uid)
 );
-
--- Patch: keep original gm_product schema and ensure existing old deployments have mall_code.
--- This does not change expire_at/created_at/updated_at definitions.
-ALTER TABLE IF EXISTS gm_product
-  ADD COLUMN IF NOT EXISTS mall_code TEXT NOT NULL DEFAULT 'CPKR';
-
-
--- Patch: mall sales count is part of base product schema.
-ALTER TABLE IF EXISTS gm_product
-  ADD COLUMN IF NOT EXISTS mall_sales_count TEXT;
