@@ -630,6 +630,19 @@ function normalizeProductPayload(raw, parent={}){
 }
 
 function jsonCleanText(v){ return cleanText(v); }
+function safeJsonString(v){
+  try{
+    if(v === undefined || v === null || v === '') return '[]';
+    if(typeof v === 'string'){
+      const t=v.trim();
+      if(!t) return '[]';
+      try{ JSON.parse(t); return t; }catch(_e){ return JSON.stringify(t); }
+    }
+    return JSON.stringify(v);
+  }catch(e){
+    return '[]';
+  }
+}
 function pickOptPrice(row, names){
   row=row||{};
   for(const n of names){
@@ -828,7 +841,7 @@ async function upsertProduct(pool, raw, parent={}){
       last_seen_at, created_at, updated_at
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-      $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,
+      $16,$17,$18,$19::jsonb,$20::jsonb,$21,$22,$23,$24,$25,$26,$27,$28,$29,
       $30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,
       $48,$49,$50,1,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,
       now(),now(),now()
@@ -899,7 +912,8 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
     id.mallCode, sourceMall, sourceUid, cpId, cpCode,
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
-    productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount, optionJson, thumbJson,
+    productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
+    safeJsonString(optionJson), safeJsonString(thumbJson),
     cleanText(p.origin_country || p.originCountry), cleanText(p.storage_type || p.storageType), cleanText(p.storage_method || p.storageMethod), cleanText(p.shelf_life_text || p.shelfLifeText), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
