@@ -512,6 +512,25 @@ function cleanDupMallProductName(productName, mallProductName){
 function pickProductUrl(p){
   return normalizeUrl(p.product_url || p.productUrl || p.url || p.link || p.href || p.detail_url || p.detailUrl || p.ali_url || p.aliUrl);
 }
+function buildProductUrlFromId(id){
+  id = id || {};
+  const mall = cleanText(id.mallCode || '').toUpperCase();
+  const productId = cleanText(id.productId || '');
+  const itemId = cleanText(id.itemId || '');
+  const vendorItemId = cleanText(id.vendorItemId || '');
+  if(!productId) return '';
+  if(mall === 'CPKR' || /^CP/.test(mall)){
+    let url = 'https://www.coupang.com/vp/products/' + productId;
+    const qs = [];
+    if(itemId) qs.push('itemId=' + encodeURIComponent(itemId));
+    if(vendorItemId) qs.push('vendorItemId=' + encodeURIComponent(vendorItemId));
+    return url + (qs.length ? '?' + qs.join('&') : '');
+  }
+  if(mall === 'ALKR' || mall === 'ALI' || /^AL/.test(mall)){
+    return 'https://ko.aliexpress.com/item/' + productId + '.html';
+  }
+  return '';
+}
 function pickThumbUrl(p){
   return normalizeUrl(
     p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl ||
@@ -602,7 +621,11 @@ function normalizeProductPayload(raw, parent={}){
   if(!vendorItemId && productId) vendorItemId = productId;
   const mallCode = cleanText(id0.mallCode || 'CPKR').toUpperCase();
   const uid = cleanText(id0.uid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
-  const productName = pickProductName(p);
+  let productName = pickProductName(p);
+  if(!productName && productId){
+    // 검색 queue payload 변동 시 product_name이 누락되어도 상품 저장이 전체 중단되지 않게 최소 식별명을 부여한다.
+    productName = cleanText(p.titleText || p.title_text || p.searchTitle || p.search_title || p.displayName || p.display_name || '') || (mallCode + ' 상품 ' + productId);
+  }
   return { p, id:{ productId, itemId, vendorItemId, mallCode, pi, uid }, productName };
 }
 
@@ -729,14 +752,28 @@ function pickMaxOrderQty(p){
   return v ? toInt(v, null) : null;
 }
 function pickReturnShippingFee(p, mallSalePrice){
-  const direct = firstNonEmpty(p, ['return_shipping_fee','returnShippingFee']);
-  if(direct) return parseMoney(direct, 0);
-  const text = cleanText(firstNonEmpty(p, ['return_fee_text','returnFeeText','exchangeReturnFeeText','exchange_return_fee_text','return_policy_text','returnPolicyText']));
+  p = p || {};
+  const deliveryType = cleanText(p.delivery_type || p.deliveryType || p.delivery_badge || p.deliveryBadge || p.shippingLabel || p.shippingBadge || '').toLowerCase();
+  const isRocket = /rocket|fresh|로켓|프레시/.test(deliveryType);
+  const directRaw = p.return_shipping_fee !== undefined ? p.return_shipping_fee : p.returnShippingFee;
+  const directText = cleanText(directRaw);
+
+  // 숫자만 직접 온 경우만 그대로 채택한다. 긴 반품 안내문이 이 필드에 들어오면 19,800원을 반품비로 오인하지 않는다.
+  if(directText && /^\s*[0-9,]+\s*(?:원)?\s*$/.test(directText)) return parseMoney(directText, 0);
+
+  const text = cleanText([
+    directText,
+    firstNonEmpty(p, ['return_fee_text','returnFeeText','exchangeReturnFeeText','exchange_return_fee_text','return_policy_text','returnPolicyText'])
+  ].filter(Boolean).join(' '));
+
   if(text){
-    const m = text.match(/19,?800\s*원\s*미만[\s\S]{0,80}?반품비\s*([0-9,]+)\s*원/i);
-    const m2 = text.match(/19,?800\s*원\s*이상[\s\S]{0,80}?반품비\s*([0-9,]+)\s*원/i);
-    if(m && Number(mallSalePrice||0) < 19800) return parseMoney(m[1], 0);
-    if(m2 && Number(mallSalePrice||0) >= 19800) return parseMoney(m2[1], 0);
+    // 로켓배송/로켓프레시의 표준 반품 안내문은 실제 반품비 5,000원만 저장한다.
+    if(isRocket && /19,?800\s*원/.test(text) && /반품비\s*5,?000\s*원/.test(text)) return 5000;
+
+    const under = text.match(/19,?800\s*원\s*미만[\s\S]{0,120}?반품비\s*([0-9,]+)\s*원/i);
+    const over = text.match(/19,?800\s*원\s*이상[\s\S]{0,120}?반품비\s*([0-9,]+)\s*원/i);
+    if(under && Number(mallSalePrice||0) < 19800) return parseMoney(under[1], 0);
+    if(over && Number(mallSalePrice||0) >= 19800) return parseMoney(over[1], 0);
     const first = text.match(/반품비\s*([0-9,]+)\s*원/i);
     if(first) return parseMoney(first[1], 0);
   }
@@ -755,7 +792,7 @@ async function upsertProduct(pool, raw, parent={}){
     return { ok:false, skipped:true, reason:'required field missing: ' + missing.join(','), missing, uid:id.uid||'', pi_ii_vi:id.pi||'', mall_code:id.mallCode||'', product_id:id.productId||'', source_url:pickProductUrl(p), title_sample:cleanText(p.title||p.name||p.productName||p.product_name).slice(0,120) };
   }
 
-  const productUrl = pickProductUrl(p);
+  const productUrl = pickProductUrl(p) || buildProductUrlFromId(id);
   const thumbUrl = pickThumbUrl(p);
   const sourceMall = sourceMallFrom(p, p.source_uid || p.sourceUid, productUrl, id.mallCode);
   const sourceUid = sourceUidFrom(p, sourceMall);

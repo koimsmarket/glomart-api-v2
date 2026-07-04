@@ -95,6 +95,30 @@ CREATE TABLE gm_product (
   exchange_shipping_fee INTEGER,
   return_period_days INTEGER,
   exchange_period_days INTEGER,
+  return_address TEXT,
+  exchange_address TEXT,
+  return_contact TEXT,
+  exchange_contact TEXT,
+
+  -- operational counters / metrics
+  view_count INTEGER NOT NULL DEFAULT 0,
+  search_count INTEGER NOT NULL DEFAULT 0,
+  sales_qty INTEGER NOT NULL DEFAULT 0,
+  sales_amount INTEGER NOT NULL DEFAULT 0,
+  purchase_amount INTEGER NOT NULL DEFAULT 0,
+  gross_profit INTEGER NOT NULL DEFAULT 0,
+  return_count INTEGER NOT NULL DEFAULT 0,
+  exchange_count INTEGER NOT NULL DEFAULT 0,
+  ad_view_count INTEGER NOT NULL DEFAULT 0,
+  ad_order_count INTEGER NOT NULL DEFAULT 0,
+  ad_sales_qty INTEGER NOT NULL DEFAULT 0,
+  ad_sales_amount INTEGER NOT NULL DEFAULT 0,
+  last_search_at TIMESTAMP,
+  last_view_at TIMESTAMP,
+  last_return_at TIMESTAMP,
+  last_exchange_at TIMESTAMP,
+  last_ad_view_at TIMESTAMP,
+  last_ad_order_at TIMESTAMP,
 
   PRIMARY KEY (product_uid)
 );
