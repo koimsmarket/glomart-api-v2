@@ -718,6 +718,112 @@ function safeJsonString(v){
     return '[]';
   }
 }
+
+function jsonArrayLengthSafe(v){
+  if(Array.isArray(v)) return v.length;
+  if(!v) return 0;
+  if(typeof v === 'string'){
+    try{ return jsonArrayLengthSafe(JSON.parse(v)); }catch(_e){ return 0; }
+  }
+  if(typeof v === 'object'){
+    if(Array.isArray(v.rows)) return v.rows.length;
+    if(Array.isArray(v.images)) return v.images.length;
+    if(Array.isArray(v.blocks)) return v.blocks.length;
+    if(Array.isArray(v.texts)) return v.texts.length;
+  }
+  return 0;
+}
+function compactError(e){
+  return {
+    message:String(e && e.message || e || ''),
+    code:e && e.code || undefined,
+    detail:e && e.detail || undefined,
+    column:e && e.column || undefined,
+    constraint:e && e.constraint || undefined,
+    table:e && e.table || undefined,
+    position:e && e.position || undefined
+  };
+}
+function detailSignalStats(optionJson, thumbJson, detailJson, p){
+  optionJson = optionJson || {}; detailJson = detailJson || {}; p = p || {};
+  const thumbCount = Array.isArray(thumbJson) ? thumbJson.length : 0;
+  const detailCount = (Array.isArray(detailJson.images) ? detailJson.images.length : 0) +
+    (Array.isArray(detailJson.blocks) ? detailJson.blocks.length : 0) +
+    (Array.isArray(detailJson.texts) ? detailJson.texts.length : 0);
+  return {
+    option_count: optionJson.option_count || (Array.isArray(optionJson.rows) ? optionJson.rows.length : 0),
+    thumb_count: thumbCount,
+    detail_count: detailCount,
+    detail_image_count: Array.isArray(detailJson.images) ? detailJson.images.length : 0,
+    detail_block_count: Array.isArray(detailJson.blocks) ? detailJson.blocks.length : 0,
+    detail_text_count: Array.isArray(detailJson.texts) ? detailJson.texts.length : 0,
+    supplier_name: cleanText(p.supplier_name || p.supplierName || ''),
+    cp_code: cleanText(p.cp_code || p.cpCode || ''),
+    return_shipping_fee: parseMoney(p.return_shipping_fee || p.returnShippingFee || p.returnFee || '', 0),
+    buyable_qty: pickBuyableQty(p)
+  };
+}
+async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee){
+  const stats = detailSignalStats(optionJson, thumbJson, detailJson, p);
+  const hasDetail = stats.option_count > 0 || stats.thumb_count > 1 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
+  if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats };
+  const q = `
+    UPDATE gm_product SET
+      option_count = CASE WHEN $2::int > 0 THEN $2::int ELSE option_count END,
+      option_json = CASE WHEN $2::int > 0 THEN $3::jsonb ELSE option_json END,
+      thumb_json = CASE
+        WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
+        THEN $5::jsonb ELSE thumb_json END,
+      detail_json = CASE WHEN $6::int > 0 THEN $7::jsonb ELSE detail_json END,
+      cp_id = COALESCE(NULLIF($8,''), cp_id),
+      cp_code = COALESCE(NULLIF($9,''), cp_code),
+      mall_category = COALESCE(NULLIF($10,''), mall_category),
+      mall_category_json = CASE WHEN $11::jsonb <> '[]'::jsonb THEN $11::jsonb ELSE mall_category_json END,
+      supplier_id = COALESCE(NULLIF($12,''), supplier_id),
+      supplier_name = COALESCE(NULLIF($13,''), supplier_name),
+      business_number = COALESCE(NULLIF($14,''), business_number),
+      online_sales_number = COALESCE(NULLIF($15,''), online_sales_number),
+      ceo_name = COALESCE(NULLIF($16,''), ceo_name),
+      supplier_mobile = COALESCE(NULLIF($17,''), supplier_mobile),
+      supplier_phone = COALESCE(NULLIF($18,''), supplier_phone),
+      supplier_email = COALESCE(NULLIF($19,''), supplier_email),
+      supplier_address = COALESCE(NULLIF($20,''), supplier_address),
+      buyable_qty = COALESCE($21::int, buyable_qty),
+      min_order_qty = COALESCE($22::int, min_order_qty),
+      max_order_qty = COALESCE($23::int, max_order_qty),
+      return_policy_text = COALESCE(NULLIF($24,''), return_policy_text),
+      exchange_policy_text = COALESCE(NULLIF($25,''), exchange_policy_text),
+      return_shipping_fee = CASE WHEN $26::int > 0 THEN $26::int ELSE return_shipping_fee END,
+      updated_at = now()
+    WHERE product_uid = $1
+    RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
+      CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
+      COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
+      COALESCE(NULLIF(detail_json->>'block_count','')::int,0) AS detail_block_count,
+      supplier_name, cp_code, buyable_qty, return_shipping_fee
+  `;
+  const vals = [
+    id.uid,
+    stats.option_count || 0, safeJsonString(optionJson || {headers:[],rows:[],option_count:0}),
+    stats.thumb_count || 0, safeJsonString(thumbJson || []),
+    stats.detail_count || 0, safeJsonString(detailJson || {}),
+    pickCpId(p), pickCpCode(p, pickMallCategoryLeaf(p, normalizeMallCategoryJson(p))), pickMallCategoryLeaf(p, normalizeMallCategoryJson(p)), safeJsonString(normalizeMallCategoryJson(p)),
+    pickSupplierId(p), pickSupplierName(p),
+    pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
+    pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
+    pickAny(p,['ceo_name','ceoName','representative_name','representativeName','supplierRepresentative']),
+    pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile']),
+    pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone']),
+    pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
+    pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
+    pickBuyableQty(p), pickMinOrderQty(p), pickMaxOrderQty(p),
+    cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
+    cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
+    returnFee || 0
+  ];
+  const r = await pool.query(q, vals);
+  return { applied:r.rowCount > 0, row:r.rows[0] || null, stats };
+}
 function pickOptPrice(row, names){
   row=row||{};
   for(const n of names){
@@ -760,6 +866,16 @@ function pickMallCategoryLeaf(p, mallCategoryJson){
 
 function normalizeThumbJson(p){
   p=p||{};
+  if(p.thumb_json && typeof p.thumb_json === 'object' && !Array.isArray(p.thumb_json)){
+    if(Array.isArray(p.thumb_json.images) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.images;
+    if(Array.isArray(p.thumb_json.rows) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.rows;
+    if(Array.isArray(p.thumb_json.urls) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.urls;
+  }
+  if(p.thumbJson && typeof p.thumbJson === 'object' && !Array.isArray(p.thumbJson)){
+    if(Array.isArray(p.thumbJson.images) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.images;
+    if(Array.isArray(p.thumbJson.rows) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.rows;
+    if(Array.isArray(p.thumbJson.urls) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.urls;
+  }
   const out=[]; const seen=new Set();
   function add(v, source){
     if(v && typeof v === 'object') v = v.url || v.src || v.image || v.thumb || '';
@@ -777,6 +893,16 @@ function normalizeThumbJson(p){
 
 function normalizeDetailJson(p){
   p=p||{};
+  if(p.detail_json && typeof p.detail_json === 'object' && !Array.isArray(p.detail_json)){
+    if(Array.isArray(p.detail_json.images) && !Array.isArray(p.detailImages)) p.detailImages = p.detail_json.images;
+    if(Array.isArray(p.detail_json.blocks) && !Array.isArray(p.detailBlocks)) p.detailBlocks = p.detail_json.blocks;
+    if(Array.isArray(p.detail_json.texts) && !Array.isArray(p.detailTexts)) p.detailTexts = p.detail_json.texts;
+  }
+  if(p.detailJson && typeof p.detailJson === 'object' && !Array.isArray(p.detailJson)){
+    if(Array.isArray(p.detailJson.images) && !Array.isArray(p.detailImages)) p.detailImages = p.detailJson.images;
+    if(Array.isArray(p.detailJson.blocks) && !Array.isArray(p.detailBlocks)) p.detailBlocks = p.detailJson.blocks;
+    if(Array.isArray(p.detailJson.texts) && !Array.isArray(p.detailTexts)) p.detailTexts = p.detailJson.texts;
+  }
   const images=[]; const blocks=[]; const texts=[]; const seenImg=new Set();
   function addImage(v, source){
     if(v && typeof v === 'object') v = v.url || v.src || v.image || v.img || '';
@@ -826,12 +952,26 @@ function normalizeDetailJson(p){
 function normalizeOptionJson(p, id){
   p=p||{}; id=id||{};
   const arrays=[];
+  if(p.option_json && typeof p.option_json === 'object' && Array.isArray(p.option_json.rows)) arrays.push(p.option_json.rows);
+  if(p.optionJson && typeof p.optionJson === 'object' && Array.isArray(p.optionJson.rows)) arrays.push(p.optionJson.rows);
   ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','detailOptionRows','optionsRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>{
     if(Array.isArray(p[k])) arrays.push(p[k]);
   });
   const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source'];
   const rows=[]; const seen=new Set();
   arrays.forEach(arr=>arr.forEach((r)=>{
+    if(Array.isArray(r)){
+      const uid0=cleanText(r[0] || '');
+      const productId0=cleanText(r[1] || id.productId || p.productId || p.product_id || '');
+      const itemId0=cleanText(r[2] || id.itemId || p.itemId || p.item_id || '');
+      const vendorItemId0=cleanText(r[3] || id.vendorItemId || p.vendorItemId || p.vendor_item_id || '');
+      const name0=cleanText(r[4] || r[5] || '');
+      if(!uid0 && !name0) return;
+      const sig0=uid0 || (name0+'|'+vendorItemId0+'|'+itemId0);
+      if(seen.has(sig0)) return; seen.add(sig0);
+      rows.push([uid0,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
+      return;
+    }
     if(!r || typeof r !== 'object') return;
     const productId = cleanText(r.productId || r.product_id || id.productId || p.productId || p.product_id || '');
     const itemId = cleanText(r.itemId || r.item_id || r.skuIdStr || r.sku_id_str || r.skuId || r.sku_id || (id.mallCode==='ALKR' ? (r.aliSkuId || r.optionId || '') : '') || '');
@@ -1066,9 +1206,27 @@ async function upsertProduct(pool, raw, parent={}){
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
 
-  const r = await pool.query(sql, vals);
+  let r;
+  try{
+    r = await pool.query(sql, vals);
+  }catch(e){
+    console.error('[GM_PRODUCT_UPSERT_SQL_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, pi:id.pi, product_name:productName, vals_len:vals.length, columns:productColumns.length }, compactError(e)));
+    throw e;
+  }
+  let detail_patch = null;
+  try{
+    detail_patch = await applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee);
+  }catch(e){
+    detail_patch = { applied:false, error:compactError(e) };
+    console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
+  }
   await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords, Object.assign({}, parent || {}, p || {}));
-  return { ok:true, action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', item:Object.assign({}, r.rows[0] || {}, { option_count:optionCount }) };
+  const detail_stats = detailSignalStats(optionJson, thumbJson, detailJson, p);
+  return {
+    ok:true,
+    action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
+    item:Object.assign({}, r.rows[0] || {}, { option_count:optionCount, detail_patch, detail_stats })
+  };
 }
 
 
@@ -1153,7 +1311,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       try{
         inlineResults.push(await upsertProduct(pool, item, p));
       }catch(e){
-        inlineResults.push({ ok:false, error:String(e && e.message || e), title_sample:cleanText(item && (item.title || item.name || item.productName || item.product_name || '')).slice(0,120) });
+        inlineResults.push({ ok:false, error:String(e && e.message || e), error_detail:compactError(e), uid:cleanText(item && (item.product_uid || item.productUid || item.pi_ii_vi || item.piIiVi || '')), title_sample:cleanText(item && (item.title || item.name || item.productName || item.product_name || '')).slice(0,120) });
       }
     }
     const inlineSaved = inlineResults.filter(x=>x && x.ok).length;
@@ -1168,7 +1326,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
             error_message=$3,
             result_json=$4::jsonb
         WHERE queue_id=$1
-      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, sample:inlineResults.slice(0,10) })]);
+      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, sample:inlineResults.slice(0,10), errors:inlineResults.filter(x=>x && !x.ok).slice(0,30) })]);
     }catch(_qe){
       console.warn('[GM_PRODUCT_QUEUE] inline result update failed', String(_qe && _qe.message || _qe));
     }
@@ -1186,7 +1344,8 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       skipped:inlineSkipped,
       inline_upsert:true,
       inline_status:inlineStatus,
-      inline_sample:inlineResults.slice(0,5),
+      inline_sample:inlineResults.slice(0,10),
+      inline_errors:inlineResults.filter(x=>x && !x.ok).slice(0,30),
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });
@@ -1234,17 +1393,17 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       const results=[];
       for(const item of items){
         try{ results.push(await upsertProduct(pool, item, p)); }
-        catch(e){ results.push({ ok:false, error:String(e && e.message || e) }); }
+        catch(e){ results.push({ ok:false, error:String(e && e.message || e), error_detail:compactError(e) }); }
       }
       const saved = results.filter(x=>x && x.ok).length;
       const skipped = results.length - saved;
-      return ok(res,{ mode:'batch', received:items.length, saved, skipped, results:results.slice(0,20) });
+      return ok(res,{ mode:'batch', received:items.length, saved, skipped, results:results.slice(0,20), errors:results.filter(x=>x && !x.ok).slice(0,30) });
     }
     const result = await upsertProduct(pool, p, p);
     try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, option_count:result && result.item && result.item.option_count, mode:'single' }); }catch(_log){}
     if(!result.ok) return fail(res, 400, result.reason || 'product upsert validation failed', result);
-    return ok(res,{ mode:'single', item:result.item });
-  }catch(e){ fail(res,500,'product upsert failed',{detail:String(e && e.message || e)}); }
+    return ok(res,{ mode:'single', item:result.item, detail_patch:result.item && result.item.detail_patch, detail_stats:result.item && result.item.detail_stats });
+  }catch(e){ console.error('[GM_PRODUCT_UPSERT_ROUTE_ERROR]', compactError(e)); fail(res,500,'product upsert failed',{detail:String(e && e.message || e), error_detail:compactError(e)}); }
 });
 
 router.post('/api/gm/product/event', async (req,res)=>{
