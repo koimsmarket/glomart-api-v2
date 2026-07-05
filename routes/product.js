@@ -296,8 +296,8 @@ function flattenDetailPayload(raw, parent={}){
 
   const cat = firstPlainObject(p.categoryInfo, p.category_info, p.cpCategoryInfo, p.coupangCategoryInfo, p.category);
   if(Object.keys(cat).length){
-    if(!cleanText(p.cp_code)) p.cp_code = cat.leaf || cat.leafCategoryId || cat.categoryNo || cat.category_no || cat.code || cat.id || '';
-    if(!cleanText(p.cp_id)) p.cp_id = cat.categoryId || cat.category_id || cat.catId || cat.cat_id || '';
+    if(!cleanText(p.cp_fix_code)) p.cp_fix_code = cat.leaf || cat.leafCategoryId || cat.categoryNo || cat.category_no || cat.code || cat.id || '';
+    if(!cleanText(p.cp_code)) p.cp_code = p.cp_fix_code; // legacy alias only; DB column is cp_fix_code
     if(!cleanText(p.mall_category)) p.mall_category = cat.leaf || cat.leafCategoryId || cat.categoryNo || cat.category_no || cat.code || cat.id || '';
     if(!p.mall_category_json && (Array.isArray(cat.path) || Array.isArray(cat.path_json) || cleanText(cat.pathText || cat.path_text || cat.path_ko))){
       const arr = Array.isArray(cat.path) ? cat.path : (Array.isArray(cat.path_json) ? cat.path_json : cleanText(cat.pathText || cat.path_text || cat.path_ko).split(/\s*>\s*/));
@@ -844,14 +844,14 @@ function detailSignalStats(optionJson, thumbJson, detailJson, p){
     detail_block_count: Array.isArray(detailJson.blocks) ? detailJson.blocks.length : 0,
     detail_text_count: Array.isArray(detailJson.texts) ? detailJson.texts.length : 0,
     supplier_name: cleanText(p.supplier_name || p.supplierName || ''),
-    cp_code: cleanText(p.cp_code || p.cpCode || ''),
+    cp_fix_code: cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode || ''),
     return_shipping_fee: parseMoney(p.return_shipping_fee || p.returnShippingFee || p.returnFee || '', 0),
     buyable_qty: pickBuyableQty(p)
   };
 }
 async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee){
   const stats = detailSignalStats(optionJson, thumbJson, detailJson, p);
-  const hasDetail = stats.option_count > 0 || stats.thumb_count > 1 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
+  const hasDetail = stats.option_count > 0 || stats.thumb_count > 1 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
   if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats, id };
   const q = `
     UPDATE gm_product SET
@@ -861,8 +861,16 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
         WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
         THEN $5::jsonb ELSE thumb_json END,
       detail_json = CASE WHEN $6::int > 0 THEN $7::jsonb ELSE detail_json END,
-      cp_id = COALESCE(NULLIF($8,''), cp_id),
-      cp_code = COALESCE(NULLIF($9,''), cp_code),
+      cp_selected_code = CASE
+        WHEN COALESCE(cp_selected_code,'')='' AND NULLIF($8,'') IS NOT NULL THEN $8
+        ELSE cp_selected_code END,
+      cp_fix_code = CASE
+        WHEN NULLIF($9,'') IS NULL THEN cp_fix_code
+        WHEN COALESCE(cp_match,'')='T' THEN cp_fix_code
+        ELSE $9 END,
+      cp_match = CASE
+        WHEN NULLIF($9,'') IS NOT NULL AND COALESCE(cp_match,'')<>'T' THEN 'F'
+        ELSE cp_match END,
       mall_category = COALESCE(NULLIF($10,''), mall_category),
       mall_category_json = CASE WHEN $11::jsonb <> '[]'::jsonb THEN $11::jsonb ELSE mall_category_json END,
       supplier_id = COALESCE(NULLIF($12,''), supplier_id),
@@ -886,14 +894,14 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
       COALESCE(NULLIF(detail_json->>'block_count','')::int,0) AS detail_block_count,
-      supplier_name, cp_code, buyable_qty, return_shipping_fee
+      supplier_name, cp_fix_code, cp_match, buyable_qty, return_shipping_fee
   `;
   const vals = [
     id.uid,
     stats.option_count || 0, safeJsonString(optionJson || {headers:[],rows:[],option_count:0}),
     stats.thumb_count || 0, safeJsonString(thumbJson || []),
     stats.detail_count || 0, safeJsonString(detailJson || {}),
-    pickCpId(p), pickCpCode(p, pickMallCategoryLeaf(p, normalizeMallCategoryJson(p))), pickMallCategoryLeaf(p, normalizeMallCategoryJson(p)), safeJsonString(normalizeMallCategoryJson(p)),
+    pickCpSelectedCode(p), pickCpFixCode(p), pickMallCategoryLeaf(p, normalizeMallCategoryJson(p)), safeJsonString(normalizeMallCategoryJson(p)),
     pickSupplierId(p), pickSupplierName(p),
     pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
     pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
@@ -1327,114 +1335,115 @@ function pickTaxType(p){
 }
 
 
-function pickCpId(p){
-  return cleanText(firstNonEmpty(p, ['cp_id','cpId','categoryId','category_id','searchCategoryId','search_category_id','coupangCategoryId']));
+function pickCpSelectedCode(p){
+  return cleanText(firstNonEmpty(p, ['cp_selected_code','cpSelectedCode','selectedCategoryCode','categorySelectedCode']));
 }
-function pickCpCode(p, mallCategoryLeaf){
-  const v = cleanText(firstNonEmpty(p, ['cp_code','cpCode','cp_category_no','cpCategoryNo','mall_category','mallCategory','mall_category_id','mallCategoryId','categoryNo','category_no','displayCategoryCode','leafCategoryId']));
-  if(/^\d+$/.test(v)) return v;
-  return cleanText(mallCategoryLeaf || '');
+function pickCpFixCode(p){
+  const v = cleanText(firstNonEmpty(p, ['cp_fix_code','cpFixCode','cp_code','cpCode','cp_category_no','cpCategoryNo','categoryNo','category_no','displayCategoryCode','leafCategoryId']));
+  return /^\d+$/.test(v) ? v : '';
 }
 
-// GM_CP_MATCH_V024
-// cp_match: T = 해당 cp_id에서 상세 cp_code가 직접 확인됨, F = 같은 검색/학습 결과로 전파된 임시 cp_code.
+// GM_CP_SELECTED_FIX_V027
+// cp_selected_code: 검색어를 gm_category와 매칭해서 고른 후보 카테고리 코드.
+// cp_fix_code: 상세페이지 CATEGORY_INFO leaf에서 직접 확인한 최종 카테고리 코드.
+// cp_match: T = 해당 상품 상세에서 직접 확인, F = 검색어/selected_code 기준 전파값.
 function normalizeCpMatch(v){
   const s = cleanText(v).toUpperCase();
   if(['T','TRUE','Y','YES','1','DETAIL','DETAIL_EXACT','MATCH'].includes(s)) return 'T';
   if(['F','FALSE','N','NO','0','INFER','AI','PROPAGATED','SEARCH'].includes(s)) return 'F';
   return '';
 }
-async function ensureProductCpMatchColumn(pool){
-  try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT`); }catch(_e){}
+async function ensureProductCpColumns(pool){
+  try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_selected_code TEXT`); }catch(_e){}
+  try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_fix_code TEXT`); }catch(_e){}
+  try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT NOT NULL DEFAULT 'F'`); }catch(_e){ try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT`); }catch(_e2){} }
 }
-async function findExistingCpIdForProduct(pool, productUid, mallCode, productId){
+async function findCpSelectedCodeForKeyword(pool, keyword){
+  const kw = cleanText(keyword);
+  if(!kw) return '';
   try{
     const r = await pool.query(`
-      SELECT cp_id FROM gm_product
-      WHERE product_uid=$1 OR (mall_code=$2 AND product_id=$3)
-      ORDER BY updated_at DESC NULLS LAST
+      SELECT cp_code
+      FROM gm_category
+      WHERE COALESCE(cp_code,'') <> ''
+        AND (
+          keyword = $1 OR keyword_seed = $1 OR name_ko = $1
+          OR $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*'))
+        )
+      ORDER BY
+        CASE WHEN name_ko = $1 THEN 0 WHEN keyword = $1 THEN 1 WHEN keyword_seed = $1 THEN 2 ELSE 3 END,
+        CASE WHEN leaf_yn = 'Y' THEN 0 ELSE 1 END,
+        COALESCE(depth::int,0) DESC,
+        COALESCE(search_count::int,0) DESC,
+        cp_code
       LIMIT 1
-    `,[cleanText(productUid), cleanText(mallCode).toUpperCase(), cleanText(productId)]);
-    return cleanText(r.rows[0] && r.rows[0].cp_id || '');
-  }catch(_e){ return ''; }
+    `, [kw]);
+    return cleanText(r.rows[0] && r.rows[0].cp_code || '');
+  }catch(e){
+    try{ console.warn('[GM_CP_SELECTED_MATCH_FAIL]', Object.assign({ keyword:kw }, compactError(e))); }catch(_l){}
+    return '';
+  }
 }
-async function inferCpCodeForProduct(pool, mallCode, keyword, cpId){
-  const mall = cleanText(mallCode).toUpperCase();
-  const kw = cleanText(keyword);
-  const cid = cleanText(cpId);
-  try{
-    // 1) CPKR 동일 cp_id에서 직접 검증(T)된 코드가 있으면 최우선.
-    if(cid){
-      const r = await pool.query(`
-        SELECT cp_code, cp_match FROM gm_product
-        WHERE mall_code='CPKR' AND cp_id=$1 AND COALESCE(cp_code,'')<>''
-        ORDER BY CASE WHEN cp_match='T' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST
-        LIMIT 1
-      `,[cid]);
-      if(r.rows[0] && cleanText(r.rows[0].cp_code)) return { cp_code:cleanText(r.rows[0].cp_code), source:'cp_id_history', cp_match: cleanText(r.rows[0].cp_match)||'F' };
-    }
-    // 2) 같은 검색어에서 이미 수집된 CPKR cp_code를 ALKR/검색상품에 전파한다.
-    if(kw){
-      const r = await pool.query(`
-        SELECT cp_code, cp_match FROM gm_product
-        WHERE mall_code='CPKR' AND keyword=$1 AND COALESCE(cp_code,'')<>''
-        ORDER BY CASE WHEN cp_match='T' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST
-        LIMIT 1
-      `,[kw]);
-      if(r.rows[0] && cleanText(r.rows[0].cp_code)) return { cp_code:cleanText(r.rows[0].cp_code), source:'keyword_history', cp_match:'F' };
-    }
-  }catch(e){ try{ console.warn('[GM_CP_CODE_INFER_FAIL]', Object.assign({ mall, keyword:kw, cp_id:cid }, compactError(e))); }catch(_l){} }
-  return null;
-}
-function decideCpMatch(p, mallCode, cpId, cpCode, inferred){
-  const explicit = normalizeCpMatch(p.cp_match || p.cpMatch || p.cp_code_match || p.cpCodeMatch || '');
-  const mall = cleanText(mallCode).toUpperCase();
+function decideCpMatch(p, mallCode, cpFixCode){
+  const explicit = normalizeCpMatch(p.cp_match || p.cpMatch || '');
   if(explicit) return explicit;
-  if(!cleanText(cpCode)) return '';
-  if(mall !== 'CPKR') return 'F';
-  if(inferred) return 'F';
-  return cleanText(cpId) ? 'T' : 'F';
+  if(!cleanText(cpFixCode)) return 'F';
+  const mall = cleanText(mallCode).toUpperCase();
+  return mall === 'CPKR' ? 'T' : 'F';
 }
-async function applyCpCodeLearning(pool, args){
+async function applyCpFixLearning(pool, args){
   args=args||{};
   const mall=cleanText(args.mall_code).toUpperCase();
   const keyword=cleanText(args.keyword);
-  const cpId=cleanText(args.cp_id);
-  const cpCode=cleanText(args.cp_code);
-  const cpMatch=normalizeCpMatch(args.cp_match);
+  const selected=cleanText(args.cp_selected_code);
+  const fix=cleanText(args.cp_fix_code);
+  const match=normalizeCpMatch(args.cp_match);
   const productUid=cleanText(args.product_uid);
-  if(!cpCode) return { applied:false, reason:'no_cp_code' };
-  await ensureProductCpMatchColumn(pool);
-  const out={ applied:true, current:0, direct_cp_id:0, keyword_f:0, ali_f:0 };
+  if(!fix) return { applied:false, reason:'no_cp_fix_code' };
+  await ensureProductCpColumns(pool);
+  const out={ applied:true, current:0, selected_f:0, keyword_f:0 };
   try{
-    if(productUid){
-      const r=await pool.query(`UPDATE gm_product SET cp_match=$2, updated_at=now() WHERE product_uid=$1`, [productUid, cpMatch||'F']);
+    // 현재 상세 상품이 직접 검증(T)이면 우선 해당 상품만 T로 확정한다.
+    // 이미 T인 다른 상품은 어떤 자동 전파도 cp_fix_code를 건드리지 않는다.
+    if(productUid && match === 'T'){
+      const r=await pool.query(`
+        UPDATE gm_product
+        SET cp_fix_code=$2, cp_match='T', updated_at=now()
+        WHERE product_uid=$1
+          AND (COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'T')
+      `, [productUid, fix]);
       out.current=r.rowCount||0;
     }
-    // 상세에서 cp_id+cp_code가 직접 확인되면 같은 cp_id 상품 전체를 T로 교정한다.
-    if(mall==='CPKR' && cpId && cpMatch==='T'){
-      const r=await pool.query(`
-        UPDATE gm_product SET cp_code=$3, cp_match='T', updated_at=now()
-        WHERE mall_code='CPKR' AND cp_id=$1 AND (COALESCE(cp_code,'')<>$3 OR COALESCE(cp_match,'')<>'T')
-      `,[cpId, keyword, cpCode]);
-      out.direct_cp_id=r.rowCount||0;
-      if(keyword){
+
+    if(match === 'T'){
+      if(selected){
         const f=await pool.query(`
-          UPDATE gm_product SET cp_code=$2, cp_match='F', updated_at=now()
-          WHERE mall_code='CPKR' AND keyword=$1
-            AND (cp_id IS NULL OR cp_id='' OR cp_id<>$3)
+          UPDATE gm_product
+          SET cp_fix_code=$2, cp_match='F', updated_at=now()
+          WHERE cp_selected_code=$1
+            AND product_uid<>$3
             AND COALESCE(cp_match,'')<>'T'
-        `,[keyword, cpCode, cpId]);
+            AND (COALESCE(cp_fix_code,'')='' OR COALESCE(cp_match,'')<>'F')
+        `, [selected, fix, productUid || '']);
+        out.selected_f=f.rowCount||0;
+      }else if(keyword){
+        const f=await pool.query(`
+          UPDATE gm_product
+          SET cp_fix_code=$2, cp_match='F', updated_at=now()
+          WHERE keyword=$1
+            AND product_uid<>$3
+            AND (cp_selected_code IS NULL OR cp_selected_code='')
+            AND COALESCE(cp_match,'')<>'T'
+            AND (COALESCE(cp_fix_code,'')='' OR COALESCE(cp_match,'')<>'F')
+        `, [keyword, fix, productUid || '']);
         out.keyword_f=f.rowCount||0;
-        const a=await pool.query(`
-          UPDATE gm_product SET cp_code=$2, cp_match='F', updated_at=now()
-          WHERE mall_code='ALKR' AND keyword=$1 AND COALESCE(cp_match,'')<>'T'
-        `,[keyword, cpCode]);
-        out.ali_f=a.rowCount||0;
       }
     }
     return out;
-  }catch(e){ try{ console.warn('[GM_CP_CODE_LEARNING_FAIL]', Object.assign({ mall, keyword, cp_id:cpId, cp_code:cpCode, cp_match:cpMatch }, compactError(e))); }catch(_l){} return { applied:false, error:compactError(e) }; }
+  }catch(e){
+    try{ console.warn('[GM_CP_FIX_LEARNING_FAIL]', Object.assign({ mall, keyword, cp_selected_code:selected, cp_fix_code:fix, cp_match:match }, compactError(e))); }catch(_l){}
+    return { applied:false, error:compactError(e) };
+  }
 }
 function pickBuyableQty(p){
   const v = firstNonEmpty(p, ['buyable_qty','buyableQty','buyableQuantity','availableQuantity','available_qty']);
@@ -1500,16 +1509,11 @@ async function upsertProduct(pool, raw, parent={}){
   const finalSupplyPrice = pickFinalSupplyPrice(p, mallSalePrice);
   const mallCategoryJson = normalizeMallCategoryJson(p);
   const mallCategoryLeaf = pickMallCategoryLeaf(p, mallCategoryJson);
-  let cpId = pickCpId(p);
-  if(!cpId) cpId = await findExistingCpIdForProduct(pool, id.uid, id.mallCode, id.productId);
-  let cpCode = pickCpCode(p, mallCategoryLeaf);
-  let cpCodeInferred = false;
-  if(!cpCode){
-    const inferred = await inferCpCodeForProduct(pool, id.mallCode, searchKeyword, cpId);
-    if(inferred && inferred.cp_code){ cpCode = inferred.cp_code; cpCodeInferred = true; }
-  }
-  const cpMatch = decideCpMatch(p, id.mallCode, cpId, cpCode, cpCodeInferred);
-  await ensureProductCpMatchColumn(pool);
+  let cpSelectedCode = pickCpSelectedCode(p);
+  if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
+  const cpFixCode = pickCpFixCode(p);
+  const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode);
+  await ensureProductCpColumns(pool);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
   const detailJson = normalizeDetailJson(p);
@@ -1519,7 +1523,7 @@ async function upsertProduct(pool, raw, parent={}){
 
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
-    'mall_category','mall_category_json','cp_id','cp_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
+    'mall_category','mall_category_json','cp_selected_code','cp_fix_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
     'product_name','mall_product_name','option_count','option_json','thumb_json','detail_json','seasonal_text',
     'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type','tax_type','overseas_direct_yn',
     'review_count','mall_sales_count','certification_no_1','certification_no_2',
@@ -1550,16 +1554,18 @@ async function upsertProduct(pool, raw, parent={}){
       keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
-      cp_id=COALESCE(NULLIF(EXCLUDED.cp_id,''), gm_product.cp_id),
-      cp_code=CASE
-        WHEN NULLIF(EXCLUDED.cp_code,'') IS NULL THEN gm_product.cp_code
-        WHEN COALESCE(gm_product.cp_match,'')='T' AND COALESCE(EXCLUDED.cp_match,'')<>'T' THEN gm_product.cp_code
-        ELSE EXCLUDED.cp_code END,
+      cp_selected_code=CASE
+        WHEN COALESCE(gm_product.cp_selected_code,'')='' AND NULLIF(EXCLUDED.cp_selected_code,'') IS NOT NULL THEN EXCLUDED.cp_selected_code
+        ELSE gm_product.cp_selected_code END,
+      cp_fix_code=CASE
+        WHEN NULLIF(EXCLUDED.cp_fix_code,'') IS NULL THEN gm_product.cp_fix_code
+        WHEN COALESCE(gm_product.cp_match,'')='T' AND COALESCE(EXCLUDED.cp_match,'')<>'T' THEN gm_product.cp_fix_code
+        ELSE EXCLUDED.cp_fix_code END,
       cp_match=CASE
         WHEN COALESCE(EXCLUDED.cp_match,'')='T' THEN 'T'
         WHEN COALESCE(gm_product.cp_match,'')='T' THEN 'T'
-        WHEN NULLIF(EXCLUDED.cp_code,'') IS NOT NULL THEN COALESCE(NULLIF(EXCLUDED.cp_match,''),'F')
-        ELSE gm_product.cp_match END,
+        WHEN NULLIF(EXCLUDED.cp_fix_code,'') IS NOT NULL THEN COALESCE(NULLIF(EXCLUDED.cp_match,''),'F')
+        ELSE COALESCE(gm_product.cp_match,'F') END,
       product_name=EXCLUDED.product_name,
       mall_product_name=EXCLUDED.mall_product_name,
       option_count=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
@@ -1614,13 +1620,13 @@ async function upsertProduct(pool, raw, parent={}){
       hit_count=COALESCE(gm_product.hit_count,0)+1,
       last_seen_at=now(),
       updated_at=now()
-    RETURNING product_uid, pi_ii_vi, mall_code, cp_id, cp_code, cp_match, hit_count, option_count, (xmax = 0) AS inserted
+    RETURNING product_uid, pi_ii_vi, mall_code, cp_selected_code, cp_fix_code, cp_match, hit_count, option_count, (xmax = 0) AS inserted
   `;
 
   const vals = [
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
-    id.mallCode, sourceMall, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpId, cpCode, cpMatch,
+    id.mallCode, sourceMall, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     safeJsonString(makeEmptyOptionJson()), safeJsonString(thumbJson), safeJsonString(detailJson), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
@@ -1656,8 +1662,8 @@ async function upsertProduct(pool, raw, parent={}){
   }
   let cp_learning = null;
   try{
-    cp_learning = await applyCpCodeLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_id:cpId, cp_code:cpCode, cp_match:cpMatch, product_uid:id.uid });
-    try{ console.log('[GM_CP_CODE_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_id:cpId, cp_code:cpCode, cp_match:cpMatch, inferred:cpCodeInferred, result:cp_learning }); }catch(_log){}
+    cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
+    try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
   }catch(e){ cp_learning={ applied:false, error:compactError(e) }; }
   let option_result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
   try{
