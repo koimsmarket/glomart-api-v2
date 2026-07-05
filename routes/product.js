@@ -94,11 +94,26 @@ function normalizeUrl(url){
   url = cleanText(url);
   if(!url) return '';
   if(url.startsWith('//')) url = 'https:' + url;
+  // GM_PRODUCT_URL_CANONICAL_V024
+  // 검색 URL은 광고/추적 파라미터가 길게 붙어서 저장되면 ALI 차단과 CPKR 중복판정 흔들림을 만든다.
+  // 저장 전에는 반드시 구매 식별에 필요한 최소 URL만 남긴다.
   try{
     const u = new URL(url);
+    const host = String(u.hostname || '').toLowerCase();
+    if(host === 'coupang.com' || host === 'www.coupang.com' || /\.coupang\.com$/i.test(host)){
+      const m = u.pathname.match(/\/vp\/products\/(\d+)/i);
+      if(m){
+        const qs = [];
+        const itemId = u.searchParams.get('itemId') || u.searchParams.get('itemid');
+        const vendorItemId = u.searchParams.get('vendorItemId') || u.searchParams.get('vendoritemid');
+        if(itemId) qs.push('itemId=' + encodeURIComponent(itemId));
+        if(vendorItemId) qs.push('vendorItemId=' + encodeURIComponent(vendorItemId));
+        return 'https://www.coupang.com/vp/products/' + m[1] + (qs.length ? '?' + qs.join('&') : '');
+      }
+    }
     if(/aliexpress\.com$/i.test(u.hostname) || /\.aliexpress\.com$/i.test(u.hostname)){
       const m = u.pathname.match(/\/item\/(\d+)\.html/i);
-      if(m) return u.origin + '/item/' + m[1] + '.html';
+      if(m) return 'https://ko.aliexpress.com/item/' + m[1] + '.html';
     }
   }catch(e){}
   url = url.replace(/_\.avif$/i, '').replace(/\.avif(?:\?.*)?$/i, '');
@@ -492,8 +507,18 @@ function ids(b){
 
   let pi = cleanText(
     b.pi_ii_vi || b.piIiVi || b.coupang_key || b.coupangKey || b.coupang_product_key || b.coupangProductKey ||
-    b.ali_key || b.aliKey || b.product_key || b.productKey
+    b.key || b.gm_key || b.gmKey || b.detail_key || b.detailKey || b.product_key || b.productKey ||
+    b.ali_key || b.aliKey
   );
+
+  // GM_DETAIL_KEY_FIX_V024
+  // 상세 Collector는 key=productId_itemId_vendorItemId 형태로 보내는 경우가 많다.
+  // 기존 ids()가 key/gm_key를 보지 않아 /api/gm/product/upsert 상세값이 다른 uid 또는 빈 uid로 빠질 수 있었다.
+  const rawUid = cleanText(b.product_uid || b.productUid || '');
+  if(!pi && rawUid){
+    const prefix = mallCode + '_';
+    pi = rawUid.indexOf(prefix) === 0 ? rawUid.slice(prefix.length) : rawUid;
+  }
 
   if(isCoupangMall && pi){
     const parts = String(pi).split('_').map(cleanText).filter(Boolean);
@@ -518,7 +543,7 @@ function ids(b){
   }
   if(!isCoupangMall && !vendorItemId && productId && !itemId) vendorItemId = productId;
 
-  const uid = cleanText(b.product_uid || b.productUid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
+  const uid = cleanText(rawUid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
   return { productId, itemId, vendorItemId, mallCode, pi, uid, source_url:urlText };
 }
 
@@ -766,7 +791,7 @@ function detailSignalStats(optionJson, thumbJson, detailJson, p){
 async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee){
   const stats = detailSignalStats(optionJson, thumbJson, detailJson, p);
   const hasDetail = stats.option_count > 0 || stats.thumb_count > 1 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
-  if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats };
+  if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats, id };
   const q = `
     UPDATE gm_product SET
       option_count = CASE WHEN $2::int > 0 THEN $2::int ELSE option_count END,
@@ -795,7 +820,7 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       exchange_policy_text = COALESCE(NULLIF($25,''), exchange_policy_text),
       return_shipping_fee = CASE WHEN $26::int > 0 THEN $26::int ELSE return_shipping_fee END,
       updated_at = now()
-    WHERE product_uid = $1
+    WHERE product_uid = $1 OR (mall_code=$27 AND pi_ii_vi=$28)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
       CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
@@ -819,10 +844,11 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
     pickBuyableQty(p), pickMinOrderQty(p), pickMaxOrderQty(p),
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
-    returnFee || 0
+    returnFee || 0,
+    cleanText(id.mallCode || ''), cleanText(id.pi || '')
   ];
   const r = await pool.query(q, vals);
-  return { applied:r.rowCount > 0, row:r.rows[0] || null, stats };
+  return { applied:r.rowCount > 0, row:r.rows[0] || null, stats, match:{ product_uid:id.uid, mall_code:id.mallCode, pi_ii_vi:id.pi } };
 }
 function pickOptPrice(row, names){
   row=row||{};
@@ -1069,7 +1095,7 @@ async function upsertProduct(pool, raw, parent={}){
     return { ok:false, skipped:true, reason:'required field missing: ' + missing.join(','), missing, uid:id.uid||'', pi_ii_vi:id.pi||'', mall_code:id.mallCode||'', product_id:id.productId||'', source_url:pickProductUrl(p), title_sample:cleanText(p.title||p.name||p.productName||p.product_name).slice(0,120) };
   }
 
-  const productUrl = pickProductUrl(p) || buildProductUrlFromId(id);
+  const productUrl = normalizeUrl(buildProductUrlFromId(id) || pickProductUrl(p));
   const thumbUrl = pickThumbUrl(p);
   const sourceMall = sourceMallFrom(p, p.source_uid || p.sourceUid, productUrl, id.mallCode);
   const sourceUid = sourceUidFrom(p, sourceMall);
@@ -1306,8 +1332,17 @@ router.post('/api/gm/product/queue', async (req,res)=>{
     // 스키마 변경 후 worker가 조용히 실패하면 gm_product가 계속 비는 문제가 있었다.
     // 검색 chunk는 보통 10개 단위이므로 queue 수신 즉시 같은 프로세스에서 upsert까지 수행한다.
     // 기존 queue 테이블은 진단/재처리용으로 유지한다.
+    const uidSeen = new Set();
+    const duplicateUidSamples = [];
     const inlineResults = [];
     for(const item of items){
+      try{
+        const probe = normalizeProductPayload(item, p);
+        if(probe && probe.id && probe.id.uid){
+          if(uidSeen.has(probe.id.uid)) duplicateUidSamples.push(probe.id.uid);
+          else uidSeen.add(probe.id.uid);
+        }
+      }catch(_dupProbe){}
       try{
         inlineResults.push(await upsertProduct(pool, item, p));
       }catch(e){
@@ -1346,6 +1381,9 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       inline_status:inlineStatus,
       inline_sample:inlineResults.slice(0,10),
       inline_errors:inlineResults.filter(x=>x && !x.ok).slice(0,30),
+      unique_uid_count:uidSeen.size,
+      duplicate_uid_count:duplicateUidSamples.length,
+      duplicate_uid_sample:duplicateUidSamples.slice(0,30),
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });
