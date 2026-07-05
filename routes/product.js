@@ -979,14 +979,39 @@ function normalizeDetailJson(p){
   });
   return { images, blocks, texts, image_count:images.length, block_count:blocks.length, text_count:texts.length, updated_at:new Date().toISOString() };
 }
+function parseMaybeJsonObject(v){
+  if(!v) return null;
+  if(typeof v === 'object') return v;
+  if(typeof v === 'string'){
+    try{
+      const o = JSON.parse(v);
+      return o && typeof o === 'object' ? o : null;
+    }catch(_e){ return null; }
+  }
+  return null;
+}
 function normalizeOptionJson(p, id){
   p=p||{}; id=id||{};
   const arrays=[];
-  if(p.option_json && typeof p.option_json === 'object' && Array.isArray(p.option_json.rows)) arrays.push(p.option_json.rows);
-  if(p.optionJson && typeof p.optionJson === 'object' && Array.isArray(p.optionJson.rows)) arrays.push(p.optionJson.rows);
+  const addArray = (a)=>{ if(Array.isArray(a) && a.length) arrays.push(a); };
+  const addJsonRows = (v)=>{
+    const o = parseMaybeJsonObject(v);
+    if(o && Array.isArray(o.rows)) addArray(o.rows);
+    if(o && Array.isArray(o.optionRows)) addArray(o.optionRows);
+    if(o && Array.isArray(o.options)) addArray(o.options);
+  };
+  addJsonRows(p.option_json);
+  addJsonRows(p.optionJson);
+  addJsonRows(p.detail_json);
+  addJsonRows(p.detailJson);
   ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','detailOptionRows','optionsRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>{
-    if(Array.isArray(p[k])) arrays.push(p[k]);
+    addArray(p[k]);
   });
+  if(p.payload && typeof p.payload === 'object'){
+    ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','detailOptionRows','optionsRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>addArray(p.payload[k]));
+    addJsonRows(p.payload.option_json);
+    addJsonRows(p.payload.optionJson);
+  }
   const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source'];
   const rows=[]; const seen=new Set();
   arrays.forEach(arr=>arr.forEach((r)=>{
@@ -1425,6 +1450,7 @@ async function upsertProduct(pool, raw, parent={}){
   let option_result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
   try{
     option_result = await upsertProductOptions(pool, id, optionJson, p, parent);
+    try{ console.log('[GM_PRODUCT_OPTION_UPSERT_RESULT]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionJson && optionJson.option_count, result:option_result }); }catch(_log){}
   }catch(e){
     option_result = { received:optionCount, inserted:0, updated:0, skipped:optionCount, nonactive:0, balance_ok:false, error:compactError(e) };
     console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
@@ -1645,6 +1671,21 @@ router.get('/api/gm/product/queue/recent', async (req,res)=>{
 router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
   const pool=db(req), p=req.body||{};
   if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    const id0 = ids(p);
+    const oj0 = parseMaybeJsonObject(p.option_json || p.optionJson);
+    console.log('[GM_PRODUCT_UPSERT_ROUTE_IN]', {
+      mall_code: cleanText(p.mall_code || p.mallCode || id0.mallCode),
+      product_id: cleanText(p.product_id || p.productId || id0.productId),
+      pi_ii_vi: cleanText(p.pi_ii_vi || p.piIiVi || id0.pi),
+      optionRows: Array.isArray(p.optionRows) ? p.optionRows.length : 0,
+      optionCombos: Array.isArray(p.optionCombos) ? p.optionCombos.length : 0,
+      aliOptionCombos: Array.isArray(p.aliOptionCombos) ? p.aliOptionCombos.length : 0,
+      option_json_rows: oj0 && Array.isArray(oj0.rows) ? oj0.rows.length : 0,
+      has_detail_json: !!(p.detail_json || p.detailJson),
+      keys: Object.keys(p).slice(0,40)
+    });
+  }catch(_log){}
   const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : null);
   try{
     if(items){
