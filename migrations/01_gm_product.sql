@@ -90,3 +90,34 @@ CREATE INDEX IF NOT EXISTS idx_gm_product_cp_selected_code ON gm_product(cp_sele
 CREATE INDEX IF NOT EXISTS idx_gm_product_cp_fix_code ON gm_product(cp_fix_code);
 CREATE INDEX IF NOT EXISTS idx_gm_product_cp_match ON gm_product(cp_match);
 CREATE INDEX IF NOT EXISTS idx_gm_product_pi_ii_vi ON gm_product(pi_ii_vi);
+
+-- V028: 상세 카테고리 path에서 새로 발견된 쿠팡 세부 카테고리를 기본 카테고리와 분리 보관한다.
+CREATE TABLE IF NOT EXISTS gm_category_dynamic (
+  id BIGSERIAL PRIMARY KEY,
+  mall_code TEXT NOT NULL DEFAULT 'CPKR',
+  gm_code TEXT NOT NULL,
+  cp_code TEXT NOT NULL,
+  gm_parent_code TEXT,
+  cp_parent_code TEXT,
+  cp_id TEXT,
+  parent_name_ko TEXT,
+  depth INTEGER NOT NULL DEFAULT 1,
+  leaf_yn TEXT NOT NULL DEFAULT 'Y',
+  display_yn TEXT NOT NULL DEFAULT 'Y',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  name_ko TEXT NOT NULL,
+  keyword TEXT,
+  category_path TEXT,
+  source_keyword TEXT,
+  source_product_id TEXT,
+  source_item_id TEXT,
+  source_vendor_item_id TEXT,
+  source TEXT NOT NULL DEFAULT 'detail_auto',
+  active_yn TEXT NOT NULL DEFAULT 'Y',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (mall_code, cp_code)
+);
+CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_keyword ON gm_category_dynamic(keyword);
+CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_name_ko ON gm_category_dynamic(name_ko);
+CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_parent ON gm_category_dynamic(cp_parent_code);

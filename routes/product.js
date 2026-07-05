@@ -866,7 +866,7 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
         ELSE cp_selected_code END,
       cp_fix_code = CASE
         WHEN NULLIF($9,'') IS NULL THEN cp_fix_code
-        WHEN COALESCE(cp_match,'')='T' THEN cp_fix_code
+        WHEN COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$9 THEN cp_fix_code
         ELSE $9 END,
       cp_match = CASE
         WHEN NULLIF($9,'') IS NOT NULL AND COALESCE(cp_match,'')<>'T' THEN 'F'
@@ -1023,8 +1023,8 @@ function normalizeDetailJson(p){
     }
     if(typeof b !== 'object') return;
     const type = cleanText(b.type || b.kind || '').toLowerCase();
-    const img = b.url || b.src || b.image || b.img || b.imageUrl || b.image_url || '';
-    const txt = b.text || b.content || b.value || b.htmlText || b.html_text || '';
+    const img = b.url || b.src || b.image || b.img || b.imageUrl || b.image_url || b.detailImageUrl || b.detail_image_url || b.originUrl || b.origin_url || '';
+    const txt = b.text || b.content || b.value || b.htmlText || b.html_text || b.html || b.desc || b.description || '';
     if(img || type === 'image'){
       const before = images.length;
       addImage(img, source || 'detailBlock');
@@ -1033,16 +1033,27 @@ function normalizeDetailJson(p){
     }
     if(txt || type === 'text') addText(txt, source || 'detailBlock');
   }
-  [p.detailImages,p.detail_images,p.detailImageUrls,p.detail_image_urls,p.descriptionImages,p.description_images,p.contentImages,p.content_images].forEach(a=>{
-    if(Array.isArray(a)) a.forEach(x=>addImage(x,'detailImages'));
+  const imageKeys=['detailImages','detail_images','detailImageUrls','detail_image_urls','descriptionImages','description_images','contentImages','content_images','productDetailImages','product_detail_images'];
+  const blockKeys=['detailBlocks','detail_blocks','blocks','contentBlocks','content_blocks','descriptionBlocks','description_blocks','productDetailBlocks','product_detail_blocks'];
+  const textKeys=['detailTexts','detail_texts','descriptionTexts','description_texts','productDetailText','product_detail_text'];
+  imageKeys.forEach(k=>{ const a=p[k]; if(Array.isArray(a)) a.forEach(x=>addImage(x,k)); });
+  blockKeys.forEach(k=>{ const a=p[k]; if(Array.isArray(a)) a.forEach(x=>addBlock(x,k)); });
+  textKeys.forEach(k=>{ const a=p[k]; if(Array.isArray(a)) a.forEach(x=>addText(x,k)); else if(a) addText(a,k); });
+  // 상세 payload가 detail/result/payload 하위에 숨어 오거나 JSON 문자열로 오는 경우까지 한 번 더 deep scan한다.
+  collectPayloadContainers(p, 5).forEach(o=>{
+    imageKeys.forEach(k=>{ const a=o[k]; if(Array.isArray(a)) a.forEach(x=>addImage(x,k)); });
+    blockKeys.forEach(k=>{ const a=o[k]; if(Array.isArray(a)) a.forEach(x=>addBlock(x,k)); });
+    textKeys.forEach(k=>{ const a=o[k]; if(Array.isArray(a)) a.forEach(x=>addText(x,k)); else if(a) addText(a,k); });
+    const dj=parseMaybeJsonAny(o.detail_json || o.detailJson);
+    if(dj && typeof dj==='object'){
+      if(Array.isArray(dj.images)) dj.images.forEach(x=>addImage(x,'detail_json.images'));
+      if(Array.isArray(dj.blocks)) dj.blocks.forEach(x=>addBlock(x,'detail_json.blocks'));
+      if(Array.isArray(dj.texts)) dj.texts.forEach(x=>addText(x,'detail_json.texts'));
+    }
   });
-  [p.detailBlocks,p.detail_blocks,p.blocks,p.contentBlocks,p.content_blocks,p.descriptionBlocks,p.description_blocks].forEach(a=>{
-    if(Array.isArray(a)) a.forEach(x=>addBlock(x,'detailBlocks'));
-  });
-  [p.detailTexts,p.detail_texts,p.descriptionTexts,p.description_texts,p.productDetailText,p.product_detail_text].forEach(a=>{
-    if(Array.isArray(a)) a.forEach(x=>addText(x,'detailTexts')); else if(a) addText(a,'detailTexts');
-  });
-  return { images, blocks, texts, image_count:images.length, block_count:blocks.length, text_count:texts.length, updated_at:new Date().toISOString() };
+  const out={ images, blocks, texts, image_count:images.length, block_count:blocks.length, text_count:texts.length, updated_at:new Date().toISOString() };
+  try{ console.log('[GM_DETAIL_JSON_NORMALIZE]', { image_count:out.image_count, block_count:out.block_count, text_count:out.text_count, keys:Object.keys(p||{}).slice(0,80) }); }catch(_e){}
+  return out;
 }
 function parseMaybeJsonObject(v){
   if(!v) return null;
@@ -1358,27 +1369,186 @@ async function ensureProductCpColumns(pool){
   try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_fix_code TEXT`); }catch(_e){}
   try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT NOT NULL DEFAULT 'F'`); }catch(_e){ try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT`); }catch(_e2){} }
 }
+async function ensureDynamicCategoryTable(pool){
+  try{
+    await pool.query(`CREATE TABLE IF NOT EXISTS gm_category_dynamic (
+      id BIGSERIAL PRIMARY KEY,
+      mall_code TEXT NOT NULL DEFAULT 'CPKR',
+      gm_code TEXT NOT NULL,
+      cp_code TEXT NOT NULL,
+      gm_parent_code TEXT,
+      cp_parent_code TEXT,
+      cp_id TEXT,
+      parent_name_ko TEXT,
+      depth INTEGER NOT NULL DEFAULT 1,
+      leaf_yn TEXT NOT NULL DEFAULT 'Y',
+      display_yn TEXT NOT NULL DEFAULT 'Y',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      name_ko TEXT NOT NULL,
+      keyword TEXT,
+      category_path TEXT,
+      source_keyword TEXT,
+      source_product_id TEXT,
+      source_item_id TEXT,
+      source_vendor_item_id TEXT,
+      source TEXT NOT NULL DEFAULT 'detail_auto',
+      active_yn TEXT NOT NULL DEFAULT 'Y',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (mall_code, cp_code)
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_keyword ON gm_category_dynamic(keyword)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_name_ko ON gm_category_dynamic(name_ko)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_parent ON gm_category_dynamic(cp_parent_code)`);
+  }catch(e){ try{ console.warn('[GM_CATEGORY_DYNAMIC_DDL_FAIL]', compactError(e)); }catch(_l){} }
+}
+function normalizeCategoryNameForMatch(v){ return cleanText(v).replace(/\s+/g,'').toLowerCase(); }
+function parseCategoryTreeFromPayload(p){
+  p=p||{};
+  let src = p.mall_category_json || p.mallCategoryJson || p.cp_category_tree_json || p.cpCategoryTreeJson || p.category_tree_json || p.categoryTreeJson || [];
+  if(typeof src === 'string'){
+    const parsed=parseMaybeJsonAny(src);
+    if(parsed) src=parsed;
+  }
+  if(src && !Array.isArray(src) && Array.isArray(src.path)) src=src.path;
+  if(src && !Array.isArray(src) && Array.isArray(src.nodes)) src=src.nodes;
+  let arr=[];
+  if(Array.isArray(src)){
+    arr=src.map((x,i)=>{
+      if(isPlainObject(x)) return {
+        depth: toInt(x.depth || x.level || (i+1), i+1),
+        cp_code: cleanText(x.cp_code || x.cpCode || x.id || x.code || x.categoryId || x.category_id || x.cate_no || x.cateNo || ''),
+        name_ko: cleanText(x.name_ko || x.nameKo || x.name || x.categoryName || x.title || ''),
+        href: cleanText(x.href || x.url || '')
+      };
+      return { depth:i+1, cp_code:'', name_ko:cleanText(x), href:'' };
+    }).filter(x=>x.name_ko || x.cp_code);
+  }
+  if(!arr.length){
+    const path=cleanText(p.mall_category_path || p.mallCategoryPath || p.cp_category_path || p.cpCategoryPath || p.category_path || p.categoryPath || '');
+    if(path) arr=path.split(/\s*>\s*/).map((name,i)=>({depth:i+1, cp_code:'', name_ko:cleanText(name), href:''})).filter(x=>x.name_ko);
+  }
+  const leafCode=cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode || p.mall_category_id || p.mallCategoryId || p.mall_category || p.mallCategory || '');
+  if(arr.length && leafCode && !arr[arr.length-1].cp_code) arr[arr.length-1].cp_code=leafCode;
+  return arr.filter(x=>!/^쿠팡\s*홈$/i.test(x.name_ko)).map((x,i)=>Object.assign({}, x, { depth:i+1 }));
+}
+async function findCategoryRow(pool, code, name, parentCode){
+  code=cleanText(code); name=cleanText(name); parentCode=cleanText(parentCode);
+  const params=[]; let idx=1; const conds=[];
+  if(code){ conds.push(`cp_code=$${idx++}`); params.push(code); }
+  if(name){
+    if(parentCode){ conds.push(`(name_ko=$${idx++} AND COALESCE(cp_parent_code,'')=$${idx++})`); params.push(name,parentCode); }
+    conds.push(`name_ko=$${idx++}`); params.push(name);
+  }
+  if(!conds.length) return null;
+  const sql=`WITH allcat AS (
+    SELECT 'base' AS src, gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, COALESCE(depth::int,0) depth, leaf_yn, COALESCE(sort_order::int,0) sort_order FROM gm_category
+    UNION ALL
+    SELECT 'dynamic' AS src, gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, COALESCE(depth::int,0) depth, leaf_yn, COALESCE(sort_order::int,0) sort_order FROM gm_category_dynamic
+  ) SELECT * FROM allcat WHERE ${conds.join(' OR ')}
+    ORDER BY CASE WHEN cp_code=$${idx} THEN 0 ELSE 1 END,
+             CASE WHEN COALESCE(cp_parent_code,'')=$${idx+1} THEN 0 ELSE 1 END,
+             CASE WHEN name_ko=$${idx+2} THEN 0 ELSE 1 END,
+             depth DESC, src LIMIT 1`;
+  params.push(code,parentCode,name);
+  try{ const r=await pool.query(sql, params); return r.rows[0]||null; }catch(e){ try{ console.warn('[GM_CATEGORY_FIND_FAIL]', Object.assign({code,name,parentCode}, compactError(e))); }catch(_l){} return null; }
+}
+function makeDynamicGmCode(parentCode, seq){
+  let code=cleanText(parentCode) || 'XX-00-000-0000-0000-0000';
+  let parts=code.split('-');
+  while(parts.length<6) parts.push(parts.length<3?'000':'0000');
+  parts[0]='XX';
+  let target=-1;
+  for(let i=1;i<parts.length;i++){ if(/^0+$/.test(parts[i])){ target=i; break; } }
+  if(target<0) target=parts.length-1;
+  const width=parts[target].length || (target<=2?3:4);
+  parts[target]=String(seq).padStart(width,'0');
+  for(let i=target+1;i<parts.length;i++) parts[i]='0'.repeat(parts[i].length || 4);
+  return parts.join('-');
+}
+async function nextDynamicChildSeq(pool, parentCpCode){
+  parentCpCode=cleanText(parentCpCode);
+  try{
+    const r=await pool.query(`SELECT COUNT(*)::int AS cnt FROM gm_category_dynamic WHERE COALESCE(cp_parent_code,'')=$1`, [parentCpCode]);
+    return (r.rows[0] && Number(r.rows[0].cnt) || 0) + 1;
+  }catch(_e){ return 1; }
+}
+async function ensureDynamicCategoriesFromDetail(pool, p, meta){
+  meta=meta||{}; p=p||{};
+  await ensureDynamicCategoryTable(pool);
+  const tree=parseCategoryTreeFromPayload(p);
+  if(!tree.length) return { applied:false, reason:'no_category_tree' };
+  const created=[]; const matched=[]; let parent=null;
+  for(const node of tree){
+    let row=await findCategoryRow(pool, node.cp_code, node.name_ko, parent && parent.cp_code);
+    if(row){ matched.push({ name:node.name_ko, cp_code:row.cp_code, source:row.src }); parent=row; continue; }
+    // 번호가 없으면 신규 카테고리 코드로 쓸 수 없으므로 부모 탐색만 진행하고 생성은 보류한다.
+    if(!node.cp_code){ matched.push({ name:node.name_ko, cp_code:'', source:'name_only_no_code' }); continue; }
+    const parentCode=cleanText(parent && parent.cp_code || '');
+    const parentGm=cleanText(parent && parent.gm_code || 'XX-00-000-0000-0000-0000');
+    const seq=await nextDynamicChildSeq(pool, parentCode);
+    const gmCode=makeDynamicGmCode(parentGm, seq);
+    const path=tree.slice(0, node.depth).map(x=>x.name_ko).filter(Boolean).join(' > ');
+    try{
+      const ins=await pool.query(`INSERT INTO gm_category_dynamic
+        (mall_code, gm_code, cp_code, gm_parent_code, cp_parent_code, cp_id, parent_name_ko, depth, leaf_yn, display_yn, sort_order, name_ko, keyword, category_path, source_keyword, source_product_id, source_item_id, source_vendor_item_id, source, created_at, updated_at)
+        VALUES ($1,$2,$3,$4,$5,'',$6,$7,'Y','Y',$8,$9,$9,$10,$11,$12,$13,$14,'detail_auto',now(),now())
+        ON CONFLICT (mall_code, cp_code) DO UPDATE SET
+          name_ko=COALESCE(NULLIF(EXCLUDED.name_ko,''), gm_category_dynamic.name_ko),
+          category_path=COALESCE(NULLIF(EXCLUDED.category_path,''), gm_category_dynamic.category_path),
+          updated_at=now()
+        RETURNING gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, depth, leaf_yn, sort_order`,
+        [cleanText(meta.mall_code || p.mall_code || p.mallCode || 'CPKR').toUpperCase(), gmCode, node.cp_code, cleanText(parent && parent.gm_code || ''), parentCode, cleanText(parent && parent.name_ko || ''), node.depth, seq, node.name_ko, path, cleanText(meta.keyword || p.keyword || ''), cleanText(meta.product_id || p.productId || p.product_id || ''), cleanText(meta.item_id || p.itemId || p.item_id || ''), cleanText(meta.vendor_item_id || p.vendorItemId || p.vendor_item_id || '')]);
+      row=Object.assign({src:'dynamic'}, ins.rows[0]||{});
+      created.push({ name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, gm_code:gmCode });
+      parent=row;
+    }catch(e){ try{ console.warn('[GM_CATEGORY_DYNAMIC_INSERT_FAIL]', Object.assign({node,parentCode}, compactError(e))); }catch(_l){} }
+  }
+  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { created_count:created.length, matched_count:matched.length, created, matched:matched.slice(-5) }); }catch(_l){}
+  return { applied:true, created_count:created.length, matched_count:matched.length, created, matched };
+}
 async function findCpSelectedCodeForKeyword(pool, keyword){
   const kw = cleanText(keyword);
   if(!kw) return '';
+  await ensureDynamicCategoryTable(pool);
   try{
     const r = await pool.query(`
-      SELECT cp_code
-      FROM gm_category
-      WHERE COALESCE(cp_code,'') <> ''
-        AND (
-          keyword = $1 OR keyword_seed = $1 OR name_ko = $1
-          OR $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*'))
-        )
+      WITH allcat AS (
+        SELECT 'base' AS src, cp_code, name_ko, keyword, keyword_seed, COALESCE(depth::int,0) depth, leaf_yn, COALESCE(search_count::int,0) search_count
+        FROM gm_category
+        UNION ALL
+        SELECT 'dynamic' AS src, cp_code, name_ko, keyword, keyword AS keyword_seed, COALESCE(depth::int,0) depth, leaf_yn, 0 AS search_count
+        FROM gm_category_dynamic WHERE active_yn='Y'
+      ), cand AS (
+        SELECT *,
+          CASE
+            WHEN name_ko = $1 THEN 0
+            WHEN keyword = $1 THEN 1
+            WHEN keyword_seed = $1 THEN 2
+            WHEN $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*')) THEN 3
+            WHEN position($1 in COALESCE(name_ko,'')) > 0 THEN 4
+            ELSE 9 END AS match_rank
+        FROM allcat
+        WHERE COALESCE(cp_code,'') <> ''
+          AND (
+            name_ko = $1 OR keyword = $1 OR keyword_seed = $1
+            OR $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*'))
+            OR position($1 in COALESCE(name_ko,'')) > 0
+          )
+      )
+      SELECT cp_code, name_ko, depth, leaf_yn, src, match_rank
+      FROM cand
       ORDER BY
-        CASE WHEN name_ko = $1 THEN 0 WHEN keyword = $1 THEN 1 WHEN keyword_seed = $1 THEN 2 ELSE 3 END,
-        CASE WHEN leaf_yn = 'Y' THEN 0 ELSE 1 END,
-        COALESCE(depth::int,0) DESC,
-        COALESCE(search_count::int,0) DESC,
+        match_rank ASC,
+        COALESCE(depth,0) DESC,
+        CASE WHEN leaf_yn='Y' THEN 0 ELSE 1 END,
+        search_count DESC,
         cp_code
       LIMIT 1
     `, [kw]);
-    return cleanText(r.rows[0] && r.rows[0].cp_code || '');
+    const code=cleanText(r.rows[0] && r.rows[0].cp_code || '');
+    try{ console.log('[GM_CP_SELECTED_MATCH]', { keyword:kw, cp_selected_code:code, row:r.rows[0]||null }); }catch(_l){}
+    return code;
   }catch(e){
     try{ console.warn('[GM_CP_SELECTED_MATCH_FAIL]', Object.assign({ keyword:kw }, compactError(e))); }catch(_l){}
     return '';
@@ -1410,6 +1580,7 @@ async function applyCpFixLearning(pool, args){
         UPDATE gm_product
         SET cp_fix_code=$2, cp_match='T', updated_at=now()
         WHERE product_uid=$1
+          AND NOT (COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$2)
           AND (COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'T')
       `, [productUid, fix]);
       out.current=r.rowCount||0;
@@ -1559,7 +1730,7 @@ async function upsertProduct(pool, raw, parent={}){
         ELSE gm_product.cp_selected_code END,
       cp_fix_code=CASE
         WHEN NULLIF(EXCLUDED.cp_fix_code,'') IS NULL THEN gm_product.cp_fix_code
-        WHEN COALESCE(gm_product.cp_match,'')='T' AND COALESCE(EXCLUDED.cp_match,'')<>'T' THEN gm_product.cp_fix_code
+        WHEN COALESCE(gm_product.cp_match,'')='T' AND COALESCE(gm_product.cp_fix_code,'')<>'' AND COALESCE(gm_product.cp_fix_code,'')<>EXCLUDED.cp_fix_code THEN gm_product.cp_fix_code
         ELSE EXCLUDED.cp_fix_code END,
       cp_match=CASE
         WHEN COALESCE(EXCLUDED.cp_match,'')='T' THEN 'T'
@@ -1660,6 +1831,12 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_UPSERT_SQL_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, pi:id.pi, product_name:productName, vals_len:vals.length, columns:productColumns.length }, compactError(e)));
     throw e;
   }
+  let category_dynamic = null;
+  try{
+    if(cpFixCode || (Array.isArray(mallCategoryJson) && mallCategoryJson.length)){
+      category_dynamic = await ensureDynamicCategoriesFromDetail(pool, p, { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
+    }
+  }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
   let cp_learning = null;
   try{
     cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
