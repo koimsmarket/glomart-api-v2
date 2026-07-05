@@ -3,9 +3,7 @@
 -- DEV/Cloud test safe before official start: DROP/CREATE gm_category only.
 -- NOTE: Upload/update key during development is cp_code. cp_id is learned later and must not be overwritten by translated category uploads.
 
-DROP TABLE IF EXISTS gm_category CASCADE;
-
-CREATE TABLE gm_category (
+CREATE TABLE IF NOT EXISTS gm_category (
   category_id BIGSERIAL PRIMARY KEY,
   gm_code TEXT NOT NULL,
   cp_code TEXT,
@@ -71,18 +69,29 @@ CREATE TABLE gm_category (
   keyword TEXT
 );
 
-CREATE UNIQUE INDEX ux_gm_category_gm_code
+CREATE UNIQUE INDEX IF NOT EXISTS ux_gm_category_gm_code
   ON gm_category (gm_code)
   WHERE gm_code IS NOT NULL AND gm_code <> '';
 
-CREATE UNIQUE INDEX ux_gm_category_cp_code
+CREATE UNIQUE INDEX IF NOT EXISTS ux_gm_category_cp_code
   ON gm_category (cp_code)
   WHERE cp_code IS NOT NULL AND cp_code <> '';
 
-CREATE INDEX idx_gm_category_gm_parent_code ON gm_category (gm_parent_code);
-CREATE INDEX idx_gm_category_cp_parent_code ON gm_category (cp_parent_code);
-CREATE INDEX idx_gm_category_cp_id ON gm_category (cp_id);
-CREATE INDEX idx_gm_category_parent_name_ko ON gm_category (parent_name_ko);
-CREATE INDEX idx_gm_category_name_ko ON gm_category (name_ko);
-CREATE INDEX idx_gm_category_keyword ON gm_category (keyword);
-CREATE INDEX idx_gm_category_tree ON gm_category (depth, sort_order, gm_code);
+CREATE INDEX IF NOT EXISTS idx_gm_category_gm_parent_code ON gm_category (gm_parent_code);
+CREATE INDEX IF NOT EXISTS idx_gm_category_cp_parent_code ON gm_category (cp_parent_code);
+CREATE INDEX IF NOT EXISTS idx_gm_category_cp_id ON gm_category (cp_id);
+CREATE INDEX IF NOT EXISTS idx_gm_category_parent_name_ko ON gm_category (parent_name_ko);
+CREATE INDEX IF NOT EXISTS idx_gm_category_name_ko ON gm_category (name_ko);
+CREATE INDEX IF NOT EXISTS idx_gm_category_keyword ON gm_category (keyword);
+CREATE INDEX IF NOT EXISTS idx_gm_category_tree ON gm_category (depth, sort_order, gm_code);
+
+
+-- 운영 안전 보강: 기준 카테고리 데이터 보존. 기존 테이블에는 필요한 칼럼만 추가한다.
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS cp_code TEXT;
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS gm_parent_code TEXT;
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS cp_parent_code TEXT;
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS parent_name_ko TEXT;
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS keyword TEXT;
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS raw_json JSONB;
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gm_category ADD COLUMN IF NOT EXISTS search_count INTEGER NOT NULL DEFAULT 0;

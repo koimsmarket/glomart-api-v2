@@ -1689,7 +1689,9 @@ async function upsertProduct(pool, raw, parent={}){
     return { ok:false, skipped:true, reason:'required field missing: ' + missing.join(','), missing, uid:id.uid||'', pi_ii_vi:id.pi||'', mall_code:id.mallCode||'', product_id:id.productId||'', source_url:pickProductUrl(p), title_sample:cleanText(p.title||p.name||p.productName||p.product_name).slice(0,120) };
   }
 
-  const productUrl = normalizeUrl(buildProductUrlFromId(id) || pickProductUrl(p));
+  // product_url 저장 중단: 필요 시 아래 줄을 부활한다.
+  // const productUrl = normalizeUrl(buildProductUrlFromId(id) || pickProductUrl(p));
+  const productUrl = '';
   const thumbUrl = pickThumbUrl(p);
   const sourceMall = sourceMallFrom(p, p.source_uid || p.sourceUid, productUrl, id.mallCode);
   const sourceMallStored = cleanText(sourceMall).toUpperCase() === cleanText(id.mallCode).toUpperCase() ? '' : sourceMall;
@@ -1767,9 +1769,15 @@ async function upsertProduct(pool, raw, parent={}){
          AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(jsonb_array_length(gm_product.thumb_json),0)
         THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
       detail_json=CASE
-        WHEN COALESCE(NULLIF(EXCLUDED.detail_json->>'block_count','')::int,0)
-           + COALESCE(NULLIF(EXCLUDED.detail_json->>'image_count','')::int,0)
-           + COALESCE(NULLIF(EXCLUDED.detail_json->>'text_count','')::int,0) > 0
+        WHEN jsonb_typeof(EXCLUDED.detail_json)='object'
+         AND (
+          COALESCE(NULLIF(EXCLUDED.detail_json->>'block_count','')::int,0)
+        + COALESCE(NULLIF(EXCLUDED.detail_json->>'image_count','')::int,0)
+        + COALESCE(NULLIF(EXCLUDED.detail_json->>'text_count','')::int,0)
+        + CASE WHEN jsonb_typeof(EXCLUDED.detail_json->'blocks')='array' THEN jsonb_array_length(EXCLUDED.detail_json->'blocks') ELSE 0 END
+        + CASE WHEN jsonb_typeof(EXCLUDED.detail_json->'images')='array' THEN jsonb_array_length(EXCLUDED.detail_json->'images') ELSE 0 END
+        + CASE WHEN jsonb_typeof(EXCLUDED.detail_json->'texts')='array' THEN jsonb_array_length(EXCLUDED.detail_json->'texts') ELSE 0 END
+        ) > 0
         THEN EXCLUDED.detail_json ELSE gm_product.detail_json END,
       seasonal_text=COALESCE(NULLIF(EXCLUDED.seasonal_text,''), gm_product.seasonal_text),
       mall_sale_price=EXCLUDED.mall_sale_price,
@@ -1793,7 +1801,8 @@ async function upsertProduct(pool, raw, parent={}){
       supplier_phone=COALESCE(NULLIF(EXCLUDED.supplier_phone,''), gm_product.supplier_phone),
       supplier_email=COALESCE(NULLIF(EXCLUDED.supplier_email,''), gm_product.supplier_email),
       supplier_address=COALESCE(NULLIF(EXCLUDED.supplier_address,''), gm_product.supplier_address),
-      product_url=COALESCE(NULLIF(EXCLUDED.product_url,''), gm_product.product_url),
+      -- product_url 저장 중단: 필요 시 위 insert 값과 함께 부활
+      product_url=gm_product.product_url,
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
       soldout_yn=EXCLUDED.soldout_yn,
       sale_status=EXCLUDED.sale_status,
@@ -1845,6 +1854,7 @@ async function upsertProduct(pool, raw, parent={}){
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
 
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(makeProductOptionLinkJson(optionJson,id)||{}).iid_vid||'', detail_image_count:detailJson.image_count||0, detail_block_count:detailJson.block_count||0, detail_text_count:detailJson.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);
@@ -1852,6 +1862,7 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_UPSERT_SQL_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, pi:id.pi, product_name:productName, vals_len:vals.length, columns:productColumns.length }, compactError(e)));
     throw e;
   }
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_OUT]', { uid:id.uid, row:(r.rows&&r.rows[0])||null }); }catch(_trace){}
   let category_dynamic = null;
   try{
     if(cpFixCode || (Array.isArray(mallCategoryJson) && mallCategoryJson.length)){

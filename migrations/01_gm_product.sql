@@ -1,10 +1,8 @@
 -- 01_gm_product.sql
--- 개발용 즉시 테스트 스키마. 정식 스타트 전까지는 배포 시 gm_product를 DROP/CREATE 한다.
+-- 운영 안전 스키마: DROP 금지. CREATE/ALTER IF NOT EXISTS만 사용.
 -- V027: cp_id/cp_code 대신 cp_selected_code/cp_fix_code 적용. cp_match는 T 보호/F 전파 기준.
 
-DROP TABLE IF EXISTS gm_product CASCADE;
-
-CREATE TABLE gm_product (
+CREATE TABLE IF NOT EXISTS gm_product (
   product_uid TEXT NOT NULL,
   glomart_code TEXT NOT NULL DEFAULT '',
   gm_category TEXT NOT NULL DEFAULT '',
@@ -52,7 +50,7 @@ CREATE TABLE gm_product (
   supplier_phone TEXT,
   supplier_email TEXT,
   supplier_address TEXT,
-  product_url TEXT NOT NULL,
+  product_url TEXT NOT NULL DEFAULT '',
   thumb_origin_url TEXT,
   soldout_yn TEXT NOT NULL DEFAULT 'N',
   hit_count INTEGER NOT NULL DEFAULT 0,
@@ -84,12 +82,12 @@ CREATE TABLE gm_product (
   PRIMARY KEY (product_uid)
 );
 
-CREATE INDEX IF NOT EXISTS idx_gm_product_keyword ON gm_product(keyword);
-CREATE INDEX IF NOT EXISTS idx_gm_product_mall_code ON gm_product(mall_code);
-CREATE INDEX IF NOT EXISTS idx_gm_product_cp_selected_code ON gm_product(cp_selected_code);
-CREATE INDEX IF NOT EXISTS idx_gm_product_cp_fix_code ON gm_product(cp_fix_code);
-CREATE INDEX IF NOT EXISTS idx_gm_product_cp_match ON gm_product(cp_match);
-CREATE INDEX IF NOT EXISTS idx_gm_product_pi_ii_vi ON gm_product(pi_ii_vi);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_keyword ON gm_product(keyword);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_mall_code ON gm_product(mall_code);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_cp_selected_code ON gm_product(cp_selected_code);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_cp_fix_code ON gm_product(cp_fix_code);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_cp_match ON gm_product(cp_match);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_pi_ii_vi ON gm_product(pi_ii_vi);
 
 -- V028: 상세 카테고리 path에서 새로 발견된 쿠팡 세부 카테고리를 기본 카테고리와 분리 보관한다.
 CREATE TABLE IF NOT EXISTS gm_category_dynamic (
@@ -118,8 +116,18 @@ CREATE TABLE IF NOT EXISTS gm_category_dynamic (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (mall_code, cp_code)
 );
-CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_keyword ON gm_category_dynamic(keyword);
-CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_name_ko ON gm_category_dynamic(name_ko);
-CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_parent ON gm_category_dynamic(cp_parent_code);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_category_dynamic_keyword ON gm_category_dynamic(keyword);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_category_dynamic_name_ko ON gm_category_dynamic(name_ko);
+CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_category_dynamic_parent ON gm_category_dynamic(cp_parent_code);
 
 ALTER TABLE gm_product ALTER COLUMN option_json SET DEFAULT '{"iid_vid":""}'::jsonb;
+
+
+-- 운영 안전 보강: 기존 테이블에는 필요한 칼럼만 추가한다. DROP/DELETE/TRUNCATE 금지.
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_selected_code TEXT;
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_fix_code TEXT;
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT NOT NULL DEFAULT 'F';
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS option_json JSONB NOT NULL DEFAULT '{"iid_vid":""}'::jsonb;
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS detail_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS mall_category_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS product_url TEXT NOT NULL DEFAULT '';
