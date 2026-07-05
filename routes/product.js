@@ -205,35 +205,94 @@ function firstPlainObject(){
   for(let i=0;i<arguments.length;i++) if(isPlainObject(arguments[i])) return arguments[i];
   return {};
 }
+
+// GM_PRODUCT_DETAIL_PAYLOAD_DEEP_V023
+// 상세/검색 payload가 fetch JSON, sendBeacon text, {payload:{...}}, {item:{...}} 등으로 섞여 와도
+// 서버에서 한 번 더 풀어 옵션/이미지/공급자 필드를 찾는다.
+function parseIncomingPayloadBody(body){
+  if(body == null) return {};
+  if(Buffer.isBuffer && Buffer.isBuffer(body)) body = body.toString('utf8');
+  if(typeof body === 'string'){
+    const t = body.trim();
+    if(!t) return {};
+    try{ return JSON.parse(t); }catch(_e){ return { raw_body:t }; }
+  }
+  return body;
+}
+function parseMaybeJsonAny(v){
+  if(v == null || v === '') return null;
+  if(typeof v === 'object') return v;
+  if(typeof v === 'string'){
+    const t = v.trim();
+    if(!t) return null;
+    try{ return JSON.parse(t); }catch(_e){ return null; }
+  }
+  return null;
+}
+function addIfMissingField(dst, key, val){
+  if(val === undefined || val === null) return;
+  const empty = dst[key] === undefined || dst[key] === null || (typeof dst[key] === 'string' && cleanText(dst[key]) === '') || (Array.isArray(dst[key]) && dst[key].length === 0);
+  if(empty) dst[key] = val;
+}
+function collectPayloadContainers(raw, maxDepth=4){
+  const out=[]; const seen=new Set();
+  const visit=(v, depth)=>{
+    if(!v || depth > maxDepth) return;
+    const parsed = typeof v === 'string' ? parseMaybeJsonAny(v) : v;
+    if(!parsed || typeof parsed !== 'object') return;
+    if(seen.has(parsed)) return; seen.add(parsed);
+    if(!Array.isArray(parsed)) out.push(parsed);
+    if(Array.isArray(parsed)) return;
+    ['item','product','data','payload','detail','result','detailResult','gm_detail','gmDetail','raw_json','rawJson','detail_json','detailJson','GM_LAST_DETAIL_RESULT','detailPayload'].forEach(k=>{
+      if(parsed[k] !== undefined) visit(parsed[k], depth + 1);
+    });
+  };
+  visit(raw, 0);
+  return out;
+}
 function flattenDetailPayload(raw, parent={}){
-  raw = raw || {}; parent = parent || {};
-  const rawJson = isPlainObject(raw.raw_json) ? raw.raw_json : {};
-  const nested = firstPlainObject(raw.item, raw.product, raw.data, raw.payload, raw.detail, raw.result, raw.detailResult, raw.gm_detail, raw.gmDetail);
-  const nestedRaw = isPlainObject(nested.raw_json) ? nested.raw_json : {};
-  const p = Object.assign({}, rawJson, nestedRaw, nested, raw);
+  raw = parseIncomingPayloadBody(raw || {}); parent = parseIncomingPayloadBody(parent || {});
+  const containers = collectPayloadContainers(raw).concat(collectPayloadContainers(parent, 2));
+  const p = {};
+  // 먼저 넓게 펼치고, 루트값은 마지막에 우선한다. 빈 값은 덮어쓰지 않는다.
+  containers.reverse().forEach(o => copyMissing(p, o));
+  copyMissing(p, raw);
 
   // payload wrapper 값 보존
   ['key','gm_key','product_uid','pi_ii_vi','mall_code','mallCode','keyword','q','requestId','request_id'].forEach(k=>{
     if((p[k] === undefined || p[k] === null || cleanText(p[k]) === '') && raw[k] !== undefined) p[k] = raw[k];
   });
 
-  const supplier = firstPlainObject(p.supplierInfo, p.__gmSupplierInfo, p.supplier, p.sellerInfo, p.vendorInfo, p.storeInfo);
+  // 자주 들어오는 배열 alias는 깊은 container에서 찾아 올린다.
+  const arrayAliases = ['optionRows','option_rows','optionCombos','aliOptionCombos','flatOptionRows','detailOptionRows','optionsRows','visibleOptions','vendorItemOptions','itemOptions','selectedOptions','options','thumbnailImages','thumbs','topImages','mainImages','images','detailImages','detailBlocks','blocks'];
+  arrayAliases.forEach(k=>{
+    if(Array.isArray(p[k]) && p[k].length) return;
+    for(const o of containers){
+      if(Array.isArray(o[k]) && o[k].length){ p[k] = o[k]; break; }
+    }
+  });
+
+  const supplier = firstPlainObject(p.supplierInfo, p.__gmSupplierInfo, p.supplier, p.sellerInfo, p.vendorInfo, p.storeInfo, p.seller, p.sellerData, p.vendor);
   if(Object.keys(supplier).length){
     const map = {
-      supplier_name:['supplierName','supplier_name','seller','sellerName','seller_name','vendorName','vendor_name','storeName','store_name','name'],
-      business_number:['businessNumber','business_number','bizNo','biz_no','biz','sellerBizNo','supplierBizNo'],
+      supplier_name:['supplierName','supplier_name','seller','sellerName','seller_name','vendorName','vendor_name','storeName','store_name','shopName','shop_name','name','companyName','company_name'],
+      business_number:['businessNumber','business_number','bizNo','biz_no','biz','sellerBizNo','supplierBizNo','businessRegistrationNumber'],
       online_sales_number:['onlineSalesNumber','online_sales_number','mailOrderNo','mail_order_no','mailO','mailOrderNumber','supplierMailOrderNo'],
       ceo_name:['ceoName','ceo_name','rep','representative','representativeName','supplierRepresentative'],
       supplier_mobile:['mobile','supplierMobile','supplier_mobile','sellerMobile','seller_mobile'],
-      supplier_phone:['phone','supplierPhone','supplier_phone','sellerPhone','seller_phone'],
+      supplier_phone:['phone','supplierPhone','supplier_phone','sellerPhone','seller_phone','tel','telephone'],
       supplier_email:['email','supplierEmail','supplier_email','sellerEmail','seller_email'],
-      supplier_address:['address','supplierAddress','supplier_address','sellerAddress','seller_address']
+      supplier_address:['address','supplierAddress','supplier_address','sellerAddress','seller_address','addr']
     };
     Object.keys(map).forEach(dst=>{
       if(cleanText(p[dst])) return;
       for(const src of map[dst]){ if(cleanText(supplier[src])){ p[dst]=supplier[src]; break; } }
     });
   }
+  // supplierInfo 객체가 아니라 루트 텍스트로 온 경우
+  if(!cleanText(p.supplier_name)) p.supplier_name = cleanText(p.seller || p.sellerName || p.vendorName || p.storeName || p.shopName || p.companyName || '');
+  if(!cleanText(p.supplier_phone)) p.supplier_phone = cleanText(p.phone || p.sellerPhone || p.supplierPhone || '');
+  if(!cleanText(p.supplier_email)) p.supplier_email = cleanText(p.email || p.sellerEmail || p.supplierEmail || '');
 
   const cat = firstPlainObject(p.categoryInfo, p.category_info, p.cpCategoryInfo, p.coupangCategoryInfo, p.category);
   if(Object.keys(cat).length){
@@ -246,7 +305,6 @@ function flattenDetailPayload(raw, parent={}){
     }
   }
 
-  // 상세 payload alias 보강
   if(!Array.isArray(p.thumbnailImages) && Array.isArray(p.thumbs)) p.thumbnailImages = p.thumbs;
   if(!Array.isArray(p.thumbnailImages) && Array.isArray(p.topImages)) p.thumbnailImages = p.topImages;
   if(!Array.isArray(p.thumbnailImages) && Array.isArray(p.mainImages)) p.thumbnailImages = p.mainImages;
@@ -261,7 +319,6 @@ function flattenDetailPayload(raw, parent={}){
   if(!cleanText(p.productName) && cleanText(p.gmTitle)) p.productName = p.gmTitle;
   return p;
 }
-
 const KEYWORD_LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 function uniqClean(arr){
   const seen = new Set();
@@ -666,7 +723,7 @@ function pickDeliveryType(p){
 function pickSupplierName(p){
   return cleanText(
     p.supplier_name_snapshot || p.supplierNameSnapshot || p.supplier_name || p.supplierName ||
-    p.seller_name || p.sellerName || p.vendor_name || p.vendorName ||
+    p.seller || p.seller_name || p.sellerName || p.vendor_name || p.vendorName ||
     p.store_name || p.storeName || p.shop_name || p.shopName || ''
   );
 }
@@ -799,7 +856,7 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
   const q = `
     UPDATE gm_product SET
       option_count = CASE WHEN $2::int > 0 THEN $2::int ELSE option_count END,
-      option_json = CASE WHEN $2::int > 0 THEN $3::jsonb ELSE option_json END,
+      option_json = CASE WHEN $3::jsonb IS NOT NULL THEN option_json ELSE option_json END,
       thumb_json = CASE
         WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
         THEN $5::jsonb ELSE thumb_json END,
@@ -993,64 +1050,92 @@ function parseMaybeJsonObject(v){
 function normalizeOptionJson(p, id){
   p=p||{}; id=id||{};
   const arrays=[];
-  const addArray = (a)=>{ if(Array.isArray(a) && a.length) arrays.push(a); };
+  const optionKeys = ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','option_rows','detailOptionRows','optionsRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions','optionList','skuOptions','skuList','variants'];
+  const addArray = (a)=>{
+    if(typeof a === 'string'){
+      const parsed = parseMaybeJsonAny(a);
+      if(Array.isArray(parsed)) a = parsed;
+      else if(parsed && typeof parsed === 'object'){
+        optionKeys.forEach(k=>{ if(Array.isArray(parsed[k]) && parsed[k].length) arrays.push(parsed[k]); });
+        if(Array.isArray(parsed.rows) && parsed.rows.length) arrays.push(parsed.rows);
+        return;
+      }
+    }
+    if(Array.isArray(a) && a.length) arrays.push(a);
+  };
   const addJsonRows = (v)=>{
-    const o = parseMaybeJsonObject(v);
+    const o = parseMaybeJsonAny(v);
+    if(!o) return;
+    if(Array.isArray(o)) addArray(o);
     if(o && Array.isArray(o.rows)) addArray(o.rows);
-    if(o && Array.isArray(o.optionRows)) addArray(o.optionRows);
-    if(o && Array.isArray(o.options)) addArray(o.options);
+    optionKeys.forEach(k=>{ if(o && Array.isArray(o[k])) addArray(o[k]); });
   };
   addJsonRows(p.option_json);
   addJsonRows(p.optionJson);
   addJsonRows(p.detail_json);
   addJsonRows(p.detailJson);
-  ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','detailOptionRows','optionsRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>{
-    addArray(p[k]);
+  optionKeys.forEach(k=>addArray(p[k]));
+  collectPayloadContainers(p, 4).forEach(o=>{
+    optionKeys.forEach(k=>addArray(o[k]));
+    addJsonRows(o.option_json); addJsonRows(o.optionJson); addJsonRows(o.detail_json); addJsonRows(o.detailJson);
   });
-  if(p.payload && typeof p.payload === 'object'){
-    ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','detailOptionRows','optionsRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>addArray(p.payload[k]));
-    addJsonRows(p.payload.option_json);
-    addJsonRows(p.payload.optionJson);
-  }
+
   const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source'];
   const rows=[]; const seen=new Set();
+  const pushRow = (row)=>{
+    const sig = cleanText(row[0]) || (cleanText(row[4]) + '|' + cleanText(row[3]) + '|' + cleanText(row[2]));
+    if(!sig || seen.has(sig)) return;
+    seen.add(sig); rows.push(row);
+  };
   arrays.forEach(arr=>arr.forEach((r)=>{
     if(Array.isArray(r)){
       const uid0=cleanText(r[0] || '');
       const productId0=cleanText(r[1] || id.productId || p.productId || p.product_id || '');
       const itemId0=cleanText(r[2] || id.itemId || p.itemId || p.item_id || '');
-      const vendorItemId0=cleanText(r[3] || id.vendorItemId || p.vendorItemId || p.vendor_item_id || '');
-      const name0=cleanText(r[4] || r[5] || '');
-      if(!uid0 && !name0) return;
-      const sig0=uid0 || (name0+'|'+vendorItemId0+'|'+itemId0);
-      if(seen.has(sig0)) return; seen.add(sig0);
-      rows.push([uid0,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
+      const vendorItemId0=cleanText(r[3] || id.vendorItemId || p.vendorItemId || p.vendor_item_id || itemId0 || productId0 || '');
+      const pi0=[productId0,itemId0,vendorItemId0].filter(Boolean).join('_') || cleanText(uid0.replace(/^\w+_/,''));
+      const uid=uid0 || (id.mallCode && pi0 ? id.mallCode + '_' + pi0 : pi0);
+      const name0=cleanText(r[4] || r[5] || p.optionName || p.product_name || p.productName || '기본옵션');
+      if(!uid && !name0) return;
+      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
       return;
     }
     if(!r || typeof r !== 'object') return;
-    const productId = cleanText(r.productId || r.product_id || id.productId || p.productId || p.product_id || '');
-    const itemId = cleanText(r.itemId || r.item_id || r.skuIdStr || r.sku_id_str || r.skuId || r.sku_id || (id.mallCode==='ALKR' ? (r.aliSkuId || r.optionId || '') : '') || '');
-    const vendorItemId = cleanText(r.vendorItemId || r.venderItemId || r.vendor_item_id || r.skuId || r.sku_id || r.aliSkuId || r.optionId || itemId || id.vendorItemId || '');
-    const pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || cleanText(r.key || r.uid || r.option_uid || '');
+    const productId = cleanText(r.productId || r.product_id || r.pid || id.productId || p.productId || p.product_id || '');
+    const itemId = cleanText(r.itemId || r.item_id || r.itemID || r.skuIdStr || r.sku_id_str || r.skuId || r.sku_id || r.aliSkuId || r.ali_sku_id || r.optionId || r.option_id || (id.mallCode==='ALKR' ? (r.aliSkuId || r.optionId || '') : '') || id.itemId || '');
+    const vendorItemId = cleanText(r.vendorItemId || r.venderItemId || r.vendor_item_id || r.vendorItemID || r.vid || r.skuId || r.sku_id || r.aliSkuId || r.ali_sku_id || r.optionId || r.option_id || itemId || id.vendorItemId || productId || '');
+    const pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || cleanText(r.key || r.uid || r.option_uid || r.pi_ii_vi || r.piIiVi || '');
     const uid = cleanText(r.uid || r.option_uid || (id.mallCode && pi ? id.mallCode + '_' + pi : pi));
-    const name = cleanText(r.fullOptionName || r.displayOptionName || r.selectedOptionText || r.optionText || r.optionName || r.option_name || r.name || r.value || r.title || '');
+    const name = cleanText(r.fullOptionName || r.displayOptionName || r.selectedOptionText || r.optionText || r.optionName || r.option_name || r.name || r.value || r.title || r.label || '');
     if(!uid && !name) return;
-    const sig = uid || (name + '|' + vendorItemId + '|' + itemId);
-    if(seen.has(sig)) return; seen.add(sig);
-    const mallPrice = pickOptPrice(r, ['mall_price','mallPrice','raw_price','rawPrice','rawCoupangOptionPrice','rawOptionPrice','rawOptionPriceText','coupangPrice','aliRawPrice','aliRawPriceText','basePrice','basePriceText']);
-    const normalPrice = pickOptPrice(r, ['normal_price','normalPrice','sell_price','sellPrice','calculatedPrice','gm_price','gmPrice','optionPrice','optionPriceText','price','priceText','finalPriceText']);
+    const mallPrice = pickOptPrice(r, ['mall_sale_price','mallSalePrice','mall_price','mallPrice','raw_price','rawPrice','rawCoupangOptionPrice','rawOptionPrice','rawOptionPriceText','coupangPrice','aliRawPrice','aliRawPriceText','basePrice','basePriceText','salePrice','sale_price']);
+    const normalPrice = pickOptPrice(r, ['normal_price','normalPrice','final_supply_price','finalSupplyPrice','sell_price','sellPrice','calculatedPrice','gm_price','gmPrice','optionPrice','optionPriceText','price','priceText','finalPriceText']);
     const feeText = cleanText(r.delivery_fee_text || r.deliveryFeeText || r.optionShippingFeeText || r.shippingFeeText || r.baseShippingFeeText || r.deliveryFee || p.deliveryFeeText || p.shippingFeeText || '');
     const fee = r.delivery_fee !== undefined ? parseMoney(r.delivery_fee, 0) : parseMoney(feeText, 0);
-    const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.shipType || p.shippingLabel || p.deliveryType || '');
+    const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.delivery_type || r.shipType || p.shippingLabel || p.deliveryType || p.delivery_type || '');
     const img = normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.colorImage || r.image || r.thumbnail || r.thumb || '');
-    const sold = !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || '')));
-    rows.push([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || p.deliveryDateText || p.arrivalText || ''),img,sold,cleanText(r.source || '')]);
+    const sold = !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || r.sale_status || '')));
+    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || p.deliveryDateText || p.arrivalText || ''),img,sold,cleanText(r.source || '')]);
   }));
+
+  // 검색결과 payload에는 옵션배열이 없지만 현재 리스트 행 자체가 대표 판매옵션이다.
+  // 따라서 검색 upsert에서도 gm_product_option 기본 1행을 만든다.
+  if(!rows.length && id.productId && id.pi){
+    const name = cleanText(p.optionName || p.option_name || p.selectedOptionName || p.selected_option_name || p.product_name || p.productName || p.title || '기본옵션');
+    const uid = cleanText(id.mallCode && id.pi ? id.mallCode + '_' + id.pi : id.pi);
+    rows.push([
+      uid, id.productId, id.itemId || '', id.vendorItemId || id.productId, name,
+      pickPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryText(p),
+      normalizeUrl(p.option_image_url || p.optionImageUrl || p.thumb_origin_url || p.thumbOriginUrl || p.thumbnail || p.image || ''),
+      /품절|sold\s*out/i.test(cleanText(p.soldout_yn || p.soldoutYn || p.soldout || p.sale_status || '')),
+      'search-row'
+    ]);
+  }
+
   const selectedUid = cleanText(p.default_uid || p.defaultUid || p.selectedOptionUid || p.selected_option_uid || id.uid || '');
   const defaultUid = rows.some(r=>r[0]===selectedUid) ? selectedUid : (rows[0] && rows[0][0] || selectedUid);
   return { headers, rows, default_uid:defaultUid, option_count:rows.length, updated_at:new Date().toISOString() };
 }
-
 
 // GM_PRODUCT_OPTION_TABLE_V001
 // 옵션은 상품 JSON에 중복 저장하지 않고 gm_product_option에만 운영 컬럼으로 저장한다.
@@ -1250,6 +1335,107 @@ function pickCpCode(p, mallCategoryLeaf){
   if(/^\d+$/.test(v)) return v;
   return cleanText(mallCategoryLeaf || '');
 }
+
+// GM_CP_MATCH_V024
+// cp_match: T = 해당 cp_id에서 상세 cp_code가 직접 확인됨, F = 같은 검색/학습 결과로 전파된 임시 cp_code.
+function normalizeCpMatch(v){
+  const s = cleanText(v).toUpperCase();
+  if(['T','TRUE','Y','YES','1','DETAIL','DETAIL_EXACT','MATCH'].includes(s)) return 'T';
+  if(['F','FALSE','N','NO','0','INFER','AI','PROPAGATED','SEARCH'].includes(s)) return 'F';
+  return '';
+}
+async function ensureProductCpMatchColumn(pool){
+  try{ await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT`); }catch(_e){}
+}
+async function findExistingCpIdForProduct(pool, productUid, mallCode, productId){
+  try{
+    const r = await pool.query(`
+      SELECT cp_id FROM gm_product
+      WHERE product_uid=$1 OR (mall_code=$2 AND product_id=$3)
+      ORDER BY updated_at DESC NULLS LAST
+      LIMIT 1
+    `,[cleanText(productUid), cleanText(mallCode).toUpperCase(), cleanText(productId)]);
+    return cleanText(r.rows[0] && r.rows[0].cp_id || '');
+  }catch(_e){ return ''; }
+}
+async function inferCpCodeForProduct(pool, mallCode, keyword, cpId){
+  const mall = cleanText(mallCode).toUpperCase();
+  const kw = cleanText(keyword);
+  const cid = cleanText(cpId);
+  try{
+    // 1) CPKR 동일 cp_id에서 직접 검증(T)된 코드가 있으면 최우선.
+    if(cid){
+      const r = await pool.query(`
+        SELECT cp_code, cp_match FROM gm_product
+        WHERE mall_code='CPKR' AND cp_id=$1 AND COALESCE(cp_code,'')<>''
+        ORDER BY CASE WHEN cp_match='T' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST
+        LIMIT 1
+      `,[cid]);
+      if(r.rows[0] && cleanText(r.rows[0].cp_code)) return { cp_code:cleanText(r.rows[0].cp_code), source:'cp_id_history', cp_match: cleanText(r.rows[0].cp_match)||'F' };
+    }
+    // 2) 같은 검색어에서 이미 수집된 CPKR cp_code를 ALKR/검색상품에 전파한다.
+    if(kw){
+      const r = await pool.query(`
+        SELECT cp_code, cp_match FROM gm_product
+        WHERE mall_code='CPKR' AND keyword=$1 AND COALESCE(cp_code,'')<>''
+        ORDER BY CASE WHEN cp_match='T' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST
+        LIMIT 1
+      `,[kw]);
+      if(r.rows[0] && cleanText(r.rows[0].cp_code)) return { cp_code:cleanText(r.rows[0].cp_code), source:'keyword_history', cp_match:'F' };
+    }
+  }catch(e){ try{ console.warn('[GM_CP_CODE_INFER_FAIL]', Object.assign({ mall, keyword:kw, cp_id:cid }, compactError(e))); }catch(_l){} }
+  return null;
+}
+function decideCpMatch(p, mallCode, cpId, cpCode, inferred){
+  const explicit = normalizeCpMatch(p.cp_match || p.cpMatch || p.cp_code_match || p.cpCodeMatch || '');
+  const mall = cleanText(mallCode).toUpperCase();
+  if(explicit) return explicit;
+  if(!cleanText(cpCode)) return '';
+  if(mall !== 'CPKR') return 'F';
+  if(inferred) return 'F';
+  return cleanText(cpId) ? 'T' : 'F';
+}
+async function applyCpCodeLearning(pool, args){
+  args=args||{};
+  const mall=cleanText(args.mall_code).toUpperCase();
+  const keyword=cleanText(args.keyword);
+  const cpId=cleanText(args.cp_id);
+  const cpCode=cleanText(args.cp_code);
+  const cpMatch=normalizeCpMatch(args.cp_match);
+  const productUid=cleanText(args.product_uid);
+  if(!cpCode) return { applied:false, reason:'no_cp_code' };
+  await ensureProductCpMatchColumn(pool);
+  const out={ applied:true, current:0, direct_cp_id:0, keyword_f:0, ali_f:0 };
+  try{
+    if(productUid){
+      const r=await pool.query(`UPDATE gm_product SET cp_match=$2, updated_at=now() WHERE product_uid=$1`, [productUid, cpMatch||'F']);
+      out.current=r.rowCount||0;
+    }
+    // 상세에서 cp_id+cp_code가 직접 확인되면 같은 cp_id 상품 전체를 T로 교정한다.
+    if(mall==='CPKR' && cpId && cpMatch==='T'){
+      const r=await pool.query(`
+        UPDATE gm_product SET cp_code=$3, cp_match='T', updated_at=now()
+        WHERE mall_code='CPKR' AND cp_id=$1 AND (COALESCE(cp_code,'')<>$3 OR COALESCE(cp_match,'')<>'T')
+      `,[cpId, keyword, cpCode]);
+      out.direct_cp_id=r.rowCount||0;
+      if(keyword){
+        const f=await pool.query(`
+          UPDATE gm_product SET cp_code=$2, cp_match='F', updated_at=now()
+          WHERE mall_code='CPKR' AND keyword=$1
+            AND (cp_id IS NULL OR cp_id='' OR cp_id<>$3)
+            AND COALESCE(cp_match,'')<>'T'
+        `,[keyword, cpCode, cpId]);
+        out.keyword_f=f.rowCount||0;
+        const a=await pool.query(`
+          UPDATE gm_product SET cp_code=$2, cp_match='F', updated_at=now()
+          WHERE mall_code='ALKR' AND keyword=$1 AND COALESCE(cp_match,'')<>'T'
+        `,[keyword, cpCode]);
+        out.ali_f=a.rowCount||0;
+      }
+    }
+    return out;
+  }catch(e){ try{ console.warn('[GM_CP_CODE_LEARNING_FAIL]', Object.assign({ mall, keyword, cp_id:cpId, cp_code:cpCode, cp_match:cpMatch }, compactError(e))); }catch(_l){} return { applied:false, error:compactError(e) }; }
+}
 function pickBuyableQty(p){
   const v = firstNonEmpty(p, ['buyable_qty','buyableQty','buyableQuantity','availableQuantity','available_qty']);
   return v ? toInt(v, null) : null;
@@ -1314,8 +1500,16 @@ async function upsertProduct(pool, raw, parent={}){
   const finalSupplyPrice = pickFinalSupplyPrice(p, mallSalePrice);
   const mallCategoryJson = normalizeMallCategoryJson(p);
   const mallCategoryLeaf = pickMallCategoryLeaf(p, mallCategoryJson);
-  const cpId = pickCpId(p);
-  const cpCode = pickCpCode(p, mallCategoryLeaf);
+  let cpId = pickCpId(p);
+  if(!cpId) cpId = await findExistingCpIdForProduct(pool, id.uid, id.mallCode, id.productId);
+  let cpCode = pickCpCode(p, mallCategoryLeaf);
+  let cpCodeInferred = false;
+  if(!cpCode){
+    const inferred = await inferCpCodeForProduct(pool, id.mallCode, searchKeyword, cpId);
+    if(inferred && inferred.cp_code){ cpCode = inferred.cp_code; cpCodeInferred = true; }
+  }
+  const cpMatch = decideCpMatch(p, id.mallCode, cpId, cpCode, cpCodeInferred);
+  await ensureProductCpMatchColumn(pool);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
   const detailJson = normalizeDetailJson(p);
@@ -1325,7 +1519,7 @@ async function upsertProduct(pool, raw, parent={}){
 
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
-    'mall_category','mall_category_json','cp_id','cp_code','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
+    'mall_category','mall_category_json','cp_id','cp_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
     'product_name','mall_product_name','option_count','option_json','thumb_json','detail_json','seasonal_text',
     'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type','tax_type','overseas_direct_yn',
     'review_count','mall_sales_count','certification_no_1','certification_no_2',
@@ -1338,10 +1532,15 @@ async function upsertProduct(pool, raw, parent={}){
   // V021: productColumns와 placeholder 순서를 1:1로 고정한다.
   // V020 오류: soldout_yn 자리에 literal 1이 들어가고, soldout 값이 hit_count에 들어가 insert가 전부 실패했다.
   const valuesSql = [
-    '$1','$2','$3','$4','$5','$6','$7','$8','$9','$10::jsonb','$11','$12','$13','$14','$15','$16','$17',
-    '$18','$19','$20','$21::jsonb','$22::jsonb','$23::jsonb','$24','$25','$26','$27','$28','$29','$30','$31','$32','$33',
-    '$34','$35','$36','$37','$38','$39','$40','$41','$42','$43','$44','$45','$46','$47','$48','$49','1','$50',
-    '$51','$52','$53','$54','$55','$56','$57','$58','$59','$60','$61','$62','now()','now()','now()'
+    '$1','$2','$3','$4','$5','$6','$7','$8',
+    '$9','$10::jsonb','$11','$12','$13','$14','$15','$16',
+    '$17','$18','$19','$20','$21','$22::jsonb','$23::jsonb','$24::jsonb',
+    '$25','$26','$27','$28','$29','$30','$31','$32',
+    '$33','$34','$35','$36','$37','$38','$39','$40',
+    '$41','$42','$43','$44','$45','$46','$47','$48',
+    '$49','$50','1','$51','$52','$53','$54','$55',
+    '$56','$57','$58','$59','$60','$61','$62','$63',
+    'now()','now()','now()'
   ];
   const sql = `
     INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
@@ -1352,7 +1551,15 @@ async function upsertProduct(pool, raw, parent={}){
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_id=COALESCE(NULLIF(EXCLUDED.cp_id,''), gm_product.cp_id),
-      cp_code=CASE WHEN NULLIF(EXCLUDED.cp_code,'') IS NULL THEN gm_product.cp_code WHEN COALESCE(gm_product.cp_code,'') <> EXCLUDED.cp_code THEN EXCLUDED.cp_code ELSE gm_product.cp_code END,
+      cp_code=CASE
+        WHEN NULLIF(EXCLUDED.cp_code,'') IS NULL THEN gm_product.cp_code
+        WHEN COALESCE(gm_product.cp_match,'')='T' AND COALESCE(EXCLUDED.cp_match,'')<>'T' THEN gm_product.cp_code
+        ELSE EXCLUDED.cp_code END,
+      cp_match=CASE
+        WHEN COALESCE(EXCLUDED.cp_match,'')='T' THEN 'T'
+        WHEN COALESCE(gm_product.cp_match,'')='T' THEN 'T'
+        WHEN NULLIF(EXCLUDED.cp_code,'') IS NOT NULL THEN COALESCE(NULLIF(EXCLUDED.cp_match,''),'F')
+        ELSE gm_product.cp_match END,
       product_name=EXCLUDED.product_name,
       mall_product_name=EXCLUDED.mall_product_name,
       option_count=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
@@ -1407,13 +1614,13 @@ async function upsertProduct(pool, raw, parent={}){
       hit_count=COALESCE(gm_product.hit_count,0)+1,
       last_seen_at=now(),
       updated_at=now()
-    RETURNING product_uid, pi_ii_vi, mall_code, cp_id, cp_code, hit_count, option_count, (xmax = 0) AS inserted
+    RETURNING product_uid, pi_ii_vi, mall_code, cp_id, cp_code, cp_match, hit_count, option_count, (xmax = 0) AS inserted
   `;
 
   const vals = [
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
-    id.mallCode, sourceMall, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpId, cpCode,
+    id.mallCode, sourceMall, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpId, cpCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     safeJsonString(makeEmptyOptionJson()), safeJsonString(thumbJson), safeJsonString(detailJson), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
@@ -1447,6 +1654,11 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_UPSERT_SQL_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, pi:id.pi, product_name:productName, vals_len:vals.length, columns:productColumns.length }, compactError(e)));
     throw e;
   }
+  let cp_learning = null;
+  try{
+    cp_learning = await applyCpCodeLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_id:cpId, cp_code:cpCode, cp_match:cpMatch, product_uid:id.uid });
+    try{ console.log('[GM_CP_CODE_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_id:cpId, cp_code:cpCode, cp_match:cpMatch, inferred:cpCodeInferred, result:cp_learning }); }catch(_log){}
+  }catch(e){ cp_learning={ applied:false, error:compactError(e) }; }
   let option_result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
   try{
     option_result = await upsertProductOptions(pool, id, optionJson, p, parent);
@@ -1458,7 +1670,7 @@ async function upsertProduct(pool, raw, parent={}){
 
   let detail_patch = null;
   try{
-    detail_patch = await applyDetailPatch(pool, id, p, makeEmptyOptionJson(), thumbJson, detailJson, returnFee);
+    detail_patch = await applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee);
   }catch(e){
     detail_patch = { applied:false, error:compactError(e) };
     console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
@@ -1468,7 +1680,7 @@ async function upsertProduct(pool, raw, parent={}){
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { option_count:optionCount, option_result, detail_patch, detail_stats })
+    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats })
   };
 }
 
@@ -1508,7 +1720,7 @@ router.get('/api/gm/keyword/lookup', async (req,res)=>{
 });
 
 router.post('/api/gm/product/queue', async (req,res)=>{
-  const pool=db(req), p=req.body||{};
+  const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const items = normalizeQueueItems(p);
   if(!items.length){
@@ -1669,7 +1881,7 @@ router.get('/api/gm/product/queue/recent', async (req,res)=>{
 });
 
 router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
-  const pool=db(req), p=req.body||{};
+  const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   try{
     const id0 = ids(p);
@@ -1682,11 +1894,12 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       optionCombos: Array.isArray(p.optionCombos) ? p.optionCombos.length : 0,
       aliOptionCombos: Array.isArray(p.aliOptionCombos) ? p.aliOptionCombos.length : 0,
       option_json_rows: oj0 && Array.isArray(oj0.rows) ? oj0.rows.length : 0,
+      deep_option_arrays: collectPayloadContainers(p,4).reduce((n,o)=>n + (Array.isArray(o.optionRows)?o.optionRows.length:0) + (Array.isArray(o.optionCombos)?o.optionCombos.length:0) + (Array.isArray(o.aliOptionCombos)?o.aliOptionCombos.length:0),0),
       has_detail_json: !!(p.detail_json || p.detailJson),
       keys: Object.keys(p).slice(0,40)
     });
   }catch(_log){}
-  const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : null);
+  const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : (p.payload && Array.isArray(p.payload.items) ? p.payload.items : (p.payload && Array.isArray(p.payload.products) ? p.payload.products : null)));
   try{
     if(items){
       const results=[];

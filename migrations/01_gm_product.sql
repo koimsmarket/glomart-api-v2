@@ -1,6 +1,6 @@
 -- 01_gm_product.sql
 -- 개발용 즉시 테스트 스키마. 정식 스타트 전까지는 배포 시 gm_product를 DROP/CREATE 한다.
--- V023: 불필요 컬럼 제거 유지 + 상세수집 저장 진단/직접 패치 반영. 기존 테이블은 DROP/CREATE로 초기화.
+-- V026: cp_match 컬럼 추가. V023: 불필요 컬럼 제거 유지 + 상세수집 저장 진단/직접 패치 반영. 기존 테이블은 DROP/CREATE로 초기화.
 
 DROP TABLE IF EXISTS gm_product CASCADE;
 
@@ -86,4 +86,5 @@ CREATE TABLE gm_product (
 CREATE INDEX IF NOT EXISTS idx_gm_product_keyword ON gm_product(keyword);
 CREATE INDEX IF NOT EXISTS idx_gm_product_mall_code ON gm_product(mall_code);
 CREATE INDEX IF NOT EXISTS idx_gm_product_cp_code ON gm_product(cp_code);
+CREATE INDEX IF NOT EXISTS idx_gm_product_cp_match ON gm_product(cp_match);
 CREATE INDEX IF NOT EXISTS idx_gm_product_pi_ii_vi ON gm_product(pi_ii_vi);
