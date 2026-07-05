@@ -961,10 +961,12 @@ async function upsertProduct(pool, raw, parent={}){
     'return_available_yn','exchange_available_yn','return_policy_text','exchange_policy_text','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days',
     'last_seen_at','created_at','updated_at'
   ];
+  // V021: productColumns와 placeholder 순서를 1:1로 고정한다.
+  // V020 오류: soldout_yn 자리에 literal 1이 들어가고, soldout 값이 hit_count에 들어가 insert가 전부 실패했다.
   const valuesSql = [
     '$1','$2','$3','$4','$5','$6','$7','$8','$9','$10::jsonb','$11','$12','$13','$14','$15','$16','$17',
     '$18','$19','$20','$21::jsonb','$22::jsonb','$23::jsonb','$24','$25','$26','$27','$28','$29','$30','$31','$32','$33',
-    '$34','$35','$36','$37','$38','$39','$40','$41','$42','$43','$44','$45','$46','$47','$48','1','$49','$50',
+    '$34','$35','$36','$37','$38','$39','$40','$41','$42','$43','$44','$45','$46','$47','$48','$49','1','$50',
     '$51','$52','$53','$54','$55','$56','$57','$58','$59','$60','$61','$62','now()','now()','now()'
   ];
   const sql = `
