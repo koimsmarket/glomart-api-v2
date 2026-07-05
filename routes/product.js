@@ -774,6 +774,55 @@ function normalizeThumbJson(p){
   add(p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl || p.thumbnail || p.image || p.mainImage, 'main');
   return out;
 }
+
+function normalizeDetailJson(p){
+  p=p||{};
+  const images=[]; const blocks=[]; const texts=[]; const seenImg=new Set();
+  function addImage(v, source){
+    if(v && typeof v === 'object') v = v.url || v.src || v.image || v.img || '';
+    v = normalizeUrl(v);
+    if(!v || seenImg.has(v)) return;
+    seenImg.add(v);
+    images.push({ url:v, source:source || 'detail', index:images.length });
+  }
+  function addText(v, source){
+    v = cleanText(v);
+    if(!v) return;
+    if(texts.indexOf(v) >= 0) return;
+    texts.push(v);
+    blocks.push({ type:'text', text:v, source:source || 'detail', index:blocks.length });
+  }
+  function addBlock(b, source){
+    if(!b) return;
+    if(typeof b === 'string'){
+      const u = normalizeUrl(b);
+      if(u) { addImage(u, source || 'detailBlock'); return; }
+      addText(b, source || 'detailBlock');
+      return;
+    }
+    if(typeof b !== 'object') return;
+    const type = cleanText(b.type || b.kind || '').toLowerCase();
+    const img = b.url || b.src || b.image || b.img || b.imageUrl || b.image_url || '';
+    const txt = b.text || b.content || b.value || b.htmlText || b.html_text || '';
+    if(img || type === 'image'){
+      const before = images.length;
+      addImage(img, source || 'detailBlock');
+      if(images.length > before) blocks.push({ type:'image', url:images[images.length-1].url, source:source || 'detailBlock', index:blocks.length });
+      return;
+    }
+    if(txt || type === 'text') addText(txt, source || 'detailBlock');
+  }
+  [p.detailImages,p.detail_images,p.detailImageUrls,p.detail_image_urls,p.descriptionImages,p.description_images,p.contentImages,p.content_images].forEach(a=>{
+    if(Array.isArray(a)) a.forEach(x=>addImage(x,'detailImages'));
+  });
+  [p.detailBlocks,p.detail_blocks,p.blocks,p.contentBlocks,p.content_blocks,p.descriptionBlocks,p.description_blocks].forEach(a=>{
+    if(Array.isArray(a)) a.forEach(x=>addBlock(x,'detailBlocks'));
+  });
+  [p.detailTexts,p.detail_texts,p.descriptionTexts,p.description_texts,p.productDetailText,p.product_detail_text].forEach(a=>{
+    if(Array.isArray(a)) a.forEach(x=>addText(x,'detailTexts')); else if(a) addText(a,'detailTexts');
+  });
+  return { images, blocks, texts, image_count:images.length, block_count:blocks.length, text_count:texts.length, updated_at:new Date().toISOString() };
+}
 function normalizeOptionJson(p, id){
   p=p||{}; id=id||{};
   const arrays=[];
@@ -895,36 +944,37 @@ async function upsertProduct(pool, raw, parent={}){
   const cpCode = pickCpCode(p, mallCategoryLeaf);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
+  const detailJson = normalizeDetailJson(p);
   const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
 
+  const productColumns = [
+    'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
+    'mall_category','mall_category_json','cp_id','cp_code','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
+    'product_name','mall_product_name','option_count','option_json','thumb_json','detail_json','seasonal_text',
+    'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type','tax_type','overseas_direct_yn',
+    'review_count','mall_sales_count','certification_no_1','certification_no_2',
+    'supplier_id','supplier_name','business_number','online_sales_number','ceo_name','supplier_mobile','supplier_phone','supplier_email','supplier_address',
+    'product_url','thumb_origin_url','soldout_yn','hit_count','sale_status','product_grade',
+    'buyable_qty','min_order_qty','max_order_qty',
+    'return_available_yn','exchange_available_yn','return_policy_text','exchange_policy_text','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days',
+    'last_seen_at','created_at','updated_at'
+  ];
+  const valuesSql = [
+    '$1','$2','$3','$4','$5','$6','$7','$8','$9','$10::jsonb','$11','$12','$13','$14','$15','$16','$17',
+    '$18','$19','$20','$21::jsonb','$22::jsonb','$23::jsonb','$24','$25','$26','$27','$28','$29','$30','$31','$32','$33',
+    '$34','$35','$36','$37','$38','$39','$40','$41','$42','$43','$44','$45','$46','$47','$48','1','$49','$50',
+    '$51','$52','$53','$54','$55','$56','$57','$58','$59','$60','$61','$62','now()','now()','now()'
+  ];
   const sql = `
-    INSERT INTO gm_product (
-      product_uid, glomart_code, gm_category, category_keyword, keyword, mall_code, source_mall, source_uid,
-      cp_id, cp_code, product_id, item_id, vendor_item_id, pi_ii_vi, internal_product_code,
-      product_name, mall_product_name, option_count, option_json, thumb_json,
-      origin_country, storage_type, storage_method, shelf_life_text, seasonal_text,
-      mall_sale_price, final_supply_price, normal_price, discount_price,
-      delivery_fee, delivery_eta_text, delivery_type, tax_type, overseas_direct_yn,
-      review_count, mall_sales_count, certification_no_1, certification_no_2,
-      supplier_id, supplier_name, business_number, online_sales_number, ceo_name, supplier_mobile, supplier_phone, supplier_email, supplier_address,
-      product_url, thumb_origin_url, soldout_yn, hit_count,
-      sale_status, product_grade, collect_status, collect_error,
-      buyable_qty, min_order_qty, max_order_qty,
-      return_available_yn, exchange_available_yn, return_policy_text, exchange_policy_text, return_shipping_fee, exchange_shipping_fee, return_period_days, exchange_period_days,
-      last_seen_at, created_at, updated_at
-    ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-      $16,$17,$18,$19::jsonb,$20::jsonb,$21,$22,$23,$24,$25,$26,$27,$28,$29,
-      $30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,
-      $48,$49,$50,1,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,
-      now(),now(),now()
-    )
+    INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=EXCLUDED.source_mall,
       source_uid=EXCLUDED.source_uid,
       keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
+      mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
+      mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_id=COALESCE(NULLIF(EXCLUDED.cp_id,''), gm_product.cp_id),
       cp_code=CASE WHEN NULLIF(EXCLUDED.cp_code,'') IS NULL THEN gm_product.cp_code WHEN COALESCE(gm_product.cp_code,'') <> EXCLUDED.cp_code THEN EXCLUDED.cp_code ELSE gm_product.cp_code END,
       product_name=EXCLUDED.product_name,
@@ -932,10 +982,7 @@ async function upsertProduct(pool, raw, parent={}){
       option_count=EXCLUDED.option_count,
       option_json=EXCLUDED.option_json,
       thumb_json=EXCLUDED.thumb_json,
-      origin_country=COALESCE(NULLIF(EXCLUDED.origin_country,''), gm_product.origin_country),
-      storage_type=COALESCE(NULLIF(EXCLUDED.storage_type,''), gm_product.storage_type),
-      storage_method=COALESCE(NULLIF(EXCLUDED.storage_method,''), gm_product.storage_method),
-      shelf_life_text=COALESCE(NULLIF(EXCLUDED.shelf_life_text,''), gm_product.shelf_life_text),
+      detail_json=CASE WHEN EXCLUDED.detail_json <> '{}'::jsonb THEN EXCLUDED.detail_json ELSE gm_product.detail_json END,
       seasonal_text=COALESCE(NULLIF(EXCLUDED.seasonal_text,''), gm_product.seasonal_text),
       mall_sale_price=EXCLUDED.mall_sale_price,
       final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product.final_supply_price),
@@ -963,8 +1010,6 @@ async function upsertProduct(pool, raw, parent={}){
       soldout_yn=EXCLUDED.soldout_yn,
       sale_status=EXCLUDED.sale_status,
       product_grade=EXCLUDED.product_grade,
-      collect_status=COALESCE(NULLIF(EXCLUDED.collect_status,''), gm_product.collect_status),
-      collect_error=COALESCE(NULLIF(EXCLUDED.collect_error,''), gm_product.collect_error),
       buyable_qty=COALESCE(EXCLUDED.buyable_qty, gm_product.buyable_qty),
       min_order_qty=COALESCE(EXCLUDED.min_order_qty, gm_product.min_order_qty),
       max_order_qty=COALESCE(EXCLUDED.max_order_qty, gm_product.max_order_qty),
@@ -979,17 +1024,16 @@ async function upsertProduct(pool, raw, parent={}){
       hit_count=COALESCE(gm_product.hit_count,0)+1,
       last_seen_at=now(),
       updated_at=now()
-    RETURNING product_uid, pi_ii_vi, mall_code, cp_id, cp_code, hit_count, (xmax = 0) AS inserted
+    RETURNING product_uid, pi_ii_vi, mall_code, cp_id, cp_code, hit_count, option_count, (xmax = 0) AS inserted
   `;
 
   const vals = [
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
-    id.mallCode, sourceMall, sourceUid, cpId, cpCode,
+    id.mallCode, sourceMall, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpId, cpCode,
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
-    safeJsonString(optionJson), safeJsonString(thumbJson),
-    cleanText(p.origin_country || p.originCountry), cleanText(p.storage_type || p.storageType), cleanText(p.storage_method || p.storageMethod), cleanText(p.shelf_life_text || p.shelfLifeText), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
+    safeJsonString(optionJson), safeJsonString(thumbJson), safeJsonString(detailJson), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
     cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
@@ -1004,7 +1048,6 @@ async function upsertProduct(pool, raw, parent={}){
     pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
     productUrl, thumbUrl,
     cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active'), pickRatingScore(p),
-    cleanText(p.collect_status || p.collectStatus || ''), cleanText(p.collect_error || p.collectError || ''),
     pickBuyableQty(p), pickMinOrderQty(p), pickMaxOrderQty(p),
     cleanText(p.return_available_yn || p.returnAvailableYn || 'Y'), cleanText(p.exchange_available_yn || p.exchangeAvailableYn || 'Y'),
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
