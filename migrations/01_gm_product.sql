@@ -26,7 +26,7 @@ CREATE TABLE gm_product (
   product_name TEXT NOT NULL,
   mall_product_name TEXT,
   option_count INTEGER NOT NULL DEFAULT 0,
-  option_json JSONB NOT NULL DEFAULT '{"default_uid":"","option_count":0,"updated_at":null,"headers":[],"rows":[]}'::jsonb,
+  option_json JSONB NOT NULL DEFAULT '{"iid_vid":""}'::jsonb,
   thumb_json JSONB NOT NULL DEFAULT '[]'::jsonb,
   detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   seasonal_text TEXT,
@@ -121,3 +121,5 @@ CREATE TABLE IF NOT EXISTS gm_category_dynamic (
 CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_keyword ON gm_category_dynamic(keyword);
 CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_name_ko ON gm_category_dynamic(name_ko);
 CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_parent ON gm_category_dynamic(cp_parent_code);
+
+ALTER TABLE gm_product ALTER COLUMN option_json SET DEFAULT '{"iid_vid":""}'::jsonb;

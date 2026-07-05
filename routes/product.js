@@ -906,8 +906,8 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
     pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
     pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
     pickAny(p,['ceo_name','ceoName','representative_name','representativeName','supplierRepresentative']),
-    pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile']),
-    pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone']),
+    pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile','phone','sellerPhone','supplierPhone']),
+    pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone','tel','telephone','landline','sellerTel','supplierTel']),
     pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
     pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
     pickBuyableQty(p), pickMinOrderQty(p), pickMaxOrderQty(p),
@@ -1159,7 +1159,27 @@ function normalizeOptionJson(p, id){
 // GM_PRODUCT_OPTION_TABLE_V001
 // 옵션은 상품 JSON에 중복 저장하지 않고 gm_product_option에만 운영 컬럼으로 저장한다.
 function makeEmptyOptionJson(){
-  return { headers:[], rows:[], default_uid:'', option_count:0, updated_at:new Date().toISOString() };
+  return { iid_vid:'' };
+}
+function makeProductOptionLinkJson(optionJson, id){
+  optionJson = optionJson || {}; id = id || {};
+  const vals = [];
+  const seen = new Set();
+  function add(iid, vid){
+    iid = cleanText(iid); vid = cleanText(vid);
+    if(!iid || !vid) return;
+    const v = iid + '_' + vid;
+    if(seen.has(v)) return;
+    seen.add(v); vals.push(v);
+  }
+  if(Array.isArray(optionJson.rows)){
+    optionJson.rows.forEach(r=>{
+      if(Array.isArray(r)) add(r[2], r[3]);
+      else if(r && typeof r === 'object') add(r.item_id || r.itemId, r.vendor_item_id || r.vendorItemId);
+    });
+  }
+  add(id.itemId, id.vendorItemId);
+  return { iid_vid: vals.join('|') };
 }
 function normalizeSoldoutYn(v){
   const s = cleanText(v);
@@ -1672,6 +1692,7 @@ async function upsertProduct(pool, raw, parent={}){
   const productUrl = normalizeUrl(buildProductUrlFromId(id) || pickProductUrl(p));
   const thumbUrl = pickThumbUrl(p);
   const sourceMall = sourceMallFrom(p, p.source_uid || p.sourceUid, productUrl, id.mallCode);
+  const sourceMallStored = cleanText(sourceMall).toUpperCase() === cleanText(id.mallCode).toUpperCase() ? '' : sourceMall;
   const sourceUid = sourceUidFrom(p, sourceMall);
   const searchKeyword = pickSearchKeyword(p, parent);
   const relatedKeywords = pickRelatedKeywords(p, parent);
@@ -1720,7 +1741,7 @@ async function upsertProduct(pool, raw, parent={}){
   const sql = `
     INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
     ON CONFLICT (product_uid) DO UPDATE SET
-      source_mall=EXCLUDED.source_mall,
+      source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
       keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
@@ -1772,7 +1793,7 @@ async function upsertProduct(pool, raw, parent={}){
       supplier_phone=COALESCE(NULLIF(EXCLUDED.supplier_phone,''), gm_product.supplier_phone),
       supplier_email=COALESCE(NULLIF(EXCLUDED.supplier_email,''), gm_product.supplier_email),
       supplier_address=COALESCE(NULLIF(EXCLUDED.supplier_address,''), gm_product.supplier_address),
-      product_url=EXCLUDED.product_url,
+      product_url=COALESCE(NULLIF(EXCLUDED.product_url,''), gm_product.product_url),
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
       soldout_yn=EXCLUDED.soldout_yn,
       sale_status=EXCLUDED.sale_status,
@@ -1797,10 +1818,10 @@ async function upsertProduct(pool, raw, parent={}){
   const vals = [
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
-    id.mallCode, sourceMall, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
-    id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
+    id.mallCode, sourceMallStored, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
+    id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
-    safeJsonString(makeEmptyOptionJson()), safeJsonString(thumbJson), safeJsonString(detailJson), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
+    safeJsonString(makeProductOptionLinkJson(optionJson, id)), safeJsonString(thumbJson), safeJsonString(detailJson), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
     cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
@@ -1809,8 +1830,8 @@ async function upsertProduct(pool, raw, parent={}){
     pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
     pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
     pickAny(p,['ceo_name','ceoName','representative_name','representativeName','supplierRepresentative']),
-    pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile']),
-    pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone']),
+    pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile','phone','sellerPhone','supplierPhone']),
+    pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone','tel','telephone','landline','sellerTel','supplierTel']),
     pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
     pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
     productUrl, thumbUrl,
