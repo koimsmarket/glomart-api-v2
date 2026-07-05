@@ -69,6 +69,12 @@ async function processRow(pool, row){
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
+  let option_received = 0;
+  let option_inserted = 0;
+  let option_updated = 0;
+  let option_skipped = 0;
+  let option_nonactive = 0;
+  let option_balance_ok = true;
   const skip_reason_count = {};
   const samples = [];
   const errors = [];
@@ -79,8 +85,15 @@ async function processRow(pool, row){
         saved += 1;
         if(r.action === 'inserted') inserted += 1;
         else updated += 1;
+        const opt = r.item && r.item.option_result || {};
+        option_received += Number(opt.received || 0);
+        option_inserted += Number(opt.inserted || 0);
+        option_updated += Number(opt.updated || 0);
+        option_skipped += Number(opt.skipped || 0);
+        option_nonactive += Number(opt.nonactive || 0);
+        if(opt.balance_ok === false) option_balance_ok = false;
         if(samples.length < 5){
-          samples.push({ action:r.action || 'saved', uid:r.item && r.item.product_uid, hit_count:r.item && r.item.hit_count });
+          samples.push({ action:r.action || 'saved', uid:r.item && r.item.product_uid, hit_count:r.item && r.item.hit_count, option_result:opt });
         }
       }else{
         skipped += 1;
@@ -98,7 +111,22 @@ async function processRow(pool, row){
       if(samples.length < 8) samples.push({ action:'error', reason });
     }
   }
-  const result = { received: items.length, saved, inserted, updated, skipped, skip_reason_count, samples, errors: errors.slice(0, 5) };
+  option_balance_ok = option_balance_ok && option_received === (option_inserted + option_updated + option_skipped);
+  const audit = {
+    search_result_count:items.length,
+    product_inserted:inserted,
+    product_updated:updated,
+    product_skipped:skipped,
+    product_balance_ok:items.length === (inserted + updated + skipped),
+    option_received,
+    option_inserted,
+    option_updated,
+    option_skipped,
+    option_nonactive,
+    option_balance_ok
+  };
+  const result = { received: items.length, saved, inserted, updated, skipped, audit, skip_reason_count, samples, errors: errors.slice(0, 5) };
+  console.log('[GM_PRODUCT_QUEUE_WORKER_SAVE_AUDIT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...audit });
   console.log('[GM_PRODUCT_QUEUE_WORKER_RESULT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...result });
   if(items.length && saved === 0){
     // V017: worker가 0건 저장일 때 route/DB 상태 확인을 위해 failed 재시도 루프만 만들지 않고

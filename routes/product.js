@@ -1022,6 +1022,147 @@ function normalizeOptionJson(p, id){
   return { headers, rows, default_uid:defaultUid, option_count:rows.length, updated_at:new Date().toISOString() };
 }
 
+
+// GM_PRODUCT_OPTION_TABLE_V001
+// 옵션은 상품 JSON에 중복 저장하지 않고 gm_product_option에만 운영 컬럼으로 저장한다.
+function makeEmptyOptionJson(){
+  return { headers:[], rows:[], default_uid:'', option_count:0, updated_at:new Date().toISOString() };
+}
+function normalizeSoldoutYn(v){
+  const s = cleanText(v);
+  if(v === true) return 'Y';
+  if(/^(y|yes|true|1|soldout|sold_out)$/i.test(s) || /품절|일시품절|sold\s*out/i.test(s)) return 'Y';
+  return 'N';
+}
+function optionRowsFromOptionJson(optionJson, id, p){
+  optionJson = optionJson || {}; id = id || {}; p = p || {};
+  const rows = Array.isArray(optionJson.rows) ? optionJson.rows : [];
+  const out = [];
+  rows.forEach((r, idx)=>{
+    if(!Array.isArray(r)) return;
+    const productId = cleanText(r[1] || id.productId || p.productId || p.product_id || '');
+    const itemId = cleanText(r[2] || id.itemId || p.itemId || p.item_id || '');
+    const vendorItemId = cleanText(r[3] || id.vendorItemId || p.vendorItemId || p.vendor_item_id || productId || '');
+    const pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || cleanText(r[0] || id.pi || '');
+    if(!productId || !pi) return;
+    const name = cleanText(r[4] || p.option_name || p.optionName || p.product_name || p.productName || '기본옵션');
+    const soldoutYn = normalizeSoldoutYn(r[11]);
+    out.push({
+      mall_code: cleanText(id.mallCode || p.mall_code || p.mallCode || '').toUpperCase(),
+      product_id: productId,
+      item_id: itemId,
+      vendor_item_id: vendorItemId,
+      pi_ii_vi: pi,
+      option_name: name,
+      option_image_url: normalizeUrl(r[10] || ''),
+      option_sort_no: idx + 1,
+      mall_sale_price: parseMoney(r[5], 0),
+      final_supply_price: null,
+      normal_price: parseMoney(r[6], 0),
+      discount_price: 0,
+      delivery_fee: parseMoney(r[8], 0),
+      delivery_eta_text: cleanText(r[9] || ''),
+      delivery_type: cleanText(r[7] || ''),
+      soldout_yn: soldoutYn,
+      sale_status: soldoutYn === 'Y' ? 'soldout' : 'active',
+      active_yn: 'Y',
+      buyable_qty: pickBuyableQty(p),
+      min_order_qty: pickMinOrderQty(p),
+      max_order_qty: pickMaxOrderQty(p)
+    });
+  });
+  return out;
+}
+async function upsertProductOptions(pool, id, optionJson, p, parent){
+  const result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
+  const optionRows = optionRowsFromOptionJson(optionJson, id, p);
+  result.received = optionRows.length;
+  if(!optionRows.length) return result;
+  const seen = new Set();
+  for(const opt of optionRows){
+    try{
+      if(!opt.mall_code || !opt.product_id || !opt.pi_ii_vi){
+        result.skipped += 1;
+        if(result.samples.length < 5) result.samples.push({ action:'skip', reason:'required option field missing', opt });
+        continue;
+      }
+      const sig = opt.mall_code + '|' + opt.pi_ii_vi;
+      if(seen.has(sig)){
+        result.skipped += 1;
+        if(result.samples.length < 5) result.samples.push({ action:'skip', reason:'duplicate option in payload', pi_ii_vi:opt.pi_ii_vi });
+        continue;
+      }
+      seen.add(sig);
+      const r = await pool.query(`
+        INSERT INTO gm_product_option (
+          mall_code, product_id, item_id, vendor_item_id, pi_ii_vi,
+          option_name, option_image_url, option_sort_no,
+          mall_sale_price, final_supply_price, normal_price, discount_price,
+          delivery_fee, delivery_eta_text, delivery_type,
+          soldout_yn, sale_status, active_yn,
+          buyable_qty, min_order_qty, max_order_qty,
+          sales_qty, last_seen_at, created_at, updated_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
+        )
+        ON CONFLICT (mall_code, pi_ii_vi) DO UPDATE SET
+          product_id=EXCLUDED.product_id,
+          item_id=EXCLUDED.item_id,
+          vendor_item_id=EXCLUDED.vendor_item_id,
+          option_name=EXCLUDED.option_name,
+          option_image_url=COALESCE(NULLIF(EXCLUDED.option_image_url,''), gm_product_option.option_image_url),
+          option_sort_no=EXCLUDED.option_sort_no,
+          mall_sale_price=EXCLUDED.mall_sale_price,
+          final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product_option.final_supply_price),
+          normal_price=COALESCE(EXCLUDED.normal_price, gm_product_option.normal_price),
+          discount_price=EXCLUDED.discount_price,
+          delivery_fee=EXCLUDED.delivery_fee,
+          delivery_eta_text=EXCLUDED.delivery_eta_text,
+          delivery_type=EXCLUDED.delivery_type,
+          soldout_yn=EXCLUDED.soldout_yn,
+          sale_status=EXCLUDED.sale_status,
+          active_yn='Y',
+          buyable_qty=COALESCE(EXCLUDED.buyable_qty, gm_product_option.buyable_qty),
+          min_order_qty=COALESCE(EXCLUDED.min_order_qty, gm_product_option.min_order_qty),
+          max_order_qty=COALESCE(EXCLUDED.max_order_qty, gm_product_option.max_order_qty),
+          last_seen_at=now(),
+          updated_at=now()
+        RETURNING (xmax = 0) AS inserted
+      `, [
+        opt.mall_code, opt.product_id, opt.item_id, opt.vendor_item_id, opt.pi_ii_vi,
+        opt.option_name, opt.option_image_url, opt.option_sort_no,
+        opt.mall_sale_price, opt.final_supply_price, opt.normal_price, opt.discount_price,
+        opt.delivery_fee, opt.delivery_eta_text, opt.delivery_type,
+        opt.soldout_yn, opt.sale_status, opt.active_yn,
+        opt.buyable_qty, opt.min_order_qty, opt.max_order_qty
+      ]);
+      if(r.rows[0] && r.rows[0].inserted) result.inserted += 1;
+      else result.updated += 1;
+      if(result.samples.length < 5) result.samples.push({ action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', pi_ii_vi:opt.pi_ii_vi, name:opt.option_name });
+    }catch(e){
+      result.skipped += 1;
+      result.errors.push(compactError(e));
+      if(result.samples.length < 5) result.samples.push({ action:'error', pi_ii_vi:opt.pi_ii_vi, error:String(e && e.message || e) });
+      if(e && e.code === '42P01') break;
+    }
+  }
+  // 수집 payload가 2개 이상 옵션을 갖고 있을 때만 전체 옵션리스트로 보고 누락 옵션을 NonActive 처리한다.
+  // 검색결과의 대표 옵션 1개 저장이 기존 옵션 전체를 죽이는 것을 방지한다.
+  if(seen.size > 1){
+    try{
+      const livePi = Array.from(seen).map(x=>x.split('|').slice(1).join('|'));
+      const nr = await pool.query(`
+        UPDATE gm_product_option
+        SET active_yn='N', sale_status='inactive', updated_at=now()
+        WHERE mall_code=$1 AND product_id=$2 AND NOT (pi_ii_vi = ANY($3::text[])) AND active_yn <> 'N'
+      `, [cleanText(id.mallCode).toUpperCase(), cleanText(id.productId), livePi]);
+      result.nonactive = nr.rowCount || 0;
+    }catch(e){ result.errors.push(compactError(e)); }
+  }
+  result.balance_ok = result.received === (result.inserted + result.updated + result.skipped);
+  return result;
+}
+
 function pickTaxType(p){
   p=p||{};
   const direct=cleanText(p.tax_type || p.taxType || p.vat_type || p.vatType || '');
@@ -1208,7 +1349,7 @@ async function upsertProduct(pool, raw, parent={}){
     id.mallCode, sourceMall, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpId, cpCode,
     id.productId, id.itemId, id.vendorItemId, id.pi, cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
-    safeJsonString(optionJson), safeJsonString(thumbJson), safeJsonString(detailJson), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
+    safeJsonString(makeEmptyOptionJson()), safeJsonString(thumbJson), safeJsonString(detailJson), cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
     cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
@@ -1239,9 +1380,17 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_UPSERT_SQL_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, pi:id.pi, product_name:productName, vals_len:vals.length, columns:productColumns.length }, compactError(e)));
     throw e;
   }
+  let option_result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
+  try{
+    option_result = await upsertProductOptions(pool, id, optionJson, p, parent);
+  }catch(e){
+    option_result = { received:optionCount, inserted:0, updated:0, skipped:optionCount, nonactive:0, balance_ok:false, error:compactError(e) };
+    console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
+  }
+
   let detail_patch = null;
   try{
-    detail_patch = await applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee);
+    detail_patch = await applyDetailPatch(pool, id, p, makeEmptyOptionJson(), thumbJson, detailJson, returnFee);
   }catch(e){
     detail_patch = { applied:false, error:compactError(e) };
     console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
@@ -1251,7 +1400,7 @@ async function upsertProduct(pool, raw, parent={}){
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { option_count:optionCount, detail_patch, detail_stats })
+    item:Object.assign({}, r.rows[0] || {}, { option_count:optionCount, option_result, detail_patch, detail_stats })
   };
 }
 
@@ -1351,6 +1500,32 @@ router.post('/api/gm/product/queue', async (req,res)=>{
     }
     const inlineSaved = inlineResults.filter(x=>x && x.ok).length;
     const inlineSkipped = inlineResults.length - inlineSaved;
+    const inlineInserted = inlineResults.filter(x=>x && x.ok && x.action === 'inserted').length;
+    const inlineUpdated = inlineResults.filter(x=>x && x.ok && x.action !== 'inserted').length;
+    const optionAudit = inlineResults.reduce((a,x)=>{
+      const o = x && x.item && x.item.option_result || {};
+      a.received += Number(o.received || 0);
+      a.inserted += Number(o.inserted || 0);
+      a.updated += Number(o.updated || 0);
+      a.skipped += Number(o.skipped || 0);
+      a.nonactive += Number(o.nonactive || 0);
+      if(o.balance_ok === false) a.balance_ok = false;
+      return a;
+    }, { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true });
+    optionAudit.balance_ok = optionAudit.balance_ok && optionAudit.received === (optionAudit.inserted + optionAudit.updated + optionAudit.skipped);
+    const saveAudit = {
+      search_result_count:items.length,
+      product_inserted:inlineInserted,
+      product_updated:inlineUpdated,
+      product_skipped:inlineSkipped,
+      product_balance_ok:items.length === (inlineInserted + inlineUpdated + inlineSkipped),
+      option_received:optionAudit.received,
+      option_inserted:optionAudit.inserted,
+      option_updated:optionAudit.updated,
+      option_skipped:optionAudit.skipped,
+      option_nonactive:optionAudit.nonactive,
+      option_balance_ok:optionAudit.balance_ok
+    };
     const inlineStatus = inlineSaved > 0 ? 'done' : 'failed';
     const inlineError = inlineSaved > 0 ? null : (inlineResults.find(x=>x && (x.error || x.reason)) || {}).error || (inlineResults.find(x=>x && x.reason) || {}).reason || 'inline upsert saved 0 rows';
     try{
@@ -1361,11 +1536,12 @@ router.post('/api/gm/product/queue', async (req,res)=>{
             error_message=$3,
             result_json=$4::jsonb
         WHERE queue_id=$1
-      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, sample:inlineResults.slice(0,10), errors:inlineResults.filter(x=>x && !x.ok).slice(0,30) })]);
+      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, audit:saveAudit, option_audit:optionAudit, sample:inlineResults.slice(0,10), errors:inlineResults.filter(x=>x && !x.ok).slice(0,30) })]);
     }catch(_qe){
       console.warn('[GM_PRODUCT_QUEUE] inline result update failed', String(_qe && _qe.message || _qe));
     }
-    console.log('[GM_PRODUCT_QUEUE] inline upsert done', { saved:inlineSaved, skipped:inlineSkipped, status:inlineStatus, queue_id:r.rows[0] && r.rows[0].queue_id, sample:inlineResults.slice(0,3) });
+    console.log('[GM_PRODUCT_QUEUE_SAVE_AUDIT]', Object.assign({ queue_id:r.rows[0] && r.rows[0].queue_id, request_id:r.rows[0] && r.rows[0].request_id, mall_code:mallCode, keyword }, saveAudit));
+    console.log('[GM_PRODUCT_QUEUE] inline upsert done', { saved:inlineSaved, skipped:inlineSkipped, status:inlineStatus, queue_id:r.rows[0] && r.rows[0].queue_id, audit:saveAudit, sample:inlineResults.slice(0,3) });
 
     ok(res,{
       action:'product.queue',
@@ -1379,6 +1555,8 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       skipped:inlineSkipped,
       inline_upsert:true,
       inline_status:inlineStatus,
+      audit:saveAudit,
+      option_audit:optionAudit,
       inline_sample:inlineResults.slice(0,10),
       inline_errors:inlineResults.filter(x=>x && !x.ok).slice(0,30),
       unique_uid_count:uidSeen.size,
@@ -1435,12 +1613,18 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       }
       const saved = results.filter(x=>x && x.ok).length;
       const skipped = results.length - saved;
-      return ok(res,{ mode:'batch', received:items.length, saved, skipped, results:results.slice(0,20), errors:results.filter(x=>x && !x.ok).slice(0,30) });
+      const inserted = results.filter(x=>x && x.ok && x.action === 'inserted').length;
+      const updated = results.filter(x=>x && x.ok && x.action !== 'inserted').length;
+      const optionAudit = results.reduce((a,x)=>{ const o=x&&x.item&&x.item.option_result||{}; a.received+=Number(o.received||0); a.inserted+=Number(o.inserted||0); a.updated+=Number(o.updated||0); a.skipped+=Number(o.skipped||0); a.nonactive+=Number(o.nonactive||0); if(o.balance_ok===false)a.balance_ok=false; return a; }, {received:0,inserted:0,updated:0,skipped:0,nonactive:0,balance_ok:true});
+      optionAudit.balance_ok = optionAudit.balance_ok && optionAudit.received === (optionAudit.inserted + optionAudit.updated + optionAudit.skipped);
+      const audit = { search_result_count:items.length, product_inserted:inserted, product_updated:updated, product_skipped:skipped, product_balance_ok:items.length === (inserted+updated+skipped), option_received:optionAudit.received, option_inserted:optionAudit.inserted, option_updated:optionAudit.updated, option_skipped:optionAudit.skipped, option_nonactive:optionAudit.nonactive, option_balance_ok:optionAudit.balance_ok };
+      console.log('[GM_PRODUCT_UPSERT_BATCH_AUDIT]', audit);
+      return ok(res,{ mode:'batch', received:items.length, saved, skipped, audit, option_audit:optionAudit, results:results.slice(0,20), errors:results.filter(x=>x && !x.ok).slice(0,30) });
     }
     const result = await upsertProduct(pool, p, p);
-    try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, option_count:result && result.item && result.item.option_count, mode:'single' }); }catch(_log){}
+    try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, option_count:result && result.item && result.item.option_count, option_result:result && result.item && result.item.option_result, mode:'single' }); }catch(_log){}
     if(!result.ok) return fail(res, 400, result.reason || 'product upsert validation failed', result);
-    return ok(res,{ mode:'single', item:result.item, detail_patch:result.item && result.item.detail_patch, detail_stats:result.item && result.item.detail_stats });
+    return ok(res,{ mode:'single', item:result.item, option_result:result.item && result.item.option_result, detail_patch:result.item && result.item.detail_patch, detail_stats:result.item && result.item.detail_stats });
   }catch(e){ console.error('[GM_PRODUCT_UPSERT_ROUTE_ERROR]', compactError(e)); fail(res,500,'product upsert failed',{detail:String(e && e.message || e), error_detail:compactError(e)}); }
 });
 
@@ -1464,8 +1648,23 @@ router.post('/api/gm/product/event', async (req,res)=>{
   else if(type === 'ad_sale') setSql = "ad_order_count=COALESCE(ad_order_count,0)+1, ad_sales_qty=COALESCE(ad_sales_qty,0)+" + qty + ", last_ad_order_at=now()";
   else return fail(res, 400, 'event type must be detail/view/cart/wish/order/return/exchange/ad_view/ad_sale');
   try{
-    const r=await pool.query(`UPDATE gm_product SET ${setSql}, updated_at=now() WHERE ${where} RETURNING product_uid, pi_ii_vi`, vals);
-    ok(res,{action:'product.event', type, updated:r.rowCount, item:r.rows[0] || null});
+    const r=await pool.query(`UPDATE gm_product SET ${setSql}, updated_at=now() WHERE ${where} RETURNING product_uid, mall_code, product_id, pi_ii_vi`, vals);
+    let option_updated = 0;
+    if(type === 'order'){
+      const mall = cleanText(id.mallCode || (r.rows[0] && r.rows[0].mall_code) || '').toUpperCase();
+      const pi = cleanText(id.pi || (r.rows[0] && r.rows[0].pi_ii_vi) || '');
+      if(mall && pi){
+        try{
+          const or = await pool.query(`
+            UPDATE gm_product_option
+            SET sales_qty=COALESCE(sales_qty,0)+$3, updated_at=now()
+            WHERE mall_code=$1 AND pi_ii_vi=$2
+          `, [mall, pi, qty]);
+          option_updated = or.rowCount || 0;
+        }catch(oe){ console.warn('[GM_PRODUCT_OPTION_EVENT_ORDER_WARN]', Object.assign({ mall_code:mall, pi_ii_vi:pi, qty }, compactError(oe))); }
+      }
+    }
+    ok(res,{action:'product.event', type, updated:r.rowCount, option_updated, item:r.rows[0] || null});
   }catch(e){ fail(res,500,'product event failed',{detail:String(e && e.message || e)}); }
 });
 
