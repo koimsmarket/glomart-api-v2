@@ -1,6 +1,6 @@
 -- 01_gm_product.sql
 -- 개발용 즉시 테스트 스키마. 정식 스타트 전까지는 배포 시 gm_product를 DROP/CREATE 한다.
--- V020: 불필요 컬럼 제거 + 상세수집(detail_json) 저장 컬럼 추가.
+-- V022: 불필요 컬럼 제거 + 상세수집(detail_json) 저장 컬럼 유지. upsert는 상세값 보호 방식으로 수정.
 
 DROP TABLE IF EXISTS gm_product CASCADE;
 

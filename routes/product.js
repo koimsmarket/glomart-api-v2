@@ -981,10 +981,17 @@ async function upsertProduct(pool, raw, parent={}){
       cp_code=CASE WHEN NULLIF(EXCLUDED.cp_code,'') IS NULL THEN gm_product.cp_code WHEN COALESCE(gm_product.cp_code,'') <> EXCLUDED.cp_code THEN EXCLUDED.cp_code ELSE gm_product.cp_code END,
       product_name=EXCLUDED.product_name,
       mall_product_name=EXCLUDED.mall_product_name,
-      option_count=EXCLUDED.option_count,
-      option_json=EXCLUDED.option_json,
-      thumb_json=EXCLUDED.thumb_json,
-      detail_json=CASE WHEN EXCLUDED.detail_json <> '{}'::jsonb THEN EXCLUDED.detail_json ELSE gm_product.detail_json END,
+      option_count=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
+      option_json=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_json ELSE gm_product.option_json END,
+      thumb_json=CASE
+        WHEN jsonb_typeof(EXCLUDED.thumb_json)='array'
+         AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(jsonb_array_length(gm_product.thumb_json),0)
+        THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
+      detail_json=CASE
+        WHEN COALESCE(NULLIF(EXCLUDED.detail_json->>'block_count','')::int,0)
+           + COALESCE(NULLIF(EXCLUDED.detail_json->>'image_count','')::int,0)
+           + COALESCE(NULLIF(EXCLUDED.detail_json->>'text_count','')::int,0) > 0
+        THEN EXCLUDED.detail_json ELSE gm_product.detail_json END,
       seasonal_text=COALESCE(NULLIF(EXCLUDED.seasonal_text,''), gm_product.seasonal_text),
       mall_sale_price=EXCLUDED.mall_sale_price,
       final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product.final_supply_price),
@@ -1234,7 +1241,7 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       return ok(res,{ mode:'batch', received:items.length, saved, skipped, results:results.slice(0,20) });
     }
     const result = await upsertProduct(pool, p, p);
-    try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, option_count:result && result.item && result.item.option_count }); }catch(_log){}
+    try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, option_count:result && result.item && result.item.option_count, mode:'single' }); }catch(_log){}
     if(!result.ok) return fail(res, 400, result.reason || 'product upsert validation failed', result);
     return ok(res,{ mode:'single', item:result.item });
   }catch(e){ fail(res,500,'product upsert failed',{detail:String(e && e.message || e)}); }
