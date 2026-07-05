@@ -543,7 +543,11 @@ function ids(b){
   }
   if(!isCoupangMall && !vendorItemId && productId && !itemId) vendorItemId = productId;
 
-  const uid = cleanText(rawUid || (mallCode && pi ? `${mallCode}_${pi}` : ''));
+  // GM_PRODUCT_UID_PID_ONLY_V021
+  // gm_product는 상품 대표 1행이므로 product_uid는 옵션키(PID_IID_VID)가 아니라 PID 기준이다.
+  // 옵션별 실제 구매키는 gm_product_option.pi_ii_vi에서 관리한다.
+  const productUidKey = productId || pi;
+  const uid = cleanText(mallCode && productUidKey ? `${mallCode}_${productUidKey}` : rawUid);
   return { productId, itemId, vendorItemId, mallCode, pi, uid, source_url:urlText };
 }
 
@@ -1073,11 +1077,49 @@ function optionRowsFromOptionJson(optionJson, id, p){
   });
   return out;
 }
+
+async function ensureProductOptionTable(pool){
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gm_product_option (
+      mall_code TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      item_id TEXT,
+      vendor_item_id TEXT,
+      pi_ii_vi TEXT NOT NULL,
+      option_name TEXT,
+      option_image_url TEXT,
+      option_sort_no INTEGER NOT NULL DEFAULT 0,
+      mall_sale_price INTEGER NOT NULL DEFAULT 0,
+      final_supply_price INTEGER,
+      normal_price INTEGER,
+      discount_price INTEGER NOT NULL DEFAULT 0,
+      delivery_fee INTEGER NOT NULL DEFAULT 0,
+      delivery_eta_text TEXT,
+      delivery_type TEXT,
+      soldout_yn TEXT NOT NULL DEFAULT 'N',
+      sale_status TEXT NOT NULL DEFAULT 'active',
+      active_yn TEXT NOT NULL DEFAULT 'Y',
+      buyable_qty INTEGER,
+      min_order_qty INTEGER,
+      max_order_qty INTEGER,
+      sales_qty INTEGER NOT NULL DEFAULT 0,
+      last_seen_at TIMESTAMP,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      updated_at TIMESTAMP,
+      PRIMARY KEY (mall_code, pi_ii_vi)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_product ON gm_product_option(mall_code, product_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_active ON gm_product_option(mall_code, product_id, active_yn)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_vendor ON gm_product_option(vendor_item_id)`);
+}
+
 async function upsertProductOptions(pool, id, optionJson, p, parent){
   const result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
   const optionRows = optionRowsFromOptionJson(optionJson, id, p);
   result.received = optionRows.length;
   if(!optionRows.length) return result;
+  await ensureProductOptionTable(pool);
   const seen = new Set();
   for(const opt of optionRows){
     try{

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V015_PRODUCT_OPTION_EXPORT';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V016_PRODUCT_OPTION_EXPORT_AUTO_TABLE';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -396,6 +396,43 @@ async function getColumns(db, table) {
 function tableSpec(key) {
   return TABLES[String(key || '').trim()] || null;
 }
+
+async function ensureProductOptionTable(db){
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS gm_product_option (
+      mall_code TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      item_id TEXT,
+      vendor_item_id TEXT,
+      pi_ii_vi TEXT NOT NULL,
+      option_name TEXT,
+      option_image_url TEXT,
+      option_sort_no INTEGER NOT NULL DEFAULT 0,
+      mall_sale_price INTEGER NOT NULL DEFAULT 0,
+      final_supply_price INTEGER,
+      normal_price INTEGER,
+      discount_price INTEGER NOT NULL DEFAULT 0,
+      delivery_fee INTEGER NOT NULL DEFAULT 0,
+      delivery_eta_text TEXT,
+      delivery_type TEXT,
+      soldout_yn TEXT NOT NULL DEFAULT 'N',
+      sale_status TEXT NOT NULL DEFAULT 'active',
+      active_yn TEXT NOT NULL DEFAULT 'Y',
+      buyable_qty INTEGER,
+      min_order_qty INTEGER,
+      max_order_qty INTEGER,
+      sales_qty INTEGER NOT NULL DEFAULT 0,
+      last_seen_at TIMESTAMP,
+      created_at TIMESTAMP NOT NULL DEFAULT now(),
+      updated_at TIMESTAMP,
+      PRIMARY KEY (mall_code, pi_ii_vi)
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_product ON gm_product_option(mall_code, product_id)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_active ON gm_product_option(mall_code, product_id, active_yn)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_vendor ON gm_product_option(vendor_item_id)`);
+}
+
 function keySets(spec) {
   return spec.keyAny || [spec.key];
 }
@@ -848,6 +885,7 @@ router.get('/api/gm/builder/export', async (req,res)=>{
     : Math.max(Number(rawLimit), 1);
 
   try {
+    if (spec.table === 'gm_product_option') await ensureProductOptionTable(db);
     let cols = await getColumns(db, spec.table);
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
     const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
@@ -879,6 +917,7 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
     for(const key of Object.keys(TABLES)){
       const spec = TABLES[key];
       try{
+        if (spec.table === 'gm_product_option') await ensureProductOptionTable(db);
         let cols = await getColumns(db, spec.table);
         if(!cols.length){ errors.push({key, table:spec.table, error:'no columns'}); continue; }
         if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
@@ -911,6 +950,9 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
 
   const apply = String(req.query.apply || '').toUpperCase() === 'YES';
   const db = dbFrom(req);
+  if (spec.table === 'gm_product_option') {
+    try { await ensureProductOptionTable(db); } catch(e) { return fail(res, 500, 'product option table prepare failed', { detail:String(e && e.message || e) }); }
+  }
 
   let rows = parseCsv(req.body);
   if (rows.length > LIMITS.MAX_ROWS) {
