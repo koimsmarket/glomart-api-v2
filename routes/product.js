@@ -70,7 +70,7 @@ function cleanProductNameCandidate(v){
 function bestProductName(p){
   const names = [
     'searchProductName','search_product_name','cleanProductName','clean_product_name',
-    'productName','product_name','mallProductName','mall_product_name',
+    'productName','product_name','gm_title','gmTitle','mallProductName','mall_product_name',
     'name','itemName','item_name','productTitle','product_title','itemTitle','item_title',
     'title','subject'
   ];
@@ -169,6 +169,82 @@ function pickRelatedKeywords(p, parent){
   if(Array.isArray(raw)) arr = raw;
   else if(typeof raw === 'string') arr = raw.split(/[|,\n\t]+/g);
   return arr.map(cleanText).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(0,50);
+}
+
+
+
+// GM_DETAIL_UPSERT_MAP_V019
+// 상세 Collector payload는 {item:{...}}, {product:{...}}, {data:{...}} 또는 payload 루트에 섞여 들어올 수 있다.
+// 검색 저장은 정상인데 상세 옵션/썸네일/공급자/카테고리 값이 반영되지 않던 원인은
+// 서버 upsert가 루트 필드만 보고 중첩 item/detail aliases를 충분히 펼치지 않았기 때문이다.
+function isPlainObject(v){ return !!v && typeof v === 'object' && !Array.isArray(v); }
+function copyMissing(dst, src){
+  dst = dst || {}; src = src || {};
+  if(!isPlainObject(src)) return dst;
+  Object.keys(src).forEach(k => {
+    if(dst[k] === undefined || dst[k] === null || cleanText(dst[k]) === '') dst[k] = src[k];
+  });
+  return dst;
+}
+function firstPlainObject(){
+  for(let i=0;i<arguments.length;i++) if(isPlainObject(arguments[i])) return arguments[i];
+  return {};
+}
+function flattenDetailPayload(raw, parent={}){
+  raw = raw || {}; parent = parent || {};
+  const rawJson = isPlainObject(raw.raw_json) ? raw.raw_json : {};
+  const nested = firstPlainObject(raw.item, raw.product, raw.data, raw.payload, raw.detail, raw.result, raw.detailResult, raw.gm_detail, raw.gmDetail);
+  const nestedRaw = isPlainObject(nested.raw_json) ? nested.raw_json : {};
+  const p = Object.assign({}, rawJson, nestedRaw, nested, raw);
+
+  // payload wrapper 값 보존
+  ['key','gm_key','product_uid','pi_ii_vi','mall_code','mallCode','keyword','q','requestId','request_id'].forEach(k=>{
+    if((p[k] === undefined || p[k] === null || cleanText(p[k]) === '') && raw[k] !== undefined) p[k] = raw[k];
+  });
+
+  const supplier = firstPlainObject(p.supplierInfo, p.__gmSupplierInfo, p.supplier, p.sellerInfo, p.vendorInfo, p.storeInfo);
+  if(Object.keys(supplier).length){
+    const map = {
+      supplier_name:['supplierName','supplier_name','seller','sellerName','seller_name','vendorName','vendor_name','storeName','store_name','name'],
+      business_number:['businessNumber','business_number','bizNo','biz_no','biz','sellerBizNo','supplierBizNo'],
+      online_sales_number:['onlineSalesNumber','online_sales_number','mailOrderNo','mail_order_no','mailO','mailOrderNumber','supplierMailOrderNo'],
+      ceo_name:['ceoName','ceo_name','rep','representative','representativeName','supplierRepresentative'],
+      supplier_mobile:['mobile','supplierMobile','supplier_mobile','sellerMobile','seller_mobile'],
+      supplier_phone:['phone','supplierPhone','supplier_phone','sellerPhone','seller_phone'],
+      supplier_email:['email','supplierEmail','supplier_email','sellerEmail','seller_email'],
+      supplier_address:['address','supplierAddress','supplier_address','sellerAddress','seller_address']
+    };
+    Object.keys(map).forEach(dst=>{
+      if(cleanText(p[dst])) return;
+      for(const src of map[dst]){ if(cleanText(supplier[src])){ p[dst]=supplier[src]; break; } }
+    });
+  }
+
+  const cat = firstPlainObject(p.categoryInfo, p.category_info, p.cpCategoryInfo, p.coupangCategoryInfo, p.category);
+  if(Object.keys(cat).length){
+    if(!cleanText(p.cp_code)) p.cp_code = cat.leaf || cat.leafCategoryId || cat.categoryNo || cat.category_no || cat.code || cat.id || '';
+    if(!cleanText(p.cp_id)) p.cp_id = cat.categoryId || cat.category_id || cat.catId || cat.cat_id || '';
+    if(!cleanText(p.mall_category)) p.mall_category = cat.leaf || cat.leafCategoryId || cat.categoryNo || cat.category_no || cat.code || cat.id || '';
+    if(!p.mall_category_json && (Array.isArray(cat.path) || Array.isArray(cat.path_json) || cleanText(cat.pathText || cat.path_text || cat.path_ko))){
+      const arr = Array.isArray(cat.path) ? cat.path : (Array.isArray(cat.path_json) ? cat.path_json : cleanText(cat.pathText || cat.path_text || cat.path_ko).split(/\s*>\s*/));
+      p.mall_category_json = arr.map((x,i)=> isPlainObject(x) ? x : ({ depth:i+1, name:cleanText(x) })).filter(x=>cleanText(x.name || x.id || x.code));
+    }
+  }
+
+  // 상세 payload alias 보강
+  if(!Array.isArray(p.thumbnailImages) && Array.isArray(p.thumbs)) p.thumbnailImages = p.thumbs;
+  if(!Array.isArray(p.thumbnailImages) && Array.isArray(p.topImages)) p.thumbnailImages = p.topImages;
+  if(!Array.isArray(p.thumbnailImages) && Array.isArray(p.mainImages)) p.thumbnailImages = p.mainImages;
+  if(!Array.isArray(p.optionRows) && Array.isArray(p.optionsRows)) p.optionRows = p.optionsRows;
+  if(!Array.isArray(p.optionRows) && Array.isArray(p.detailOptionRows)) p.optionRows = p.detailOptionRows;
+  if(!Array.isArray(p.optionRows) && Array.isArray(p.selectedOptions)) p.optionRows = p.selectedOptions;
+
+  if(!cleanText(p.return_shipping_fee) && cleanText(p.returnFee)) p.return_shipping_fee = p.returnFee;
+  if(!cleanText(p.return_policy_text) && cleanText(p.returnFeeText)) p.return_policy_text = p.returnFeeText;
+  if(!cleanText(p.return_policy_text) && cleanText(p.returnPolicy)) p.return_policy_text = p.returnPolicy;
+  if(!cleanText(p.product_name) && cleanText(p.gm_title)) p.product_name = p.gm_title;
+  if(!cleanText(p.productName) && cleanText(p.gmTitle)) p.productName = p.gmTitle;
+  return p;
 }
 
 const KEYWORD_LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
@@ -596,8 +672,7 @@ function sourceUidFrom(p, sourceMall){
   return key;
 }
 function normalizeProductPayload(raw, parent={}){
-  const rawObj = (raw && typeof raw.raw_json === 'object' && !Array.isArray(raw.raw_json)) ? raw.raw_json : {};
-  const p = { ...rawObj, ...(raw || {}) };
+  const p = flattenDetailPayload(raw, parent);
   if(!p.mall_code && !p.mallCode) p.mall_code = parent.mall_code || parent.mallCode || parent.source || parent.mall || 'CPKR';
   if(!p.keyword && parent.keyword) p.keyword = parent.keyword;
   if(!p.requestId && parent.requestId) p.requestId = parent.requestId;
@@ -693,7 +768,7 @@ function normalizeThumbJson(p){
     seen.add(v);
     out.push({ url:v, source:source || 'payload', index:out.length });
   }
-  [p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.skuThumbnailImages].forEach((a)=>{
+  [p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.skuThumbnailImages,p.topImages,p.mainImages,p.thumbs].forEach((a)=>{
     if(Array.isArray(a)) a.forEach(x=>add(x,'array'));
   });
   add(p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl || p.thumbnail || p.image || p.mainImage, 'main');
@@ -702,7 +777,7 @@ function normalizeThumbJson(p){
 function normalizeOptionJson(p, id){
   p=p||{}; id=id||{};
   const arrays=[];
-  ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>{
+  ['optionCombos','aliOptionCombos','flatOptionRows','optionRows','detailOptionRows','optionsRows','visibleOptions','options','vendorItemOptions','itemOptions','selectedOptions'].forEach(k=>{
     if(Array.isArray(p[k])) arrays.push(p[k]);
   });
   const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source'];
@@ -768,7 +843,7 @@ function pickReturnShippingFee(p, mallSalePrice){
   p = p || {};
   const deliveryType = cleanText(p.delivery_type || p.deliveryType || p.delivery_badge || p.deliveryBadge || p.shippingLabel || p.shippingBadge || '').toLowerCase();
   const isRocket = /rocket|fresh|로켓|프레시/.test(deliveryType);
-  const directRaw = p.return_shipping_fee !== undefined ? p.return_shipping_fee : p.returnShippingFee;
+  const directRaw = p.return_shipping_fee !== undefined ? p.return_shipping_fee : (p.returnShippingFee !== undefined ? p.returnShippingFee : p.returnFee);
   const directText = cleanText(directRaw);
 
   // 숫자만 직접 온 경우만 그대로 채택한다. 긴 반품 안내문이 이 필드에 들어오면 19,800원을 반품비로 오인하지 않는다.
@@ -776,7 +851,7 @@ function pickReturnShippingFee(p, mallSalePrice){
 
   const text = cleanText([
     directText,
-    firstNonEmpty(p, ['return_fee_text','returnFeeText','exchangeReturnFeeText','exchange_return_fee_text','return_policy_text','returnPolicyText'])
+    firstNonEmpty(p, ['return_fee_text','returnFeeText','returnFee','exchangeReturnFeeText','exchange_return_fee_text','return_policy_text','returnPolicyText','returnPolicy'])
   ].filter(Boolean).join(' '));
 
   if(text){
@@ -1114,6 +1189,7 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       return ok(res,{ mode:'batch', received:items.length, saved, skipped, results:results.slice(0,20) });
     }
     const result = await upsertProduct(pool, p, p);
+    try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, option_count:result && result.item && result.item.option_count }); }catch(_log){}
     if(!result.ok) return fail(res, 400, result.reason || 'product upsert validation failed', result);
     return ok(res,{ mode:'single', item:result.item });
   }catch(e){ fail(res,500,'product upsert failed',{detail:String(e && e.message || e)}); }
