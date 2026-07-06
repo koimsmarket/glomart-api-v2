@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V018_CATEGORY_FAST_UPSERT_STREAM_EXPORT';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V020_V018_PLUS_PRODUCT_OPTIONS';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -29,6 +29,23 @@ const TABLES = {
       unit_sortable_yn:['Y','N'], return_available_yn:['Y','N'], exchange_available_yn:['Y','N']
     },
     blocked: ['product_uid','created_at']
+  },
+
+  product_options: {
+    table: 'gm_product_option',
+    key: ['mall_code', 'pi_ii_vi'],
+    order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST, mall_code ASC, product_id ASC, option_sort_no ASC',
+    critical: ['mall_code','product_id','pi_ii_vi'],
+    numeric: ['option_sort_no','mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','buyable_qty','min_order_qty','max_order_qty','sales_qty'],
+    defaults: { mall_code:'CPKR', option_sort_no:'0', mall_sale_price:'0', discount_price:'0', delivery_fee:'0', soldout_yn:'N', sale_status:'active', active_yn:'Y', sales_qty:'0' },
+    enums: {
+      soldout_yn:['Y','N'],
+      active_yn:['Y','N'],
+      sale_status:['active','soldout','unavailable','deleted','collect_failed'],
+      delivery_type:['seller','bundle','fresh','rocket','rocket_fresh','unknown']
+    },
+    blocked: ['created_at'],
+    allowInsert: true
   },
   cart: {
     table: 'gm_basket',
