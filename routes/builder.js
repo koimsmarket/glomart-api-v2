@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V016_PRODUCT_OPTION_EXPORT_AUTO_TABLE';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V018_CATEGORY_FAST_UPSERT_STREAM_EXPORT';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -29,22 +29,6 @@ const TABLES = {
       unit_sortable_yn:['Y','N'], return_available_yn:['Y','N'], exchange_available_yn:['Y','N']
     },
     blocked: ['product_uid','created_at']
-  },
-
-  product_options: {
-    table: 'gm_product_option',
-    key: ['mall_code', 'pi_ii_vi'],
-    order: 'updated_at DESC NULLS LAST, last_seen_at DESC NULLS LAST, product_id ASC, option_sort_no ASC',
-    critical: ['mall_code','product_id','pi_ii_vi'],
-    numeric: ['option_sort_no','mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','buyable_qty','min_order_qty','max_order_qty','sales_qty'],
-    defaults: { mall_code:'CPKR', delivery_fee:'0', discount_price:'0', soldout_yn:'N', sale_status:'active', active_yn:'Y', option_sort_no:'0', mall_sale_price:'0', sales_qty:'0' },
-    enums: {
-      delivery_type:['seller','bundle','fresh','rocket','rocket_fresh','unknown'],
-      sale_status:['active','soldout','unavailable','deleted','collect_failed','inactive'],
-      soldout_yn:['Y','N'],
-      active_yn:['Y','N']
-    },
-    blocked: ['created_at']
   },
   cart: {
     table: 'gm_basket',
@@ -396,43 +380,6 @@ async function getColumns(db, table) {
 function tableSpec(key) {
   return TABLES[String(key || '').trim()] || null;
 }
-
-async function ensureProductOptionTable(db){
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS gm_product_option (
-      mall_code TEXT NOT NULL,
-      product_id TEXT NOT NULL,
-      item_id TEXT,
-      vendor_item_id TEXT,
-      pi_ii_vi TEXT NOT NULL,
-      option_name TEXT,
-      option_image_url TEXT,
-      option_sort_no INTEGER NOT NULL DEFAULT 0,
-      mall_sale_price INTEGER NOT NULL DEFAULT 0,
-      final_supply_price INTEGER,
-      normal_price INTEGER,
-      discount_price INTEGER NOT NULL DEFAULT 0,
-      delivery_fee INTEGER NOT NULL DEFAULT 0,
-      delivery_eta_text TEXT,
-      delivery_type TEXT,
-      soldout_yn TEXT NOT NULL DEFAULT 'N',
-      sale_status TEXT NOT NULL DEFAULT 'active',
-      active_yn TEXT NOT NULL DEFAULT 'Y',
-      buyable_qty INTEGER,
-      min_order_qty INTEGER,
-      max_order_qty INTEGER,
-      sales_qty INTEGER NOT NULL DEFAULT 0,
-      last_seen_at TIMESTAMP,
-      created_at TIMESTAMP NOT NULL DEFAULT now(),
-      updated_at TIMESTAMP,
-      PRIMARY KEY (mall_code, pi_ii_vi)
-    )
-  `);
-  await db.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_product ON gm_product_option(mall_code, product_id)`);
-  await db.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_active ON gm_product_option(mall_code, product_id, active_yn)`);
-  await db.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_vendor ON gm_product_option(vendor_item_id)`);
-}
-
 function keySets(spec) {
   return spec.keyAny || [spec.key];
 }
@@ -706,166 +653,6 @@ async function upsertObject(client, table, obj, keyCols, allowBlank=false) {
   return { action:'UPSERT' };
 }
 
-// GM_CATEGORY_BATCH_IMPORT_V001
-// 카테고리처럼 1만 행 이상 대량 CSV는 전체를 한 트랜잭션으로 처리하지 않는다.
-// - 300건 단위 트랜잭션
-// - 행 단위 SAVEPOINT로 일부 실패만 기록
-// - CP_CODE 우선 개발키 유지(keyAny: cp_code -> gm_code)
-// - 결과 CSV에 batch_no/action/reason을 남긴다.
-async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
-  const db = dbFrom(req);
-  const table = spec.table;
-  const result = [];
-  const outCols = ['row_no','batch_no','table','key','result','action','column_name','value','reason'];
-  const batchSize = Math.min(Math.max(Number(req.query.batch || LIMITS.BATCH_SIZE || 300), 50), 1000);
-  let processed = 0, applied = 0, inserted = 0, updated = 0, skipped = 0, invalid = 0, failed = 0;
-
-  function push(rowNo, batchNo, key, resultName, action, column, value, reason) {
-    result.push({
-      row_no: rowNo,
-      batch_no: batchNo,
-      table,
-      key: key || '',
-      result: resultName,
-      action: action || '',
-      column_name: column || '',
-      value: value ?? '',
-      reason: reason || ''
-    });
-  }
-
-  function buildRowParts(row, colSet, key) {
-    const insertCols = [];
-    const insertVals = [];
-    const updateCols = [];
-    const updateVals = [];
-    for (const [col, raw] of Object.entries(row)) {
-      if (col === '__row_no') continue;
-      if (!colSet.has(col)) {
-        push(row.__row_no, '', key && key.label, 'SKIP_CELL', '', col, raw, 'UNKNOWN_COLUMN');
-        continue;
-      }
-      if ((spec.blocked || []).includes(col)) continue;
-      const v = validateCell(col, raw, spec);
-      if (!v.ok) return { ok:false, column:col, value:raw, reason:v.reason };
-      if (v.action === 'KEEP_OLD') continue;
-      insertCols.push(col);
-      insertVals.push(v.value);
-      if (!key.keys.includes(col)) {
-        updateCols.push(col);
-        updateVals.push(v.value);
-      }
-    }
-    // 키 컬럼은 INSERT에 반드시 포함한다.
-    for (const k of key.keys) {
-      if (!insertCols.includes(k) && colSet.has(k)) {
-        insertCols.push(k);
-        insertVals.push(clean(row[k]));
-      }
-    }
-    return { ok:true, insertCols, insertVals, updateCols, updateVals };
-  }
-
-  try {
-    const columns = await getColumns(db, table);
-    const colSet = new Set(columns);
-    console.log(`[GM_CATEGORY_BATCH_IMPORT] start rows=${rows.length} apply=${apply ? 'Y':'N'} batch=${batchSize}`);
-
-    for (let start = 0; start < rows.length; start += batchSize) {
-      const batch = rows.slice(start, start + batchSize);
-      const batchNo = Math.floor(start / batchSize) + 1;
-      const batchTotal = Math.ceil(rows.length / batchSize);
-      const client = apply ? await db.connect() : null;
-      console.log(`[GM_CATEGORY_BATCH_IMPORT] batch ${batchNo}/${batchTotal} rows=${batch.length} range=${start+1}-${start+batch.length}`);
-
-      try {
-        if (client) await client.query('BEGIN');
-
-        for (const row of batch) {
-          processed++;
-          const key = pickKey(row, spec);
-          if (!key) {
-            invalid++; skipped++;
-            push(row.__row_no, batchNo, '', 'SKIP', '', '', '', 'MISSING_KEY');
-            continue;
-          }
-
-          const parts = buildRowParts(row, colSet, key);
-          if (!parts.ok) {
-            invalid++; skipped++;
-            push(row.__row_no, batchNo, key.label, 'SKIP', '', parts.column, parts.value, parts.reason);
-            continue;
-          }
-          if (!parts.insertCols.length && !parts.updateCols.length) {
-            skipped++;
-            push(row.__row_no, batchNo, key.label, 'SKIP', '', '', '', 'NO_UPDATABLE_VALUE');
-            continue;
-          }
-
-          if (!apply) {
-            applied++;
-            push(row.__row_no, batchNo, key.label, 'VALID', 'DRY_RUN', '', '', 'BATCH_VALID');
-            continue;
-          }
-
-          try {
-            await client.query('SAVEPOINT gm_category_row');
-            const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
-            const exists = await client.query(`SELECT 1 FROM ${qIdent(table)} WHERE ${where} LIMIT 1`, key.values);
-
-            if (exists.rows.length) {
-              if (!parts.updateCols.length) {
-                skipped++;
-                push(row.__row_no, batchNo, key.label, 'SKIP', 'UPDATE', '', '', 'NO_UPDATABLE_VALUE');
-              } else {
-                const setSql = parts.updateCols.map((c,i)=>`${qIdent(c)}=$${i+1}`).join(', ');
-                const params = parts.updateVals.slice();
-                key.values.forEach(v => params.push(v));
-                const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${parts.updateVals.length+i+1}`).join(' AND ');
-                await client.query(`UPDATE ${qIdent(table)} SET ${setSql}, updated_at=NOW() WHERE ${where2}`, params);
-                applied++; updated++;
-                push(row.__row_no, batchNo, key.label, 'UPDATED', 'UPDATE', '', '', 'APPLIED');
-              }
-            } else {
-              const ph = parts.insertCols.map((_,i)=>'$'+(i+1)).join(', ');
-              await client.query(`INSERT INTO ${qIdent(table)} (${parts.insertCols.map(qIdent).join(', ')}) VALUES (${ph})`, parts.insertVals);
-              applied++; inserted++;
-              push(row.__row_no, batchNo, key.label, 'INSERTED', 'INSERT', '', '', 'APPLIED');
-            }
-            await client.query('RELEASE SAVEPOINT gm_category_row');
-          } catch (e) {
-            failed++; invalid++;
-            try { await client.query('ROLLBACK TO SAVEPOINT gm_category_row'); } catch(_e) {}
-            try { await client.query('RELEASE SAVEPOINT gm_category_row'); } catch(_e) {}
-            push(row.__row_no, batchNo, key.label, 'FAIL', 'DB', '', '', String(e && e.message || e));
-          }
-        }
-
-        if (client) await client.query('COMMIT');
-      } catch (e) {
-        if (client) await client.query('ROLLBACK').catch(()=>{});
-        throw e;
-      } finally {
-        if (client) client.release();
-      }
-    }
-
-    console.log(`[GM_CATEGORY_BATCH_IMPORT] done processed=${processed} applied=${applied} inserted=${inserted} updated=${updated} skipped=${skipped} invalid=${invalid} failed=${failed}`);
-    const csv = toCsv(result, outCols);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="gm_category_batch_${apply?'apply':'dryrun'}_${Date.now()}.csv"`);
-    res.setHeader('X-GM-Builder-Version', VERSION);
-    res.setHeader('X-GM-Category-Processed', String(processed));
-    res.setHeader('X-GM-Category-Applied', String(applied));
-    res.end(csv);
-  } catch(e) {
-    fail(res, 500, 'category batch import failed', {
-      detail:String(e && e.message || e), processed, applied, inserted, updated, skipped, invalid, failed
-    });
-  }
-}
-
-
 router.get('/api/gm/builder/tables', (req,res)=>{
   ok(res, { tables:Object.keys(TABLES).map(k=>({ key:k, table:TABLES[k].table, keys:keySets(TABLES[k]) })) });
 });
@@ -876,28 +663,49 @@ router.get('/api/gm/builder/export', async (req,res)=>{
 
   const format = String(req.query.format || 'csv').toLowerCase();
   const db = dbFrom(req);
-  // V017: 기본 export 제한 제거.
-  // - limit 파라미터가 없으면 전체 다운로드
-  // - limit 파라미터가 있으면 요청한 개수만 다운로드
-  const rawLimit = req.query.limit;
-  const limit = rawLimit === undefined || rawLimit === null || String(rawLimit).trim() === ''
-    ? null
-    : Math.max(Number(rawLimit), 1);
+  // V018: no default 5,000 row cap for single-table export.
+  // If limit is provided, use it. If omitted, stream all rows in pages.
+  const rawLimit = req.query.limit === undefined ? 0 : Number(req.query.limit || 0);
+  const limit = rawLimit > 0 ? Math.min(Math.max(rawLimit, 1), 200000) : 0;
+  const pageSize = Math.min(Math.max(Number(req.query.pageSize || 1000), 100), 5000);
 
   try {
-    if (spec.table === 'gm_product_option') await ensureProductOptionTable(db);
     let cols = await getColumns(db, spec.table);
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
-    const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
-    const r = await db.query(sql, limit ? [limit] : []);
-    if (format === 'json') return ok(res, { table:spec.table, count:r.rows.length, limit:limit || 'ALL', columns:cols, rows:r.rows });
 
-    const csv = toCsv(r.rows, cols);
+    if (format === 'json') {
+      const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
+      const r = await db.query(sql, limit ? [limit] : []);
+      return ok(res, { table:spec.table, count:r.rows.length, columns:cols, rows:r.rows });
+    }
+
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${spec.table}_${Date.now()}.csv"`);
-    res.end(csv);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.write('﻿' + cols.map(csvEscape).join(',') + '\n');
+
+    let offset = 0;
+    let sent = 0;
+    while (true) {
+      const take = limit ? Math.min(pageSize, limit - sent) : pageSize;
+      if (take <= 0) break;
+      const r = await db.query(
+        `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1 OFFSET $2`,
+        [take, offset]
+      );
+      if (!r.rows.length) break;
+      for (const row of r.rows) {
+        res.write(cols.map(c => csvEscape(row[c])).join(',') + '\n');
+      }
+      sent += r.rows.length;
+      offset += r.rows.length;
+      try { console.log('[GM_BUILDER_EXPORT_STREAM_V018]', JSON.stringify({ table:spec.table, sent, offset, pageSize })); } catch(_) {}
+      if (r.rows.length < take) break;
+    }
+    res.end();
   } catch(e) {
-    fail(res, 500, 'export failed', { detail:String(e && e.message || e) });
+    if (!res.headersSent) return fail(res, 500, 'export failed', { detail:String(e && e.message || e) });
+    try { res.end(); } catch(_) {}
   }
 });
 
@@ -905,24 +713,17 @@ router.get('/api/gm/builder/export', async (req,res)=>{
 // 전체 테이블 CSV를 한 번에 ZIP으로 다운로드한다.
 router.get('/api/gm/builder/export-all', async (req,res)=>{
   const db = dbFrom(req);
-  // V017: export-all도 기본 제한 제거.
-  // limit 파라미터가 없으면 각 테이블 전체 다운로드.
-  const rawLimit = req.query.limit;
-  const limit = rawLimit === undefined || rawLimit === null || String(rawLimit).trim() === ''
-    ? null
-    : Math.max(Number(rawLimit), 1);
+  const limit = Math.min(Math.max(Number(req.query.limit || 50000), 1), 50000);
   try{
     const files=[];
     const errors=[];
     for(const key of Object.keys(TABLES)){
       const spec = TABLES[key];
       try{
-        if (spec.table === 'gm_product_option') await ensureProductOptionTable(db);
         let cols = await getColumns(db, spec.table);
         if(!cols.length){ errors.push({key, table:spec.table, error:'no columns'}); continue; }
         if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
-        const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
-        const r = await db.query(sql, limit ? [limit] : []);
+        const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
         files.push({ name: `${spec.table}.csv`, data: toCsv(r.rows, cols) });
       }catch(e){
         errors.push({ key, table:spec.table, error:String(e && e.message || e) });
@@ -944,15 +745,164 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
   }
 });
 
+
+function validateCategoryImportRow(row, columns, colSet, spec, seenKeys) {
+  const key = pickKey(row, spec);
+  if (!key) return { ok:false, result:resultRow(row.__row_no, spec.table, '', 'SKIP', '', '', 'MISSING_KEY') };
+  const upsertKey = key.values.join('+');
+  if (seenKeys && seenKeys.has(upsertKey)) {
+    return { ok:false, duplicate:true, result:resultRow(row.__row_no, spec.table, upsertKey, 'SKIP', '', '', 'DUPLICATE_INPUT_KEY') };
+  }
+
+  const obj = {};
+  for (const [col, raw] of Object.entries(row)) {
+    if (col === '__row_no') continue;
+    if (!colSet.has(col)) continue;
+    if ((spec.blocked || []).includes(col)) continue;
+    const v = validateCell(col, raw, spec);
+    if (!v.ok) return { ok:false, result:resultRow(row.__row_no, spec.table, upsertKey, 'SKIP', col, raw, v.reason) };
+    if (v.action === 'KEEP_OLD') continue;
+    obj[col] = v.value;
+  }
+  for (const k of key.keys) {
+    if (colSet.has(k) && clean(row[k]) !== '') obj[k] = clean(row[k]);
+  }
+  if (!obj.cp_code && clean(row.cp_code)) obj.cp_code = clean(row.cp_code);
+  if (!obj.gm_code && clean(row.gm_code)) obj.gm_code = clean(row.gm_code);
+
+  // gm_category requires gm_code and current development key cp_code.
+  if (!clean(obj.cp_code)) return { ok:false, result:resultRow(row.__row_no, spec.table, upsertKey, 'SKIP', 'cp_code', row.cp_code || '', 'CRITICAL_EMPTY') };
+  if (!clean(obj.gm_code)) return { ok:false, result:resultRow(row.__row_no, spec.table, upsertKey, 'SKIP', 'gm_code', row.gm_code || '', 'CRITICAL_EMPTY') };
+  if (clean(row.name_ko) === '') return { ok:false, result:resultRow(row.__row_no, spec.table, upsertKey, 'SKIP', 'name_ko', row.name_ko || '', 'CRITICAL_EMPTY') };
+
+  if (seenKeys) seenKeys.add(upsertKey);
+  return { ok:true, key:upsertKey, obj };
+}
+
+async function categoryFastUpsertBatch(db, spec, rows, columns, colSet, apply) {
+  const seenKeys = new Set();
+  const valid = [];
+  const result = [];
+  let invalid = 0;
+  let skipped = 0;
+
+  for (const row of rows) {
+    const v = validateCategoryImportRow(row, columns, colSet, spec, seenKeys);
+    if (!v.ok) {
+      if (v.duplicate) skipped++; else invalid++;
+      result.push(v.result);
+      continue;
+    }
+    valid.push({ rowNo:row.__row_no, key:v.key, obj:v.obj });
+  }
+
+  if (!valid.length || !apply) {
+    for (const v of valid) result.push(resultRow(v.rowNo, spec.table, v.key, apply ? 'SKIP' : 'VALID_UPSERT', '', '', apply ? 'NO_VALID_ROWS' : 'DRY_RUN'));
+    return { result, validCount:valid.length, invalid, skipped, applied:0 };
+  }
+
+  const upsertCols = columns.filter(c => {
+    if (c === 'category_id' || c === 'created_at') return false;
+    if ((spec.blocked || []).includes(c)) return false;
+    return valid.some(v => Object.prototype.hasOwnProperty.call(v.obj, c));
+  });
+  if (!upsertCols.includes('cp_code')) upsertCols.unshift('cp_code');
+  if (!upsertCols.includes('gm_code')) upsertCols.unshift('gm_code');
+
+  const params = [];
+  const valuesSql = [];
+  valid.forEach((v, rowIdx) => {
+    const ph = [];
+    upsertCols.forEach((c) => {
+      params.push(Object.prototype.hasOwnProperty.call(v.obj, c) ? v.obj[c] : null);
+      ph.push('$' + params.length);
+    });
+    valuesSql.push('(' + ph.join(',') + ')');
+  });
+
+  const updateCols = upsertCols.filter(c => c !== 'cp_code' && c !== 'created_at' && c !== 'category_id');
+  const updateSql = updateCols.map(c => {
+    if (c === 'updated_at') return `${qIdent(c)}=NOW()`;
+    return `${qIdent(c)}=CASE WHEN EXCLUDED.${qIdent(c)} IS NULL OR EXCLUDED.${qIdent(c)}::text='' THEN ${qIdent(spec.table)}.${qIdent(c)} ELSE EXCLUDED.${qIdent(c)} END`;
+  });
+  if (!updateCols.includes('updated_at') && columns.includes('updated_at')) updateSql.push(`${qIdent('updated_at')}=NOW()`);
+
+  const sql = `INSERT INTO ${qIdent(spec.table)} (${upsertCols.map(qIdent).join(', ')}) VALUES ${valuesSql.join(', ')} ` +
+    `ON CONFLICT (${qIdent('cp_code')}) WHERE cp_code IS NOT NULL AND cp_code <> '' DO UPDATE SET ${updateSql.join(', ')} ` +
+    `RETURNING cp_code, (xmax = 0) AS inserted`;
+
+  try {
+    await db.query(sql, params);
+    for (const v of valid) result.push(resultRow(v.rowNo, spec.table, v.key, 'UPSERTED', '', '', 'APPLIED'));
+    return { result, validCount:valid.length, invalid, skipped, applied:valid.length };
+  } catch (e) {
+    // A failed multi-row batch usually means duplicate gm_code or one bad value. Fall back per row to identify exact rows.
+    const detail = String(e && e.message || e);
+    try { console.error('[GM_CATEGORY_FAST_UPSERT_BATCH_FAIL_V018]', detail); } catch(_) {}
+    if (valid.length === 1) {
+      invalid++;
+      result.push(resultRow(valid[0].rowNo, spec.table, valid[0].key, 'FAIL', '', '', detail));
+      return { result, validCount:valid.length, invalid, skipped, applied:0 };
+    }
+    let applied = 0;
+    for (const v of valid) {
+      const one = await categoryFastUpsertBatch(db, spec, [{ __row_no:v.rowNo, ...v.obj }], columns, colSet, true);
+      applied += one.applied || 0;
+      invalid += one.invalid || 0;
+      skipped += one.skipped || 0;
+      for (const rr of one.result) result.push(rr);
+    }
+    return { result, validCount:valid.length, invalid, skipped, applied };
+  }
+}
+
+async function handleCategoryFastImport(req, res, spec, rows, apply, db) {
+  const startTime = Date.now();
+  const columns = await getColumns(db, spec.table);
+  const colSet = new Set(columns);
+  const batchSize = Math.min(Math.max(Number(req.query.batchSize || 500), 50), 1000);
+  const outCols = ['row_no','table','key','result','column_name','value','reason'];
+  let processed = 0, applied = 0, invalid = 0, skipped = 0;
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="gm_category_import_result_${Date.now()}.csv"`);
+  res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
+  res.write('﻿' + outCols.map(csvEscape).join(',') + '\n');
+
+  for (let i=0; i<rows.length; i+=batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const client = apply ? await db.connect() : null;
+    try {
+      if (client) await client.query('BEGIN');
+      const r = await categoryFastUpsertBatch(client || db, spec, batch, columns, colSet, apply);
+      if (client) await client.query('COMMIT');
+      processed += batch.length;
+      applied += r.applied || 0;
+      invalid += r.invalid || 0;
+      skipped += r.skipped || 0;
+      for (const rr of r.result) res.write(outCols.map(c => csvEscape(rr[c])).join(',') + '\n');
+      try { console.log('[GM_CATEGORY_FAST_IMPORT_V018]', JSON.stringify({ batchStart:i+1, batchEnd:i+batch.length, total:rows.length, processed, applied, invalid, skipped, ms:Date.now()-startTime })); } catch(_) {}
+    } catch(e) {
+      if (client) await client.query('ROLLBACK').catch(()=>{});
+      processed += batch.length;
+      invalid += batch.length;
+      const msg = String(e && e.message || e);
+      for (const row of batch) res.write(outCols.map(c => csvEscape(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'FAIL', '', '', msg)[c])).join(',') + '\n');
+      try { console.error('[GM_CATEGORY_FAST_IMPORT_BATCH_FATAL_V018]', msg); } catch(_) {}
+    } finally {
+      if (client) client.release();
+    }
+  }
+  try { console.log('[GM_CATEGORY_FAST_IMPORT_DONE_V018]', JSON.stringify({ total:rows.length, processed, applied, invalid, skipped, apply, ms:Date.now()-startTime })); } catch(_) {}
+  res.end();
+}
+
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
 
   const apply = String(req.query.apply || '').toUpperCase() === 'YES';
   const db = dbFrom(req);
-  if (spec.table === 'gm_product_option') {
-    try { await ensureProductOptionTable(db); } catch(e) { return fail(res, 500, 'product option table prepare failed', { detail:String(e && e.message || e) }); }
-  }
 
   let rows = parseCsv(req.body);
   if (rows.length > LIMITS.MAX_ROWS) {
@@ -1016,7 +966,11 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   }
 
   if (spec.table === 'gm_category') {
-    return safeUpdateCategoryBatch(req, res, spec, rows, apply);
+    try {
+      return await handleCategoryFastImport(req, res, spec, rows, apply, db);
+    } catch(e) {
+      return fail(res, 500, 'category fast import failed', { detail:String(e && e.message || e) });
+    }
   }
 
   const result = [];
