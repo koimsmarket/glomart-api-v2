@@ -1855,6 +1855,46 @@ async function upsertProduct(pool, raw, parent={}){
 
 
 
+
+router.post('/api/gm/keyword/relation/status', async (req,res)=>{
+  const pool=db(req), p=req.body||{};
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    await ensureKeywordRelationSchema(pool);
+    const meta = pickKeywordMeta(p);
+    const keywordKo = cleanText(p.keyword_ko || p.keywordKo || meta.mainKeyword || p.mainKeyword || p.keyword || '');
+    const related = uniqClean(p.relatedKeywords || p.related_keywords || meta.relatedKeywords || []);
+    if(!keywordKo || !related.length){
+      return ok(res, { mainKeyword:keywordKo, related_count:related.length, pending:[], complete:[], missing:[], reason:'empty_keyword_or_related' });
+    }
+    const r = await pool.query(`
+      SELECT v.related_keyword_ko,
+             COALESCE(gr.translate_complete,'F') AS translate_complete,
+             gr.related_keyword_en, gr.related_keyword_zh, gr.related_keyword_vi, gr.related_keyword_ja, gr.related_keyword_tw,
+             gr.related_keyword_th, gr.related_keyword_uz, gr.related_keyword_ne, gr.related_keyword_km, gr.related_keyword_id,
+             gr.related_keyword_tl, gr.related_keyword_mn, gr.related_keyword_my, gr.related_keyword_kk, gr.related_keyword_si,
+             gr.related_keyword_ru, gr.related_keyword_bn, gr.related_keyword_ur, gr.related_keyword_lo, gr.related_keyword_hi,
+             gr.related_keyword_tr, gr.related_keyword_fa, gr.related_keyword_es, gr.related_keyword_fr
+      FROM unnest($2::text[]) AS v(related_keyword_ko)
+      LEFT JOIN gm_keyword_relation gr
+        ON gr.keyword_ko=$1 AND gr.related_keyword_ko=v.related_keyword_ko
+    `, [keywordKo, related]);
+    const langCols = KEYWORD_LANGS.filter(l => l !== 'ko').map(l => 'related_keyword_' + l);
+    const pending=[], complete=[], missing=[];
+    for(const row of (r.rows||[])){
+      const rk = cleanText(row.related_keyword_ko);
+      const done = cleanText(row.translate_complete).toUpperCase() === 'T' && langCols.every(c => !!cleanText(row[c] || ''));
+      if(done) complete.push(rk);
+      else { pending.push(rk); missing.push({ related_keyword_ko:rk, translate_complete:cleanText(row.translate_complete)||'F' }); }
+    }
+    try{ console.log('[GM_KEYWORD_RELATION_STATUS]', { keyword_ko:keywordKo, related_count:related.length, pending:pending.length, complete:complete.length }); }catch(_l){}
+    return ok(res, { mainKeyword:keywordKo, keyword_ko:keywordKo, related_count:related.length, pending, complete, pending_count:pending.length, complete_count:complete.length, missing });
+  }catch(e){
+    console.error('[GM_KEYWORD_RELATION_STATUS_ERROR]', e);
+    return fail(res, 500, 'keyword relation status failed', { detail:String(e && e.message || e) });
+  }
+});
+
 router.post('/api/gm/keyword/translate', async (req,res)=>{
   const pool=db(req), p=req.body||{};
   if(!pool) return fail(res, 500, 'DB pool is not attached');
