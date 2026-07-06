@@ -1454,8 +1454,20 @@ function parseCategoryTreeFromPayload(p){
 }
 async function findCategoryRow(pool, code, name, parentCode){
   code=cleanText(code); name=cleanText(name); parentCode=cleanText(parentCode);
+
+  // IMPORTANT: 상세에서 쿠팡 cp_code가 들어온 경우에는 이름 중복으로 대체하지 않는다.
+  // 폭죽처럼 같은 name_ko가 여러 부모 아래 존재하므로, cp_code가 다르면 반드시 신규 카테고리로 본다.
+  if(code){
+    const sql=`WITH allcat AS (
+      SELECT 'base' AS src, gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, COALESCE(depth::int,0) depth, leaf_yn, COALESCE(sort_order::int,0) sort_order FROM gm_category
+      UNION ALL
+      SELECT 'dynamic' AS src, gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, COALESCE(depth::int,0) depth, leaf_yn, COALESCE(sort_order::int,0) sort_order FROM gm_category_dynamic
+    ) SELECT * FROM allcat WHERE cp_code=$1 LIMIT 1`;
+    try{ const r=await pool.query(sql, [code]); return r.rows[0]||null; }catch(e){ try{ console.warn('[GM_CATEGORY_FIND_CODE_FAIL]', Object.assign({code,name,parentCode}, compactError(e))); }catch(_l){} return null; }
+  }
+
+  // code가 없을 때만 이름으로 부모 탐색을 보조한다. 이 결과는 후보/부모 추정용이지 신규 cp_code 삽입 차단용이 아니다.
   const params=[]; let idx=1; const conds=[];
-  if(code){ conds.push(`cp_code=$${idx++}`); params.push(code); }
   if(name){
     if(parentCode){ conds.push(`(name_ko=$${idx++} AND COALESCE(cp_parent_code,'')=$${idx++})`); params.push(name,parentCode); }
     conds.push(`name_ko=$${idx++}`); params.push(name);
@@ -1466,13 +1478,13 @@ async function findCategoryRow(pool, code, name, parentCode){
     UNION ALL
     SELECT 'dynamic' AS src, gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, COALESCE(depth::int,0) depth, leaf_yn, COALESCE(sort_order::int,0) sort_order FROM gm_category_dynamic
   ) SELECT * FROM allcat WHERE ${conds.join(' OR ')}
-    ORDER BY CASE WHEN cp_code=$${idx} THEN 0 ELSE 1 END,
-             CASE WHEN COALESCE(cp_parent_code,'')=$${idx+1} THEN 0 ELSE 1 END,
-             CASE WHEN name_ko=$${idx+2} THEN 0 ELSE 1 END,
+    ORDER BY CASE WHEN COALESCE(cp_parent_code,'')=$${idx} THEN 0 ELSE 1 END,
+             CASE WHEN name_ko=$${idx+1} THEN 0 ELSE 1 END,
              depth DESC, src LIMIT 1`;
-  params.push(code,parentCode,name);
-  try{ const r=await pool.query(sql, params); return r.rows[0]||null; }catch(e){ try{ console.warn('[GM_CATEGORY_FIND_FAIL]', Object.assign({code,name,parentCode}, compactError(e))); }catch(_l){} return null; }
+  params.push(parentCode,name);
+  try{ const r=await pool.query(sql, params); return r.rows[0]||null; }catch(e){ try{ console.warn('[GM_CATEGORY_FIND_NAME_FAIL]', Object.assign({code,name,parentCode}, compactError(e))); }catch(_l){} return null; }
 }
+
 function makeDynamicGmCode(parentCode, seq){
   let code=cleanText(parentCode) || 'XX-00-000-0000-0000-0000';
   let parts=code.split('-');
@@ -1489,43 +1501,133 @@ function makeDynamicGmCode(parentCode, seq){
 async function nextDynamicChildSeq(pool, parentCpCode){
   parentCpCode=cleanText(parentCpCode);
   try{
-    const r=await pool.query(`SELECT COUNT(*)::int AS cnt FROM gm_category_dynamic WHERE COALESCE(cp_parent_code,'')=$1`, [parentCpCode]);
+    const r=await pool.query(`
+      SELECT COALESCE(SUM(cnt),0)::int AS cnt FROM (
+        SELECT COUNT(*)::int AS cnt FROM gm_category WHERE COALESCE(cp_parent_code,'')=$1
+        UNION ALL
+        SELECT COUNT(*)::int AS cnt FROM gm_category_dynamic WHERE COALESCE(cp_parent_code,'')=$1
+      ) x`, [parentCpCode]);
     return (r.rows[0] && Number(r.rows[0].cnt) || 0) + 1;
   }catch(_e){ return 1; }
 }
 async function ensureDynamicCategoriesFromDetail(pool, p, meta){
+  // 이름 중복 때문에 상세 카테고리 생성은 name_ko가 아니라 cp_code 기준이다.
+  // 신규 cp_code는 gm_category 본 테이블에 추가해서 builder 다운로드에 바로 보이게 한다.
   meta=meta||{}; p=p||{};
   await ensureDynamicCategoryTable(pool);
   const tree=parseCategoryTreeFromPayload(p);
   if(!tree.length) return { applied:false, reason:'no_category_tree' };
   const created=[]; const matched=[]; let parent=null;
+  const mallCode=cleanText(meta.mall_code || p.mall_code || p.mallCode || 'CPKR').toUpperCase();
+  const sourceKeyword=cleanText(meta.keyword || p.keyword || '');
   for(const node of tree){
     let row=await findCategoryRow(pool, node.cp_code, node.name_ko, parent && parent.cp_code);
-    if(row){ matched.push({ name:node.name_ko, cp_code:row.cp_code, source:row.src }); parent=row; continue; }
-    // 번호가 없으면 신규 카테고리 코드로 쓸 수 없으므로 부모 탐색만 진행하고 생성은 보류한다.
+    if(row){ matched.push({ name:node.name_ko, cp_code:row.cp_code, source:row.src, parent:row.cp_parent_code || '' }); parent=row; continue; }
     if(!node.cp_code){ matched.push({ name:node.name_ko, cp_code:'', source:'name_only_no_code' }); continue; }
+
     const parentCode=cleanText(parent && parent.cp_code || '');
     const parentGm=cleanText(parent && parent.gm_code || 'XX-00-000-0000-0000-0000');
     const seq=await nextDynamicChildSeq(pool, parentCode);
     const gmCode=makeDynamicGmCode(parentGm, seq);
     const path=tree.slice(0, node.depth).map(x=>x.name_ko).filter(Boolean).join(' > ');
+    const isLeaf = node.depth >= tree.length ? 'Y' : 'N';
     try{
-      const ins=await pool.query(`INSERT INTO gm_category_dynamic
-        (mall_code, gm_code, cp_code, gm_parent_code, cp_parent_code, cp_id, parent_name_ko, depth, leaf_yn, display_yn, sort_order, name_ko, keyword, category_path, source_keyword, source_product_id, source_item_id, source_vendor_item_id, source, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,'',$6,$7,'Y','Y',$8,$9,$9,$10,$11,$12,$13,$14,'detail_auto',now(),now())
-        ON CONFLICT (mall_code, cp_code) DO UPDATE SET
-          name_ko=COALESCE(NULLIF(EXCLUDED.name_ko,''), gm_category_dynamic.name_ko),
-          category_path=COALESCE(NULLIF(EXCLUDED.category_path,''), gm_category_dynamic.category_path),
-          updated_at=now()
-        RETURNING gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, depth, leaf_yn, sort_order`,
-        [cleanText(meta.mall_code || p.mall_code || p.mallCode || 'CPKR').toUpperCase(), gmCode, node.cp_code, cleanText(parent && parent.gm_code || ''), parentCode, cleanText(parent && parent.name_ko || ''), node.depth, seq, node.name_ko, path, cleanText(meta.keyword || p.keyword || ''), cleanText(meta.product_id || p.productId || p.product_id || ''), cleanText(meta.item_id || p.itemId || p.item_id || ''), cleanText(meta.vendor_item_id || p.vendorItemId || p.vendor_item_id || '')]);
-      row=Object.assign({src:'dynamic'}, ins.rows[0]||{});
-      created.push({ name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, gm_code:gmCode });
+      const ins=await pool.query(`INSERT INTO gm_category
+        (gm_code, cp_code, gm_parent_code, cp_parent_code, cp_id, parent_name_ko, depth, leaf_yn, display_yn, sort_order,
+         name_ko, keyword_seed, keyword, raw_json, created_at, updated_at,
+         view_count, search_count, wish_count, cart_count, order_count, sales_qty, sales_amount, purchase_amount, gross_profit,
+         return_count, exchange_count, ad_view_count, ad_order_count, ad_sales_qty, ad_sales_amount)
+        VALUES ($1,$2,$3,$4,'',$5,$6,$7,'Y',$8,
+                $9,$10,$10,$11::jsonb,now(),now(),
+                0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+        ON CONFLICT DO NOTHING
+        RETURNING 'base' AS src, gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, depth, leaf_yn, sort_order`,
+        [gmCode, node.cp_code, cleanText(parent && parent.gm_code || ''), parentCode, cleanText(parent && parent.name_ko || ''), node.depth, isLeaf, seq, node.name_ko, node.name_ko, JSON.stringify({ source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||'') })]);
+      if(ins.rows[0]){
+        row=ins.rows[0];
+        created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, gm_code:gmCode, path });
+      }else{
+        row=await findCategoryRow(pool, node.cp_code, '', '') || { src:'base', gm_code:gmCode, cp_code:node.cp_code, cp_parent_code:parentCode, name_ko:node.name_ko, parent_name_ko:cleanText(parent && parent.name_ko || ''), depth:node.depth, leaf_yn:isLeaf, sort_order:seq };
+        matched.push({ name:node.name_ko, cp_code:node.cp_code, source:'conflict_found_after_insert' });
+      }
       parent=row;
-    }catch(e){ try{ console.warn('[GM_CATEGORY_DYNAMIC_INSERT_FAIL]', Object.assign({node,parentCode}, compactError(e))); }catch(_l){} }
+    }catch(e){ try{ console.warn('[GM_CATEGORY_INSERT_FAIL]', Object.assign({node,parentCode}, compactError(e))); }catch(_l){} }
   }
-  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { created_count:created.length, matched_count:matched.length, created, matched:matched.slice(-5) }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { table:'gm_category', created_count:created.length, matched_count:matched.length, created, matched:matched.slice(-8) }); }catch(_l){}
   return { applied:true, created_count:created.length, matched_count:matched.length, created, matched };
+}
+
+async function findCategoryCandidatesForKeyword(pool, keyword){
+  const kw=cleanText(keyword);
+  if(!kw) return [];
+  await ensureDynamicCategoryTable(pool);
+  try{
+    const r=await pool.query(`
+      WITH allcat AS (
+        SELECT 'base' AS src, cp_code, name_ko, keyword, keyword_seed, gm_code, gm_parent_code, cp_parent_code, parent_name_ko, COALESCE(depth::int,0) depth, leaf_yn, COALESCE(search_count::int,0) search_count
+        FROM gm_category
+        UNION ALL
+        SELECT 'dynamic' AS src, cp_code, name_ko, keyword, keyword AS keyword_seed, gm_code, gm_parent_code, cp_parent_code, parent_name_ko, COALESCE(depth::int,0) depth, leaf_yn, 0 AS search_count
+        FROM gm_category_dynamic WHERE active_yn='Y'
+      )
+      SELECT *, CASE
+        WHEN name_ko=$1 THEN 'EXACT'
+        WHEN keyword=$1 OR keyword_seed=$1 THEN 'KEYWORD'
+        WHEN $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*')) THEN 'KEYWORD_LIST'
+        WHEN position($1 in COALESCE(name_ko,'')) > 0 THEN 'PARTIAL'
+        ELSE 'OTHER' END AS match_type
+      FROM allcat
+      WHERE COALESCE(cp_code,'')<>'' AND (
+        name_ko=$1 OR keyword=$1 OR keyword_seed=$1
+        OR $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*'))
+        OR position($1 in COALESCE(name_ko,'')) > 0
+      )
+      ORDER BY CASE WHEN name_ko=$1 THEN 0 WHEN keyword=$1 OR keyword_seed=$1 THEN 1 WHEN position($1 in COALESCE(name_ko,'')) > 0 THEN 3 ELSE 8 END,
+               depth DESC, CASE WHEN leaf_yn='Y' THEN 0 ELSE 1 END, search_count DESC, cp_code
+      LIMIT 50`, [kw]);
+    return r.rows || [];
+  }catch(e){ try{ console.warn('[GM_CATEGORY_CANDIDATE_FAIL]', Object.assign({keyword:kw}, compactError(e))); }catch(_l){} return []; }
+}
+async function findCpSelectedCodeForKeyword(pool, keyword){
+  // 검색 단계에서는 동명이인 카테고리 문제 때문에 확정 선택하지 않는다.
+  // exact 후보가 하나뿐일 때만 selected를 넣고, 그 외에는 상세 category_tree에서 path로 확정한다.
+  const kw = cleanText(keyword);
+  if(!kw) return '';
+  const cand=await findCategoryCandidatesForKeyword(pool, kw);
+  const exact=cand.filter(r=>cleanText(r.name_ko)===kw || cleanText(r.keyword)===kw || cleanText(r.keyword_seed)===kw);
+  let code='';
+  if(exact.length === 1) code=cleanText(exact[0].cp_code);
+  try{ console.log('[GM_CP_SELECTED_MATCH]', { keyword:kw, candidate_count:cand.length, exact_count:exact.length, cp_selected_code:code, candidates:cand.slice(0,8).map(r=>({cp_code:r.cp_code,name_ko:r.name_ko,parent_name_ko:r.parent_name_ko,cp_parent_code:r.cp_parent_code,depth:r.depth,match_type:r.match_type})) }); }catch(_l){}
+  return code;
+}
+async function findCpSelectedCodeForKeywordAndTree(pool, keyword, tree){
+  const kw=cleanText(keyword);
+  if(!kw || !Array.isArray(tree) || !tree.length) return '';
+  const cand=await findCategoryCandidatesForKeyword(pool, kw);
+  if(!cand.length) return '';
+  const names=tree.map(x=>normalizeCategoryNameForMatch(x.name_ko));
+  const codes=tree.map(x=>cleanText(x.cp_code));
+  const nameSet=new Set(names.filter(Boolean));
+  const codeSet=new Set(codes.filter(Boolean));
+  let best=null;
+  for(const r of cand){
+    const name=normalizeCategoryNameForMatch(r.name_ko);
+    const parentName=normalizeCategoryNameForMatch(r.parent_name_ko);
+    const cp=cleanText(r.cp_code);
+    let score=0;
+    if(name && nameSet.has(name)) score += 100;
+    if(parentName && nameSet.has(parentName)) score += 80;
+    if(cp && codeSet.has(cp)) score += 200;
+    if(cleanText(r.name_ko) === kw) score += 40;
+    else if(cleanText(r.name_ko).includes(kw)) score += 20;
+    if(cleanText(r.leaf_yn)==='Y') score += 5;
+    score += Math.min(toInt(r.depth,0), 20);
+    const item={row:r, score};
+    if(!best || item.score > best.score || (item.score===best.score && toInt(r.depth,0)>toInt(best.row.depth,0))) best=item;
+  }
+  const code=best && best.score>0 ? cleanText(best.row.cp_code) : '';
+  try{ console.log('[GM_CP_SELECTED_TREE_MATCH]', { keyword:kw, cp_selected_code:code, score:best&&best.score, selected:best&&{cp_code:best.row.cp_code,name_ko:best.row.name_ko,parent_name_ko:best.row.parent_name_ko,cp_parent_code:best.row.cp_parent_code,depth:best.row.depth}, candidate_count:cand.length, tree:tree.map(x=>({cp_code:x.cp_code,name_ko:x.name_ko,depth:x.depth})) }); }catch(_l){}
+  return code;
 }
 async function findCpSelectedCodeForKeyword(pool, keyword){
   const kw = cleanText(keyword);
@@ -1703,9 +1805,15 @@ async function upsertProduct(pool, raw, parent={}){
   const finalSupplyPrice = pickFinalSupplyPrice(p, mallSalePrice);
   const mallCategoryJson = normalizeMallCategoryJson(p);
   const mallCategoryLeaf = pickMallCategoryLeaf(p, mallCategoryJson);
+  const categoryTreeForMatch = parseCategoryTreeFromPayload(p);
   let cpSelectedCode = pickCpSelectedCode(p);
-  if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
   const cpFixCode = pickCpFixCode(p);
+  if(!cpSelectedCode){
+    if((cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length)) && searchKeyword){
+      cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
+    }
+    if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
+  }
   const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode);
   await ensureProductCpColumns(pool);
   const optionJson = normalizeOptionJson(p, id);
