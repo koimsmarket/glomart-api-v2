@@ -419,6 +419,106 @@ async function ensureKeywordTranslateTable(pool){
 function pickLang(p){
   return cleanText(p.lang || p.gm_lang || p.ui_lang_code || p.lang_code || p.country_lang || (p.searchKeywordMeta && (p.searchKeywordMeta.lang || p.searchKeywordMeta.gm_lang)) || 'ko').toLowerCase() || 'ko';
 }
+
+function boolToTF(v){
+  if(v === true) return 'T';
+  if(v === false) return 'F';
+  const s = cleanText(v).toUpperCase();
+  if(['T','TRUE','Y','YES','1','사용','CACHE'].includes(s)) return 'T';
+  return 'F';
+}
+async function ensureSearchLogSchema(pool){
+  // 검색로그는 분석용 최소 데이터만 저장한다. raw_json은 운영/백업 부담이 커서 제거한다.
+  try{ await pool.query(`ALTER TABLE gm_search_log DROP COLUMN IF EXISTS raw_json`); }
+  catch(e){ try{ console.warn('[GM_SEARCH_LOG_RAW_JSON_DROP_SKIP]', { message:e && e.message, code:e && e.code }); }catch(_l){} }
+  try{ await pool.query(`ALTER TABLE gm_search_log ALTER COLUMN cache_used TYPE CHAR(1) USING CASE WHEN COALESCE(cache_used::text,'') IN ('true','t','T','Y','y','1') THEN 'T' ELSE 'F' END`); }
+  catch(e){ try{ console.warn('[GM_SEARCH_LOG_CACHE_TF_SKIP]', { message:e && e.message, code:e && e.code }); }catch(_l){} }
+}
+async function lookupCategoryNameByCode(pool, cpCode){
+  cpCode = cleanText(cpCode);
+  if(!cpCode) return '';
+  try{
+    const r = await pool.query(`SELECT name_ko FROM gm_category WHERE cp_code::text=$1 LIMIT 1`, [cpCode]);
+    if(r.rows && r.rows[0] && cleanText(r.rows[0].name_ko)) return cleanText(r.rows[0].name_ko);
+  }catch(_e){}
+  try{
+    const r = await pool.query(`SELECT name_ko FROM gm_category_dynamic WHERE cp_code::text=$1 LIMIT 1`, [cpCode]);
+    if(r.rows && r.rows[0] && cleanText(r.rows[0].name_ko)) return cleanText(r.rows[0].name_ko);
+  }catch(_e){}
+  return '';
+}
+function pickSearchLogCategoryNo(p, meta){
+  return cleanText(
+    p.category_no || p.categoryNo || p.cp_selected_code || p.cpSelectedCode ||
+    p.selected_code || p.selectedCode || p.matched_category_keyword ||
+    (meta && (meta.selectedCode || meta.cp_selected_code || meta.matched_category_keyword)) ||
+    p.keyword_normalized || p.keyword_canonical || p.main_keyword || p.mainKeyword || p.keyword || p.input_keyword || ''
+  );
+}
+async function saveSearchLogPayload(pool, payload){
+  const p = parseIncomingPayloadBody(payload || {});
+  await ensureSearchLogSchema(pool);
+  const meta = pickKeywordMeta(p);
+  const keywordOriginal = cleanText(p.keyword_original || p.keywordOriginal || meta.originalKeyword || meta.inputKeyword || p.keyword || p.q || '');
+  const keywordNormalized = cleanText(p.keyword_normalized || p.keywordNormalized || p.keyword_canonical || p.keywordCanonical || meta.mainKeyword || meta.correctedKeyword || keywordOriginal);
+  const categoryCode = cleanText(p.category_code || p.categoryCode || p.cp_fix_code || p.cpFixCode || '');
+  const categoryName = cleanText(p.category_name || p.categoryName || (categoryCode ? await lookupCategoryNameByCode(pool, categoryCode) : ''));
+  const categoryNo = pickSearchLogCategoryNo(p, meta.raw || {});
+  const vals = [
+    keywordOriginal,
+    keywordNormalized,
+    cleanText(p.lang_code || p.langCode || p.ui_lang_code || p.uiLangCode || p.lang || 'kr'),
+    cleanText(p.country_code || p.countryCode || 'KR'),
+    cleanText(p.member_country_code || p.memberCountryCode || p.country_code || p.countryCode || 'KR'),
+    categoryCode || null,
+    categoryNo || null,
+    categoryName || null,
+    cleanText(p.mall_code || p.mallCode || p.mall || '').toUpperCase(),
+    toInt(p.result_count || p.resultCount, 0),
+    toInt(p.db_insert_count || p.dbInsertCount, 0),
+    toInt(p.queue_send_count || p.queueSendCount, 0),
+    boolToTF(p.cache_used !== undefined ? p.cache_used : p.cacheUsed),
+    cleanText(p.cache_key || p.cacheKey || ''),
+    cleanText(p.search_source || p.searchSource || p.source_page || p.sourcePage || 'search'),
+    cleanText(p.member_id || p.memberId || ''),
+    cleanText(p.guest_key || p.guestKey || ''),
+    cleanText(p.device_type || p.deviceType || 'app'),
+    cleanText(p.request_id || p.requestId || (meta.raw && meta.raw.requestId) || ''),
+    cleanText(p.keyword_canonical || p.keywordCanonical || keywordNormalized),
+    cleanText(p.ui_lang_code || p.uiLangCode || p.lang_code || p.langCode || 'kr'),
+    cleanText(p.keyword_lang_code || p.keywordLangCode || 'ko')
+  ];
+  const sql = `INSERT INTO gm_search_log (
+    search_at, keyword_original, keyword_normalized, lang_code, country_code, member_country_code,
+    category_code, category_no, category_name, mall_code, result_count, db_insert_count, queue_send_count,
+    cache_used, cache_key, search_source, member_id, guest_key, device_type, request_id,
+    created_at, keyword_canonical, ui_lang_code, keyword_lang_code
+  ) VALUES (now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now(), $20,$21,$22)
+  RETURNING search_id, keyword_original, keyword_normalized, category_code, category_no, category_name, mall_code, cache_used`;
+  const r = await pool.query(sql, vals);
+  try{ console.log('[GM_SEARCH_LOG_SAVE]', { row:r.rows && r.rows[0], raw_json_saved:false }); }catch(_l){}
+  return r.rows && r.rows[0] || null;
+}
+async function updateSearchLogCategoryByKeyword(pool, args){
+  args=args||{};
+  const keyword = cleanText(args.keyword);
+  const fix = cleanText(args.cp_fix_code);
+  if(!keyword || !fix) return { applied:false, reason:'keyword_or_fix_missing' };
+  await ensureSearchLogSchema(pool);
+  const name = cleanText(args.category_name || await lookupCategoryNameByCode(pool, fix));
+  const selected = cleanText(args.cp_selected_code || keyword);
+  const r = await pool.query(`
+    UPDATE gm_search_log
+    SET category_code=$2,
+        category_name=COALESCE(NULLIF($3,''), category_name),
+        category_no=COALESCE(NULLIF(category_no,''), $4),
+        cache_used=CASE WHEN COALESCE(cache_used::text,'') IN ('true','t','T','Y','y','1') THEN 'T' ELSE 'F' END
+    WHERE (keyword_normalized=$1 OR keyword_original=$1 OR keyword_canonical=$1)
+      AND (category_code IS NULL OR category_code::text='' OR category_code::text=$2)
+  `, [keyword, fix, name, selected]);
+  try{ console.log('[GM_SEARCH_LOG_CATEGORY_UPDATE]', { keyword, cp_fix_code:fix, category_name:name, category_no:selected, updated:r.rowCount||0 }); }catch(_l){}
+  return { applied:true, updated:r.rowCount||0, category_name:name };
+}
 async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, inc=1){
   lang = cleanText(lang).toLowerCase(); inputKeyword = cleanText(inputKeyword); mainKeywordKo = cleanText(mainKeywordKo);
   if(!lang || !inputKeyword || !mainKeywordKo) return false;
@@ -476,25 +576,47 @@ async function saveKeywordTranslatePayload(pool, payload){
     relatedKeywordTranslations: relatedTranslations
   };
 }
+async function ensureKeywordRelationSchema(pool){
+  // 운영 DB 보호: 테이블 drop 없이 필요한 컬럼만 안전 추가한다.
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_complete CHAR(1) NOT NULL DEFAULT 'F'`); }catch(e){}
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_updated_at DATE`); }catch(e){}
+}
+function keywordRelationComplete(trans){
+  trans = trans || {};
+  return KEYWORD_LANGS.filter(l => l !== 'ko').every(lang => !!cleanText(trans[lang] || '')) ? 'T' : 'F';
+}
 async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
   keywordKo = cleanText(keywordKo);
   relatedKo = cleanText(relatedKo);
   if(!keywordKo || !relatedKo) return false;
+  await ensureKeywordRelationSchema(pool);
   const categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
   const trans = enrichTranslationKo(options.translations || {}, relatedKo);
+  const complete = keywordRelationComplete(trans);
   const cols = ['category_main_keyword_ko','keyword_ko','related_keyword_ko'];
   const vals = [categoryMainKeywordKo, keywordKo, relatedKo];
   KEYWORD_LANGS.filter(l => l !== 'ko').forEach(lang => {
     cols.push('related_keyword_' + lang);
     vals.push(cleanText(trans[lang] || ''));
   });
+  cols.push('translate_complete'); vals.push(complete);
+  cols.push('translate_updated_at'); vals.push(complete === 'T' ? new Date().toISOString().slice(0,10) : null);
   const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
-  const updateCols = cols.filter(c => c !== 'keyword_ko' && c !== 'related_keyword_ko');
+  const langCols = KEYWORD_LANGS.filter(l => l !== 'ko').map(l => 'related_keyword_' + l);
+  const updateParts = [];
+  updateParts.push(`category_main_keyword_ko=CASE WHEN EXCLUDED.category_main_keyword_ko IS NULL OR EXCLUDED.category_main_keyword_ko::text='' THEN gm_keyword_relation.category_main_keyword_ko ELSE EXCLUDED.category_main_keyword_ko END`);
+  langCols.forEach(c => {
+    // 기존 row가 있어도 번역 컬럼이 비어 있고 EXCLUDED가 값을 가져오면 반드시 보강한다.
+    updateParts.push(`${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END`);
+  });
+  updateParts.push(`translate_complete=CASE WHEN ${langCols.map(c => `(CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END) IS NOT NULL AND (CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END)::text<>''`).join(' AND ')} THEN 'T' ELSE 'F' END`);
+  updateParts.push(`translate_updated_at=CASE WHEN ${langCols.map(c => `(CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END) IS NOT NULL AND (CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END)::text<>''`).join(' AND ')} THEN CURRENT_DATE ELSE gm_keyword_relation.translate_updated_at END`);
+  updateParts.push(`updated_at=CURRENT_DATE`);
   const sql = `INSERT INTO gm_keyword_relation (${cols.join(',')}) VALUES (${placeholders})
     ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET
-      ${updateCols.map(c => `${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END`).join(',')},
-      updated_at=CURRENT_DATE`;
+      ${updateParts.join(',\n      ')}`;
   await pool.query(sql, vals);
+  try{ if(complete !== 'T') console.log('[GM_KEYWORD_RELATION_PENDING]', { keyword_ko:keywordKo, related_keyword_ko:relatedKo, complete }); }catch(_log){}
   return true;
 }
 async function saveKeywordRelationStats(pool, keywordKo, relatedKo, categoryMainKeywordKo){
@@ -1700,6 +1822,10 @@ async function upsertProduct(pool, raw, parent={}){
   try{
     cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
     try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
+    if(cpFixCode && searchKeyword){
+      try{ await updateSearchLogCategoryByKeyword(pool, { keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode }); }
+      catch(_sl){ try{ console.warn('[GM_SEARCH_LOG_CATEGORY_UPDATE_FAIL]', Object.assign({ keyword:searchKeyword, cp_fix_code:cpFixCode }, compactError(_sl))); }catch(_l){} }
+    }
   }catch(e){ cp_learning={ applied:false, error:compactError(e) }; }
   let option_result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
   try{
@@ -1733,11 +1859,27 @@ router.post('/api/gm/keyword/translate', async (req,res)=>{
   const pool=db(req), p=req.body||{};
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   try{
+    const meta = pickKeywordMeta(p);
+    const relatedTranslations = pickRelatedTranslations(p, meta.raw || {});
+    try{ console.log('[GM_KEYWORD_TRANSLATE_START]', { mainKeyword:meta.mainKeyword, inputKeyword:meta.inputKeyword, related_count:meta.relatedKeywords.length, related_translation_keys:Object.keys(relatedTranslations||{}).length }); }catch(_l){}
     const result = await saveKeywordTranslatePayload(pool, p);
+    try{ console.log('[GM_KEYWORD_TRANSLATE_SAVED]', result); }catch(_l){}
     return ok(res, result);
   }catch(e){
     console.error('[GM_KEYWORD_TRANSLATE_SAVE_ERROR]', e);
     return fail(res, 500, 'keyword translate save failed', { detail:String(e && e.message || e) });
+  }
+});
+
+router.post(['/api/gm/search/log','/api/gm/search_log','/api/gm/search/log/save'], async (req,res)=>{
+  const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    const row = await saveSearchLogPayload(pool, p);
+    return ok(res, { action:'search.log', item:row });
+  }catch(e){
+    console.error('[GM_SEARCH_LOG_SAVE_ERROR]', compactError(e));
+    return fail(res, 500, 'search log save failed', { detail:String(e && e.message || e), error_detail:compactError(e) });
   }
 });
 
