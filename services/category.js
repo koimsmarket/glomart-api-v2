@@ -220,6 +220,63 @@ async function nextDynamicChildSeq(pool, parentCpCode){
     return (r.rows[0] && Number(r.rows[0].cnt) || 0) + 1;
   }catch(_e){ return 1; }
 }
+
+let __gmCategoryColumnsCache = null;
+async function getGmCategoryColumns(pool){
+  if(__gmCategoryColumnsCache) return __gmCategoryColumnsCache;
+  try{
+    const r = await pool.query(`SELECT column_name, data_type FROM information_schema.columns WHERE table_name='gm_category'`);
+    const map = new Map();
+    (r.rows||[]).forEach(x=>map.set(cleanText(x.column_name), cleanText(x.data_type)));
+    __gmCategoryColumnsCache = map;
+    return map;
+  }catch(e){
+    try{ console.warn('[GM_CATEGORY_COLUMNS_LOOKUP_FAIL]', compactError(e)); }catch(_l){}
+    __gmCategoryColumnsCache = new Map();
+    return __gmCategoryColumnsCache;
+  }
+}
+function pushCategoryValue(cols, vals, col, val, columnMap){
+  if(!columnMap.has(col)) return;
+  cols.push(col);
+  vals.push(val);
+}
+async function insertGmCategoryRow(pool, row){
+  const columnMap = await getGmCategoryColumns(pool);
+  const cols=[]; const vals=[];
+  const tr = row.translations || translationFallback(row.name_ko);
+  pushCategoryValue(cols, vals, 'gm_code', row.gm_code, columnMap);
+  pushCategoryValue(cols, vals, 'cp_code', row.cp_code, columnMap);
+  pushCategoryValue(cols, vals, 'gm_parent_code', row.gm_parent_code || '', columnMap);
+  pushCategoryValue(cols, vals, 'cp_parent_code', row.cp_parent_code || '', columnMap);
+  pushCategoryValue(cols, vals, 'cp_id', row.cp_id || '', columnMap);
+  pushCategoryValue(cols, vals, 'parent_name_ko', row.parent_name_ko || '', columnMap);
+  pushCategoryValue(cols, vals, 'depth', toInt(row.depth,1), columnMap);
+  pushCategoryValue(cols, vals, 'leaf_yn', row.leaf_yn || 'Y', columnMap);
+  pushCategoryValue(cols, vals, 'display_yn', row.display_yn || 'Y', columnMap);
+  pushCategoryValue(cols, vals, 'sort_order', toInt(row.sort_order,0), columnMap);
+  pushCategoryValue(cols, vals, 'name_ko', row.name_ko, columnMap);
+  for(const l of CATEGORY_LANGS){
+    pushCategoryValue(cols, vals, 'name_'+l, cleanText(tr[l]) || row.name_ko, columnMap);
+  }
+  pushCategoryValue(cols, vals, 'keyword_seed', row.keyword || row.name_ko, columnMap);
+  pushCategoryValue(cols, vals, 'keyword', row.keyword || row.name_ko, columnMap);
+  pushCategoryValue(cols, vals, 'category_path', row.category_path || '', columnMap);
+  pushCategoryValue(cols, vals, 'source_keyword', row.source_keyword || '', columnMap);
+  pushCategoryValue(cols, vals, 'source', row.source || 'detail_auto', columnMap);
+  pushCategoryValue(cols, vals, 'active_yn', 'Y', columnMap);
+  pushCategoryValue(cols, vals, 'raw_json', JSON.stringify(row.raw_json || {}), columnMap);
+  for(const c of ['view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount']){
+    pushCategoryValue(cols, vals, c, 0, columnMap);
+  }
+  pushCategoryValue(cols, vals, 'created_at', new Date(), columnMap);
+  pushCategoryValue(cols, vals, 'updated_at', new Date(), columnMap);
+  if(!cols.includes('cp_code') || !cols.includes('name_ko')) throw new Error('gm_category required columns missing: cp_code/name_ko');
+  const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
+  const sql = `INSERT INTO gm_category (${cols.join(',')}) VALUES (${placeholders}) ON CONFLICT DO NOTHING RETURNING *`;
+  const ins = await pool.query(sql, vals);
+  return ins.rows && ins.rows[0] || null;
+}
 async function ensureDynamicCategoriesFromDetail(pool, p, meta){
   // 이름 중복 때문에 상세 카테고리 생성은 name_ko가 아니라 cp_code 기준이다.
   // 신규 cp_code는 gm_category 본 테이블에 추가해서 builder 다운로드에 바로 보이게 한다.
@@ -243,25 +300,41 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
     const isLeaf = node.depth >= tree.length ? 'Y' : 'N';
     try{
       const tr = await findNameTranslations(pool, node.name_ko);
-      const keywordText = translationKeywordString(tr);
-      const langCols = CATEGORY_NAME_COLS.join(', ');
-      const langPlaceholders = CATEGORY_NAME_COLS.map((_,i)=>'$' + (12+i)).join(', ');
-      const rawJson = JSON.stringify({ source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr });
-      const params = [gmCode, node.cp_code, cleanText(parent && parent.gm_code || ''), parentCode, cleanText(parent && parent.name_ko || ''), node.depth, isLeaf, seq, node.name_ko, keywordText || node.name_ko, rawJson].concat(CATEGORY_LANGS.map(l=>cleanText(tr[l]) || node.name_ko));
-      const ins=await pool.query(`INSERT INTO gm_category
-        (gm_code, cp_code, gm_parent_code, cp_parent_code, cp_id, parent_name_ko, depth, leaf_yn, display_yn, sort_order,
-         name_ko, keyword_seed, keyword, raw_json, ${langCols}, created_at, updated_at,
-         view_count, search_count, wish_count, cart_count, order_count, sales_qty, sales_amount, purchase_amount, gross_profit,
-         return_count, exchange_count, ad_view_count, ad_order_count, ad_sales_qty, ad_sales_amount)
-        VALUES ($1,$2,$3,$4,'',$5,$6,$7,'Y',$8,
-                $9,$10,$10,$11::jsonb,${langPlaceholders},now(),now(),
-                0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
-        ON CONFLICT DO NOTHING
-        RETURNING 'base' AS src, gm_code, cp_code, gm_parent_code, cp_parent_code, name_ko, parent_name_ko, depth, leaf_yn, sort_order`,
-        params);
-      if(ins.rows[0]){
-        row=ins.rows[0];
-        created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, gm_code:gmCode, path });
+      const keywordText = translationKeywordString(tr) || node.name_ko;
+      const raw = { source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr };
+      const inserted = await insertGmCategoryRow(pool, {
+        gm_code: gmCode,
+        cp_code: node.cp_code,
+        gm_parent_code: cleanText(parent && parent.gm_code || ''),
+        cp_parent_code: parentCode,
+        cp_id: '',
+        parent_name_ko: cleanText(parent && parent.name_ko || ''),
+        depth: node.depth,
+        leaf_yn: isLeaf,
+        display_yn: 'Y',
+        sort_order: seq,
+        name_ko: node.name_ko,
+        keyword: keywordText,
+        category_path: path,
+        source_keyword: sourceKeyword,
+        source: 'detail_auto',
+        raw_json: raw,
+        translations: tr
+      });
+      if(inserted){
+        row={
+          src:'base',
+          gm_code:cleanText(inserted.gm_code || gmCode),
+          cp_code:cleanText(inserted.cp_code || node.cp_code),
+          gm_parent_code:cleanText(inserted.gm_parent_code || (parent && parent.gm_code) || ''),
+          cp_parent_code:cleanText(inserted.cp_parent_code || parentCode),
+          name_ko:cleanText(inserted.name_ko || node.name_ko),
+          parent_name_ko:cleanText(inserted.parent_name_ko || (parent && parent.name_ko) || ''),
+          depth:toInt(inserted.depth, node.depth),
+          leaf_yn:cleanText(inserted.leaf_yn || isLeaf),
+          sort_order:toInt(inserted.sort_order, seq)
+        };
+        created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, gm_code:row.gm_code, path });
       }else{
         row=await findCategoryRow(pool, node.cp_code, '', '') || { src:'base', gm_code:gmCode, cp_code:node.cp_code, cp_parent_code:parentCode, name_ko:node.name_ko, parent_name_ko:cleanText(parent && parent.name_ko || ''), depth:node.depth, leaf_yn:isLeaf, sort_order:seq };
         matched.push({ name:node.name_ko, cp_code:node.cp_code, source:'conflict_or_existing_after_insert', parent:parentCode });

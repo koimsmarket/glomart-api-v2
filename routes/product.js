@@ -742,6 +742,19 @@ function pickSupplierName(p){
 function pickSupplierId(p){
   return cleanText(p.supplier_id || p.supplierId || p.seller_id || p.sellerId || p.vendor_id || p.vendorId || p.store_id || p.storeId || '');
 }
+function isStandardCoupangSupplier(p, id){
+  p=p||{}; id=id||{};
+  const mall = cleanText(id.mallCode || p.mall_code || p.mallCode || '').toUpperCase();
+  if(mall !== 'CPKR') return false;
+  const text = [
+    p.supplier_name, p.supplierName, p.seller, p.sellerName, p.vendorName, p.storeName, p.shopName,
+    p.business_number, p.businessNumber, p.bizNo, p.supplierBizNo,
+    p.online_sales_number, p.onlineSalesNumber, p.mailOrderNo,
+    p.supplier_phone, p.supplierPhone, p.supplier_mobile, p.supplierMobile, p.phone, p.sellerPhone,
+    p.supplier_email, p.supplierEmail, p.email
+  ].map(cleanText).join(' ');
+  return /쿠팡|coupang/i.test(text) || /1577[- ]?7011/.test(text) || /120[- ]?88[- ]?00767/.test(text);
+}
 function pickAny(p, names){
   for(const n of names){
     if(p && p[n] !== undefined && p[n] !== null && cleanText(p[n]) !== '') return cleanText(p[n]);
@@ -908,20 +921,21 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       COALESCE(NULLIF(detail_json->>'block_count','')::int,0) AS detail_block_count,
       supplier_name, cp_fix_code, cp_match, buyable_qty, return_shipping_fee
   `;
+  const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
     id.uid,
     stats.option_count || 0, safeJsonString(optionJson || {headers:[],rows:[],option_count:0}),
     stats.thumb_count || 0, safeJsonString(thumbJson || []),
     stats.detail_count || 0, safeJsonString(detailJson || {}),
     pickCpSelectedCode(p), pickCpFixCode(p), pickMallCategoryLeaf(p, normalizeMallCategoryJson(p)), safeJsonString(normalizeMallCategoryJson(p)),
-    pickSupplierId(p), pickSupplierName(p),
-    pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
-    pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
-    pickAny(p,['ceo_name','ceoName','representative_name','representativeName','supplierRepresentative']),
-    pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile','phone','sellerPhone','supplierPhone']),
-    pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone','tel','telephone','landline','sellerTel','supplierTel']),
-    pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
-    pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
+    standardCoupangSupplier ? '' : pickSupplierId(p), standardCoupangSupplier ? '' : pickSupplierName(p),
+    standardCoupangSupplier ? '' : pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
+    standardCoupangSupplier ? '' : pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
+    standardCoupangSupplier ? '' : pickAny(p,['ceo_name','ceoName','representative_name','representativeName','supplierRepresentative']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile','phone','sellerPhone','supplierPhone']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone','tel','telephone','landline','sellerTel','supplierTel']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
     pickBuyableQty(p), pickMinOrderQty(p), pickMaxOrderQty(p),
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
@@ -1002,7 +1016,7 @@ function normalizeThumbJson(p){
     v = normalizeUrl(v);
     if(!v || seen.has(v)) return;
     seen.add(v);
-    out.push({ url:v, source:source || 'payload', index:out.length });
+    out.push(v);
   }
   [p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.skuThumbnailImages,p.topImages,p.mainImages,p.thumbs].forEach((a)=>{
     if(Array.isArray(a)) a.forEach(x=>add(x,'array'));
@@ -1203,8 +1217,10 @@ function makeProductOptionLinkJson(optionJson, id){
       else if(r && typeof r === 'object') add(r.item_id || r.itemId, r.vendor_item_id || r.vendorItemId);
     });
   }
-  add(id.itemId, id.vendorItemId);
+  // 상품 대표 IID/VID는 gm_product 자체 컬럼에 있으므로 option_json에 중복 저장하지 않는다.
+  if(!vals.length) return null;
   return { iid_vid: vals.join('|') };
+
 }
 function normalizeSoldoutYn(v){
   const s = cleanText(v);
@@ -1404,6 +1420,25 @@ const {
   applyCpFixLearning
 } = require('../services/category');
 
+
+let __gmLightJsonColumnsEnsured = false;
+async function ensureProductLightJsonColumns(pool){
+  if(__gmLightJsonColumnsEnsured) return;
+  __gmLightJsonColumnsEnsured = true;
+  // 빈 option_json/detail_json을 SQL NULL로 저장하기 위한 안전 보정.
+  // migration 파일은 건드리지 않고, 서버 실행 시 필요한 컬럼만 NOT NULL/DEFAULT를 해제한다.
+  const stmts = [
+    `ALTER TABLE gm_product ALTER COLUMN option_json DROP NOT NULL`,
+    `ALTER TABLE gm_product ALTER COLUMN option_json DROP DEFAULT`,
+    `ALTER TABLE gm_product ALTER COLUMN detail_json DROP NOT NULL`,
+    `ALTER TABLE gm_product ALTER COLUMN detail_json DROP DEFAULT`
+  ];
+  for(const sql of stmts){
+    try{ await pool.query(sql); }
+    catch(e){ try{ console.warn('[GM_PRODUCT_LIGHT_JSON_DDL_SKIP]', { sql, message:e && e.message, code:e && e.code }); }catch(_l){} }
+  }
+}
+
 function pickBuyableQty(p){
   const v = firstNonEmpty(p, ['buyable_qty','buyableQty','buyableQuantity','availableQuantity','available_qty']);
   return v ? toInt(v, null) : null;
@@ -1479,9 +1514,12 @@ async function upsertProduct(pool, raw, parent={}){
       cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
     }
     if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
+    // 검색어로 카테고리 후보가 잡히지 않으면 상품이 미아가 되지 않도록 검색어를 임시 selected로 보관한다.
+    if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
   }
   const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode);
   await ensureProductCpColumns(pool);
+  await ensureProductLightJsonColumns(pool);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
   const detailJsonRaw = normalizeDetailJson(p);
@@ -1490,6 +1528,15 @@ async function upsertProduct(pool, raw, parent={}){
   const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
+
+  // CATEGORY_TREE 기반 신규 카테고리는 상품 upsert보다 먼저 처리한다.
+  // 상품 저장 SQL이 실패해도 카테고리 학습이 유실되지 않게 하기 위함이다.
+  let category_dynamic = null;
+  try{
+    if(cpFixCode || (Array.isArray(mallCategoryJson) && mallCategoryJson.length)){
+      category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: mallCategoryJson, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
+    }
+  }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
 
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
@@ -1542,7 +1589,7 @@ async function upsertProduct(pool, raw, parent={}){
       option_json=CASE WHEN COALESCE(EXCLUDED.option_count,0) >= 2 THEN EXCLUDED.option_json WHEN COALESCE(EXCLUDED.option_count,0)=1 THEN NULL ELSE gm_product.option_json END,
       thumb_json=CASE
         WHEN jsonb_typeof(EXCLUDED.thumb_json)='array'
-         AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(jsonb_array_length(gm_product.thumb_json),0)
+         AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) ELSE 0 END,0)
         THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
       detail_json=CASE
         WHEN jsonb_typeof(EXCLUDED.detail_json)='object'
@@ -1602,25 +1649,27 @@ async function upsertProduct(pool, raw, parent={}){
     RETURNING product_uid, pi_ii_vi, mall_code, cp_selected_code, cp_fix_code, cp_match, hit_count, option_count, (xmax = 0) AS inserted
   `;
 
+  const productOptionLinkJson = optionCount >= 2 ? makeProductOptionLinkJson(optionJson, id) : null;
+  const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
     id.mallCode, sourceMallStored, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
-    optionCount >= 2 ? safeJsonString(makeProductOptionLinkJson(optionJson, id)) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
+    productOptionLinkJson ? safeJsonString(productOptionLinkJson) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
     cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
     cleanText(p.certification_no_1 || p.certificationNo1 || ''), cleanText(p.certification_no_2 || p.certificationNo2 || ''),
-    pickSupplierId(p), pickSupplierName(p),
-    pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
-    pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
-    pickAny(p,['ceo_name','ceoName','representative_name','representativeName','supplierRepresentative']),
-    pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile','phone','sellerPhone','supplierPhone']),
-    pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone','tel','telephone','landline','sellerTel','supplierTel']),
-    pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
-    pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
+    standardCoupangSupplier ? '' : pickSupplierId(p), standardCoupangSupplier ? '' : pickSupplierName(p),
+    standardCoupangSupplier ? '' : pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
+    standardCoupangSupplier ? '' : pickAny(p,['online_sales_number','onlineSalesNumber','mail_order_number','mailOrderNumber','supplierMailOrderNo']),
+    standardCoupangSupplier ? '' : pickAny(p,['ceo_name','ceoName','representative_name','representativeName','supplierRepresentative']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_mobile','supplierMobile','seller_mobile','sellerMobile','phone','sellerPhone','supplierPhone']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_phone','supplierPhone','seller_phone','sellerPhone','tel','telephone','landline','sellerTel','supplierTel']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
+    standardCoupangSupplier ? '' : pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
     productUrl, thumbUrl,
     cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active'), pickRatingScore(p),
     pickBuyableQty(p), pickMinOrderQty(p), pickMaxOrderQty(p),
@@ -1632,7 +1681,7 @@ async function upsertProduct(pool, raw, parent={}){
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
 
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(makeProductOptionLinkJson(optionJson,id)||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);
@@ -1641,12 +1690,6 @@ async function upsertProduct(pool, raw, parent={}){
     throw e;
   }
   try{ console.log('[GM_PRODUCT_UPSERT_TRACE_OUT]', { uid:id.uid, row:(r.rows&&r.rows[0])||null }); }catch(_trace){}
-  let category_dynamic = null;
-  try{
-    if(cpFixCode || (Array.isArray(mallCategoryJson) && mallCategoryJson.length)){
-      category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: mallCategoryJson, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
-    }
-  }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
   let cp_learning = null;
   try{
     cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
