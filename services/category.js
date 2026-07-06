@@ -132,16 +132,21 @@ async function ensureDynamicCategoryTable(pool){
   }catch(e){ try{ console.warn('[GM_CATEGORY_DYNAMIC_DDL_FAIL]', compactError(e)); }catch(_l){} }
 }
 function normalizeCategoryNameForMatch(v){ return cleanText(v).replace(/\s+/g,'').toLowerCase(); }
+function pickFirstCategoryTreeSource(p){
+  const keys=['mall_category_json','mallCategoryJson','cp_category_tree_json','cpCategoryTreeJson','category_tree_json','categoryTreeJson','categoryTree','category_tree','cpCategoryTree','cp_category_tree','breadcrumbs','breadcrumb','categoryPathItems','category_path_items'];
+  for(const k of keys){
+    let v=p && p[k];
+    if(typeof v === 'string'){ const parsed=parseMaybeJsonAny(v); if(parsed) v=parsed; }
+    if(v && !Array.isArray(v) && Array.isArray(v.path)) v=v.path;
+    if(v && !Array.isArray(v) && Array.isArray(v.nodes)) v=v.nodes;
+    if(v && !Array.isArray(v) && Array.isArray(v.tree)) v=v.tree;
+    if(Array.isArray(v) && v.length) return v;
+  }
+  return [];
+}
 function parseCategoryTreeFromPayload(p){
   p=p||{};
-  let src = p.mall_category_json || p.mallCategoryJson || p.cp_category_tree_json || p.cpCategoryTreeJson || p.category_tree_json || p.categoryTreeJson || p.categoryTree || p.category_tree || p.cpCategoryTree || p.cp_category_tree || p.breadcrumbs || p.breadcrumb || p.categoryPathItems || p.category_path_items || [];
-  if(typeof src === 'string'){
-    const parsed=parseMaybeJsonAny(src);
-    if(parsed) src=parsed;
-  }
-  if(src && !Array.isArray(src) && Array.isArray(src.path)) src=src.path;
-  if(src && !Array.isArray(src) && Array.isArray(src.nodes)) src=src.nodes;
-  if(src && !Array.isArray(src) && Array.isArray(src.tree)) src=src.tree;
+  let src = pickFirstCategoryTreeSource(p);
   let arr=[];
   if(Array.isArray(src)){
     arr=src.map((x,i)=>{
@@ -435,45 +440,42 @@ async function applyCpFixLearning(pool, args){
   const productUid=cleanText(args.product_uid);
   if(!fix) return { applied:false, reason:'no_cp_fix_code' };
   await ensureProductCpColumns(pool);
-  const out={ applied:true, current:0, selected_f:0, keyword_f:0 };
+  const out={ applied:true, current:0, propagated:0, protected_t:0 };
   try{
-    // 현재 상세 상품이 직접 검증(T)이면 우선 해당 상품만 T로 확정한다.
-    // 이미 T인 다른 상품은 어떤 자동 전파도 cp_fix_code를 건드리지 않는다.
+    // 현재 상세 상품이 직접 검증(T)이면 해당 상품은 selected/fix 모두 leaf로 확정한다.
     if(productUid && match === 'T'){
       const r=await pool.query(`
         UPDATE gm_product
-        SET cp_fix_code=$2, cp_match='T', updated_at=now()
+        SET cp_selected_code=$2, cp_fix_code=$2, cp_match='T', updated_at=now()
         WHERE product_uid=$1
           AND NOT (COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$2)
-          AND (COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'T')
+          AND (COALESCE(cp_selected_code,'')<>$2 OR COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'T')
       `, [productUid, fix]);
       out.current=r.rowCount||0;
     }
 
     if(match === 'T'){
-      if(selected){
-        const f=await pool.query(`
-          UPDATE gm_product
-          SET cp_fix_code=$2, cp_match='F', updated_at=now()
-          WHERE cp_selected_code=$1
-            AND product_uid<>$3
-            AND COALESCE(cp_match,'')<>'T'
-            AND (COALESCE(cp_fix_code,'')='' OR COALESCE(cp_match,'')<>'F')
-        `, [selected, fix, productUid || '']);
-        out.selected_f=f.rowCount||0;
-      }else if(keyword){
-        const f=await pool.query(`
-          UPDATE gm_product
-          SET cp_fix_code=$2, cp_match='F', updated_at=now()
-          WHERE keyword=$1
-            AND product_uid<>$3
-            AND (cp_selected_code IS NULL OR cp_selected_code='')
-            AND COALESCE(cp_match,'')<>'T'
-            AND (COALESCE(cp_fix_code,'')='' OR COALESCE(cp_match,'')<>'F')
-        `, [keyword, fix, productUid || '']);
-        out.keyword_f=f.rowCount||0;
-      }
+      try{
+        const pt=await pool.query(`SELECT COUNT(*)::int AS cnt FROM gm_product WHERE COALESCE(cp_match,'')='T' AND product_uid<>$1 AND (keyword=$2 OR cp_selected_code=$2 OR cp_selected_code=$3)`, [productUid || '', keyword, selected]);
+        out.protected_t = (pt.rows && pt.rows[0] && Number(pt.rows[0].cnt)) || 0;
+      }catch(_e){}
+      // 같은 검색어로 들어온 미분류/과거 selected 상품은 모두 leaf로 승격한다.
+      // 단, 이미 T인 상품은 절대 건드리지 않는다.
+      const f=await pool.query(`
+        UPDATE gm_product
+        SET cp_selected_code=$2, cp_fix_code=$2, cp_match='F', updated_at=now()
+        WHERE product_uid<>$3
+          AND COALESCE(cp_match,'')<>'T'
+          AND (
+            ($1<>'' AND keyword=$1)
+            OR ($1<>'' AND cp_selected_code=$1)
+            OR ($4<>'' AND cp_selected_code=$4)
+          )
+          AND (COALESCE(cp_selected_code,'')<>$2 OR COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'F')
+      `, [keyword, fix, productUid || '', selected]);
+      out.propagated=f.rowCount||0;
     }
+    try{ console.log('[GM_CP_FIX_PROPAGATE]', { mall, keyword, old_selected:selected, fix, match, product_uid:productUid, result:out }); }catch(_l){}
     return out;
   }catch(e){
     try{ console.warn('[GM_CP_FIX_LEARNING_FAIL]', Object.assign({ mall, keyword, cp_selected_code:selected, cp_fix_code:fix, cp_match:match }, compactError(e))); }catch(_l){}

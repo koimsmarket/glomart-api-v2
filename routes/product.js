@@ -1507,8 +1507,10 @@ async function upsertProduct(pool, raw, parent={}){
   const mallCategoryJson = normalizeMallCategoryJson(p);
   const mallCategoryLeaf = pickMallCategoryLeaf(p, mallCategoryJson);
   const categoryTreeForMatch = parseCategoryTreeFromPayload(p);
+  const categoryTreeForSave = (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length) ? categoryTreeForMatch : mallCategoryJson;
   let cpSelectedCode = pickCpSelectedCode(p);
   const cpFixCode = pickCpFixCode(p);
+  const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode);
   if(!cpSelectedCode){
     if((cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length)) && searchKeyword){
       cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
@@ -1517,7 +1519,9 @@ async function upsertProduct(pool, raw, parent={}){
     // 검색어로 카테고리 후보가 잡히지 않으면 상품이 미아가 되지 않도록 검색어를 임시 selected로 보관한다.
     if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
   }
-  const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode);
+  // 상세에서 leaf cp_code가 직접 확인된 상품은 selected도 leaf로 승격한다.
+  // 이렇게 해야 332870/검색어/411016 혼재가 상세 확인 이후 정리된다.
+  if(cpFixCode && cpMatch === 'T') cpSelectedCode = cpFixCode;
   await ensureProductCpColumns(pool);
   await ensureProductLightJsonColumns(pool);
   const optionJson = normalizeOptionJson(p, id);
@@ -1533,8 +1537,8 @@ async function upsertProduct(pool, raw, parent={}){
   // 상품 저장 SQL이 실패해도 카테고리 학습이 유실되지 않게 하기 위함이다.
   let category_dynamic = null;
   try{
-    if(cpFixCode || (Array.isArray(mallCategoryJson) && mallCategoryJson.length)){
-      category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: mallCategoryJson, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
+    if(cpFixCode || (Array.isArray(categoryTreeForSave) && categoryTreeForSave.length)){
+      category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: categoryTreeForSave, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
     }
   }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
 
@@ -1572,7 +1576,9 @@ async function upsertProduct(pool, raw, parent={}){
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_selected_code=CASE
-        WHEN COALESCE(gm_product.cp_selected_code,'')='' AND NULLIF(EXCLUDED.cp_selected_code,'') IS NOT NULL THEN EXCLUDED.cp_selected_code
+        WHEN COALESCE(gm_product.cp_match,'')='T' AND COALESCE(gm_product.cp_fix_code,'')<>'' THEN gm_product.cp_selected_code
+        WHEN COALESCE(EXCLUDED.cp_match,'')='T' AND NULLIF(EXCLUDED.cp_fix_code,'') IS NOT NULL THEN EXCLUDED.cp_fix_code
+        WHEN NULLIF(EXCLUDED.cp_selected_code,'') IS NOT NULL THEN EXCLUDED.cp_selected_code
         ELSE gm_product.cp_selected_code END,
       cp_fix_code=CASE
         WHEN NULLIF(EXCLUDED.cp_fix_code,'') IS NULL THEN gm_product.cp_fix_code
