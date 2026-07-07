@@ -192,3 +192,32 @@ CREATE TABLE IF NOT EXISTS gm_message_counter_daily (
   save_count INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (counter_date, message_scope, message_type)
 );
+
+-- Broadcast bulk sending queue. Integrated into 30_gm_message.sql as initial creation.
+-- Broadcast bulk sending queue. Designed for chunk/rate-limited delivery.
+
+CREATE TABLE IF NOT EXISTS gm_message_broadcast_job (
+  job_no          VARCHAR(40) PRIMARY KEY,
+  broadcast_no    VARCHAR(32) NOT NULL,
+  chunk_no        INTEGER NOT NULL,
+  status          VARCHAR(20) NOT NULL DEFAULT 'READY',
+  target_count    INTEGER NOT NULL DEFAULT 0,
+  chunk_size      INTEGER NOT NULL DEFAULT 1000,
+  start_offset    INTEGER NOT NULL DEFAULT 0,
+  sent_count      INTEGER NOT NULL DEFAULT 0,
+  receive_count   INTEGER NOT NULL DEFAULT 0,
+  attempt_count   INTEGER NOT NULL DEFAULT 0,
+  error_message   TEXT,
+  created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at      TIMESTAMP,
+  finished_at     TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gm_message_broadcast_job_broadcast
+  ON gm_message_broadcast_job(broadcast_no, chunk_no);
+
+CREATE INDEX IF NOT EXISTS idx_gm_message_broadcast_job_status
+  ON gm_message_broadcast_job(status, broadcast_no, chunk_no);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_message_broadcast_job_broadcast_chunk
+  ON gm_message_broadcast_job(broadcast_no, chunk_no);

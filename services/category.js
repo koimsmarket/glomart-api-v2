@@ -311,8 +311,10 @@ async function insertGmCategoryRow(pool, row){
   pushCategoryValue(cols, vals, 'updated_at', new Date(), columnMap);
   if(!cols.includes('cp_code') || !cols.includes('name_ko')) throw new Error('gm_category required columns missing: cp_code/name_ko');
   const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
-  const sql = `INSERT INTO gm_category (${cols.join(',')}) VALUES (${placeholders}) ON CONFLICT DO NOTHING RETURNING *`;
+  const sql = `INSERT INTO gm_category (${cols.join(',')}) VALUES (${placeholders}) RETURNING *`;
   try{
+    const exists = await findCategoryRow(pool, row.cp_code, '', '');
+    if(exists) return exists;
     const ins = await pool.query(sql, vals);
     return ins.rows && ins.rows[0] || null;
   }catch(e){
@@ -327,6 +329,23 @@ async function insertGmCategoryRow(pool, row){
     throw e;
   }
 }
+
+async function insertDynamicFallbackRow(pool, row){
+  await ensureDynamicCategoryTable(pool);
+  const tr = row.translations || translationFallback(row.name_ko);
+  const keywordText = row.keyword || translationKeywordString(tr) || row.name_ko;
+  const vals = [
+    cleanText(row.mall_code || 'CPKR'), cleanText(row.gm_code), cleanText(row.cp_code), cleanText(row.gm_parent_code||''), cleanText(row.cp_parent_code||''), cleanText(row.cp_id||''),
+    cleanText(row.parent_name_ko||''), toInt(row.depth,1), cleanText(row.leaf_yn||'Y'), cleanText(row.display_yn||'Y'), toInt(row.sort_order,0), cleanText(row.name_ko),
+    keywordText, cleanText(row.category_path||''), cleanText(row.source_keyword||''), cleanText(row.source_product_id||''), cleanText(row.source_item_id||''), cleanText(row.source_vendor_item_id||'')
+  ];
+  const r = await pool.query(`INSERT INTO gm_category_dynamic (mall_code,gm_code,cp_code,gm_parent_code,cp_parent_code,cp_id,parent_name_ko,depth,leaf_yn,display_yn,sort_order,name_ko,keyword,category_path,source_keyword,source_product_id,source_item_id,source_vendor_item_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+    ON CONFLICT (mall_code, cp_code) DO UPDATE SET updated_at=now(), gm_parent_code=EXCLUDED.gm_parent_code, cp_parent_code=EXCLUDED.cp_parent_code, category_path=EXCLUDED.category_path
+    RETURNING *`, vals);
+  return r.rows && r.rows[0] || null;
+}
+
 async function ensureDynamicCategoriesFromDetail(pool, p, meta){
   // 이름 중복 때문에 상세 카테고리 생성은 name_ko가 아니라 cp_code 기준이다.
   // 신규 cp_code는 gm_category 본 테이블에 추가해서 builder 다운로드에 바로 보이게 한다.
@@ -392,7 +411,25 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
       parent=row;
     }catch(e){
       const err = Object.assign({node,parentCode, insert_context:e && e.gm_category_insert_context}, compactError(e));
-      created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, error:err });
+      try{
+        const tr = await findNameTranslations(pool, node.name_ko);
+        const path=tree.slice(0, node.depth).map(x=>x.name_ko).filter(Boolean).join(' > ');
+        const fallback = await insertDynamicFallbackRow(pool, {
+          mall_code:mallCode, gm_code:gmCode, cp_code:node.cp_code, gm_parent_code:cleanText(parent && parent.gm_code || ''), cp_parent_code:parentCode,
+          cp_id:'', parent_name_ko:cleanText(parent && parent.name_ko || ''), depth:node.depth, leaf_yn:isLeaf, display_yn:'Y', sort_order:seq,
+          name_ko:node.name_ko, keyword:translationKeywordString(tr) || node.name_ko, category_path:path, source_keyword:sourceKeyword,
+          source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr
+        });
+        if(fallback){
+          row={src:'dynamic', gm_code:cleanText(fallback.gm_code || gmCode), cp_code:cleanText(fallback.cp_code || node.cp_code), gm_parent_code:cleanText(fallback.gm_parent_code || (parent && parent.gm_code) || ''), cp_parent_code:cleanText(fallback.cp_parent_code || parentCode), name_ko:cleanText(fallback.name_ko || node.name_ko), parent_name_ko:cleanText(fallback.parent_name_ko || (parent && parent.name_ko) || ''), depth:toInt(fallback.depth, node.depth), leaf_yn:cleanText(fallback.leaf_yn || isLeaf), sort_order:toInt(fallback.sort_order, seq)};
+          created.push({ table:'gm_category_dynamic', fallback:true, name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, gm_code:row.gm_code, path, gm_category_error:err });
+          parent=row;
+        }else{
+          created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, error:err });
+        }
+      }catch(e2){
+        created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, error:Object.assign({ fallback_error:compactError(e2) }, err) });
+      }
       try{ console.warn('[GM_CATEGORY_INSERT_FAIL]', err); }catch(_l){}
     }
   }

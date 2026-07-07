@@ -669,6 +669,84 @@ async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relat
 }
 
 
+// GM_KEYWORD_TRANSLATE_WIDE_V043
+// 검색어 번역은 1개 한국어 키워드 = 1 row = 25개 언어 컬럼으로 저장한다.
+// 기존 PK(lang,input_keyword)를 유지하는 운영 DB에서도 lang='all', input_keyword=main_keyword_ko 로 1 row만 사용한다.
+const KEYWORD_WIDE_COLS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'].map(l => 'keyword_' + l);
+async function ensureKeywordTranslateTable(pool){
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_translate (
+    lang TEXT NOT NULL,
+    input_keyword TEXT NOT NULL,
+    main_keyword_ko TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (lang, input_keyword)
+  )`);
+  try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS keyword_ko TEXT`); }catch(_e){}
+  for(const l of KEYWORD_LANGS.filter(x=>x !== 'ko')){
+    try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS keyword_${l} TEXT`); }catch(_e){}
+  }
+  try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS translate_complete CHAR(1) NOT NULL DEFAULT 'F'`); }catch(_e){}
+  try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS created_at DATE NOT NULL DEFAULT CURRENT_DATE`); }catch(_e){}
+  try{ await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_keyword_translate_main_keyword_ko ON gm_keyword_translate(main_keyword_ko)`); }catch(_e){}
+}
+function keywordWideComplete(trans, mainKeywordKo){
+  const t = trans || {};
+  return KEYWORD_LANGS.every(l => !!cleanText(l === 'ko' ? (t.ko || mainKeywordKo) : t[l])) ? 'T' : 'F';
+}
+async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, inc=1, translationsArg=null){
+  mainKeywordKo = cleanText(mainKeywordKo || inputKeyword);
+  if(!mainKeywordKo) return false;
+  await ensureKeywordTranslateTable(pool);
+  const trans = Object.assign({}, translationsArg || {});
+  trans.ko = cleanText(trans.ko || mainKeywordKo);
+  // 단일어 호출 호환: 과거 방식으로 들어와도 해당 lang 컬럼만 보강한다.
+  const l0 = cleanText(lang).toLowerCase();
+  if(l0 && l0 !== 'all' && l0 !== 'ko' && cleanText(inputKeyword)) trans[l0] = cleanText(inputKeyword);
+  const complete = keywordWideComplete(trans, mainKeywordKo);
+  const cols = ['lang','input_keyword','main_keyword_ko','hit_count','updated_at','created_at','translate_complete'];
+  const vals = ['all', mainKeywordKo, mainKeywordKo, Math.max(0, toInt(inc,1)), new Date().toISOString().slice(0,10), new Date().toISOString().slice(0,10), complete];
+  for(const l of KEYWORD_LANGS){ cols.push('keyword_'+l); vals.push(cleanText(trans[l] || (l==='ko' ? mainKeywordKo : ''))); }
+  const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
+  const upd=[];
+  upd.push(`main_keyword_ko=EXCLUDED.main_keyword_ko`);
+  upd.push(`hit_count=gm_keyword_translate.hit_count + EXCLUDED.hit_count`);
+  upd.push(`updated_at=CURRENT_DATE`);
+  for(const l of KEYWORD_LANGS){
+    const c='keyword_'+l;
+    upd.push(`${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_translate.${c} ELSE EXCLUDED.${c} END`);
+  }
+  const completeExpr = KEYWORD_LANGS.map(l => `(CASE WHEN EXCLUDED.keyword_${l} IS NULL OR EXCLUDED.keyword_${l}::text='' THEN gm_keyword_translate.keyword_${l} ELSE EXCLUDED.keyword_${l} END) IS NOT NULL AND (CASE WHEN EXCLUDED.keyword_${l} IS NULL OR EXCLUDED.keyword_${l}::text='' THEN gm_keyword_translate.keyword_${l} ELSE EXCLUDED.keyword_${l} END)::text<>''`).join(' AND ');
+  upd.push(`translate_complete=CASE WHEN ${completeExpr} THEN 'T' ELSE 'F' END`);
+  await pool.query(`INSERT INTO gm_keyword_translate (${cols.join(',')}) VALUES (${placeholders}) ON CONFLICT (lang,input_keyword) DO UPDATE SET ${upd.join(', ')}`, vals);
+  return true;
+}
+async function saveKeywordTranslatePayload(pool, payload){
+  payload = payload || {};
+  await ensureKeywordTranslateTable(pool);
+  const meta = pickKeywordMeta(payload);
+  const mainKeywordKo = cleanText(meta.mainKeyword || payload.main_keyword_ko || payload.mainKeywordKo || payload.keyword_ko || payload.keyword || '');
+  const inputKeyword = cleanText(meta.inputKeyword || payload.inputKeyword || payload.input_keyword || mainKeywordKo);
+  const lang = pickLang(payload);
+  const translations = pickKeywordTranslations(payload, Object.assign({}, meta.raw || {}, { mainKeyword:mainKeywordKo }));
+  translations.ko = cleanText(translations.ko || mainKeywordKo);
+  let alias_saved = 0, relation_saved = 0, relation_skipped = 0;
+  if(mainKeywordKo){
+    if(await upsertKeywordTranslate(pool, lang, inputKeyword || mainKeywordKo, mainKeywordKo, 1, translations)) alias_saved++;
+  }
+  const relatedTranslations = pickRelatedTranslations(payload, meta.raw || {});
+  for(const rk of meta.relatedKeywords){
+    const t = relatedTransFor(relatedTranslations, rk);
+    try{
+      const ok = await saveKeywordRelationRow(pool, mainKeywordKo, rk, { categoryMainKeywordKo:meta.categoryMainKeywordKo, translations:t });
+      if(ok){ relation_saved++; await saveKeywordRelationStats(pool, mainKeywordKo, rk, meta.categoryMainKeywordKo); }
+      else relation_skipped++;
+    }catch(e){ relation_skipped++; try{ console.warn('[GM_KEYWORD_RELATION_SAVE_FAIL]', { keyword_ko:mainKeywordKo, related_keyword_ko:rk, message:e && e.message }); }catch(_l){} }
+  }
+  return { mainKeyword: mainKeywordKo, inputKeyword, lang, wide:true, alias_saved, relation_saved, relation_skipped, related_count: meta.relatedKeywords.length, mainKeywordTranslations: translations, relatedKeywordTranslations: relatedTranslations };
+}
+
+
 function ids(b){
   const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
   const isAliMall = mallCode === 'ALI' || mallCode === 'ALKR' || /^AL/.test(mallCode);

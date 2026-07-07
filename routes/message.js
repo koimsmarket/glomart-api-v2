@@ -1,7 +1,7 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_MESSAGE_API_V002_SHARE_RECEIVER_DEDUP_SPACE_SUBSCRIBE';
+const VERSION = 'GM_MESSAGE_API_V004_BROADCAST_QUEUE_NIGHT_SEND_SMARTFIT';
 console.log('[GM_MESSAGE_ROUTE] loaded', VERSION);
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -38,6 +38,43 @@ async function bumpDaily(pool, scope, type, field, inc=1){
   if(!allowed.has(field)) return;
   await pool.query(`INSERT INTO gm_message_counter_daily(counter_date,message_scope,message_type,${field}) VALUES((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date,$1,$2,$3) ON CONFLICT(counter_date,message_scope,message_type) DO UPDATE SET ${field}=gm_message_counter_daily.${field}+EXCLUDED.${field}`,[scope,s(type).toUpperCase(),Number(inc)||1]);
 }
+
+const BROADCAST_MIN_DELAY_MINUTES = 30;
+const BROADCAST_DEFAULT_CHUNK_SIZE = 1000;
+const BROADCAST_MAX_CHUNK_SIZE = 1000;
+const BROADCAST_BULK_THRESHOLD = 10000;
+const BROADCAST_NIGHT_START_HOUR = 0;
+const BROADCAST_NIGHT_END_HOUR = 6;
+
+function kstNow(){ return new Date(Date.now()+9*60*60*1000); }
+function kstHour(){ return kstNow().getUTCHours(); }
+function isNightKst(){
+  const h = kstHour();
+  if(BROADCAST_NIGHT_START_HOUR < BROADCAST_NIGHT_END_HOUR) return h >= BROADCAST_NIGHT_START_HOUR && h < BROADCAST_NIGHT_END_HOUR;
+  return h >= BROADCAST_NIGHT_START_HOUR || h < BROADCAST_NIGHT_END_HOUR;
+}
+function urgentFlag(v){ return yn(v,'N') === 'Y'; }
+function safeChunkSize(v){ return Math.min(BROADCAST_MAX_CHUNK_SIZE, Math.max(1, Number(v || BROADCAST_DEFAULT_CHUNK_SIZE) || BROADCAST_DEFAULT_CHUNK_SIZE)); }
+function delayInfo(row){
+  const created = row && row.created_at ? new Date(row.created_at).getTime() : Date.now();
+  const availableAt = new Date(created + BROADCAST_MIN_DELAY_MINUTES * 60 * 1000);
+  const now = Date.now();
+  const waitMs = Math.max(0, availableAt.getTime() - now);
+  return { available_at: availableAt.toISOString(), wait_seconds: Math.ceil(waitMs/1000), ready: waitMs <= 0 };
+}
+function broadcastSendGuard(row, opts={}){
+  const urgent = urgentFlag(opts.urgent || opts.is_urgent || row?.is_urgent);
+  const targetCount = Number(opts.target_count || row?.target_count || row?.send_count || 0) || 0;
+  const d = delayInfo(row || {});
+  if(!urgent && !d.ready){
+    return { ok:false, reason:'BROADCAST_30_MIN_WAIT', message:'단체메시지는 작성 후 30분 이후 발송 가능합니다.', ...d };
+  }
+  if(!urgent && targetCount >= BROADCAST_BULK_THRESHOLD && !isNightKst()){
+    return { ok:false, reason:'BROADCAST_BULK_NIGHT_ONLY', message:'대량 단체메시지는 긴급을 제외하고 KST 심야 시간대에만 발송 가능합니다.', target_count:targetCount, kst_hour:kstHour(), night_start:BROADCAST_NIGHT_START_HOUR, night_end:BROADCAST_NIGHT_END_HOUR };
+  }
+  return { ok:true, urgent, target_count:targetCount, ...d, kst_hour:kstHour() };
+}
+
 
 router.get('/api/gm/message/health',(req,res)=>ok(res,{ route:'message' }));
 
@@ -134,12 +171,103 @@ router.post('/api/gm/message/broadcast/create', async (req,res)=>{
     const trackReceive = b.track_receive===undefined ? p.track_receive : yn(b.track_receive,'N');
     const trackRead = b.track_read===undefined ? p.track_read : yn(b.track_read,'N');
     const trackClick = b.track_click===undefined ? p.track_click : yn(b.track_click,'N');
-    const status=s(b.status||'active').toLowerCase();
+    let status=s(b.status||'waiting').toLowerCase();
     const r=await pool.query(`INSERT INTO gm_message_broadcast(broadcast_no,message_type,title,message,target_rule_json,move_type,move_value,action_json,track_receive,track_read,track_click,status,start_at,end_at,created_by)
       VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8::jsonb,$9,$10,$11,$12,COALESCE($13::timestamp,CURRENT_TIMESTAMP),$14::timestamp,$15) RETURNING *`,
       [no,mt,s(b.title),s(b.message),JSON.stringify(jsonb(b.target_rule_json||b.target_rule,{})),s(b.move_type),s(b.move_value),JSON.stringify(jsonb(b.action_json,{})),trackReceive,trackRead,trackClick,status,b.start_at||null,b.end_at||null,s(b.created_by||b.admin_id)]);
-    ok(res,{ item:r.rows[0] });
+    const d=delayInfo(r.rows[0]);
+    ok(res,{ item:r.rows[0], min_send_delay_minutes:BROADCAST_MIN_DELAY_MINUTES, send_available_at:d.available_at, wait_seconds:d.wait_seconds });
   }catch(e){ fail(res,500,'broadcast create failed',{ detail:String(e.message||e) }); }
+});
+
+
+router.get('/api/gm/message/broadcast/send-check', async (req,res)=>{
+  try{
+    const pool=db(req); const no=s(req.query.broadcast_no||req.query.broadcastNo); if(!no) return fail(res,400,'broadcast_no required');
+    const br=await pool.query('SELECT * FROM gm_message_broadcast WHERE broadcast_no=$1',[no]); if(!br.rowCount) return fail(res,404,'broadcast not found');
+    const targetCount = Number(req.query.target_count || br.rows[0].target_count || br.rows[0].send_count || 0) || 0;
+    const guard=broadcastSendGuard(br.rows[0], { urgent:req.query.urgent||req.query.is_urgent, target_count:targetCount });
+    ok(res,{ broadcast_no:no, can_send:guard.ok, guard });
+  }catch(e){ fail(res,500,'broadcast send check failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/message/broadcast/activate', async (req,res)=>{
+  try{
+    const pool=db(req), b=req.body||{}; const no=s(b.broadcast_no||b.broadcastNo); if(!no) return fail(res,400,'broadcast_no required');
+    const br=await pool.query('SELECT * FROM gm_message_broadcast WHERE broadcast_no=$1',[no]); if(!br.rowCount) return fail(res,404,'broadcast not found');
+    const targetCount = Number(b.target_count || br.rows[0].target_count || br.rows[0].send_count || 0) || 0;
+    const guard=broadcastSendGuard(br.rows[0], { urgent:b.urgent||b.is_urgent, target_count:targetCount });
+    if(!guard.ok) return fail(res,409,guard.reason,{ guard });
+    const r=await pool.query("UPDATE gm_message_broadcast SET status='active', start_at=COALESCE(start_at,CURRENT_TIMESTAMP) WHERE broadcast_no=$1 RETURNING *",[no]);
+    ok(res,{ item:r.rows[0], guard });
+  }catch(e){ fail(res,500,'broadcast activate failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/message/broadcast/job/create', async (req,res)=>{
+  try{
+    const pool=db(req), b=req.body||{}; const no=s(b.broadcast_no||b.broadcastNo); if(!no) return fail(res,400,'broadcast_no required');
+    const br=await pool.query('SELECT * FROM gm_message_broadcast WHERE broadcast_no=$1',[no]); if(!br.rowCount) return fail(res,404,'broadcast not found');
+    const targetCount = Math.max(0, Number(b.target_count || b.total_target_count || br.rows[0].target_count || 0) || 0);
+    if(targetCount <= 0) return fail(res,400,'target_count required');
+    const guard=broadcastSendGuard(br.rows[0], { urgent:b.urgent||b.is_urgent, target_count:targetCount });
+    if(!guard.ok) return fail(res,409,guard.reason,{ guard });
+    const chunkSize=safeChunkSize(b.chunk_size);
+    const chunkTotal=Math.ceil(targetCount/chunkSize);
+    const existing=await pool.query("SELECT COUNT(*)::int AS cnt FROM gm_message_broadcast_job WHERE broadcast_no=$1 AND status IN ('READY','RUNNING','DONE')",[no]);
+    if((existing.rows[0]?.cnt||0)>0 && yn(b.recreate,'N')!=='Y') return fail(res,409,'broadcast jobs already exist',{ existing_count:existing.rows[0].cnt });
+    if(yn(b.recreate,'N')==='Y') await pool.query("DELETE FROM gm_message_broadcast_job WHERE broadcast_no=$1 AND status<>'DONE'",[no]);
+    let inserted=0;
+    for(let i=1;i<=chunkTotal;i++){
+      const startOffset=(i-1)*chunkSize;
+      const cnt=Math.min(chunkSize, targetCount-startOffset);
+      const jobNo=`${no}_${String(i).padStart(6,'0')}`;
+      const ir=await pool.query(`INSERT INTO gm_message_broadcast_job(job_no,broadcast_no,chunk_no,status,target_count,chunk_size,start_offset)
+        VALUES($1,$2,$3,'READY',$4,$5,$6) ON CONFLICT(job_no) DO NOTHING`,[jobNo,no,i,cnt,chunkSize,startOffset]);
+      inserted += ir.rowCount;
+    }
+    await pool.query("UPDATE gm_message_broadcast SET status='sending', send_count=$2 WHERE broadcast_no=$1",[no,targetCount]);
+    ok(res,{ broadcast_no:no, target_count:targetCount, chunk_size:chunkSize, chunk_total:chunkTotal, inserted_jobs:inserted, guard });
+  }catch(e){ fail(res,500,'broadcast job create failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/message/broadcast/job/claim', async (req,res)=>{
+  try{
+    const pool=db(req), b=req.body||{}; const no=s(b.broadcast_no||b.broadcastNo);
+    const params=[]; let where="status='READY'";
+    if(no){ params.push(no); where += ` AND broadcast_no=$${params.length}`; }
+    const q=`WITH picked AS (SELECT job_no FROM gm_message_broadcast_job WHERE ${where} ORDER BY broadcast_no, chunk_no LIMIT 1 FOR UPDATE SKIP LOCKED)
+      UPDATE gm_message_broadcast_job j SET status='RUNNING', started_at=CURRENT_TIMESTAMP, attempt_count=attempt_count+1
+      FROM picked WHERE j.job_no=picked.job_no RETURNING j.*`;
+    const r=await pool.query(q,params);
+    ok(res,{ item:r.rows[0]||null, claimed:r.rowCount });
+  }catch(e){ fail(res,500,'broadcast job claim failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/message/broadcast/job/done', async (req,res)=>{
+  try{
+    const pool=db(req), b=req.body||{}; const jobNo=s(b.job_no||b.jobNo); if(!jobNo) return fail(res,400,'job_no required');
+    const sent=Math.max(0,Number(b.sent_count||0)||0); const received=Math.max(0,Number(b.receive_count||sent)||0);
+    const status=yn(b.failed,'N')==='Y' ? 'FAIL' : 'DONE';
+    const r=await pool.query(`UPDATE gm_message_broadcast_job SET status=$2, sent_count=$3, receive_count=$4, error_message=$5, finished_at=CURRENT_TIMESTAMP WHERE job_no=$1 RETURNING *`,[jobNo,status,sent,received,s(b.error_message)]);
+    if(!r.rowCount) return fail(res,404,'job not found');
+    const brNo=r.rows[0].broadcast_no;
+    const br=await pool.query('SELECT message_type FROM gm_message_broadcast WHERE broadcast_no=$1',[brNo]);
+    if(br.rowCount && received>0) await bumpDaily(pool,'BROADCAST',br.rows[0].message_type,'receive_count',received);
+    const remain=await pool.query("SELECT COUNT(*)::int AS cnt FROM gm_message_broadcast_job WHERE broadcast_no=$1 AND status IN ('READY','RUNNING')",[brNo]);
+    if((remain.rows[0]?.cnt||0)===0){
+      const failCnt=await pool.query("SELECT COUNT(*)::int AS cnt FROM gm_message_broadcast_job WHERE broadcast_no=$1 AND status='FAIL'",[brNo]);
+      await pool.query("UPDATE gm_message_broadcast SET status=$2, receive_count=(SELECT COALESCE(SUM(receive_count),0) FROM gm_message_broadcast_job WHERE broadcast_no=$1) WHERE broadcast_no=$1",[brNo,(failCnt.rows[0]?.cnt||0)>0?'partial':'done']);
+    }
+    ok(res,{ item:r.rows[0] });
+  }catch(e){ fail(res,500,'broadcast job done failed',{ detail:String(e.message||e) }); }
+});
+
+router.get('/api/gm/message/broadcast/job/list', async (req,res)=>{
+  try{
+    const pool=db(req); const no=s(req.query.broadcast_no||req.query.broadcastNo); if(!no) return fail(res,400,'broadcast_no required');
+    const r=await pool.query('SELECT * FROM gm_message_broadcast_job WHERE broadcast_no=$1 ORDER BY chunk_no',[no]);
+    ok(res,{ items:r.rows });
+  }catch(e){ fail(res,500,'broadcast job list failed',{ detail:String(e.message||e) }); }
 });
 
 router.post('/api/gm/message/broadcast/receive', async (req,res)=>{
@@ -202,6 +330,68 @@ async function getShareReceivers(pool, sender, maxChon){
   const r = await pool.query(q, [sender, depth]);
   return r.rows || [];
 }
+
+
+async function getSpaceSubscribers(pool, spaceNo, sender){
+  spaceNo = s(spaceNo);
+  if(!spaceNo) return [];
+  const r = await pool.query(`SELECT member_id, 0 AS chon_depth
+    FROM gm_smartfit_space_subscriber
+    WHERE space_no=$1 AND active_yn='Y' AND member_id <> $2
+    ORDER BY subscribed_at DESC`, [spaceNo, sender || '']);
+  return r.rows || [];
+}
+function dedupeReceivers(rows){
+  const map = new Map();
+  (rows || []).forEach(function(x){
+    const id = s(x.member_id || x.receiver_member_id);
+    if(!id) return;
+    const depth = Number(x.chon_depth || 0);
+    if(!map.has(id) || depth < Number(map.get(id).chon_depth || 99)) map.set(id, { member_id:id, chon_depth:depth });
+  });
+  return Array.from(map.values());
+}
+
+router.post('/api/gm/message/smartfit/template/share-create', async (req,res)=>{
+  try{
+    const pool=db(req), b=req.body||{};
+    const sender=s(b.sender_member_id||b.senderMemberId||b.member_id);
+    if(!sender) return fail(res,400,'sender_member_id required');
+    const refNo=s(b.ref_no||b.template_id||b.templateId);
+    if(!refNo) return fail(res,400,'template_id/ref_no required');
+    const spaceNo=s(b.space_no||b.spaceNo||b.space_id||b.spaceId);
+    const includeReferral=yn(b.include_referral,'Y')==='Y';
+    const includeSubscribers=yn(b.include_subscribers,'Y')==='Y';
+    const requestedDepth = Math.max(1, Math.min(5, Number(b.target_chon_max||b.targetChonMax||b.chon_max||1)));
+
+    const mr=await pool.query("SELECT COALESCE(message_send_chon_max,1) AS max_chon FROM gm_member WHERE member_id=$1",[sender]);
+    const allowedDepth = Math.max(1, Math.min(5, Number(mr.rows[0]?.max_chon || 1)));
+    const targetDepth = Math.min(requestedDepth, allowedDepth);
+
+    const referralRows = includeReferral ? await getShareReceivers(pool, sender, targetDepth) : [];
+    const subscriberRows = includeSubscribers ? await getSpaceSubscribers(pool, spaceNo, sender) : [];
+    const receivers = dedupeReceivers([].concat(referralRows, subscriberRows));
+
+    const no=s(b.share_no)||await nextNo(pool,'gm_message_share','share_no');
+    const shareType=s(b.share_type||'SMARTFIT_TEMPLATE').toUpperCase();
+    const target={ type:'SMARTFIT_TEMPLATE_MIXED', sender_member_id:sender, ref_no:refNo, space_no:spaceNo||null, include_referral:includeReferral?'Y':'N', include_subscribers:includeSubscribers?'Y':'N', target_chon_max:targetDepth, requested_chon_max:requestedDepth, allowed_chon_max:allowedDepth, referral_candidate_count:referralRows.length, subscriber_candidate_count:subscriberRows.length };
+    const r=await pool.query(`INSERT INTO gm_message_share(share_no,sender_member_id,share_type,ref_no,title,message,target_rule_json,move_type,move_value,target_chon_max,target_count,candidate_count,sent_count)
+      VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,0) RETURNING *`,
+      [no,sender,shareType,refNo,s(b.title),s(b.message),JSON.stringify(target),s(b.move_type||'SMARTFIT_TEMPLATE'),s(b.move_value||refNo),targetDepth,receivers.length,receivers.length]);
+
+    let inserted=0, skippedDup=0;
+    for(const rec of receivers){
+      const ir=await pool.query(`INSERT INTO gm_message_share_receiver(share_no,sender_member_id,ref_no,receiver_member_id,chon_depth,received_at)
+        VALUES($1,$2,$3,$4,$5,CURRENT_TIMESTAMP)
+        ON CONFLICT(sender_member_id,ref_no,receiver_member_id) DO NOTHING`,
+        [no,sender,refNo,rec.member_id,rec.chon_depth]);
+      if(ir.rowCount) inserted += 1; else skippedDup += 1;
+    }
+    const u=await pool.query('UPDATE gm_message_share SET sent_count=$2 WHERE share_no=$1 RETURNING *',[no,inserted]);
+    await bumpDaily(pool,'SHARE',shareType,'send_count',inserted||0);
+    ok(res,{ item:u.rows[0]||r.rows[0], candidate_count:receivers.length, referral_candidate_count:referralRows.length, subscriber_candidate_count:subscriberRows.length, sent_count:inserted, skipped_duplicate:skippedDup, target_chon_max:targetDepth, requested_chon_max:requestedDepth, allowed_chon_max:allowedDepth, space_no:spaceNo||null });
+  }catch(e){ fail(res,500,'smartfit template share create failed',{ detail:String(e.message||e) }); }
+});
 
 router.post('/api/gm/message/share/create', async (req,res)=>{
   try{
