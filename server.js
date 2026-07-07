@@ -1978,6 +1978,8 @@ app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
 app.use(require('./routes/network'));
 app.use(require('./routes/smartfit'));
+app.use(require('./routes/message'));
 console.log('[GM_SMARTFIT_ROUTE_V001] routes/smartfit registered');
+console.log('[GM_MESSAGE_ROUTE_V002] routes/message registered');
 
 app.listen(PORT, ()=>console.log(`[${VERSION}] listening on ${PORT}`));

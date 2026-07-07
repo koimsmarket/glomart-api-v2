@@ -246,10 +246,43 @@ function pushCategoryValue(cols, vals, col, val, columnMap){
   cols.push(col);
   vals.push(val);
 }
+async function nextGmCategoryNumber(pool, columnName){
+  columnName = cleanText(columnName);
+  if(!/^[a-zA-Z0-9_]+$/.test(columnName)) return 1;
+  try{
+    const r = await pool.query(`SELECT COALESCE(MAX(${columnName}::bigint),0)::bigint + 1 AS next_no FROM gm_category WHERE ${columnName}::text ~ '^[0-9]+$'`);
+    return Number((r.rows && r.rows[0] && r.rows[0].next_no) || 1);
+  }catch(_e){
+    try{
+      const r = await pool.query(`SELECT COALESCE(MAX(${columnName}),0) + 1 AS next_no FROM gm_category`);
+      return Number((r.rows && r.rows[0] && r.rows[0].next_no) || 1);
+    }catch(_e2){ return 1; }
+  }
+}
+async function buildGmCategoryInsertIdentity(pool, row, columnMap){
+  const out = {};
+  // CSV/운영 DB에서 category_id가 필수값처럼 쓰인다. 없으면 INSERT가 조용히 실패하므로 항상 보정한다.
+  if(columnMap.has('category_id')){
+    const explicit = toInt(row.category_id, 0);
+    out.category_id = explicit > 0 ? explicit : await nextGmCategoryNumber(pool, 'category_id');
+  }
+  if(columnMap.has('id')){
+    const explicit = toInt(row.id, 0);
+    if(explicit > 0) out.id = explicit;
+  }
+  if(columnMap.has('sort_order')){
+    const explicit = toInt(row.sort_order, 0);
+    out.sort_order = explicit > 0 ? explicit : (out.category_id || await nextGmCategoryNumber(pool, 'sort_order'));
+  }
+  return out;
+}
 async function insertGmCategoryRow(pool, row){
   const columnMap = await getGmCategoryColumns(pool);
   const cols=[]; const vals=[];
   const tr = row.translations || translationFallback(row.name_ko);
+  const identity = await buildGmCategoryInsertIdentity(pool, row, columnMap);
+  pushCategoryValue(cols, vals, 'category_id', identity.category_id, columnMap);
+  pushCategoryValue(cols, vals, 'id', identity.id, columnMap);
   pushCategoryValue(cols, vals, 'gm_code', row.gm_code, columnMap);
   pushCategoryValue(cols, vals, 'cp_code', row.cp_code, columnMap);
   pushCategoryValue(cols, vals, 'gm_parent_code', row.gm_parent_code || '', columnMap);
@@ -259,7 +292,7 @@ async function insertGmCategoryRow(pool, row){
   pushCategoryValue(cols, vals, 'depth', toInt(row.depth,1), columnMap);
   pushCategoryValue(cols, vals, 'leaf_yn', row.leaf_yn || 'Y', columnMap);
   pushCategoryValue(cols, vals, 'display_yn', row.display_yn || 'Y', columnMap);
-  pushCategoryValue(cols, vals, 'sort_order', toInt(row.sort_order,0), columnMap);
+  pushCategoryValue(cols, vals, 'sort_order', identity.sort_order || toInt(row.sort_order,0), columnMap);
   pushCategoryValue(cols, vals, 'name_ko', row.name_ko, columnMap);
   for(const l of CATEGORY_LANGS){
     pushCategoryValue(cols, vals, 'name_'+l, cleanText(tr[l]) || row.name_ko, columnMap);
@@ -279,8 +312,20 @@ async function insertGmCategoryRow(pool, row){
   if(!cols.includes('cp_code') || !cols.includes('name_ko')) throw new Error('gm_category required columns missing: cp_code/name_ko');
   const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
   const sql = `INSERT INTO gm_category (${cols.join(',')}) VALUES (${placeholders}) ON CONFLICT DO NOTHING RETURNING *`;
-  const ins = await pool.query(sql, vals);
-  return ins.rows && ins.rows[0] || null;
+  try{
+    const ins = await pool.query(sql, vals);
+    return ins.rows && ins.rows[0] || null;
+  }catch(e){
+    e.gm_category_insert_context = {
+      cp_code: cleanText(row.cp_code),
+      name_ko: cleanText(row.name_ko),
+      parent_cp_code: cleanText(row.cp_parent_code),
+      category_id: identity.category_id,
+      sort_order: identity.sort_order,
+      cols
+    };
+    throw e;
+  }
 }
 async function ensureDynamicCategoriesFromDetail(pool, p, meta){
   // 이름 중복 때문에 상세 카테고리 생성은 name_ko가 아니라 cp_code 기준이다.
@@ -345,10 +390,15 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
         matched.push({ name:node.name_ko, cp_code:node.cp_code, source:'conflict_or_existing_after_insert', parent:parentCode });
       }
       parent=row;
-    }catch(e){ try{ console.warn('[GM_CATEGORY_INSERT_FAIL]', Object.assign({node,parentCode}, compactError(e))); }catch(_l){} }
+    }catch(e){
+      const err = Object.assign({node,parentCode, insert_context:e && e.gm_category_insert_context}, compactError(e));
+      created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCode, error:err });
+      try{ console.warn('[GM_CATEGORY_INSERT_FAIL]', err); }catch(_l){}
+    }
   }
-  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { table:'gm_category', created_count:created.length, matched_count:matched.length, created, matched:matched.slice(-8) }); }catch(_l){}
-  return { applied:true, created_count:created.length, matched_count:matched.length, created, matched };
+  const errors = created.filter(x=>x && x.error);
+  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { table:'gm_category', created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched:matched.slice(-8) }); }catch(_l){}
+  return { applied:true, created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched, errors };
 }
 
 async function findCategoryCandidatesForKeyword(pool, keyword){

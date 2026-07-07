@@ -1848,7 +1848,7 @@ async function upsertProduct(pool, raw, parent={}){
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats })
+    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats })
   };
 }
 
@@ -2142,7 +2142,7 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       return ok(res,{ mode:'batch', received:items.length, saved, skipped, audit, option_audit:optionAudit, results:results.slice(0,20), errors:results.filter(x=>x && !x.ok).slice(0,30) });
     }
     const result = await upsertProduct(pool, p, p);
-    try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, option_count:result && result.item && result.item.option_count, option_result:result && result.item && result.item.option_result, mode:'single' }); }catch(_log){}
+    try{ console.log('[GM_PRODUCT_UPSERT_SINGLE_RESULT]', { ok:result && result.ok, action:result && result.action, uid:result && result.item && result.item.product_uid, category_dynamic:result && result.item && result.item.category_dynamic, option_count:result && result.item && result.item.option_count, option_result:result && result.item && result.item.option_result, mode:'single' }); }catch(_log){}
     if(!result.ok) return fail(res, 400, result.reason || 'product upsert validation failed', result);
     return ok(res,{ mode:'single', item:result.item, option_result:result.item && result.item.option_result, detail_patch:result.item && result.item.detail_patch, detail_stats:result.item && result.item.detail_stats });
   }catch(e){ console.error('[GM_PRODUCT_UPSERT_ROUTE_ERROR]', compactError(e)); fail(res,500,'product upsert failed',{detail:String(e && e.message || e), error_detail:compactError(e)}); }
