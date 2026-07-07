@@ -1,5 +1,5 @@
 /* routes/order.js
- * GM_ORDER_ROUTE_V034
+ * GM_ORDER_ROUTE_V035
  * server.js에서 분리한 주문 저장 라우터.
  * server.js 하단의 app.use(require('./routes/order')) 방식으로 로드된다.
  * - POST /api/gm/order/create : gm_order 1건 + gm_order_item N건 저장
@@ -10,7 +10,7 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_ORDER_ROUTE_V034';
+const VERSION = 'GM_ORDER_ROUTE_V035';
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function clean(v){
@@ -253,11 +253,11 @@ router.post('/api/gm/order/create', async (req, res) => {
     const orderAction = await upsertOrder(client, orderRow);
     const itemCount = await replaceOrderItems(client, orderRow, inputItems);
     await client.query('COMMIT');
-    console.log('[GM_ORDER_CREATE_V034_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemCount, total:orderRow.total_payment_price }));
+    console.log('[GM_ORDER_CREATE_V035_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemCount, total:orderRow.total_payment_price }));
     ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemCount, total_payment_price:orderRow.total_payment_price });
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
-    console.error('[GM_ORDER_CREATE_V034_ERROR]', String(e && e.message || e));
+    console.error('[GM_ORDER_CREATE_V035_ERROR]', String(e && e.message || e));
     fail(res, 500, 'order create failed', { detail:String(e && e.message || e) });
   }finally{
     client.release();
@@ -273,7 +273,7 @@ router.get('/api/gm/order/get', async (req, res) => {
     const items = await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC', [orderNo]);
     ok(res, { action:'order.get', order:order.rows[0] || null, items:items.rows || [] });
   }catch(e){
-    console.error('[GM_ORDER_GET_V034_ERROR]', String(e && e.message || e));
+    console.error('[GM_ORDER_GET_V035_ERROR]', String(e && e.message || e));
     fail(res, 500, 'order get failed', { detail:String(e && e.message || e) });
   }
 });
@@ -294,7 +294,7 @@ router.post('/api/gm/order/link', async (req, res) => {
     ok(res, { action:'order.link', order_no:orderNo, cafe24_order_no:cafeNo });
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
-    console.error('[GM_ORDER_LINK_V034_ERROR]', String(e && e.message || e));
+    console.error('[GM_ORDER_LINK_V035_ERROR]', String(e && e.message || e));
     fail(res, 500, 'order link failed', { detail:String(e && e.message || e) });
   }finally{
     client.release();
