@@ -82,12 +82,12 @@ CREATE TABLE IF NOT EXISTS gm_product (
   PRIMARY KEY (product_uid)
 );
 
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_keyword ON gm_product(keyword);
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_mall_code ON gm_product(mall_code);
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_cp_selected_code ON gm_product(cp_selected_code);
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_cp_fix_code ON gm_product(cp_fix_code);
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_cp_match ON gm_product(cp_match);
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_product_pi_ii_vi ON gm_product(pi_ii_vi);
+CREATE INDEX IF NOT EXISTS idx_gm_product_keyword ON gm_product(keyword);
+CREATE INDEX IF NOT EXISTS idx_gm_product_mall_code ON gm_product(mall_code);
+CREATE INDEX IF NOT EXISTS idx_gm_product_cp_selected_code ON gm_product(cp_selected_code);
+CREATE INDEX IF NOT EXISTS idx_gm_product_cp_fix_code ON gm_product(cp_fix_code);
+CREATE INDEX IF NOT EXISTS idx_gm_product_cp_match ON gm_product(cp_match);
+CREATE INDEX IF NOT EXISTS idx_gm_product_pi_ii_vi ON gm_product(pi_ii_vi);
 
 -- V028: 상세 카테고리 path에서 새로 발견된 쿠팡 세부 카테고리를 기본 카테고리와 분리 보관한다.
 CREATE TABLE IF NOT EXISTS gm_category_dynamic (
@@ -116,9 +116,9 @@ CREATE TABLE IF NOT EXISTS gm_category_dynamic (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (mall_code, cp_code)
 );
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_category_dynamic_keyword ON gm_category_dynamic(keyword);
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_category_dynamic_name_ko ON gm_category_dynamic(name_ko);
-CREATE INDEX IF NOT EXISTS IF NOT EXISTS idx_gm_category_dynamic_parent ON gm_category_dynamic(cp_parent_code);
+CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_keyword ON gm_category_dynamic(keyword);
+CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_name_ko ON gm_category_dynamic(name_ko);
+CREATE INDEX IF NOT EXISTS idx_gm_category_dynamic_parent ON gm_category_dynamic(cp_parent_code);
 
 ALTER TABLE gm_product ALTER COLUMN option_json SET DEFAULT '{"iid_vid":""}'::jsonb;
 
