@@ -1719,9 +1719,8 @@ async function upsertProduct(pool, raw, parent={}){
     // 검색어로 카테고리 후보가 잡히지 않으면 상품이 미아가 되지 않도록 검색어를 임시 selected로 보관한다.
     if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
   }
-  // 상세에서 leaf cp_code가 직접 확인된 상품은 selected도 leaf로 승격한다.
-  // 이렇게 해야 332870/검색어/411016 혼재가 상세 확인 이후 정리된다.
-  if(cpFixCode && cpMatch === 'T') cpSelectedCode = cpFixCode;
+  // cp_selected_code는 검색어 기준 후보 코드다. 상세 leaf(cp_fix_code)가 확인되어도 selected를 leaf로 덮어쓰지 않는다.
+  // 예: 푸룬 검색은 selected=432516(건자두/푸룬), fix=445867(셀러가 올린 실제 leaf)로 함께 보관한다.
   await ensureProductCpColumns(pool);
   await ensureProductLightJsonColumns(pool);
   const optionJson = normalizeOptionJson(p, id);
@@ -1741,6 +1740,9 @@ async function upsertProduct(pool, raw, parent={}){
       category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: categoryTreeForSave, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
     }
   }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
+
+  const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
+  try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
 
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
@@ -1776,8 +1778,6 @@ async function upsertProduct(pool, raw, parent={}){
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_selected_code=CASE
-        WHEN COALESCE(gm_product.cp_match,'')='T' AND COALESCE(gm_product.cp_fix_code,'')<>'' THEN gm_product.cp_selected_code
-        WHEN COALESCE(EXCLUDED.cp_match,'')='T' AND NULLIF(EXCLUDED.cp_fix_code,'') IS NOT NULL THEN EXCLUDED.cp_fix_code
         WHEN NULLIF(EXCLUDED.cp_selected_code,'') IS NOT NULL THEN EXCLUDED.cp_selected_code
         ELSE gm_product.cp_selected_code END,
       cp_fix_code=CASE
@@ -1860,7 +1860,7 @@ async function upsertProduct(pool, raw, parent={}){
   const vals = [
     id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
-    id.mallCode, sourceMallStored, sourceUid, mallCategoryLeaf, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
+    id.mallCode, sourceMallStored, sourceUid, mallCategoryStored, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     productOptionLinkJson ? safeJsonString(productOptionLinkJson) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),

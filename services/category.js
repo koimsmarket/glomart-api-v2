@@ -132,6 +132,24 @@ async function ensureDynamicCategoryTable(pool){
   }catch(e){ try{ console.warn('[GM_CATEGORY_DYNAMIC_DDL_FAIL]', compactError(e)); }catch(_l){} }
 }
 function normalizeCategoryNameForMatch(v){ return cleanText(v).replace(/\s+/g,'').toLowerCase(); }
+function splitSlashCategoryTokens(v){
+  const out=[];
+  const seen=new Set();
+  cleanText(v).split('/').forEach(x=>{
+    const t=cleanText(x);
+    if(!t) return;
+    const k=normalizeCategoryNameForMatch(t);
+    if(seen.has(k)) return;
+    seen.add(k); out.push(t);
+  });
+  return out;
+}
+function isSlashExactNameMatch(name, keyword){
+  const kw=normalizeCategoryNameForMatch(keyword);
+  if(!kw) return false;
+  if(normalizeCategoryNameForMatch(name) === kw) return true;
+  return splitSlashCategoryTokens(name).some(t=>normalizeCategoryNameForMatch(t) === kw);
+}
 function pickFirstCategoryTreeSource(p){
   const keys=['mall_category_json','mallCategoryJson','cp_category_tree_json','cpCategoryTreeJson','category_tree_json','categoryTreeJson','categoryTree','category_tree','cpCategoryTree','cp_category_tree','breadcrumbs','breadcrumb','categoryPathItems','category_path_items'];
   for(const k of keys){
@@ -352,6 +370,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
   meta=meta||{}; p=p||{};
   await ensureDynamicCategoryTable(pool);
   const tree=parseCategoryTreeFromPayload(p);
+  try{ console.log('[GM_CATEGORY_TREE_RECEIVE]', { tree_count:tree.length, leaf:cleanText(p.cp_fix_code || p.cpFixCode || ''), keyword:cleanText(meta.keyword || p.keyword || ''), sample:tree.slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_l){}
   if(!tree.length) return { applied:false, reason:'no_category_tree' };
   const created=[]; const matched=[]; let parent=null;
   const mallCode=cleanText(meta.mall_code || p.mall_code || p.mallCode || 'CPKR').toUpperCase();
@@ -371,6 +390,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
       const tr = await findNameTranslations(pool, node.name_ko);
       const keywordText = translationKeywordString(tr) || node.name_ko;
       const raw = { source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr };
+      try{ console.log('[GM_CATEGORY_INSERT_START]', { cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCode, depth:node.depth, gm_code:gmCode, path }); }catch(_l){}
       const inserted = await insertGmCategoryRow(pool, {
         gm_code: gmCode,
         cp_code: node.cp_code,
@@ -391,6 +411,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
         translations: tr
       });
       if(inserted){
+        try{ console.log('[GM_CATEGORY_INSERT_OK]', { cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCode, gm_code:cleanText(inserted.gm_code || gmCode), table:'gm_category' }); }catch(_l){}
         row={
           src:'base',
           gm_code:cleanText(inserted.gm_code || gmCode),
@@ -453,17 +474,20 @@ async function findCategoryCandidatesForKeyword(pool, keyword){
       )
       SELECT *, CASE
         WHEN name_ko=$1 THEN 'EXACT'
+        WHEN $1 = ANY(regexp_split_to_array(COALESCE(name_ko,''), '\s*/\s*')) THEN 'SLASH_EXACT'
         WHEN keyword=$1 OR keyword_seed=$1 THEN 'KEYWORD'
-        WHEN $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*')) THEN 'KEYWORD_LIST'
+        WHEN $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\s*,\s*')) THEN 'KEYWORD_LIST'
         WHEN position($1 in COALESCE(name_ko,'')) > 0 THEN 'PARTIAL'
         ELSE 'OTHER' END AS match_type
       FROM allcat
       WHERE COALESCE(cp_code,'')<>'' AND (
-        name_ko=$1 OR keyword=$1 OR keyword_seed=$1
-        OR $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\\s*,\\s*'))
+        name_ko=$1
+        OR $1 = ANY(regexp_split_to_array(COALESCE(name_ko,''), '\s*/\s*'))
+        OR keyword=$1 OR keyword_seed=$1
+        OR $1 = ANY(regexp_split_to_array(COALESCE(keyword,'') || ',' || COALESCE(keyword_seed,''), '\s*,\s*'))
         OR position($1 in COALESCE(name_ko,'')) > 0
       )
-      ORDER BY CASE WHEN name_ko=$1 THEN 0 WHEN keyword=$1 OR keyword_seed=$1 THEN 1 WHEN position($1 in COALESCE(name_ko,'')) > 0 THEN 3 ELSE 8 END,
+      ORDER BY CASE WHEN name_ko=$1 THEN 0 WHEN $1 = ANY(regexp_split_to_array(COALESCE(name_ko,''), '\s*/\s*')) THEN 0 WHEN keyword=$1 OR keyword_seed=$1 THEN 1 WHEN position($1 in COALESCE(name_ko,'')) > 0 THEN 3 ELSE 8 END,
                depth DESC, CASE WHEN leaf_yn='Y' THEN 0 ELSE 1 END, search_count DESC, cp_code
       LIMIT 50`, [kw]);
     return r.rows || [];
@@ -475,7 +499,7 @@ async function findCpSelectedCodeForKeyword(pool, keyword){
   const kw = cleanText(keyword);
   if(!kw) return '';
   const cand=await findCategoryCandidatesForKeyword(pool, kw);
-  const exact=cand.filter(r=>cleanText(r.name_ko)===kw || cleanText(r.keyword)===kw || cleanText(r.keyword_seed)===kw);
+  const exact=cand.filter(r=>isSlashExactNameMatch(r.name_ko, kw) || cleanText(r.keyword)===kw || cleanText(r.keyword_seed)===kw || cleanText(r.match_type)==='SLASH_EXACT');
   let code='';
   if(exact.length === 1) code=cleanText(exact[0].cp_code);
   try{ console.log('[GM_CP_SELECTED_MATCH]', { keyword:kw, candidate_count:cand.length, exact_count:exact.length, cp_selected_code:code, candidates:cand.slice(0,8).map(r=>({cp_code:r.cp_code,name_ko:r.name_ko,parent_name_ko:r.parent_name_ko,cp_parent_code:r.cp_parent_code,depth:r.depth,match_type:r.match_type})) }); }catch(_l){}
@@ -499,7 +523,7 @@ async function findCpSelectedCodeForKeywordAndTree(pool, keyword, tree){
     if(name && nameSet.has(name)) score += 100;
     if(parentName && nameSet.has(parentName)) score += 80;
     if(cp && codeSet.has(cp)) score += 200;
-    if(cleanText(r.name_ko) === kw) score += 40;
+    if(isSlashExactNameMatch(r.name_ko, kw)) score += 80;
     else if(cleanText(r.name_ko).includes(kw)) score += 20;
     if(cleanText(r.leaf_yn)==='Y') score += 5;
     score += Math.min(toInt(r.depth,0), 20);
@@ -533,11 +557,11 @@ async function applyCpFixLearning(pool, args){
     if(productUid && match === 'T'){
       const r=await pool.query(`
         UPDATE gm_product
-        SET cp_selected_code=$2, cp_fix_code=$2, cp_match='T', updated_at=now()
+        SET cp_selected_code=COALESCE(NULLIF($4,''), cp_selected_code, $2), cp_fix_code=$2, cp_match='T', updated_at=now()
         WHERE product_uid=$1
           AND NOT (COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$2)
-          AND (COALESCE(cp_selected_code,'')<>$2 OR COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'T')
-      `, [productUid, fix]);
+          AND (COALESCE(cp_selected_code,'')<>COALESCE(NULLIF($4,''), cp_selected_code, $2) OR COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'T')
+      `, [productUid, fix, keyword, selected]);
       out.current=r.rowCount||0;
     }
 
@@ -550,7 +574,7 @@ async function applyCpFixLearning(pool, args){
       // 단, 이미 T인 상품은 절대 건드리지 않는다.
       const f=await pool.query(`
         UPDATE gm_product
-        SET cp_selected_code=$2, cp_fix_code=$2, cp_match='F', updated_at=now()
+        SET cp_selected_code=COALESCE(NULLIF($4,''), cp_selected_code, $1), cp_fix_code=$2, cp_match='F', updated_at=now()
         WHERE product_uid<>$3
           AND COALESCE(cp_match,'')<>'T'
           AND (
@@ -558,7 +582,7 @@ async function applyCpFixLearning(pool, args){
             OR ($1<>'' AND cp_selected_code=$1)
             OR ($4<>'' AND cp_selected_code=$4)
           )
-          AND (COALESCE(cp_selected_code,'')<>$2 OR COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'F')
+          AND (COALESCE(cp_selected_code,'')<>COALESCE(NULLIF($4,''), cp_selected_code, $1) OR COALESCE(cp_fix_code,'')<>$2 OR COALESCE(cp_match,'')<>'F')
       `, [keyword, fix, productUid || '', selected]);
       out.propagated=f.rowCount||0;
     }
