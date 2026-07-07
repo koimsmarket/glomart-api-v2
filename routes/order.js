@@ -1,7 +1,5 @@
 /* routes/order.js
- * GM_ORDER_ROUTE_V035
- * server.js에서 분리한 주문 저장 라우터.
- * server.js 하단의 app.use(require('./routes/order')) 방식으로 로드된다.
+ * GM_ORDER_ROUTE_V037_DOM_ORDERFORM_SAVE
  * - POST /api/gm/order/create : gm_order 1건 + gm_order_item N건 저장
  * - GET  /api/gm/order/get    : order_no 기준 조회
  * - POST /api/gm/order/link   : Cafe24 주문번호 연결
@@ -10,105 +8,122 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_ORDER_ROUTE_V035';
+const VERSION = 'GM_ORDER_ROUTE_V037_DOM_ORDERFORM_SAVE';
+
+const ORDER_COLS = [
+  'order_no','member_id','guest_key','orderer_name','orderer_phone','orderer_mobile','orderer_email',
+  'receiver_name','receiver_phone','receiver_mobile','receiver_safe_phone','receiver_zipcode','receiver_address1','receiver_address2','delivery_memo',
+  'customs_required_yn','customs_clearance_code','customs_name','customs_mobile',
+  'payment_method','payment_method_display','payment_bank_name','payment_account_number','depositor_name','depositor_phone',
+  'expected_payment_amount','actual_payment_amount','payment_difference_amount','total_product_price','total_delivery_fee','extra_area_delivery_fee',
+  'estimated_customs_fee','estimated_import_vat','total_payment_price',
+  'order_status','payment_status','shipping_status','cs_status','cancel_status','purchase_confirmed_yn',
+  'receiver_address_old','receiver_address_full','receiver_sido','receiver_sigungu','receiver_eup_myeon_dong','cafe24_order_no'
+];
+const ORDER_ITEM_COLS = [
+  'order_no','pi_ii_vi','product_name','option_name','option_value','quantity',
+  'mall_sale_price','customer_order_price','final_supply_price','product_amount',
+  'delivery_type','delivery_fee','extra_area_delivery_fee','mall_code','supplier_id','supplier_name',
+  'product_url','thumb_file_name','hs_code','origin_country','carrier_name','tracking_number',
+  'item_order_status','item_shipping_status','cafe24_order_no','source_mall','source_uid'
+];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
-function clean(v){
-  return String(v == null ? '' : v)
-    .replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-function money(v, def){
-  if(def == null) def = 0;
-  if(v === undefined || v === null || v === '') return def;
-  const n = Number(String(v).replace(/[^0-9.-]/g, ''));
-  return Number.isFinite(n) ? Math.round(n) : def;
-}
-function pick(obj, keys, def){
-  if(def === undefined) def = '';
-  for(const k of keys){
-    if(obj && obj[k] !== undefined && obj[k] !== null && clean(obj[k]) !== '') return obj[k];
-  }
+function clean(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
+function nullable(v){ const s = clean(v); return s ? s : null; }
+function money(v, def=0){ if(v === undefined || v === null || v === '') return def; const n = Number(String(v).replace(/[^0-9.-]/g,'')); return Number.isFinite(n) ? Math.round(n) : def; }
+function pick(obj, keys, def=''){
+  for(const k of keys){ if(obj && obj[k] !== undefined && obj[k] !== null && clean(obj[k]) !== '') return obj[k]; }
   return def;
 }
-function normalizeUrl(v){
-  const s = clean(v);
-  if(!s) return '';
-  if(/^https?:\/\//i.test(s)) return s;
-  if(/^\/\//.test(s)) return 'https:' + s;
-  return s;
+function pickDeep(raw, keys, def=''){
+  const direct = pick(raw, keys, '');
+  if(clean(direct)) return direct;
+  return pick(raw && raw.address || {}, keys, def);
 }
-function ok(res, data){ res.json(Object.assign({ ok:true, version:VERSION }, data || {})); }
-function fail(res, status, message, extra){ res.status(status).json(Object.assign({ ok:false, version:VERSION, error:message }, extra || {})); }
-function pad(n, len){ return String(n).padStart(len, '0'); }
-function autoOrderNo(){
-  const d = new Date();
-  return 'GM' + d.getFullYear() + pad(d.getMonth()+1,2) + pad(d.getDate(),2) + '-' + pad(d.getHours(),2) + pad(d.getMinutes(),2) + pad(d.getSeconds(),2) + '-' + String(Date.now()).slice(-4);
+function totalVal(raw, keys, def=0){
+  const v = pick(raw, keys, '');
+  if(clean(v)) return money(v, def);
+  return money(pick(raw && raw.totals || {}, keys, def), def);
 }
-function cafe24OrderNo(raw){
-  return clean(pick(raw || {}, ['cafe24_order_no','cafe24OrderNo','cafe24_order_id','cafe24OrderId','order_id','orderId','mall_order_no','mallOrderNo','internal_order_no','internalOrderNo'], '')) || null;
-}
-function sourceMallFrom(v, uid, url, mallCode){
-  const direct = clean(v).toUpperCase();
-  if(direct) return direct;
-  const u = clean(uid).toUpperCase();
-  if(u.indexOf('_') > 0) return u.split('_')[0];
-  const x = String(url || '').toLowerCase();
-  if(x.includes('coupang.com') || x.includes('link.coupang.com')) return 'CPKR';
-  if(x.includes('aliexpress.com')) return 'ALKR';
-  if(x.includes('temu.com')) return 'TEMU';
-  if(x.includes('shopping.naver.com') || x.includes('smartstore.naver.com')) return 'NPKR';
-  const m = clean(mallCode).toUpperCase();
-  return (m === 'CAFE24' || m === 'INTERNAL') ? '' : m;
-}
-function sourceUidFrom(v, mall, key){
-  const direct = clean(v);
-  if(direct) return direct;
-  const k = clean(key);
-  if(!k) return '';
-  const m = clean(mall).toUpperCase();
-  return m && k.indexOf(m + '_') !== 0 ? m + '_' + k : k;
-}
-function addrVal(raw, keys){ return clean(pick(raw, keys, pick(raw.address || {}, keys, ''))); }
-function totalVal(raw, keys, def){ return money(pick(raw, keys, pick(raw.totals || {}, keys, def)), def); }
-function itemVal(it, keys, def){ return pick(it || {}, keys, def); }
+function normalizeUrl(v){ const s=clean(v); if(!s) return null; if(/^https?:\/\//i.test(s)) return s; if(/^\/\//.test(s)) return 'https:'+s; return s; }
+function ok(res, data){ res.json(Object.assign({ok:true, version:VERSION}, data||{})); }
+function fail(res, status, message, extra){ res.status(status).json(Object.assign({ok:false, version:VERSION, error:message}, extra||{})); }
+function pad(n,len){ return String(n).padStart(len,'0'); }
+function autoOrderNo(){ const d=new Date(); return 'GM'+d.getFullYear()+pad(d.getMonth()+1,2)+pad(d.getDate(),2)+'-'+pad(d.getHours(),2)+pad(d.getMinutes(),2)+pad(d.getSeconds(),2)+'-'+String(Date.now()).slice(-4); }
+function cafe24OrderNo(raw){ return nullable(pick(raw||{}, ['cafe24_order_no','cafe24OrderNo','cafe24_order_id','cafe24OrderId','order_id','orderId','mall_order_no','mallOrderNo','internal_order_no','internalOrderNo'], '')); }
 function normalizeItems(raw){
   if(Array.isArray(raw.items)) return raw.items;
   if(Array.isArray(raw.orderItems)) return raw.orderItems;
   if(Array.isArray(raw.products)) return raw.products;
+  if(Array.isArray(raw.dom_items)) return raw.dom_items;
   if(raw.item && typeof raw.item === 'object') return [raw.item];
   return [];
+}
+function itemVal(it, keys, def=''){ return pick(it||{}, keys, def); }
+function sourceMallFrom(v, uid, url, mallCode){
+  const direct = clean(v).toUpperCase(); if(direct) return direct;
+  const u = clean(uid).toUpperCase(); if(u.includes('_')) return u.split('_')[0];
+  const x = String(url||'').toLowerCase();
+  if(x.includes('coupang.com') || x.includes('link.coupang.com')) return 'CPKR';
+  if(x.includes('aliexpress.com')) return 'ALKR';
+  if(x.includes('temu.com')) return 'TEMU';
+  const m = clean(mallCode).toUpperCase();
+  return (m === 'CAFE24' || m === 'INTERNAL') ? '' : m;
+}
+function sourceUidFrom(v, mall, key){
+  const direct=clean(v); if(direct) return direct;
+  const k=clean(key); if(!k) return '';
+  const m=clean(mall).toUpperCase();
+  return m && k.indexOf(m+'_') !== 0 ? m+'_'+k : k;
+}
+function rowObj(cols, obj){ const out={}; cols.forEach(c=>{ if(obj[c] !== undefined) out[c]=obj[c]; }); return out; }
+async function updateThenInsert(client, table, keyCol, row, extraCols){
+  extraCols = extraCols || [];
+  const key = row[keyCol];
+  if(!key) throw new Error(table+'.'+keyCol+' required');
+  const cols = Object.keys(row).filter(c => c !== keyCol);
+  if(cols.length){
+    const sets = cols.map((c,i)=>`${c}=$${i+2}`).join(', ');
+    const upd = await client.query(`UPDATE ${table} SET ${sets}, updated_at=now() WHERE ${keyCol}=$1`, [key].concat(cols.map(c=>row[c])));
+    if(upd.rowCount) return 'updated';
+  }
+  const insCols = Object.keys(row).filter(c => row[c] !== undefined);
+  const vals = insCols.map((_,i)=>`$${i+1}`);
+  const allCols = insCols.concat(extraCols.map(e=>e.col));
+  const allVals = vals.concat(extraCols.map(e=>e.expr));
+  await client.query(`INSERT INTO ${table} (${allCols.join(',')}) VALUES (${allVals.join(',')})`, insCols.map(c=>row[c]));
+  return 'inserted';
 }
 function buildOrderRow(raw, inputItems){
   const orderNo = clean(raw.gm_order_no || raw.order_no) || autoOrderNo();
   const cafeNo = cafe24OrderNo(raw);
-  const orderRow = {
+  const o = {
     order_no: orderNo,
-    member_id: clean(raw.member_id) || null,
-    guest_key: clean(raw.guest_key) || null,
-    orderer_name: clean(raw.orderer_name || raw.buyer_name || raw.name),
-    orderer_phone: clean(raw.orderer_phone || raw.buyer_phone),
-    orderer_mobile: clean(raw.orderer_mobile || raw.buyer_mobile || raw.mobile),
-    orderer_email: clean(raw.orderer_email || raw.email),
-    receiver_name: addrVal(raw, ['receiver_name','rname','name']),
-    receiver_phone: addrVal(raw, ['receiver_phone','rphone1','phone']),
-    receiver_mobile: addrVal(raw, ['receiver_mobile','rphone2','mobile']),
-    receiver_safe_phone: addrVal(raw, ['receiver_safe_phone','safe_phone']),
-    receiver_zipcode: addrVal(raw, ['receiver_zipcode','zipcode','zip','rzipcode']),
-    receiver_address1: addrVal(raw, ['receiver_address1','address1','addr1','raddr1']),
-    receiver_address2: addrVal(raw, ['receiver_address2','address2','addr2','raddr2']),
-    delivery_memo: addrVal(raw, ['delivery_memo','memo','message','omessage']),
+    member_id: nullable(raw.member_id),
+    guest_key: nullable(raw.guest_key),
+    orderer_name: nullable(raw.orderer_name || raw.buyer_name || raw.name),
+    orderer_phone: nullable(raw.orderer_phone || raw.buyer_phone),
+    orderer_mobile: nullable(raw.orderer_mobile || raw.buyer_mobile || raw.mobile),
+    orderer_email: nullable(raw.orderer_email || raw.email),
+    receiver_name: nullable(pickDeep(raw, ['receiver_name','rname','name'])),
+    receiver_phone: nullable(pickDeep(raw, ['receiver_phone','rphone1','phone'])),
+    receiver_mobile: nullable(pickDeep(raw, ['receiver_mobile','rphone2','mobile'])),
+    receiver_safe_phone: nullable(pickDeep(raw, ['receiver_safe_phone','safe_phone'])),
+    receiver_zipcode: nullable(pickDeep(raw, ['receiver_zipcode','zipcode','zip','rzipcode'])),
+    receiver_address1: nullable(pickDeep(raw, ['receiver_address1','address1','addr1','raddr1'])),
+    receiver_address2: nullable(pickDeep(raw, ['receiver_address2','address2','addr2','raddr2'])),
+    delivery_memo: nullable(pickDeep(raw, ['delivery_memo','memo','message','omessage'])),
     customs_required_yn: clean(raw.customs_required_yn || 'N'),
-    customs_clearance_code: clean(raw.customs_clearance_code),
-    customs_name: clean(raw.customs_name),
-    customs_mobile: clean(raw.customs_mobile),
+    customs_clearance_code: nullable(raw.customs_clearance_code),
+    customs_name: nullable(raw.customs_name),
+    customs_mobile: nullable(raw.customs_mobile),
     payment_method: clean(raw.payment_method || 'pending'),
     payment_method_display: clean(raw.payment_method_display || '미정'),
-    payment_bank_name: clean(raw.payment_bank_name),
-    payment_account_number: clean(raw.payment_account_number),
-    depositor_name: clean(raw.depositor_name),
-    depositor_phone: clean(raw.depositor_phone),
+    payment_bank_name: nullable(raw.payment_bank_name),
+    payment_account_number: nullable(raw.payment_account_number),
+    depositor_name: nullable(raw.depositor_name),
+    depositor_phone: nullable(raw.depositor_phone),
     expected_payment_amount: totalVal(raw, ['expected_payment_amount','payment','total_payment_price'], 0),
     actual_payment_amount: totalVal(raw, ['actual_payment_amount'], 0),
     payment_difference_amount: totalVal(raw, ['payment_difference_amount'], 0),
@@ -124,122 +139,90 @@ function buildOrderRow(raw, inputItems){
     cs_status: clean(raw.cs_status || 'none'),
     cancel_status: clean(raw.cancel_status || 'none'),
     purchase_confirmed_yn: clean(raw.purchase_confirmed_yn || 'N'),
-    receiver_address_old: clean(raw.receiver_address_old || raw.address_old || raw.jibun_address),
-    receiver_address_full: clean(raw.receiver_address_full || raw.address_full),
-    receiver_sido: clean(raw.receiver_sido || raw.sido),
-    receiver_sigungu: clean(raw.receiver_sigungu || raw.sigungu),
-    receiver_eup_myeon_dong: clean(raw.receiver_eup_myeon_dong || raw.eup_myeon_dong || raw.dong),
+    receiver_address_old: nullable(raw.receiver_address_old || raw.address_old || raw.jibun_address),
+    receiver_address_full: nullable(raw.receiver_address_full || raw.address_full),
+    receiver_sido: nullable(raw.receiver_sido || raw.sido),
+    receiver_sigungu: nullable(raw.receiver_sigungu || raw.sigungu),
+    receiver_eup_myeon_dong: nullable(raw.receiver_eup_myeon_dong || raw.eup_myeon_dong || raw.dong),
     cafe24_order_no: cafeNo
   };
-  if(!orderRow.total_product_price || !orderRow.total_payment_price){
-    let product = 0, delivery = 0, extra = 0;
+  if(!o.total_product_price || !o.total_payment_price){
+    let product=0, delivery=0, extra=0;
     for(const it of inputItems){
-      const qty = Math.max(1, money(itemVal(it, ['quantity','qty'], 1), 1));
-      const line = money(itemVal(it, ['product_amount','amount','line_amount'], 0), 0);
-      const unit = money(itemVal(it, ['customer_order_price','mall_sale_price','price','sale_price','normal_price'], 0), 0);
-      product += line || (unit * qty);
-      delivery += money(itemVal(it, ['delivery_fee','shipping_fee'], 0), 0);
-      extra += money(itemVal(it, ['extra_area_delivery_fee','extra_fee'], 0), 0);
+      const qty = Math.max(1, money(itemVal(it,['quantity','qty'],1),1));
+      const line = money(itemVal(it,['product_amount','amount','line_amount'],0),0);
+      const unit = money(itemVal(it,['customer_order_price','mall_sale_price','price','sale_price','normal_price'],0),0);
+      product += line || unit*qty;
+      delivery += money(itemVal(it,['delivery_fee','shipping_fee'],0),0);
+      extra += money(itemVal(it,['extra_area_delivery_fee','extra_fee'],0),0);
     }
-    if(!orderRow.total_product_price) orderRow.total_product_price = product;
-    if(!orderRow.total_delivery_fee) orderRow.total_delivery_fee = delivery;
-    if(!orderRow.extra_area_delivery_fee) orderRow.extra_area_delivery_fee = extra;
-    if(!orderRow.total_payment_price) orderRow.total_payment_price = product + delivery + extra;
-    if(!orderRow.expected_payment_amount) orderRow.expected_payment_amount = orderRow.total_payment_price;
+    if(!o.total_product_price) o.total_product_price = product;
+    if(!o.total_delivery_fee) o.total_delivery_fee = delivery;
+    if(!o.extra_area_delivery_fee) o.extra_area_delivery_fee = extra;
+    if(!o.total_payment_price) o.total_payment_price = product+delivery+extra;
+    if(!o.expected_payment_amount) o.expected_payment_amount = o.total_payment_price;
   }
-  return orderRow;
+  return rowObj(ORDER_COLS, o);
 }
-async function upsertOrder(client, o){
-  const params = [
-    o.order_no, o.member_id, o.guest_key, o.orderer_name, o.orderer_phone, o.orderer_mobile, o.orderer_email,
-    o.receiver_name, o.receiver_phone, o.receiver_mobile, o.receiver_safe_phone,
-    o.receiver_zipcode, o.receiver_address1, o.receiver_address2, o.delivery_memo,
-    o.customs_required_yn, o.customs_clearance_code, o.customs_name, o.customs_mobile,
-    o.payment_method, o.payment_method_display, o.payment_bank_name, o.payment_account_number,
-    o.depositor_name, o.depositor_phone, o.expected_payment_amount, o.actual_payment_amount, o.payment_difference_amount,
-    o.total_product_price, o.total_delivery_fee, o.extra_area_delivery_fee,
-    o.estimated_customs_fee, o.estimated_import_vat, o.total_payment_price,
-    o.order_status, o.payment_status, o.shipping_status, o.cs_status,
-    o.cancel_status, o.purchase_confirmed_yn,
-    o.receiver_address_old, o.receiver_address_full, o.receiver_sido, o.receiver_sigungu, o.receiver_eup_myeon_dong,
-    o.cafe24_order_no
-  ];
-  const upd = await client.query(`
-    UPDATE gm_order SET
-      member_id=$2, guest_key=$3, orderer_name=$4, orderer_phone=$5, orderer_mobile=$6, orderer_email=$7,
-      receiver_name=$8, receiver_phone=$9, receiver_mobile=$10, receiver_safe_phone=$11,
-      receiver_zipcode=$12, receiver_address1=$13, receiver_address2=$14, delivery_memo=$15,
-      customs_required_yn=$16, customs_clearance_code=$17, customs_name=$18, customs_mobile=$19,
-      payment_method=$20, payment_method_display=$21, payment_bank_name=$22, payment_account_number=$23,
-      depositor_name=$24, depositor_phone=$25, expected_payment_amount=$26, actual_payment_amount=$27, payment_difference_amount=$28,
-      total_product_price=$29, total_delivery_fee=$30, extra_area_delivery_fee=$31,
-      estimated_customs_fee=$32, estimated_import_vat=$33, total_payment_price=$34,
-      order_status=$35, payment_status=$36, shipping_status=$37, cs_status=$38,
-      cancel_status=$39, purchase_confirmed_yn=$40,
-      receiver_address_old=$41, receiver_address_full=$42, receiver_sido=$43, receiver_sigungu=$44, receiver_eup_myeon_dong=$45,
-      cafe24_order_no=$46, updated_at=now()
-    WHERE order_no=$1
-  `, params);
-  if(upd.rowCount) return 'updated';
-  await client.query(`
-    INSERT INTO gm_order (
-      order_no, member_id, guest_key, orderer_name, orderer_phone, orderer_mobile, orderer_email,
-      receiver_name, receiver_phone, receiver_mobile, receiver_safe_phone,
-      receiver_zipcode, receiver_address1, receiver_address2, delivery_memo,
-      customs_required_yn, customs_clearance_code, customs_name, customs_mobile,
-      payment_method, payment_method_display, payment_bank_name, payment_account_number,
-      depositor_name, depositor_phone, expected_payment_amount, actual_payment_amount, payment_difference_amount,
-      total_product_price, total_delivery_fee, extra_area_delivery_fee,
-      estimated_customs_fee, estimated_import_vat, total_payment_price,
-      order_status, payment_status, shipping_status, cs_status,
-      ordered_at, created_at, updated_at, cancel_status, purchase_confirmed_yn,
-      receiver_address_old, receiver_address_full, receiver_sido, receiver_sigungu, receiver_eup_myeon_dong, cafe24_order_no
-    ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,now(),now(),now(),$39,$40,$41,$42,$43,$44,$45,$46
-    )
-  `, params);
-  return 'inserted';
+function buildItemRow(orderRow, src, idx){
+  const qty = Math.max(1, money(itemVal(src,['quantity','qty'],1),1));
+  const mallCode = clean(itemVal(src,['mall_code','mallCode','source_mall','sourceMall'], '')).toUpperCase();
+  const pi = clean(itemVal(src,['pi_ii_vi','piIiVi','source_key','sourceKey','key','product_uid','uid'], '')) || (mallCode ? mallCode+'_'+idx : 'ITEM_'+idx);
+  const unit = money(itemVal(src,['customer_order_price','mall_sale_price','sale_price','price','normal_price'],0),0);
+  const amount = money(itemVal(src,['product_amount','amount','line_amount'],0),0) || unit*qty;
+  const sourceMall = sourceMallFrom(itemVal(src,['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(src,['source_uid','sourceUid','product_uid','uid'], ''), itemVal(src,['product_url','source_url','url'], ''), mallCode);
+  const sourceUid = sourceUidFrom(itemVal(src,['source_uid','sourceUid','product_uid','uid'], ''), sourceMall, itemVal(src,['source_key','sourceKey','key','pi_ii_vi','piIiVi'], '')) || pi;
+  return rowObj(ORDER_ITEM_COLS, {
+    order_no: orderRow.order_no,
+    pi_ii_vi: pi,
+    product_name: clean(itemVal(src,['product_name','productName','name','title'], '상품')) || '상품',
+    option_name: nullable(itemVal(src,['option_name','optionName'], '')),
+    option_value: nullable(itemVal(src,['option_value','optionValue','selected_option','selectedOption'], '')),
+    quantity: qty,
+    mall_sale_price: money(itemVal(src,['mall_sale_price','sale_price','normal_price','price'], unit), unit),
+    customer_order_price: unit,
+    final_supply_price: itemVal(src,['final_supply_price','supply_price'], null) == null ? null : money(itemVal(src,['final_supply_price','supply_price'], null),0),
+    product_amount: amount,
+    delivery_type: nullable(itemVal(src,['delivery_type','ship_type','shipping_type'], '')),
+    delivery_fee: money(itemVal(src,['delivery_fee','shipping_fee'],0),0),
+    extra_area_delivery_fee: money(itemVal(src,['extra_area_delivery_fee','extra_fee'],0),0),
+    mall_code: nullable(mallCode),
+    supplier_id: nullable(itemVal(src,['supplier_id','supplierId'],'')),
+    supplier_name: nullable(itemVal(src,['supplier_name','supplierName','seller','seller_name'],'')),
+    product_url: normalizeUrl(itemVal(src,['product_url','source_url','url'],'')),
+    thumb_file_name: nullable(itemVal(src,['thumb_file_name','thumb','thumb_url','image','image_url'],'')),
+    hs_code: nullable(itemVal(src,['hs_code','hsCode'],'')),
+    origin_country: nullable(itemVal(src,['origin_country','origin','country'],'')),
+    carrier_name: nullable(itemVal(src,['carrier_name','carrier'],'')),
+    tracking_number: nullable(itemVal(src,['tracking_number','tracking'],'')),
+    item_order_status: clean(itemVal(src,['item_order_status','order_status'],'ordered')) || 'ordered',
+    item_shipping_status: clean(itemVal(src,['item_shipping_status','shipping_status'],'pending')) || 'pending',
+    cafe24_order_no: orderRow.cafe24_order_no || null,
+    source_mall: nullable(sourceMall),
+    source_uid: nullable(sourceUid)
+  });
 }
-async function replaceOrderItems(client, orderRow, inputItems){
+async function insertRow(client, table, row, extraCols){
+  const cols = Object.keys(row).filter(c => row[c] !== undefined);
+  const vals = cols.map((_,i)=>`$${i+1}`);
+  const extra = extraCols || [];
+  const sql = `INSERT INTO ${table} (${cols.concat(extra.map(e=>e.col)).join(',')}) VALUES (${vals.concat(extra.map(e=>e.expr)).join(',')})`;
+  await client.query(sql, cols.map(c=>row[c]));
+}
+async function saveOrder(client, raw, inputItems){
+  const orderRow = buildOrderRow(raw, inputItems);
+  const orderAction = await updateThenInsert(client, 'gm_order', 'order_no', orderRow, [{col:'ordered_at',expr:'now()'}, {col:'created_at',expr:'now()'}, {col:'updated_at',expr:'now()'}]);
   await client.query('DELETE FROM gm_order_item WHERE order_no=$1', [orderRow.order_no]);
   let itemCount = 0;
   for(const src of inputItems){
-    const qty = Math.max(1, money(itemVal(src, ['quantity','qty'], 1), 1));
-    const mallCode = clean(itemVal(src, ['mall_code','mallCode','source_mall','sourceMall'], '')).toUpperCase();
-    const pi = clean(itemVal(src, ['pi_ii_vi','piIiVi','source_key','sourceKey','key','product_uid','uid'], '')) || (mallCode ? mallCode + '_' + itemCount : 'ITEM_' + itemCount);
-    const unit = money(itemVal(src, ['customer_order_price','mall_sale_price','sale_price','price','normal_price'], 0), 0);
-    const amount = money(itemVal(src, ['product_amount','amount','line_amount'], 0), 0) || (unit * qty);
-    const sourceMall = sourceMallFrom(itemVal(src, ['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(src, ['source_uid','sourceUid'], ''), itemVal(src, ['product_url','source_url','url'], ''), mallCode);
-    const sourceUid = sourceUidFrom(itemVal(src, ['source_uid','sourceUid','product_uid','uid'], ''), sourceMall, itemVal(src, ['source_key','sourceKey','key'], '')) || pi;
-    await client.query(`
-      INSERT INTO gm_order_item (
-        order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
-        mall_sale_price, customer_order_price, final_supply_price, product_amount,
-        delivery_type, delivery_fee, extra_area_delivery_fee, mall_code, supplier_id, supplier_name,
-        product_url, thumb_file_name, hs_code, origin_country, carrier_name, tracking_number,
-        item_order_status, item_shipping_status, created_at, updated_at, cafe24_order_no, source_mall, source_uid
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,now(),now(),$25,$26,$27
-      )
-    `, [
-      orderRow.order_no, pi, clean(itemVal(src, ['product_name','productName','name','title'], '')),
-      clean(itemVal(src, ['option_name','optionName'], '')), clean(itemVal(src, ['option_value','optionValue','selected_option','selectedOption'], '')),
-      qty, money(itemVal(src, ['mall_sale_price','sale_price','normal_price','price'], unit), unit), unit,
-      itemVal(src, ['final_supply_price','supply_price'], null) == null ? null : money(itemVal(src, ['final_supply_price','supply_price'], null), 0),
-      amount, clean(itemVal(src, ['delivery_type','ship_type','shipping_type'], '')),
-      money(itemVal(src, ['delivery_fee','shipping_fee'], 0), 0), money(itemVal(src, ['extra_area_delivery_fee','extra_fee'], 0), 0),
-      mallCode, clean(itemVal(src, ['supplier_id','supplierId'], '')), clean(itemVal(src, ['supplier_name','supplierName','seller','seller_name'], '')),
-      normalizeUrl(itemVal(src, ['product_url','source_url','url'], '')), clean(itemVal(src, ['thumb_file_name','thumb','thumb_url','image','image_url'], '')),
-      clean(itemVal(src, ['hs_code','hsCode'], '')), clean(itemVal(src, ['origin_country','origin','country'], '')),
-      clean(itemVal(src, ['carrier_name','carrier'], '')), clean(itemVal(src, ['tracking_number','tracking'], '')),
-      clean(itemVal(src, ['item_order_status','order_status'], 'ordered')), clean(itemVal(src, ['item_shipping_status','shipping_status'], 'pending')),
-      orderRow.cafe24_order_no || null, sourceMall, sourceUid
-    ]);
+    const row = buildItemRow(orderRow, src, itemCount);
+    await insertRow(client, 'gm_order_item', row, [{col:'created_at',expr:'now()'}, {col:'updated_at',expr:'now()'}]);
     itemCount++;
   }
-  return itemCount;
+  return {orderRow, orderAction, itemCount};
 }
-router.post('/api/gm/order/create', async (req, res) => {
+
+router.post('/api/gm/order/create', async (req,res)=>{
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const raw = req.body || {};
@@ -248,22 +231,19 @@ router.post('/api/gm/order/create', async (req, res) => {
   const client = await pool.connect().catch(()=>null);
   if(!client) return fail(res, 500, 'DB client connect failed');
   try{
-    const orderRow = buildOrderRow(raw, inputItems);
     await client.query('BEGIN');
-    const orderAction = await upsertOrder(client, orderRow);
-    const itemCount = await replaceOrderItems(client, orderRow, inputItems);
+    const saved = await saveOrder(client, raw, inputItems);
     await client.query('COMMIT');
-    console.log('[GM_ORDER_CREATE_V035_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemCount, total:orderRow.total_payment_price }));
-    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemCount, total_payment_price:orderRow.total_payment_price });
+    console.log('[GM_ORDER_CREATE_V037_OK]', JSON.stringify({order_no:saved.orderRow.order_no, items:saved.itemCount, total:saved.orderRow.total_payment_price, source:raw.source||''}));
+    ok(res, {action:'order.create', order_no:saved.orderRow.order_no, gm_order_no:saved.orderRow.order_no, cafe24_order_no:saved.orderRow.cafe24_order_no, order_action:saved.orderAction, item_count:saved.itemCount, total_payment_price:saved.orderRow.total_payment_price});
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
-    console.error('[GM_ORDER_CREATE_V035_ERROR]', String(e && e.message || e));
-    fail(res, 500, 'order create failed', { detail:String(e && e.message || e) });
-  }finally{
-    client.release();
-  }
+    console.error('[GM_ORDER_CREATE_V037_ERROR]', String(e && e.message || e));
+    fail(res, 500, 'order create failed', {detail:String(e && e.message || e)});
+  }finally{ client.release(); }
 });
-router.get('/api/gm/order/get', async (req, res) => {
+
+router.get('/api/gm/order/get', async (req,res)=>{
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const orderNo = clean(req.query.order_no || req.query.gm_order_no);
@@ -271,13 +251,11 @@ router.get('/api/gm/order/get', async (req, res) => {
   try{
     const order = await pool.query('SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1', [orderNo]);
     const items = await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC', [orderNo]);
-    ok(res, { action:'order.get', order:order.rows[0] || null, items:items.rows || [] });
-  }catch(e){
-    console.error('[GM_ORDER_GET_V035_ERROR]', String(e && e.message || e));
-    fail(res, 500, 'order get failed', { detail:String(e && e.message || e) });
-  }
+    ok(res, {action:'order.get', order:order.rows[0] || null, items:items.rows || []});
+  }catch(e){ fail(res, 500, 'order get failed', {detail:String(e && e.message || e)}); }
 });
-router.post('/api/gm/order/link', async (req, res) => {
+
+router.post('/api/gm/order/link', async (req,res)=>{
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const body = req.body || {};
@@ -291,16 +269,13 @@ router.post('/api/gm/order/link', async (req, res) => {
     await client.query('UPDATE gm_order SET cafe24_order_no=$2, updated_at=now() WHERE order_no=$1', [orderNo, cafeNo]);
     await client.query('UPDATE gm_order_item SET cafe24_order_no=$2, updated_at=now() WHERE order_no=$1', [orderNo, cafeNo]);
     await client.query('COMMIT');
-    ok(res, { action:'order.link', order_no:orderNo, cafe24_order_no:cafeNo });
+    ok(res, {action:'order.link', order_no:orderNo, cafe24_order_no:cafeNo});
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
-    console.error('[GM_ORDER_LINK_V035_ERROR]', String(e && e.message || e));
-    fail(res, 500, 'order link failed', { detail:String(e && e.message || e) });
-  }finally{
-    client.release();
-  }
+    fail(res, 500, 'order link failed', {detail:String(e && e.message || e)});
+  }finally{ client.release(); }
 });
-// 기존 GET 호환 URL 유지
+
 router.get('/api/order/:order_no', async (req,res)=>{
   req.query.order_no = req.params.order_no;
   const pool = db(req);
@@ -308,7 +283,8 @@ router.get('/api/order/:order_no', async (req,res)=>{
   try{
     const order = await pool.query('SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1', [req.params.order_no]);
     const items = await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC', [req.params.order_no]);
-    ok(res, { action:'order.get', order:order.rows[0] || null, items:items.rows || [] });
-  }catch(e){ fail(res, 500, 'order get failed', { detail:String(e && e.message || e) }); }
+    ok(res, {action:'order.get', order:order.rows[0] || null, items:items.rows || []});
+  }catch(e){ fail(res, 500, 'order get failed', {detail:String(e && e.message || e)}); }
 });
+
 module.exports = router;
