@@ -1710,7 +1710,7 @@ async function upsertProduct(pool, raw, parent={}){
   const categoryTreeForSave = (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length) ? categoryTreeForMatch : mallCategoryJson;
   let cpSelectedCode = pickCpSelectedCode(p);
   const cpFixCode = pickCpFixCode(p);
-  const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode);
+  try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
   if(!cpSelectedCode){
     if((cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length)) && searchKeyword){
       cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
@@ -1719,6 +1719,7 @@ async function upsertProduct(pool, raw, parent={}){
     // 검색어로 카테고리 후보가 잡히지 않으면 상품이 미아가 되지 않도록 검색어를 임시 selected로 보관한다.
     if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
   }
+  const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode, cpSelectedCode);
   // cp_selected_code는 검색어 기준 후보 코드다. 상세 leaf(cp_fix_code)가 확인되어도 selected를 leaf로 덮어쓰지 않는다.
   // 예: 푸룬 검색은 selected=432516(건자두/푸룬), fix=445867(셀러가 올린 실제 leaf)로 함께 보관한다.
   await ensureProductCpColumns(pool);
@@ -2198,7 +2199,15 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       option_json_rows: oj0 && Array.isArray(oj0.rows) ? oj0.rows.length : 0,
       deep_option_arrays: collectPayloadContainers(p,4).reduce((n,o)=>n + (Array.isArray(o.optionRows)?o.optionRows.length:0) + (Array.isArray(o.optionCombos)?o.optionCombos.length:0) + (Array.isArray(o.aliOptionCombos)?o.aliOptionCombos.length:0),0),
       has_detail_json: !!(p.detail_json || p.detailJson),
-      keys: Object.keys(p).slice(0,40)
+      category_alias_counts: {
+        categoryTree: Array.isArray(p.categoryTree) ? p.categoryTree.length : 0,
+        category_tree: Array.isArray(p.category_tree) ? p.category_tree.length : 0,
+        categoryTreeJson: Array.isArray(p.categoryTreeJson) ? p.categoryTreeJson.length : (cleanText(p.categoryTreeJson) ? 'text' : 0),
+        cpCategoryTree: Array.isArray(p.cpCategoryTree) ? p.cpCategoryTree.length : 0,
+        mall_category_json: Array.isArray(p.mall_category_json) ? p.mall_category_json.length : (cleanText(p.mall_category_json) ? 'text' : 0),
+        categoryInfo: p.categoryInfo && typeof p.categoryInfo === 'object' ? Object.keys(p.categoryInfo).length : 0
+      },
+      keys: Object.keys(p).slice(0,60)
     });
   }catch(_log){}
   const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : (p.payload && Array.isArray(p.payload.items) ? p.payload.items : (p.payload && Array.isArray(p.payload.products) ? p.payload.products : null)));

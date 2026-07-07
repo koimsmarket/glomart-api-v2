@@ -494,15 +494,37 @@ async function findCategoryCandidatesForKeyword(pool, keyword){
   }catch(e){ try{ console.warn('[GM_CATEGORY_CANDIDATE_FAIL]', Object.assign({keyword:kw}, compactError(e))); }catch(_l){} return []; }
 }
 async function findCpSelectedCodeForKeyword(pool, keyword){
-  // 검색 단계에서는 동명이인 카테고리 문제 때문에 확정 선택하지 않는다.
-  // exact 후보가 하나뿐일 때만 selected를 넣고, 그 외에는 상세 category_tree에서 path로 확정한다.
+  // GM_CP_SELECTED_DECIDE_V047
+  // 검색어 매칭 후보가 있으면 검색어 자체가 아니라 반드시 cp_code를 selected로 저장한다.
+  // 단, 상세 CATEGORY_TREE가 있으면 findCpSelectedCodeForKeywordAndTree()가 path 비교로 먼저 확정한다.
+  // 여기서는 tree가 없는 검색 queue 단계의 fallback이므로 우선순위만으로 1개를 고른다.
   const kw = cleanText(keyword);
   if(!kw) return '';
   const cand=await findCategoryCandidatesForKeyword(pool, kw);
   const exact=cand.filter(r=>isSlashExactNameMatch(r.name_ko, kw) || cleanText(r.keyword)===kw || cleanText(r.keyword_seed)===kw || cleanText(r.match_type)==='SLASH_EXACT');
-  let code='';
-  if(exact.length === 1) code=cleanText(exact[0].cp_code);
-  try{ console.log('[GM_CP_SELECTED_MATCH]', { keyword:kw, candidate_count:cand.length, exact_count:exact.length, cp_selected_code:code, candidates:cand.slice(0,8).map(r=>({cp_code:r.cp_code,name_ko:r.name_ko,parent_name_ko:r.parent_name_ko,cp_parent_code:r.cp_parent_code,depth:r.depth,match_type:r.match_type})) }); }catch(_l){}
+  const poolRows = exact.length ? exact : cand;
+  function rowScore(r){
+    let score=0;
+    const mt=cleanText(r.match_type).toUpperCase();
+    if(normalizeCategoryNameForMatch(r.name_ko) === normalizeCategoryNameForMatch(kw)) score += 500;
+    else if(mt === 'SLASH_EXACT' || isSlashExactNameMatch(r.name_ko, kw)) score += 480;
+    else if(mt === 'KEYWORD' || cleanText(r.keyword)===kw || cleanText(r.keyword_seed)===kw) score += 430;
+    else if(mt === 'KEYWORD_LIST') score += 400;
+    else if(mt === 'PARTIAL') score += 100;
+    if(cleanText(r.leaf_yn)==='Y') score += 60;
+    score += Math.min(toInt(r.depth,0),20) * 5;
+    score += Math.min(toInt(r.search_count,0),100);
+    return score;
+  }
+  let best=null;
+  for(const r of poolRows){
+    const score=rowScore(r);
+    if(!best || score > best.score || (score===best.score && toInt(r.depth,0)>toInt(best.row.depth,0)) || (score===best.score && String(r.cp_code||'') < String(best.row.cp_code||''))){
+      best={row:r,score};
+    }
+  }
+  const code=best ? cleanText(best.row.cp_code) : '';
+  try{ console.log('[GM_CP_SELECTED_MATCH]', { keyword:kw, candidate_count:cand.length, exact_count:exact.length, cp_selected_code:code, selected:best&&{cp_code:best.row.cp_code,name_ko:best.row.name_ko,parent_name_ko:best.row.parent_name_ko,cp_parent_code:best.row.cp_parent_code,depth:best.row.depth,match_type:best.row.match_type,score:best.score}, candidates:cand.slice(0,8).map(r=>({cp_code:r.cp_code,name_ko:r.name_ko,parent_name_ko:r.parent_name_ko,cp_parent_code:r.cp_parent_code,depth:r.depth,match_type:r.match_type})) }); }catch(_l){}
   return code;
 }
 async function findCpSelectedCodeForKeywordAndTree(pool, keyword, tree){
@@ -534,12 +556,15 @@ async function findCpSelectedCodeForKeywordAndTree(pool, keyword, tree){
   try{ console.log('[GM_CP_SELECTED_TREE_MATCH]', { keyword:kw, cp_selected_code:code, score:best&&best.score, selected:best&&{cp_code:best.row.cp_code,name_ko:best.row.name_ko,parent_name_ko:best.row.parent_name_ko,cp_parent_code:best.row.cp_parent_code,depth:best.row.depth}, candidate_count:cand.length, tree:tree.map(x=>({cp_code:x.cp_code,name_ko:x.name_ko,depth:x.depth})) }); }catch(_l){}
   return code;
 }
-function decideCpMatch(p, mallCode, cpFixCode){
+function decideCpMatch(p, mallCode, cpFixCode, cpSelectedCode){
   const explicit = normalizeCpMatch(p.cp_match || p.cpMatch || '');
   if(explicit) return explicit;
-  if(!cleanText(cpFixCode)) return 'F';
-  const mall = cleanText(mallCode).toUpperCase();
-  return mall === 'CPKR' ? 'T' : 'F';
+  const fix=cleanText(cpFixCode);
+  const selected=cleanText(cpSelectedCode);
+  if(!fix) return 'F';
+  // T는 selected와 상세 leaf가 같은 경우만 사용한다.
+  // 예: 푸룬 selected=432516, fix=445867 이면 셀러 등록 카테고리는 기록하되 cp_match='F'.
+  return (selected && selected === fix) ? 'T' : 'F';
 }
 async function applyCpFixLearning(pool, args){
   args=args||{};

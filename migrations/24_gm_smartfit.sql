@@ -1,5 +1,6 @@
--- GM SmartFit Server Schema V013
+-- GM SmartFit Server Schema V015
 -- 기준: source_lang = 작성자 현재 gm_lang. 국적 기준 저장 금지.
+-- V015: Space/Template 동시 구축. Template.space_id는 NULL 허용(미분류)이며 나중에 이동 가능.
 -- 콘텐츠 원문은 *_source / description / search_source 에 저장하고, ko 보조 검색값만 *_ko / search_ko 로 저장한다.
 -- 이미지 URL은 DB에 저장하지 않는다. image_count만 저장하고 R2 경로 규칙으로 자동 생성한다.
 -- 링크는 link01~link06만 저장한다. 실제 허용 도메인 검증은 routes/smartfit.js에서 수행한다.
@@ -24,6 +25,8 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_space (
   description TEXT NOT NULL DEFAULT '',
   visibility VARCHAR(20) NOT NULL DEFAULT 'private',
   search_visible CHAR(1) NOT NULL DEFAULT 'T',
+  favorite_yn CHAR(1) NOT NULL DEFAULT 'F',
+  sort_no INTEGER NOT NULL DEFAULT 0,
   sort_order INTEGER NOT NULL DEFAULT 0,
   is_active CHAR(1) NOT NULL DEFAULT 'T',
   is_deleted CHAR(1) NOT NULL DEFAULT 'F',
@@ -50,6 +53,8 @@ ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS link06 TEXT NOT NULL DEFA
 ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) NOT NULL DEFAULT 'private';
 ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS search_visible CHAR(1) NOT NULL DEFAULT 'T';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS favorite_yn CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS sort_no INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS is_active CHAR(1) NOT NULL DEFAULT 'T';
 ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
 ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
@@ -64,6 +69,8 @@ UPDATE gm_smartfit_space SET space_title_source=COALESCE(NULLIF(space_title_sour
 UPDATE gm_smartfit_space SET space_title_ko=COALESCE(NULLIF(space_title_ko,''), NULLIF(space_title,''), '') WHERE COALESCE(space_title_ko,'')='';
 UPDATE gm_smartfit_space SET description=COALESCE(NULLIF(description,''), NULLIF(space_desc,''), NULLIF(space_desc_gm_lang,''), '') WHERE COALESCE(description,'')='';
 UPDATE gm_smartfit_space SET image_count=0 WHERE image_count IS NULL OR image_count < 0 OR image_count > 5;
+ALTER TABLE gm_smartfit_space ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
+UPDATE gm_smartfit_space SET sort_no=sort_order WHERE COALESCE(sort_no,0)=0 AND sort_order IS NOT NULL;
 
 ALTER TABLE gm_smartfit_space DROP COLUMN IF EXISTS space_title;
 ALTER TABLE gm_smartfit_space DROP COLUMN IF EXISTS space_title_gm_lang;
@@ -72,7 +79,8 @@ ALTER TABLE gm_smartfit_space DROP COLUMN IF EXISTS space_desc_gm_lang;
 ALTER TABLE gm_smartfit_space DROP COLUMN IF EXISTS youtube_url;
 ALTER TABLE gm_smartfit_space DROP COLUMN IF EXISTS image_url;
 
-CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_owner_v013 ON gm_smartfit_space (owner_member_id, is_deleted, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_owner_v014 ON gm_smartfit_space (owner_member_id, is_deleted, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_favorite_v014 ON gm_smartfit_space (owner_member_id, favorite_yn, is_deleted, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_public_v013 ON gm_smartfit_space (visibility, search_visible, is_deleted, is_active, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_space_category_v013 ON gm_smartfit_space (category_no, visibility, is_active);
 
@@ -134,6 +142,9 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_template (
   keyword_count INTEGER NOT NULL DEFAULT 0,
   visibility VARCHAR(20) NOT NULL DEFAULT 'private',
   search_visible CHAR(1) NOT NULL DEFAULT 'T',
+  favorite_yn CHAR(1) NOT NULL DEFAULT 'F',
+  sort_no INTEGER NOT NULL DEFAULT 0,
+  content_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   use_count BIGINT NOT NULL DEFAULT 0,
   item_count INTEGER NOT NULL DEFAULT 0,
   view_count BIGINT NOT NULL DEFAULT 0,
@@ -170,6 +181,9 @@ ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS search_ko TEXT NOT NUL
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS keyword_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) NOT NULL DEFAULT 'private';
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS search_visible CHAR(1) NOT NULL DEFAULT 'T';
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS favorite_yn CHAR(1) NOT NULL DEFAULT 'F';
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS sort_no INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS content_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS use_count BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS item_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS is_active CHAR(1) NOT NULL DEFAULT 'T';
@@ -214,7 +228,9 @@ ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS return_amount;
 ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS incentive_confirm_amount;
 ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS incentive_cancel_amount;
 
-CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_creator_v013 ON gm_smartfit_template (creator_member_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_creator_v014 ON gm_smartfit_template (creator_member_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_space_v014 ON gm_smartfit_template (creator_member_id, space_id, is_deleted, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_favorite_v014 ON gm_smartfit_template (creator_member_id, favorite_yn, is_deleted, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_category_v013 ON gm_smartfit_template (category_no, visibility, is_active);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_public_v013 ON gm_smartfit_template (visibility, search_visible, is_deleted, is_active, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_trash_v013 ON gm_smartfit_template (creator_member_id, is_deleted, deleted_at DESC);

@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V013_SOURCE_LANG_R2_POLICY';
+const VERSION = 'GM_SMARTFIT_SERVER_V015_SPACE_TEMPLATE_OPTIONAL_SPACE';
 console.log('[GM_SMARTFIT_ROUTE] loaded', VERSION);
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -34,6 +34,26 @@ function normLang(v){
 }
 const LANGS = new Set(['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr','ot']);
 function safeLang(v){ const x=normLang(v); return LANGS.has(x) ? x : 'ot'; }
+function nullableId(v){
+  const raw=s(v);
+  if(!raw || raw==='0' || raw.toLowerCase()==='null' || raw.toLowerCase()==='undefined') return null;
+  const x=i(raw,0);
+  return x>0 ? x : null;
+}
+function boolFlag(v, def='F'){
+  const x=s(v).toUpperCase();
+  if(['T','Y','YES','TRUE','1','ON'].includes(x)) return 'T';
+  if(['F','N','NO','FALSE','0','OFF'].includes(x)) return 'F';
+  return def;
+}
+async function assertSpaceOwnerIfSet(client, member, spaceId){
+  if(!spaceId) return null;
+  const r=await client.query("SELECT * FROM gm_smartfit_space WHERE space_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[spaceId,'T']);
+  const row=r.rows[0];
+  if(!row) throw new Error('space not found');
+  if(!(await isOwnerOrAdmin(client, member, row.owner_member_id || row.creator_member_id))) throw new Error('space permission denied');
+  return row;
+}
 
 const ALLOWED_HOSTS = [
   'youtube.com','www.youtube.com','m.youtube.com','youtu.be',
@@ -242,24 +262,26 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     const desc=validateDescription(b.template_description || b.description || b.template_desc || '');
     const links=normalizeLinks(b);
     const visibility=visibilityOf(b.visibility || b.is_public || 'private','private');
+    const spaceIdValue=nullableId(b.space_id || b.spaceId);
     const searchSource=s(b.search_source || b.search || '');
     const keywordCount=searchSource ? searchSource.split(',').map(x=>s(x)).filter(Boolean).slice(0,10).length : 0;
     await client.query('BEGIN');
+    await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
-        link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16,
-        visibility=$17, search_visible=$18, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$19 RETURNING *`,
-        [b.space_id || null,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,visibility,publicVisibility(visibility),templateId]);
+        link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
+        visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
+        [spaceIdValue,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
       saved=r.rows[0];
     }else{
       const r=await client.query(`INSERT INTO gm_smartfit_template (space_id, creator_member_id, source_lang, template_title_source, template_title_ko, category_no, image_count,
-        link01, link02, link03, link04, link05, link06, description, search_source, search_ko, keyword_count, visibility, search_visible)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
-        [b.space_id || null,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,visibility,publicVisibility(visibility)]);
+        link01, link02, link03, link04, link05, link06, description, search_source, search_ko, keyword_count, content_json, visibility, search_visible)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19) RETURNING *`,
+        [spaceIdValue,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
     if(Array.isArray(b.items)){
@@ -287,6 +309,140 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
     const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id,'T']);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
+});
+
+
+router.get('/api/gm/smartfit/space/detail', async (req,res)=>{
+  try{
+    const pool=db(req); const id=i(req.query.space_id || req.query.spaceId,0);
+    if(!id) return fail(res,400,'space_id required');
+    const r=await pool.query("SELECT * FROM gm_smartfit_space WHERE space_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id]);
+    const space=r.rows[0]; if(!space) return fail(res,404,'space not found');
+    ok(res,{ space:addImageUrls(Object.assign({},space,{ title:coalesceSpaceTitle(space), author:displayAuthor(space) }),'space') });
+  }catch(e){ fail(res,500,'space detail failed',{ detail:String(e.message||e) }); }
+});
+
+router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
+  try{
+    const pool=db(req); const id=i(req.query.template_id || req.query.templateId,0);
+    if(!id) return fail(res,400,'template_id required');
+    const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id]);
+    const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
+    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[id]);
+    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows });
+  }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/smartfit/space/favorite', async (req,res)=>{
+  try{
+    const pool=db(req); const b=req.body||{}; const member=s(b.member_id || b.memberId || ''); const spaceId=i(b.space_id || b.spaceId,0);
+    if(!member) return fail(res,401,'login required'); if(!spaceId) return fail(res,400,'space_id required');
+    const old=(await pool.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 LIMIT 1',[spaceId])).rows[0];
+    if(!old) return fail(res,404,'space not found');
+    if(!(await isOwnerOrAdmin(pool, member, old.owner_member_id || old.creator_member_id))) return fail(res,403,'permission denied');
+    const flag=boolFlag(b.favorite_yn || b.favorite || b.on, old.favorite_yn==='T'?'F':'T');
+    const r=await pool.query("UPDATE gm_smartfit_space SET favorite_yn=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2 RETURNING *",[flag,spaceId]);
+    ok(res,{ space:addImageUrls(Object.assign({},r.rows[0],{ title:coalesceSpaceTitle(r.rows[0]), author:displayAuthor(r.rows[0]) }),'space') });
+  }catch(e){ fail(res,400,'space favorite failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/smartfit/template/favorite', async (req,res)=>{
+  try{
+    const pool=db(req); const b=req.body||{}; const member=s(b.member_id || b.memberId || ''); const templateId=i(b.template_id || b.templateId,0);
+    if(!member) return fail(res,401,'login required'); if(!templateId) return fail(res,400,'template_id required');
+    const old=(await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1',[templateId])).rows[0];
+    if(!old) return fail(res,404,'template not found');
+    if(!(await isOwnerOrAdmin(pool, member, old.creator_member_id))) return fail(res,403,'permission denied');
+    const flag=boolFlag(b.favorite_yn || b.favorite || b.on, old.favorite_yn==='T'?'F':'T');
+    const r=await pool.query("UPDATE gm_smartfit_template SET favorite_yn=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2 RETURNING *",[flag,templateId]);
+    ok(res,{ template:addImageUrls(Object.assign({},r.rows[0],{ title:coalesceTitle(r.rows[0]), author:displayAuthor(r.rows[0]) }),'template') });
+  }catch(e){ fail(res,400,'template favorite failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/smartfit/template/move', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{}; const member=s(b.member_id || b.memberId || '');
+    if(!member) return fail(res,401,'login required');
+    const ids=Array.isArray(b.template_ids || b.templateIds) ? (b.template_ids || b.templateIds).map(x=>i(x,0)).filter(Boolean) : [i(b.template_id || b.templateId,0)].filter(Boolean);
+    if(!ids.length) return fail(res,400,'template_id required');
+    const spaceId=nullableId(b.space_id || b.spaceId);
+    await client.query('BEGIN');
+    await assertSpaceOwnerIfSet(client, member, spaceId);
+    const templates=await client.query('SELECT template_id, creator_member_id FROM gm_smartfit_template WHERE template_id = ANY($1::bigint[]) FOR UPDATE',[ids]);
+    if(templates.rowCount !== ids.length) throw new Error('template not found');
+    for(const t of templates.rows){ if(!(await isOwnerOrAdmin(client, member, t.creator_member_id))) throw new Error('permission denied'); }
+    const r=await client.query('UPDATE gm_smartfit_template SET space_id=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id = ANY($2::bigint[]) RETURNING *',[spaceId,ids]);
+    await client.query('COMMIT');
+    ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template')), count:r.rowCount, space_id:spaceId });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'template move failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+
+router.post('/api/gm/smartfit/space/trash', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{}; const member=s(b.member_id || b.memberId || ''); const spaceId=i(b.space_id || b.spaceId,0);
+    if(!member) return fail(res,401,'login required'); if(!spaceId) return fail(res,400,'space_id required');
+    await client.query('BEGIN');
+    const old=(await client.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 FOR UPDATE',[spaceId])).rows[0];
+    if(!old) throw new Error('space not found');
+    if(!(await isOwnerOrAdmin(client, member, old.owner_member_id || old.creator_member_id))) throw new Error('permission denied');
+    const trash=boolFlag(b.trash_yn || b.trash || b.on,'T');
+    const r=await client.query("UPDATE gm_smartfit_space SET is_deleted=$1, deleted_at=CASE WHEN $1='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1='T' THEN $2 ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE space_id=$3 RETURNING *",[trash,member,spaceId]);
+    if(trash==='T') await client.query('UPDATE gm_smartfit_template SET space_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$1',[spaceId]);
+    await client.query('COMMIT');
+    ok(res,{ space:r.rows[0], detached_templates:trash==='T' });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'space trash failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+
+router.post('/api/gm/smartfit/template/trash', async (req,res)=>{
+  try{
+    const pool=db(req); const b=req.body||{}; const member=s(b.member_id || b.memberId || ''); const templateId=i(b.template_id || b.templateId,0);
+    if(!member) return fail(res,401,'login required'); if(!templateId) return fail(res,400,'template_id required');
+    const old=(await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1',[templateId])).rows[0];
+    if(!old) return fail(res,404,'template not found');
+    if(!(await isOwnerOrAdmin(pool, member, old.creator_member_id))) return fail(res,403,'permission denied');
+    const trash=boolFlag(b.trash_yn || b.trash || b.on,'T');
+    const r=await pool.query("UPDATE gm_smartfit_template SET is_deleted=$1, deleted_at=CASE WHEN $1='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1='T' THEN $2 ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE template_id=$3 RETURNING *",[trash,member,templateId]);
+    ok(res,{ template:r.rows[0] });
+  }catch(e){ fail(res,400,'template trash failed',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/smartfit/space/delete', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{}; const member=s(b.member_id || b.memberId || ''); const spaceId=i(b.space_id || b.spaceId,0);
+    if(!member) return fail(res,401,'login required'); if(!spaceId) return fail(res,400,'space_id required');
+    await client.query('BEGIN');
+    const old=(await client.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 FOR UPDATE',[spaceId])).rows[0];
+    if(!old) throw new Error('space not found');
+    if(!(await isOwnerOrAdmin(client, member, old.owner_member_id || old.creator_member_id))) throw new Error('permission denied');
+    await client.query('UPDATE gm_smartfit_template SET space_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$1',[spaceId]);
+    await client.query('DELETE FROM gm_smartfit_space WHERE space_id=$1',[spaceId]);
+    await client.query('COMMIT');
+    ok(res,{ deleted:true, space_id:spaceId, detached_templates:true });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'space delete failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
+});
+
+router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{}; const member=s(b.member_id || b.memberId || ''); const templateId=i(b.template_id || b.templateId,0);
+    if(!member) return fail(res,401,'login required'); if(!templateId) return fail(res,400,'template_id required');
+    await client.query('BEGIN');
+    const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
+    if(!old) throw new Error('template not found');
+    if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
+    await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[templateId]);
+    await client.query('DELETE FROM gm_smartfit_collection WHERE template_id=$1',[templateId]);
+    await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1',[templateId]);
+    await client.query('COMMIT');
+    ok(res,{ deleted:true, template_id:templateId });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'template delete failed',{ detail:String(e.message||e) }); }
+  finally{ client.release(); }
 });
 
 router.get('/api/gm/smartfit/product/search', async (req,res)=>{

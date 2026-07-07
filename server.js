@@ -1762,82 +1762,216 @@ app.post('/api/gm/admin/orders/:order_no/builder/start', async (req,res)=>{
 });
 
 app.post('/api/gm/order/create', async (req,res)=>{
-  const o = req.body || {};
-  const items = Array.isArray(o.items) ? o.items : [];
-  if(!items.length) return fail(res, 400, 'items required');
+  const rawBody = req.body || {};
+  let o = rawBody;
+  if(typeof rawBody === 'string'){
+    try{ o = JSON.parse(rawBody); }catch(_e){ o = {}; }
+  }else if(rawBody.payload){
+    try{ o = typeof rawBody.payload === 'string' ? JSON.parse(rawBody.payload) : rawBody.payload; }catch(_e){ o = rawBody; }
+  }else if(rawBody.data){
+    try{ o = typeof rawBody.data === 'string' ? JSON.parse(rawBody.data) : rawBody.data; }catch(_e){ o = rawBody; }
+  }
+  o = o || {};
+  const addr = (o.address && typeof o.address === 'object') ? o.address : {};
+  const totalsIn = (o.totals && typeof o.totals === 'object') ? o.totals : {};
+
+  const rawItems = Array.isArray(o.items) ? o.items :
+    (Array.isArray(o.order_items) ? o.order_items :
+    (Array.isArray(o.external_items) ? o.external_items :
+    (Array.isArray(o.products) ? o.products : [])));
+  if(!rawItems.length) return fail(res, 400, 'items required', { version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
+
   const orderNo = cleanText(o.gm_order_no || o.order_no) || gmAutoOrderNo();
   const cafe24OrderNo = gmCafe24OrderNo(o);
+  const num = (v, d=0) => toInt(v, d);
+  const txt = (v, d='') => cleanText(v == null || v === '' ? d : v);
+  const nullable = v => { const x = cleanText(v); return x || null; };
+  const itemKey = (it, idx) => txt(it.pi_ii_vi || it.uid || it.cart_uid || it.source_uid || it.sourceUid || it.product_key || it.productKey || it.product_code || it.productCode || it.variant_code || it.variantCode || ('ITEM_' + (idx+1)));
+  const itemMall = it => txt(it.mall_code || it.mallCode || gmSourceMallFrom(it.source_mall || it.sourceMall || it.source_code || it.sourceCode, it.source_uid || it.sourceUid, it.product_url || it.source_url || it.url, it.mall_code || it.mallCode), 'GM');
+  const itemName = it => txt(it.product_name || it.productName || it.name || it.title, '상품명 없음');
+  const itemThumb = it => txt(it.thumb_file_name || it.thumb || it.image || it.image_url || it.imageUrl || it.thumbnail, '');
+  const itemUrl = it => normalizeUrl(it.product_url || it.source_url || it.url || it.href || '');
+  const itemQty = it => Math.max(1, num(it.quantity || it.qty || it.count, 1));
+  const itemUnit = it => num(it.customer_order_price || it.order_price || it.price || it.mall_sale_price || it.sale_price || it.unit_price, 0);
+  const itemAmount = it => num(it.product_amount || it.amount || it.total_price || (itemUnit(it) * itemQty(it)), 0);
+
+  const totalProductPrice = num(o.total_product_price || o.product_total || totalsIn.product || totalsIn.product_total || rawItems.reduce((sum,it)=>sum+itemAmount(it),0), 0);
+  const totalDeliveryFee = num(o.total_delivery_fee || o.delivery_fee_total || o.shipping_fee || totalsIn.delivery || totalsIn.delivery_fee || 0, 0);
+  const extraAreaDeliveryFee = num(o.extra_area_delivery_fee || totalsIn.extra || totalsIn.extra_area_delivery_fee || 0, 0);
+  const estimatedCustomsFee = num(o.estimated_customs_fee || 0, 0);
+  const estimatedImportVat = num(o.estimated_import_vat || 0, 0);
+  const totalPaymentPrice = num(o.total_payment_price || o.payment_amount || o.total_amount || totalsIn.payment || totalsIn.total || (totalProductPrice + totalDeliveryFee + extraAreaDeliveryFee + estimatedCustomsFee + estimatedImportVat), 0);
 
   const client = await pool.connect();
   try{
     await client.query('BEGIN');
     await client.query(`
       INSERT INTO gm_order (
-        order_no, cafe24_order_no, member_id, guest_key, orderer_name, orderer_phone, orderer_mobile, orderer_email,
+        order_no, cafe24_order_no, member_id, guest_key,
+        orderer_name, orderer_phone, orderer_mobile, orderer_email,
         receiver_name, receiver_phone, receiver_mobile, receiver_safe_phone,
         receiver_zipcode, receiver_address1, receiver_address2, delivery_memo,
         customs_required_yn, customs_clearance_code, customs_name, customs_mobile,
         payment_method, payment_method_display, payment_bank_name, payment_account_number,
-        depositor_name, depositor_phone, expected_payment_amount, total_product_price,
-        total_delivery_fee, extra_area_delivery_fee, estimated_customs_fee, estimated_import_vat,
-        total_payment_price, order_status, payment_status, shipping_status, cs_status,
-        ordered_at, created_at, updated_at
+        depositor_name, depositor_phone,
+        expected_payment_amount, actual_payment_amount, payment_difference_amount,
+        total_product_price, total_delivery_fee, extra_area_delivery_fee,
+        estimated_customs_fee, estimated_import_vat, total_payment_price,
+        order_status, payment_status, shipping_status, delivered_at, cs_status,
+        ordered_at, payment_requested_at, payment_completed_at, payment_confirmed_at,
+        created_at, updated_at, cancel_status, cancel_requested_at, cancel_completed_at,
+        purchase_confirmed_yn, purchase_confirmed_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, $22,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,now(),now(),now()
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+        $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
+        $31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
+        COALESCE($41::timestamp, now()),$42,$43,$44,now(),now(),$45,$46,$47,$48,$49
       )
-      ON CONFLICT (order_no) DO NOTHING
+      ON CONFLICT (order_no) DO UPDATE SET
+        cafe24_order_no=COALESCE(EXCLUDED.cafe24_order_no, gm_order.cafe24_order_no),
+        member_id=COALESCE(EXCLUDED.member_id, gm_order.member_id),
+        guest_key=COALESCE(EXCLUDED.guest_key, gm_order.guest_key),
+        orderer_name=EXCLUDED.orderer_name,
+        orderer_phone=EXCLUDED.orderer_phone,
+        orderer_mobile=EXCLUDED.orderer_mobile,
+        orderer_email=EXCLUDED.orderer_email,
+        receiver_name=EXCLUDED.receiver_name,
+        receiver_phone=EXCLUDED.receiver_phone,
+        receiver_mobile=EXCLUDED.receiver_mobile,
+        receiver_safe_phone=EXCLUDED.receiver_safe_phone,
+        receiver_zipcode=EXCLUDED.receiver_zipcode,
+        receiver_address1=EXCLUDED.receiver_address1,
+        receiver_address2=EXCLUDED.receiver_address2,
+        delivery_memo=EXCLUDED.delivery_memo,
+        payment_method=EXCLUDED.payment_method,
+        payment_method_display=EXCLUDED.payment_method_display,
+        expected_payment_amount=EXCLUDED.expected_payment_amount,
+        total_product_price=EXCLUDED.total_product_price,
+        total_delivery_fee=EXCLUDED.total_delivery_fee,
+        extra_area_delivery_fee=EXCLUDED.extra_area_delivery_fee,
+        total_payment_price=EXCLUDED.total_payment_price,
+        order_status=EXCLUDED.order_status,
+        payment_status=EXCLUDED.payment_status,
+        shipping_status=EXCLUDED.shipping_status,
+        updated_at=now()
     `, [
-      orderNo, cafe24OrderNo || null, cleanText(o.member_id) || null, cleanText(o.guest_key) || null,
-      cleanText(o.orderer_name), cleanText(o.orderer_phone), cleanText(o.orderer_mobile), cleanText(o.orderer_email),
-      cleanText(o.receiver_name), cleanText(o.receiver_phone), cleanText(o.receiver_mobile), cleanText(o.receiver_safe_phone),
-      cleanText(o.receiver_zipcode), cleanText(o.receiver_address1), cleanText(o.receiver_address2), cleanText(o.delivery_memo),
-      cleanText(o.customs_required_yn || 'N'), cleanText(o.customs_clearance_code), cleanText(o.customs_name), cleanText(o.customs_mobile),
-      cleanText(o.payment_method || 'pending'), cleanText(o.payment_method_display || '미정'),
-      cleanText(o.payment_bank_name), cleanText(o.payment_account_number),
-      cleanText(o.depositor_name), cleanText(o.depositor_phone), toInt(o.expected_payment_amount, 0),
-      toInt(o.total_product_price, 0), toInt(o.total_delivery_fee, 0), toInt(o.extra_area_delivery_fee, 0),
-      toInt(o.estimated_customs_fee, 0), toInt(o.estimated_import_vat, 0), toInt(o.total_payment_price, 0),
-      cleanText(o.order_status || 'ordered'), cleanText(o.payment_status || 'pending'),
-      cleanText(o.shipping_status || 'pending'), cleanText(o.cs_status || 'none')
+      orderNo, cafe24OrderNo || null, nullable(o.member_id || addr.member_id), nullable(o.guest_key),
+      txt(o.orderer_name || o.buyer_name || o.member_name, '주문자'), txt(o.orderer_phone || o.buyer_phone), txt(o.orderer_mobile || o.buyer_mobile || o.orderer_phone || o.buyer_phone, '00000000000'), txt(o.orderer_email || o.buyer_email),
+      txt(o.receiver_name || o.recipient_name || addr.receiver_name || addr.name || o.orderer_name || o.buyer_name, '수령인'), txt(o.receiver_phone || o.recipient_phone || addr.receiver_phone || addr.phone), txt(o.receiver_mobile || o.recipient_mobile || addr.receiver_mobile || addr.mobile || o.receiver_phone || o.recipient_phone || addr.receiver_phone || addr.phone, '00000000000'), txt(o.receiver_safe_phone),
+      txt(o.receiver_zipcode || o.zipcode || o.postcode || addr.zipcode || addr.postcode, '00000'), txt(o.receiver_address1 || o.address1 || addr.address1 || o.receiver_address_full || o.address_full || addr.address_full, '주소 미확인'), txt(o.receiver_address2 || o.address2 || addr.address2), txt(o.delivery_memo || o.memo || addr.delivery_memo || addr.memo),
+      txt(o.customs_required_yn || 'N'), txt(o.customs_clearance_code), txt(o.customs_name), txt(o.customs_mobile),
+      txt(o.payment_method || 'pending', 'pending'), txt(o.payment_method_display || '미정', '미정'), txt(o.payment_bank_name), txt(o.payment_account_number),
+      txt(o.depositor_name), txt(o.depositor_phone), num(o.expected_payment_amount || totalPaymentPrice, totalPaymentPrice),
+      o.actual_payment_amount == null || o.actual_payment_amount === '' ? null : num(o.actual_payment_amount, 0),
+      o.payment_difference_amount == null || o.payment_difference_amount === '' ? null : num(o.payment_difference_amount, 0),
+      totalProductPrice, totalDeliveryFee, extraAreaDeliveryFee, estimatedCustomsFee, estimatedImportVat, totalPaymentPrice,
+      txt(o.order_status || 'ordered'), txt(o.payment_status || 'pending'), txt(o.shipping_status || 'pending'), o.delivered_at || null, txt(o.cs_status || 'none'),
+      o.ordered_at || null, o.payment_requested_at || null, o.payment_completed_at || null, o.payment_confirmed_at || null,
+      txt(o.cancel_status || 'none'), o.cancel_requested_at || null, o.cancel_completed_at || null, txt(o.purchase_confirmed_yn || 'N'), o.purchase_confirmed_at || null
     ]);
 
-    for(const it of items){
+    let saved = 0;
+    for(let idx=0; idx<rawItems.length; idx++){
+      const it = rawItems[idx] || {};
+      const mallCode = itemMall(it);
+      const pi = itemKey(it, idx);
+      const sourceMall = gmSourceMallFrom(it.source_mall || it.sourceMall || it.source_code || it.sourceCode, it.source_uid || it.sourceUid, it.product_url || it.source_url || it.url, mallCode);
+      const sourceUid = gmSourceUidFrom(it.source_uid || it.sourceUid, sourceMall, it.source_key || it.sourceKey || pi);
+      const qty = itemQty(it);
+      const unit = itemUnit(it);
+      const amount = itemAmount(it);
       await client.query(`
         INSERT INTO gm_order_item (
           order_no, cafe24_order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
           mall_sale_price, customer_order_price, final_supply_price, product_amount,
-          delivery_type, delivery_fee, extra_area_delivery_fee, mall_code, source_mall, source_uid, supplier_id, supplier_name,
+          delivery_type, delivery_fee, extra_area_delivery_fee,
+          mall_code, source_mall, source_uid, supplier_id, supplier_name,
           product_url, thumb_file_name, hs_code, origin_country, carrier_name, tracking_number,
           item_order_status, item_shipping_status, created_at, updated_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, $22,$25,$26,$27,now(),now()
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+          $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+          $21,$22,$23,$24,$25,$26,$27,now(),now()
         )
         ON CONFLICT (order_no, pi_ii_vi) DO UPDATE SET
+          cafe24_order_no=COALESCE(EXCLUDED.cafe24_order_no, gm_order_item.cafe24_order_no),
+          product_name=EXCLUDED.product_name,
+          option_name=EXCLUDED.option_name,
+          option_value=EXCLUDED.option_value,
           quantity=EXCLUDED.quantity,
+          mall_sale_price=EXCLUDED.mall_sale_price,
+          customer_order_price=EXCLUDED.customer_order_price,
+          final_supply_price=EXCLUDED.final_supply_price,
           product_amount=EXCLUDED.product_amount,
+          delivery_type=EXCLUDED.delivery_type,
+          delivery_fee=EXCLUDED.delivery_fee,
+          extra_area_delivery_fee=EXCLUDED.extra_area_delivery_fee,
+          mall_code=EXCLUDED.mall_code,
+          source_mall=EXCLUDED.source_mall,
+          source_uid=EXCLUDED.source_uid,
+          supplier_id=EXCLUDED.supplier_id,
+          supplier_name=EXCLUDED.supplier_name,
+          product_url=EXCLUDED.product_url,
+          thumb_file_name=EXCLUDED.thumb_file_name,
+          item_order_status=EXCLUDED.item_order_status,
+          item_shipping_status=EXCLUDED.item_shipping_status,
           updated_at=now()
       `, [
-        orderNo, cleanText(it.cafe24_order_no || it.cafe24OrderNo || cafe24OrderNo) || null, cleanText(it.pi_ii_vi), cleanText(it.product_name),
-        cleanText(it.option_name), cleanText(it.option_value), Math.max(1, toInt(it.quantity, 1)),
-        toInt(it.mall_sale_price, 0), toInt(it.customer_order_price, 0),
-        it.final_supply_price == null ? null : toInt(it.final_supply_price, 0),
-        toInt(it.product_amount, 0), cleanText(it.delivery_type), toInt(it.delivery_fee, 0),
-        toInt(it.extra_area_delivery_fee, 0), cleanText(it.mall_code), gmSourceMallFrom(it.source_mall || it.sourceMall || it.source_code || it.sourceCode, it.source_uid || it.sourceUid, it.product_url || it.source_url || it.url, it.mall_code), gmSourceUidFrom(it.source_uid || it.sourceUid, it.source_mall || it.sourceMall || it.source_code || it.sourceCode, it.source_key || it.sourceKey), cleanText(it.supplier_id),
-        cleanText(it.supplier_name), normalizeUrl(it.product_url || it.source_url || it.url), cleanText(it.thumb_file_name),
-        cleanText(it.hs_code), cleanText(it.origin_country), cleanText(it.carrier_name),
-        cleanText(it.tracking_number), cleanText(it.item_order_status || 'ordered'),
-        cleanText(it.item_shipping_status || 'pending')
+        orderNo, cleanText(it.cafe24_order_no || it.cafe24OrderNo || cafe24OrderNo) || null, pi, itemName(it),
+        txt(it.option_name || it.optionName), txt(it.option_value || it.optionValue || it.option_text || it.optionText), qty,
+        num(it.mall_sale_price || it.sale_price || unit, unit), unit,
+        it.final_supply_price == null || it.final_supply_price === '' ? null : num(it.final_supply_price, 0),
+        amount, txt(it.delivery_type || it.shipping_type), num(it.delivery_fee || it.shipping_fee, 0), num(it.extra_area_delivery_fee, 0),
+        mallCode, sourceMall, sourceUid, txt(it.supplier_id || it.supplierId), txt(it.supplier_name || it.supplierName),
+        itemUrl(it), itemThumb(it), txt(it.hs_code || it.hsCode), txt(it.origin_country || it.originCountry), txt(it.carrier_name || it.carrierName), txt(it.tracking_number || it.trackingNumber),
+        txt(it.item_order_status || it.item_status || 'ordered'), txt(it.item_shipping_status || 'pending')
       ]);
+      saved++;
       try{ await upsertSalesAggregate(client, o, it); }catch(_agg){ try{ console.warn('[GM SALES AGG SKIP]', String(_agg && _agg.message || _agg)); }catch(_w){} }
     }
 
     await client.query('COMMIT');
-    ok(res, { order_no:orderNo, cafe24_order_no:cafe24OrderNo, item_count:items.length });
+    ok(res, { order_no:orderNo, cafe24_order_no:cafe24OrderNo, item_count:saved, version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
-    fail(res, 500, 'order create failed', { detail:String(e && e.message || e) });
+    console.error('[GM_ORDER_CREATE_ERROR_V031]', String(e && e.message || e));
+    fail(res, 500, 'order create failed', { detail:String(e && e.message || e), version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
   }finally{
     client.release();
+  }
+});
+
+app.post('/api/gm/order/link', async (req,res)=>{
+  const o = req.body || {};
+  const orderNo = cleanText(o.gm_order_no || o.order_no);
+  const cafe24OrderNo = gmCafe24OrderNo(o);
+  if(!orderNo || !cafe24OrderNo) return fail(res, 400, 'order_no/cafe24_order_no required', { version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
+  try{
+    await pool.query(`
+      UPDATE gm_order
+      SET cafe24_order_no=$2,
+          order_status=COALESCE(NULLIF($3,''), order_status),
+          payment_status=COALESCE(NULLIF($4,''), payment_status),
+          updated_at=now()
+      WHERE order_no=$1
+    `, [orderNo, cafe24OrderNo, cleanText(o.order_status || 'ordered'), cleanText(o.payment_status || '')]);
+    await pool.query(`UPDATE gm_order_item SET cafe24_order_no=$2, updated_at=now() WHERE order_no=$1`, [orderNo, cafe24OrderNo]);
+    ok(res, { order_no:orderNo, cafe24_order_no:cafe24OrderNo, version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
+  }catch(e){
+    fail(res, 500, 'order link failed', { detail:String(e && e.message || e), version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
+  }
+});
+
+app.get('/api/gm/order/get', async (req,res)=>{
+  const orderNo = cleanText(req.query.order_no || req.query.gm_order_no);
+  if(!orderNo) return fail(res, 400, 'order_no required', { version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
+  try{
+    const o = await pool.query('SELECT * FROM gm_order WHERE order_no=$1', [orderNo]);
+    const i = await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY pi_ii_vi', [orderNo]);
+    ok(res, { order:o.rows[0] || null, items:i.rows, version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
+  }catch(e){
+    fail(res, 500, 'order get failed', { detail:String(e && e.message || e), version:'GM_ORDER_SAVE_EXISTING_TABLE_V031' });
   }
 });
 
