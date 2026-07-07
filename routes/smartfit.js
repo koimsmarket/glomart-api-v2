@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V015_SPACE_TEMPLATE_OPTIONAL_SPACE';
+const VERSION = 'GM_SMARTFIT_SERVER_V017_SPACE_TEMPLATE_SAVE_FIX';
 console.log('[GM_SMARTFIT_ROUTE] loaded', VERSION);
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -190,6 +190,7 @@ router.get('/api/gm/smartfit/space/list', async (req,res)=>{
 });
 
 router.post('/api/gm/smartfit/space/save', async (req,res)=>{
+  console.log('[GM_SMARTFIT_SPACE_SAVE_REQUEST_V017]', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), mode:s((req.body||{}).mode), title:s((req.body||{}).space_title_source || (req.body||{}).space_title || (req.body||{}).space_name) });
   const pool=db(req); const client=await pool.connect();
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.owner_member_id);
@@ -211,13 +212,13 @@ router.post('/api/gm/smartfit/space/save', async (req,res)=>{
       const r=await client.query(`UPDATE gm_smartfit_space SET source_lang=$1, space_title_source=$2, space_title_ko=$3, author_nickname=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, visibility=$14, search_visible=$15,
         is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$16 RETURNING *`,
-        [sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility),spaceId]);
+        [sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility),spaceId]);
       saved=r.rows[0];
     }else{
       const r=await client.query(`INSERT INTO gm_smartfit_space (creator_member_id, owner_member_id, source_lang, space_title_source, space_title_ko, author_nickname, category_no, image_count,
         link01, link02, link03, link04, link05, link06, description, visibility, search_visible)
         VALUES ($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-        [member,sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility)]);
+        [member,sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
     await client.query('COMMIT');
@@ -251,6 +252,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
 });
 
 router.post('/api/gm/smartfit/template/save', async (req,res)=>{
+  console.log('[GM_SMARTFIT_TEMPLATE_SAVE_REQUEST_V017]', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
   const pool=db(req); const client=await pool.connect();
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.creatorMemberId);
@@ -275,13 +277,13 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
-        [spaceIdValue,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
+        [spaceIdValue,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
       saved=r.rows[0];
     }else{
       const r=await client.query(`INSERT INTO gm_smartfit_template (space_id, creator_member_id, source_lang, template_title_source, template_title_ko, category_no, image_count,
         link01, link02, link03, link04, link05, link06, description, search_source, search_ko, keyword_count, content_json, visibility, search_visible)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19) RETURNING *`,
-        [spaceIdValue,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ROOT'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20) RETURNING *`,
+        [spaceIdValue,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
     if(Array.isArray(b.items)){

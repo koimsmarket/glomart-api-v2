@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-/* GM_SEARCH_KEYWORD_ROUTE_V003
+/* GM_SEARCH_KEYWORD_ROUTE_V004
  * External search keyword normalization only.
  * Scope:
  * - Used by mobile/product/gm_search.html before CPKR / ALKR search.
@@ -17,7 +17,7 @@ const router = express.Router();
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V003';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V004';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -115,7 +115,7 @@ async function matchKeywordTranslate(pool, input, lang){
     WHERE LOWER(REGEXP_REPLACE(COALESCE(${col}::text,''), '[[:space:]"''“”‘’.,/\\\\|_\\-()\\[\\]{}]+', '', 'g')) = $1
        OR (
           LOWER(REGEXP_REPLACE(COALESCE(input_keyword::text,''), '[[:space:]"''“”‘’.,/\\\\|_\\-()\\[\\]{}]+', '', 'g')) = $1
-          AND ($2 = 'ko' OR lang=$2 OR lang='all')
+          AND ($2 = 'ko' OR lang=$2 OR lang='all' OR lang IS NULL OR lang='')
        )
     ORDER BY COALESCE(hit_count,0) DESC, updated_at DESC NULLS LAST
     LIMIT 1`;
