@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-/* GM_SEARCH_KEYWORD_ROUTE_V002
+/* GM_SEARCH_KEYWORD_ROUTE_V003
  * External search keyword normalization only.
  * Scope:
  * - Used by mobile/product/gm_search.html before CPKR / ALKR search.
@@ -13,10 +13,11 @@ const router = express.Router();
  *    IMPORTANT: relation match must NOT return keyword_ko as the search term.
  * 3) gm_keyword_translate keyword_[gm_lang] / input_keyword exact match -> main_keyword_ko or keyword_ko
  * 4) fallback original keyword
+ *    - fallback means CPKR may search original first and gm_search can reuse Coupang correctedQuery for GMKR/ALKR.
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V002';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V003';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -173,6 +174,7 @@ async function normalizeKeyword(pool, params){
     matched_keyword: best.matched_value,
     matched_value: best.matched_value,
     need_dictionary_save: best.source === 'fallback',
+    coupang_refine_required: best.source === 'fallback',
     fallback: best.source === 'fallback',
     searchKeywordMeta: {
       inputKeyword: input,
@@ -184,6 +186,7 @@ async function normalizeKeyword(pool, params){
       priority: priority[best.source] || 9,
       matchedKeyword: best.matched_value,
       need_dictionary_save: best.source === 'fallback',
+      coupangRefineRequired: best.source === 'fallback',
       relatedKeywords: []
     },
     candidates: candidates.map(c => ({

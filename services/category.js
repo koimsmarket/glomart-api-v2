@@ -454,25 +454,61 @@ async function insertDynamicFallbackRow(pool, row){
 }
 
 async function ensureDynamicCategoriesFromDetail(pool, p, meta){
-  // GM_CATEGORY_PATH_CREATE_V050
-  // Coupang breadcrumb path is the source of truth. Service badges such as 로켓프레시 are removed.
-  // Walk path from root to leaf, add only missing cp_code nodes into gm_category.
+  // GM_CATEGORY_PATH_CREATE_V051
+  // Rule fixed by 운영 기준:
+  // 1) Existing gm_category match is ONLY by Coupang cp_code. Never attach by name/search-word inference.
+  // 2) If any node in the received Coupang path already exists in gm_category, skip unmatched ancestors and continue under the first matched node.
+  // 3) If no cp_code in the path exists in gm_category, create the whole path under XX temporary tree.
+  // Service badges such as 로켓프레시 are removed before this decision.
   meta=meta||{}; p=p||{};
   await ensureDynamicCategoryTable(pool);
   let tree=sanitizeCoupangCategoryTree(parseCategoryTreeFromPayload(p));
-  try{ console.log('[GM_CATEGORY_TREE_RECEIVE]', { tree_count:tree.length, leaf:cleanText(p.cp_fix_code || p.cpFixCode || ''), keyword:cleanText(meta.keyword || p.keyword || ''), sample:tree.slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_TREE_RECEIVE]', { version:'V051', rule:'cp_code_only_else_xx', tree_count:tree.length, leaf:cleanText(p.cp_fix_code || p.cpFixCode || ''), keyword:cleanText(meta.keyword || p.keyword || ''), sample:tree.slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_l){}
   if(!tree.length) return { applied:false, reason:'no_category_tree' };
 
   const created=[]; const matched=[]; const errors=[];
   const mallCode=cleanText(meta.mall_code || p.mall_code || p.mallCode || 'CPKR').toUpperCase();
   const sourceKeyword=cleanText(meta.keyword || p.keyword || '');
-  let parent=null;
 
+  // First pass: decide whether this Coupang path belongs under an existing gm_category node.
+  // This pass uses cp_code only. Name match is intentionally forbidden here.
+  const existingByIndex = new Map();
+  let firstMatchedIndex = -1;
+  let firstMatchedRow = null;
   for(let i=0;i<tree.length;i++){
-    const node=Object.assign({}, tree[i], { depth:i+1 });
+    const cp=cleanText(tree[i] && tree[i].cp_code);
+    if(!cp) continue;
+    const r=await findBaseCategoryRow(pool, cp, '', '');
+    if(r){
+      existingByIndex.set(i, r);
+      if(firstMatchedIndex < 0){ firstMatchedIndex=i; firstMatchedRow=r; }
+    }
+  }
+
+  let parent=null;
+  let startIndex=0;
+  if(firstMatchedIndex >= 0){
+    // A known Coupang code exists. Do not create unknown ancestors above it under XX or OS.
+    // Continue only from the matched point downward.
+    for(let i=0;i<firstMatchedIndex;i++){
+      const n=tree[i] || {};
+      matched.push({ name:n.name_ko, cp_code:cleanText(n.cp_code), source:'skipped_unmatched_ancestor_before_cp_match', depth:n.depth });
+    }
+    parent=firstMatchedRow;
+    const n=tree[firstMatchedIndex] || {};
+    matched.push({ name:n.name_ko, cp_code:firstMatchedRow.cp_code, source:'base_first_match', parent:firstMatchedRow.cp_parent_code || '', gm_code:firstMatchedRow.gm_code || '', depth:firstMatchedRow.depth || n.depth });
+    startIndex=firstMatchedIndex+1;
+  }
+
+  try{ console.log('[GM_CATEGORY_PATH_DECISION]', { version:'V051', mode:firstMatchedIndex>=0?'attach_under_existing_cp':'create_full_xx_path', firstMatchedIndex, firstMatched:firstMatchedRow?{cp_code:firstMatchedRow.cp_code, name_ko:firstMatchedRow.name_ko, gm_code:firstMatchedRow.gm_code, depth:firstMatchedRow.depth}:null, skipped_ancestors:firstMatchedIndex>0?tree.slice(0,firstMatchedIndex).map(x=>({cp_code:x.cp_code,name_ko:x.name_ko,depth:x.depth})):[] }); }catch(_l){}
+
+  for(let i=startIndex;i<tree.length;i++){
+    const priorMatched = existingByIndex.get(i);
+    const node=Object.assign({}, tree[i], { depth: parent ? (toInt(parent.depth,0)+1) : (i+1) });
     const parentCode=cleanText(parent && parent.cp_code || '');
     let row=null;
-    if(node.cp_code) row=await findBaseCategoryRow(pool, node.cp_code, '', '');
+    if(priorMatched) row=priorMatched;
+    else if(node.cp_code) row=await findBaseCategoryRow(pool, node.cp_code, '', '');
     if(row){
       matched.push({ name:node.name_ko, cp_code:row.cp_code, source:'base', parent:row.cp_parent_code || '', gm_code:row.gm_code || '', depth:row.depth || node.depth });
       parent=row;
@@ -483,16 +519,6 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
       // cp_code 없는 breadcrumb는 생성하지 않고 부모 후보로도 쓰지 않는다.
       matched.push({ name:node.name_ko, cp_code:'', source:'name_only_no_code', depth:node.depth });
       continue;
-    }
-
-    // If immediate parent is missing for any reason, climb up the already-known ancestors in the path.
-    if(!parent && i>0){
-      for(let j=i-1;j>=0;j--){
-        const anc=tree[j];
-        if(!anc || !anc.cp_code) continue;
-        const ar=await findBaseCategoryRow(pool, anc.cp_code, '', '');
-        if(ar){ parent=ar; break; }
-      }
     }
 
     const parentGm=cleanText(parent && parent.gm_code || '');
@@ -506,8 +532,8 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
     try{
       const tr = await findNameTranslations(pool, node.name_ko);
       const keywordText = translationKeywordString(tr) || node.name_ko;
-      const raw = { source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr };
-      try{ console.log('[GM_CATEGORY_INSERT_START]', { cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, seq, path }); }catch(_l){}
+      const raw = { source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr, rule:'cp_code_only_else_xx', first_matched_cp:firstMatchedRow && firstMatchedRow.cp_code || '' };
+      try{ console.log('[GM_CATEGORY_INSERT_START]', { version:'V051', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, seq, path }); }catch(_l){}
       if(parentCp){
         try{ await pool.query(`UPDATE gm_category SET leaf_yn='N', updated_at=now() WHERE cp_code::text=$1`, [parentCp]); }catch(_e){}
       }
@@ -537,18 +563,18 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
         depth:toInt(inserted && inserted.depth, node.depth), leaf_yn:cleanText(inserted && inserted.leaf_yn || isLeaf), sort_order:toInt(inserted && inserted.sort_order, seq)
       };
       created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCp, gm_code:row.gm_code, path });
-      try{ console.log('[GM_CATEGORY_INSERT_OK]', { cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, gm_code:row.gm_code, table:'gm_category' }); }catch(_l){}
+      try{ console.log('[GM_CATEGORY_INSERT_OK]', { version:'V051', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, gm_code:row.gm_code, table:'gm_category' }); }catch(_l){}
       parent=row;
     }catch(e){
       const err=Object.assign({ cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, path }, compactError(e), e && e.gm_category_insert_context ? { insert_context:e.gm_category_insert_context } : {});
       errors.push(err);
       created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCp, gm_code:gmCode, error:err });
       try{ console.warn('[GM_CATEGORY_INSERT_FAIL]', err); }catch(_l){}
-      // Do not let fallback dynamic block future gm_category inserts. Continue with synthetic parent so descendants keep the path.
+      // Continue with synthetic parent so descendants keep the path.
       parent={ src:'synthetic_failed', gm_code:gmCode, cp_code:node.cp_code, gm_parent_code:parentGm, cp_parent_code:parentCp, name_ko:node.name_ko, parent_name_ko:parentName, depth:node.depth, leaf_yn:isLeaf, sort_order:seq };
     }
   }
-  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { table:'gm_category', created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched:matched.slice(-8), errors }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { version:'V051', table:'gm_category', created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched:matched.slice(-12), errors }); }catch(_l){}
   return { applied:true, created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched, errors };
 }
 
