@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V012 Product Option Export</title>
+<title>GM Safe Update Builder V013 SmartFit Export</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -25,7 +25,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V012 Product Option Export</h1>
+<h1>GM Safe Update Builder V013 SmartFit Export</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -137,6 +137,11 @@ const tables = {
   category_country_sales_monthly:'카테고리 국가별 월별 판매 gm_category_country_sales_monthly',
   category_country_sales_yearly:'카테고리 국가별 연간 판매 gm_category_country_sales_yearly',
   keyword_relation:'연관검색어 gm_keyword_relation', keyword_translate:'외국어검색어 gm_keyword_translate',
+  smartfit_space:'SmartFit 공간 gm_smartfit_space',
+  smartfit_template:'SmartFit Template gm_smartfit_template',
+  smartfit_item:'SmartFit Item gm_smartfit_item',
+  smartfit_collection:'SmartFit 컬렉션 gm_smartfit_collection',
+  smartfit_category:'SmartFit 카테고리 gm_smartfit_category',
   search_log:'검색 로그 gm_search_log',
   dashboard_snapshot:'대시보드 스냅샷 gm_dashboard_snapshot'
 };
@@ -145,7 +150,9 @@ const tableNameMap = {
   gm_category:'category', gm_category_keyword:'category_keyword',
   gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',
   gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
-  gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_keyword_relation:'keyword_relation', gm_keyword_translate:'keyword_translate', gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
+  gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_keyword_relation:'keyword_relation', gm_keyword_translate:'keyword_translate',
+  gm_smartfit_space:'smartfit_space', gm_smartfit_template:'smartfit_template', gm_smartfit_item:'smartfit_item', gm_smartfit_collection:'smartfit_collection', gm_smartfit_category:'smartfit_category',
+  gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
 };
 function fill(){
   for(const id of ['downTable','upTable']){
@@ -163,7 +170,7 @@ async function loadDashboard(save){
     if(!j.ok){ log(j); return; }
     const cur=j.current||{}, counts=cur.counts||{}, diff=cur.diff_from_previous||{}, q=cur.queue||{}, db=cur.db_size||{};
     document.getElementById('statusTime').textContent = `현재 조회: ${cur.server_time||cur.snapshot_at||''}` + (j.previous&&j.previous.snapshot_at ? ` / 직전 스냅샷: ${j.previous.snapshot_at}` : '');
-    const order=['gm_product','gm_product_option','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_keyword_relation','gm_keyword_translate','gm_search_log','gm_dashboard_snapshot'];
+    const order=['gm_smartfit_space','gm_smartfit_template','gm_smartfit_item','gm_smartfit_collection','gm_smartfit_category','gm_product','gm_product_option','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_keyword_relation','gm_keyword_translate','gm_search_log','gm_dashboard_snapshot'];
     document.getElementById('tableStatus').innerHTML = order.map(t=>`<tr><td>${t}</td><td class="num">${fmt(counts[t])}</td><td class="num">${diffHtml(diff[t])}</td></tr>`).join('');
     document.getElementById('queueStatus').innerHTML = `
       <tr><th>pending</th><td class="num">${fmt(q.pending)}</td></tr>
@@ -191,9 +198,36 @@ async function resetAll(){
   const r=await fetch(`${API}/api/gm/db/reset`,{method:'POST'});
   const j=await r.json(); log(j); await loadDashboard(false);
 }
-function download(){
+async function download(){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
-  location.href = `${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=${encodeURIComponent(f)}`;
+  const url = `${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=${encodeURIComponent(f)}&t=${Date.now()}`;
+  log({ action:'export.request', table:t, format:f, url });
+  try{
+    const r = await fetch(url, { method:'GET', cache:'no-store' });
+    const ct = (r.headers.get('content-type')||'').toLowerCase();
+    log({ action:'export.response', table:t, status:r.status, ok:r.ok, content_type:ct });
+    if(!r.ok){
+      const txt = await r.text().catch(()=>String(r.status));
+      log({ action:'export.failed', table:t, status:r.status, body:txt.slice(0,1200) });
+      return;
+    }
+    if(f === 'json' || ct.includes('application/json')){
+      const j = await r.json();
+      log({ action:'export.json.preview', table:t, count:j.count, rows:j.rows || j.items || j });
+      return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    const objectUrl = URL.createObjectURL(blob);
+    a.href = objectUrl;
+    a.download = `${t}_${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(objectUrl); a.remove(); }, 1000);
+    log({ action:'export.downloaded', table:t, bytes:blob.size, filename:a.download });
+  }catch(e){
+    log({ action:'export.error', table:t, message:String(e&&e.message||e) });
+  }
 }
 async function downloadAll(){
   const url = `${API}/api/gm/builder/export-all?limit=50000&t=${Date.now()}`;
@@ -239,6 +273,7 @@ async function send(apply){
 function inferTableFromFileName(name){
   const n=String(name||'').toLowerCase();
   const pairs=[
+    ['gm_smartfit_collection','smartfit_collection'],['gm_smartfit_template','smartfit_template'],['gm_smartfit_category','smartfit_category'],['gm_smartfit_space','smartfit_space'],['gm_smartfit_item','smartfit_item'],
     ['gm_dashboard_snapshot','dashboard_snapshot'],['gm_keyword_relation','keyword_relation'],['gm_keyword_translate','keyword_translate'],['gm_search_log','search_log'],
     ['gm_search_keyword_stat','search_keyword_stat'],['gm_category_search_stat','category_search_stat'],['gm_category_search_monthly','category_search_monthly'],['gm_category_search_yearly','category_search_yearly'],['gm_product_sales_monthly','product_sales_monthly'],['gm_product_sales_yearly','product_sales_yearly'],['gm_product_country_sales_monthly','product_country_sales_monthly'],['gm_product_country_sales_yearly','product_country_sales_yearly'],['gm_category_sales_monthly','category_sales_monthly'],['gm_category_sales_yearly','category_sales_yearly'],['gm_category_country_sales_monthly','category_country_sales_monthly'],['gm_category_country_sales_yearly','category_country_sales_yearly'],
     ['gm_category_keyword','category_keyword'],['gm_category','category'],

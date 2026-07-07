@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V020_V018_PLUS_PRODUCT_OPTIONS';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V021_SMARTFIT_EXPORT';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -261,6 +261,57 @@ const TABLES = {
     defaults: { cache_used:'false' },
     enums: {},
     blocked: ['search_id','search_at','created_at']
+  },
+
+  smartfit_space: {
+    table: 'gm_smartfit_space',
+    key: ['space_id'],
+    order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST, space_id DESC',
+    critical: ['space_id'],
+    numeric: ['space_id','image_count','sort_no','sort_order'],
+    defaults: { source_lang:'ko', category_no:'ROOT', image_count:'0', visibility:'private', search_visible:'T', favorite_yn:'F', sort_no:'0', is_active:'T', is_deleted:'F' },
+    enums: { visibility:['draft','private','public'], search_visible:['T','F','Y','N'], favorite_yn:['T','F','Y','N'], is_active:['T','F','Y','N'], is_deleted:['T','F','Y','N'] },
+    blocked: ['space_id','created_at']
+  },
+  smartfit_template: {
+    table: 'gm_smartfit_template',
+    key: ['template_id'],
+    order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST, template_id DESC',
+    critical: ['template_id'],
+    numeric: ['template_id','space_id','image_count','keyword_count','sort_no','use_count','item_count','view_count','visit_count','collection_count','reuse_count','build_cart_count','item_add_count','review_count','rating_sum','rating_avg'],
+    defaults: { source_lang:'ko', category_no:'ROOT', image_count:'0', keyword_count:'0', visibility:'private', search_visible:'T', favorite_yn:'F', sort_no:'0', content_json:'{}', use_count:'0', item_count:'0', is_active:'T', is_deleted:'F' },
+    enums: { visibility:['draft','private','public'], search_visible:['T','F','Y','N'], favorite_yn:['T','F','Y','N'], is_active:['T','F','Y','N'], is_deleted:['T','F','Y','N'] },
+    blocked: ['template_id','created_at']
+  },
+  smartfit_item: {
+    table: 'gm_smartfit_item',
+    key: ['item_id'],
+    order: 'template_id ASC, sort_no ASC, item_id ASC',
+    critical: ['item_id'],
+    numeric: ['item_id','template_id','qty','sort_no'],
+    defaults: { item_role:'ETC', qty:'1', sort_no:'0', is_active:'T', is_deleted:'F' },
+    enums: { is_active:['T','F','Y','N'], is_deleted:['T','F','Y','N'] },
+    blocked: ['item_id','created_at']
+  },
+  smartfit_collection: {
+    table: 'gm_smartfit_collection',
+    key: ['member_id','template_id'],
+    order: 'updated_at DESC NULLS LAST, collected_at DESC NULLS LAST',
+    critical: ['member_id','template_id'],
+    numeric: ['template_id','use_count'],
+    defaults: { use_count:'0', is_active:'T', is_deleted:'F' },
+    enums: { is_active:['T','F','Y','N'], is_deleted:['T','F','Y','N'] },
+    blocked: ['collected_at','created_at']
+  },
+  smartfit_category: {
+    table: 'gm_smartfit_category',
+    key: ['category_code'],
+    order: 'depth ASC, display_order ASC, category_code ASC',
+    critical: ['category_code'],
+    numeric: ['depth','display_order'],
+    defaults: { parent_code:'', depth:'1', leaf_yn:'F', display_order:'0', is_active:'T' },
+    enums: { leaf_yn:['T','F','Y','N'], is_active:['T','F','Y','N'] },
+    blocked: []
   },
   dashboard_snapshot: {
     table: 'gm_dashboard_snapshot',
@@ -685,6 +736,7 @@ router.get('/api/gm/builder/export', async (req,res)=>{
   const rawLimit = req.query.limit === undefined ? 0 : Number(req.query.limit || 0);
   const limit = rawLimit > 0 ? Math.min(Math.max(rawLimit, 1), 200000) : 0;
   const pageSize = Math.min(Math.max(Number(req.query.pageSize || 1000), 100), 5000);
+  try { console.log('[GM_BUILDER_EXPORT_REQUEST_V021]', JSON.stringify({ table:spec.table, key:String(req.query.table||''), format, limit, pageSize })); } catch(_) {}
 
   try {
     let cols = await getColumns(db, spec.table);
@@ -693,6 +745,7 @@ router.get('/api/gm/builder/export', async (req,res)=>{
     if (format === 'json') {
       const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
       const r = await db.query(sql, limit ? [limit] : []);
+      try { console.log('[GM_BUILDER_EXPORT_JSON_DONE_V021]', JSON.stringify({ table:spec.table, count:r.rows.length })); } catch(_) {}
       return ok(res, { table:spec.table, count:r.rows.length, columns:cols, rows:r.rows });
     }
 
@@ -719,6 +772,7 @@ router.get('/api/gm/builder/export', async (req,res)=>{
       try { console.log('[GM_BUILDER_EXPORT_STREAM_V018]', JSON.stringify({ table:spec.table, sent, offset, pageSize })); } catch(_) {}
       if (r.rows.length < take) break;
     }
+    try { console.log('[GM_BUILDER_EXPORT_CSV_DONE_V021]', JSON.stringify({ table:spec.table, sent })); } catch(_) {}
     res.end();
   } catch(e) {
     if (!res.headersSent) return fail(res, 500, 'export failed', { detail:String(e && e.message || e) });
