@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-/* GM_SEARCH_KEYWORD_ROUTE_V004
+/* GM_SEARCH_KEYWORD_ROUTE_V005_KO_CANONICAL_GUARD
  * External search keyword normalization only.
  * Scope:
  * - Used by mobile/product/gm_search.html before CPKR / ALKR search.
@@ -17,7 +17,7 @@ const router = express.Router();
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V004';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V005_KO_CANONICAL_GUARD';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -38,6 +38,7 @@ function normalizeLang(v){
 function norm(v){
   return cleanText(v).toLowerCase().replace(/[\s"'“”‘’.,/\\|_\-()\[\]{}]+/g, '');
 }
+function hasKo(v){ return /[가-힣]/.test(cleanText(v)); }
 
 function langColumn(prefix, lang){
   const l = normalizeLang(lang);
@@ -122,7 +123,10 @@ async function matchKeywordTranslate(pool, input, lang){
   const r = await safeQuery(pool, sql, [n, l]);
   if(!r.rows.length) return null;
   const row = r.rows[0];
-  return buildCandidate('gm_keyword_translate', row.main_keyword_ko || row.keyword_ko, row.matched_value || row.input_keyword, row, 100 + Math.min(50, Number(row.hit_count || 0)));
+  const ko = cleanText(row.main_keyword_ko || row.keyword_ko || '');
+  // 기존 테스트 쓰레기값 보호: keyword_ko/main_keyword_ko가 한국어가 아니면 매칭으로 인정하지 않는다.
+  if(!hasKo(ko)) return null;
+  return buildCandidate('gm_keyword_translate', ko, row.matched_value || row.input_keyword, row, 100 + Math.min(50, Number(row.hit_count || 0)));
 }
 
 async function normalizeKeyword(pool, params){
