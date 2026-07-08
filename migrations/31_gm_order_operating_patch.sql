@@ -10,7 +10,7 @@ TRUNCATE TABLE gm_order RESTART IDENTITY CASCADE;
 TRUNCATE TABLE gm_member_address RESTART IDENTITY CASCADE;
 
 -- gm_order: 실제 테이블에 없고 자동주문/배송지 선택에 필요한 컬럼만 추가
-ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS address_id BIGINT;
+ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS address_id VARCHAR(80);
 ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS receiver_road_address TEXT;
 ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS receiver_building_no VARCHAR(40);
 

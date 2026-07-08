@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-/* GM_SEARCH_KEYWORD_ROUTE_V005_KO_CANONICAL_GUARD
+/* GM_SEARCH_KEYWORD_ROUTE_V014_NO_RELATION_FAST
  * External search keyword normalization only.
  * Scope:
  * - Used by mobile/product/gm_search.html before CPKR / ALKR search.
@@ -9,15 +9,13 @@ const router = express.Router();
  *
  * Priority:
  * 1) gm_category name_[gm_lang] exact match -> name_ko
- * 2) gm_keyword_relation related_keyword_[gm_lang] exact match -> related_keyword_ko
- *    IMPORTANT: relation match must NOT return keyword_ko as the search term.
- * 3) gm_keyword_translate keyword_[gm_lang] / input_keyword exact match -> main_keyword_ko or keyword_ko
- * 4) fallback original keyword
+ * 2) gm_keyword_translate keyword_[gm_lang] / input_keyword exact match -> main_keyword_ko or keyword_ko
+ * 3) fallback original keyword
  *    - fallback means CPKR may search original first and gm_search can reuse Coupang correctedQuery for GMKR/ALKR.
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V006_FAST_FALLBACK_KO_GUARD';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V014_NO_RELATION_FAST';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -95,23 +93,6 @@ async function matchCategory(pool, input, lang){
   return buildCandidate('gm_category', row.name_ko || row.keyword || row.keyword_seed, row.matched_value, row, 300);
 }
 
-async function matchRelation(pool, input, lang){
-  const col = langColumn('related_keyword', lang);
-  const n = norm(input);
-  const sql = `
-    SELECT
-      category_main_keyword_ko, keyword_ko, related_keyword_ko,
-      ${col} AS matched_value, updated_at
-    FROM gm_keyword_relation
-    WHERE LOWER(REGEXP_REPLACE(COALESCE(${col}::text,''), '[[:space:]"''“”‘’.,/\\\\|_\\-()\\[\\]{}]+', '', 'g')) = $1
-    ORDER BY updated_at DESC NULLS LAST
-    LIMIT 1`;
-  const r = await safeQuery(pool, sql, [n]);
-  if(!r.rows.length) return null;
-  const row = r.rows[0];
-  return buildCandidate('gm_keyword_relation', row.related_keyword_ko, row.matched_value, row, 200);
-}
-
 async function matchKeywordTranslate(pool, input, lang){
   const col = langColumn('keyword', lang);
   const l = normalizeLang(lang);
@@ -162,10 +143,9 @@ async function normalizeKeyword(pool, params){
   const overrideKo = koOverride(input);
   if(overrideKo) candidates.push(buildCandidate('local_ko_override', overrideKo, input, {}, 80));
   const c1 = await matchCategory(pool, input, lang); if(c1) candidates.push(c1);
-  const c2 = await matchRelation(pool, input, lang); if(c2) candidates.push(c2);
   const c3 = await matchKeywordTranslate(pool, input, lang); if(c3) candidates.push(c3);
 
-  const priority = { gm_category:1, gm_keyword_relation:2, gm_keyword_translate:3, local_ko_override:4, fallback:9 };
+  const priority = { gm_category:1, gm_keyword_translate:2, local_ko_override:3, fallback:9 };
   candidates.sort((a,b)=> (priority[a.source] || 99) - (priority[b.source] || 99) || b.score - a.score);
 
   const best = candidates[0] || buildCandidate('fallback', input, input, {}, 0);

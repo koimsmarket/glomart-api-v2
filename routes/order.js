@@ -295,9 +295,9 @@ async function replaceOrderItems(client, orderRow, inputItems){
     const qty = Math.max(1, money(itemVal(src, ['quantity','qty'], 1), 1));
     const mallCode = clean(itemVal(src, ['mall_code','mallCode','source_mall','sourceMall'], '')).toUpperCase();
     const pi = clean(itemVal(src, ['pi_ii_vi','piIiVi','source_key','sourceKey','key','product_uid','uid'], '')) || (mallCode ? mallCode + '_' + itemCount : 'ITEM_' + itemCount);
-    const rawUrlForPrice = itemVal(src, ['product_url','source_url','url','productUrl','pageUrl'], '');
-    const mallUnit = money(itemVal(src, ['mall_sale_price','mall_unit_price','source_sale_price','external_sale_price','coupang_sale_price','ali_sale_price','gm_coupang_price','gm_ali_price','raw_price','rawPrice'], 0), 0) || priceFromUrl(rawUrlForPrice, ['gm_coupang_price','gm_ali_price','mall_sale_price','raw_price']);
-    const customerUnit = money(itemVal(src, ['customer_order_price','sale_price','price','normal_price','gm_price'], 0), 0) || priceFromUrl(rawUrlForPrice, ['gm_price','customer_order_price']) || mallUnit;
+    const rawUrlForPrice = itemVal(src, ['product_url','source_url','sourceUrl','url','productUrl','pageUrl','detailHref'], '');
+    const mallUnit = money(itemVal(src, ['mall_sale_price','mall_unit_price','source_sale_price','external_sale_price','coupang_sale_price','ali_sale_price','gm_coupang_price','gm_ali_price','raw_price','rawPrice','priceText','searchPrice','sell_price','sell_price_text','raw_price_text','displayPriceText'], 0), 0) || priceFromUrl(rawUrlForPrice, ['gm_coupang_price','gm_ali_price','mall_sale_price','raw_price','priceText','searchPrice','sell_price','sell_price_text','gm_price']);
+    const customerUnit = money(itemVal(src, ['customer_order_price','sale_price','price','normal_price','gm_price','priceText','searchPrice','sell_price','sell_price_text','displayPriceText'], 0), 0) || priceFromUrl(rawUrlForPrice, ['gm_price','customer_order_price','priceText','searchPrice','sell_price','sell_price_text']) || mallUnit;
     const unit = customerUnit || mallUnit;
     const amount = money(itemVal(src, ['product_amount','amount','line_amount'], 0), 0) || (unit * qty);
     const sourceMall = sourceMallFrom(itemVal(src, ['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(src, ['source_uid','sourceUid'], ''), itemVal(src, ['product_url','source_url','url'], ''), mallCode);
@@ -320,7 +320,7 @@ async function replaceOrderItems(client, orderRow, inputItems){
       amount, clean(itemVal(src, ['delivery_type','ship_type','shipping_type'], '')),
       money(itemVal(src, ['delivery_fee','shipping_fee'], 0), 0), money(itemVal(src, ['extra_area_delivery_fee','extra_fee'], 0), 0),
       mallCode, clean(itemVal(src, ['supplier_id','supplierId'], '')), clean(itemVal(src, ['supplier_name','supplierName','seller','seller_name'], '')),
-      externalProductUrl(itemVal(src, ['product_url','source_url','url','productUrl','pageUrl'], '')), clean(itemVal(src, ['thumb_file_name','thumb','thumb_url','image','image_url'], '')),
+      externalProductUrl(itemVal(src, ['product_url','source_url','sourceUrl','url','productUrl','pageUrl','detailHref'], '')), clean(itemVal(src, ['thumb_file_name','thumb','thumb_url','image','image_url'], '')),
       clean(itemVal(src, ['hs_code','hsCode'], '')), clean(itemVal(src, ['origin_country','origin','country'], '')),
       clean(itemVal(src, ['carrier_name','carrier'], '')), clean(itemVal(src, ['tracking_number','tracking'], '')),
       'READY_TO_ORDER', clean(itemVal(src, ['item_shipping_status','shipping_status'], 'pending')),

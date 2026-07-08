@@ -33,6 +33,21 @@ function compactError(e){
 const CATEGORY_LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const CATEGORY_NAME_COLS = CATEGORY_LANGS.map(l => 'name_' + l);
 const CATEGORY_FALLBACK_TRANSLATIONS = {
+  '아트/공예': {
+    en:'Arts/Crafts', zh:'艺术/手工', vi:'Nghệ thuật/Thủ công', ja:'アート／クラフト', tw:'藝術/手作', th:'ศิลปะ/งานฝีมือ', uz:'San’at/Hunarmandchilik', ne:'कला/शिल्प', km:'សិល្បៈ/សិប្បកម្ម', id:'Seni/Kerajinan', tl:'Sining/Kasangkapan', mn:'Урлаг/Гар урлал', my:'အနုပညာ/လက်မှုပညာ', kk:'Өнер/Қолөнер', si:'කලා/හස්තකර්මාන්ත', ru:'Искусство/Ремесла', bn:'শিল্প/কারুশিল্প', ur:'آرٹ/دستکاری', lo:'ສິລະປະ/ຫັດຖະກຳ', hi:'कला/शिल्प', tr:'Sanat/El işleri', fa:'هنر/صنایع دستی', es:'Arte/Manualidades', fr:'Arts/Loisirs créatifs'
+  },
+  '결혼준비': {
+    en:'Wedding preparation', zh:'婚礼准备', vi:'Chuẩn bị đám cưới', ja:'結婚準備', tw:'婚禮準備', th:'การเตรียมงานแต่งงาน', uz:'To‘y tayyorgarligi', ne:'विवाह तयारी', km:'ការរៀបចំអាពាហ៍ពិពាហ៍', id:'Persiapan pernikahan', tl:'Paghahanda sa kasal', mn:'Хуримын бэлтгэл', my:'မင်္ဂလာဆောင်ပြင်ဆင်မှု', kk:'Үйлену тойына дайындық', si:'විවාහ සූදානම', ru:'Подготовка к свадьбе', bn:'বিয়ের প্রস্তুতি', ur:'شادی کی تیاری', lo:'ການກະກຽມງານແຕ່ງງານ', hi:'शादी की तैयारी', tr:'Düğün hazırlığı', fa:'آمادگی عروسی', es:'Preparación de boda', fr:'Préparation du mariage'
+  },
+  '이벤트용품': {
+    en:'Event supplies', zh:'活动用品', vi:'Đồ dùng sự kiện', ja:'イベント用品', tw:'活動用品', th:'อุปกรณ์งานอีเวนต์', uz:'Tadbir buyumlari', ne:'कार्यक्रम सामग्री', km:'សម្ភារៈព្រឹត្តិការណ៍', id:'Perlengkapan acara', tl:'Kagamitan sa kaganapan', mn:'Арга хэмжээний хэрэгсэл', my:'ပွဲအခမ်းအနားပစ္စည်းများ', kk:'Іс-шара жабдықтары', si:'උත්සව භාණ්ඩ', ru:'Товары для мероприятий', bn:'ইভেন্ট সামগ্রী', ur:'ایونٹ کا سامان', lo:'ອຸປະກອນກິດຈະກຳ', hi:'इवेंट सामग्री', tr:'Etkinlik malzemeleri', fa:'لوازم رویداد', es:'Artículos para eventos', fr:'Articles événementiels'
+  },
+  '파티/이벤트': {
+    en:'Party/Event', zh:'派对/活动', vi:'Tiệc/Sự kiện', ja:'パーティー／イベント', tw:'派對/活動', th:'งานเลี้ยง/กิจกรรม', uz:'Bayram/Tadbir', ne:'पार्टी/कार्यक्रम', km:'ពិធីជប់លៀង/ព្រឹត្តិការណ៍', id:'Pesta/Acara', tl:'Party/Kaganapan', mn:'Үдэшлэг/Арга хэмжээ', my:'ပါတီ/ပွဲ', kk:'Кеш/Іс-шара', si:'සාදය/සිදුවීම', ru:'Вечеринка/Мероприятие', bn:'পার্টি/অনুষ্ঠান', ur:'پارٹی/ایونٹ', lo:'ງານລ້ຽງ/ກິດຈະກຳ', hi:'पार्टी/कार्यक्रम', tr:'Parti/Etkinlik', fa:'مهمانی/رویداد', es:'Fiesta/Evento', fr:'Fête/Événement'
+  },
+  '스파클라/불꽃놀이': {
+    en:'Sparklers/Fireworks', zh:'仙女棒/烟花', vi:'Pháo sáng/Pháo hoa', ja:'線香花火／花火', tw:'仙女棒/煙火', th:'ดอกไม้ไฟ/พลุ', uz:'Uchqunlar/Mushakbozlik', ne:'स्पार्कलर/आतिशबाजी', km:'ផ្កាភ្លើង/កាំជ្រួច', id:'Kembang api/percikan api', tl:'Mga sparkler/paputok', mn:'Бенгал гал/Салют', my:'မီးပန်း/မီးရှူးမီးပန်း', kk:'Бенгал оттары/отшашулар', si:'ගිනි පුපුරු/ගිනිකෙළි', ru:'Бенгальские огни/Фейерверки', bn:'ফুলঝুরি/আতশবাজি', ur:'چمکنے والے/آتش بازی', lo:'ດອກໄຟ/ດອກໄມ້ໄຟ', hi:'फुलझड़ियाँ/आतिशबाजी', tr:'Maytap/Havai fişek', fa:'فشفشه/آتش‌بازی', es:'Bengalas/Fuegos artificiales', fr:'Cierges magiques/Feux d’artifice'
+  },
   '폭죽': {
     en:'firecracker', zh:'鞭炮', vi:'pháo hoa', ja:'爆竹', tw:'鞭炮', th:'พลุ', uz:'mushakboz', ne:'पटाका', km:'កាំជ្រួច', id:'petasan', tl:'paputok', mn:'салют', my:'မီးရှူးမီးပန်း', kk:'отшашу', si:'රතිඤ්ඤා', ru:'петарда', bn:'আতশবাজি', ur:'پٹاخہ', lo:'ດອກໄມ້ໄຟ', hi:'पटाखे', tr:'havai fişek', fa:'ترقه', es:'petardo', fr:'pétard'
   },
@@ -47,7 +62,10 @@ function translationFallback(name){
   const ko = cleanText(name);
   const base = Object.assign({}, CATEGORY_FALLBACK_TRANSLATIONS[ko] || {});
   base.ko = ko;
-  CATEGORY_LANGS.forEach(l => { if(!cleanText(base[l])) base[l] = ko; });
+  // GM_CATEGORY_TRANSLATE_NO_KO_COPY_V055
+  // fallback 사전에 없는 언어를 한글로 복사하지 않는다.
+  // 미번역은 빈 값으로 두고 빌더 업로드에서 24개국어 번역만 보강한다.
+  CATEGORY_LANGS.forEach(l => { if(l !== 'ko' && !cleanText(base[l])) base[l] = ''; });
   return base;
 }
 function translationKeywordString(t){
@@ -60,6 +78,10 @@ function translationKeywordString(t){
   });
   return arr.join(',');
 }
+function categoryTranslationComplete(t){
+  t = t || {};
+  return CATEGORY_LANGS.filter(l => l !== 'ko').every(l => !!cleanText(t[l]));
+}
 async function findNameTranslations(pool, name){
   const ko = cleanText(name);
   const out = translationFallback(ko);
@@ -69,7 +91,11 @@ async function findNameTranslations(pool, name){
     const r = await pool.query(`SELECT ${cols}, keyword, keyword_seed FROM gm_category WHERE name_ko=$1 ORDER BY COALESCE(search_count,0) DESC, COALESCE(depth,0) DESC LIMIT 1`, [ko]);
     const row = r.rows && r.rows[0];
     if(row){
-      CATEGORY_LANGS.forEach(l => { const v=cleanText(row['name_'+l]); if(v) out[l]=v; });
+      CATEGORY_LANGS.forEach(l => {
+        const v=cleanText(row['name_'+l]);
+        // 기존 잘못 생성된 row처럼 24개국어가 모두 한글로 복사된 값은 번역으로 보지 않는다.
+        if(v && (l === 'ko' || v !== ko)) out[l]=v;
+      });
     }
   }catch(e){ try{ console.warn('[GM_CATEGORY_TRANSLATION_LOOKUP_FAIL]', Object.assign({name:ko}, compactError(e))); }catch(_l){} }
   return out;
@@ -322,6 +348,27 @@ async function nextGmChildSeq(pool, parentRow, childDepth){
     return max+1;
   }catch(_e){ return 1; }
 }
+async function nextCategorySortOrder(pool, parentRow, childDepth){
+  const parentGm=cleanText(parentRow && parentRow.gm_code);
+  const parentCp=cleanText(parentRow && parentRow.cp_code);
+  const depth=toInt(childDepth,1);
+  try{
+    let r;
+    if(parentGm || parentCp){
+      r=await pool.query(`SELECT COALESCE(MAX(COALESCE(sort_order::int,0)),0)::int + 1 AS next_sort
+        FROM gm_category
+        WHERE (COALESCE(gm_parent_code,'')=$1 OR COALESCE(cp_parent_code,'')=$2)
+          AND COALESCE(depth::int,0)=$3`, [parentGm, parentCp, depth]);
+    }else{
+      r=await pool.query(`SELECT COALESCE(MAX(COALESCE(sort_order::int,0)),0)::int + 1 AS next_sort
+        FROM gm_category
+        WHERE COALESCE(gm_parent_code,'')='' AND COALESCE(cp_parent_code,'')=''
+          AND COALESCE(depth::int,0)=1 AND gm_code LIKE 'XX-%'`);
+    }
+    return Number((r.rows && r.rows[0] && r.rows[0].next_sort) || 1) || 1;
+  }catch(_e){ return 1; }
+}
+
 async function makeUniqueChildGmCode(pool, parentRow, childDepth){
   let seq=await nextGmChildSeq(pool, parentRow, childDepth);
   const parentGm=cleanText(parentRow && parentRow.gm_code) || 'XX-00-000-0000-0000-0000';
@@ -380,7 +427,7 @@ async function buildGmCategoryInsertIdentity(pool, row, columnMap){
   }
   if(columnMap.has('sort_order')){
     const explicit = toInt(row.sort_order, 0);
-    out.sort_order = explicit > 0 ? explicit : (out.category_id || await nextGmCategoryNumber(pool, 'sort_order'));
+    out.sort_order = explicit > 0 ? explicit : 0;
   }
   return out;
 }
@@ -404,15 +451,16 @@ async function insertGmCategoryRow(pool, row){
   pushCategoryValue(cols, vals, 'name_ko', row.name_ko, columnMap);
   for(const l of CATEGORY_LANGS){
     if(l === 'ko') continue; // name_ko는 위에서 이미 1회 추가됨. 중복 INSERT 방지.
-    pushCategoryValue(cols, vals, 'name_'+l, cleanText(tr[l]) || row.name_ko, columnMap);
+    pushCategoryValue(cols, vals, 'name_'+l, cleanText(tr[l]), columnMap);
   }
+  pushCategoryValue(cols, vals, 'translate_complete', categoryTranslationComplete(tr) ? 'T' : 'F', columnMap);
   pushCategoryValue(cols, vals, 'keyword_seed', row.keyword || row.name_ko, columnMap);
   pushCategoryValue(cols, vals, 'keyword', row.keyword || row.name_ko, columnMap);
   pushCategoryValue(cols, vals, 'category_path', row.category_path || '', columnMap);
   pushCategoryValue(cols, vals, 'source_keyword', row.source_keyword || '', columnMap);
   pushCategoryValue(cols, vals, 'source', row.source || 'detail_auto', columnMap);
   pushCategoryValue(cols, vals, 'active_yn', 'Y', columnMap);
-  pushCategoryValue(cols, vals, 'raw_json', JSON.stringify(row.raw_json || {}), columnMap);
+  // GM_CATEGORY_RAW_JSON_DROP_V055: 운영 DB 용량 절감. 디버깅용 raw_json 저장 중단.
   for(const c of ['view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount']){
     pushCategoryValue(cols, vals, c, 0, columnMap);
   }
@@ -423,7 +471,10 @@ async function insertGmCategoryRow(pool, row){
   const sql = `INSERT INTO gm_category (${cols.join(',')}) VALUES (${placeholders}) RETURNING *`;
   try{
     const exists = await findCategoryRow(pool, row.cp_code, '', '');
-    if(exists) return exists;
+    if(exists){
+      try{ await updateExistingCategoryTranslations(pool, row, exists); }catch(_e){}
+      return exists;
+    }
     const ins = await pool.query(sql, vals);
     return ins.rows && ins.rows[0] || null;
   }catch(e){
@@ -437,6 +488,31 @@ async function insertGmCategoryRow(pool, row){
     };
     throw e;
   }
+}
+
+async function updateExistingCategoryTranslations(pool, row, existing){
+  const columnMap = await getGmCategoryColumns(pool);
+  const cp=cleanText(row && row.cp_code);
+  if(!cp) return { updated:0 };
+  const ko=cleanText(row && row.name_ko);
+  const tr=row.translations || translationFallback(ko);
+  const sets=[]; const vals=[]; let idx=1;
+  for(const l of CATEGORY_LANGS){
+    if(l === 'ko') continue;
+    const col='name_'+l;
+    const v=cleanText(tr[l]);
+    if(!v || v === ko || !columnMap.has(col)) continue;
+    sets.push(`${col}=CASE WHEN ${col} IS NULL OR ${col}::text='' OR ${col}::text=$${idx+1} THEN $${idx} ELSE ${col} END`);
+    vals.push(v, ko); idx += 2;
+  }
+  if(columnMap.has('translate_complete')){
+    sets.push(`translate_complete=CASE WHEN ${categoryTranslationComplete(tr) ? "'T'" : "'F'"}='T' THEN 'T' ELSE COALESCE(translate_complete,'F') END`);
+  }
+  if(!sets.length) return { updated:0 };
+  if(columnMap.has('updated_at')) sets.push(`updated_at=now()`);
+  vals.push(cp);
+  const r=await pool.query(`UPDATE gm_category SET ${sets.join(', ')} WHERE cp_code::text=$${idx}`, vals);
+  return { updated:r.rowCount||0 };
 }
 
 async function insertDynamicFallbackRow(pool, row){
@@ -465,7 +541,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
   meta=meta||{}; p=p||{};
   await ensureDynamicCategoryTable(pool);
   let tree=sanitizeCoupangCategoryTree(parseCategoryTreeFromPayload(p));
-  try{ console.log('[GM_CATEGORY_TREE_RECEIVE]', { version:'V054', rule:'cp_code_only_else_xx', tree_count:tree.length, leaf:cleanText(p.cp_fix_code || p.cpFixCode || ''), keyword:cleanText(meta.keyword || p.keyword || ''), sample:tree.slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_TREE_RECEIVE]', { version:'V055', rule:'cp_code_only_else_xx', tree_count:tree.length, leaf:cleanText(p.cp_fix_code || p.cpFixCode || ''), keyword:cleanText(meta.keyword || p.keyword || ''), sample:tree.slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_l){}
   if(!tree.length) return { applied:false, reason:'no_category_tree' };
 
   const created=[]; const matched=[]; const errors=[];
@@ -502,7 +578,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
     startIndex=firstMatchedIndex+1;
   }
 
-  try{ console.log('[GM_CATEGORY_PATH_DECISION]', { version:'V054', mode:firstMatchedIndex>=0?'attach_under_existing_cp':'create_full_xx_path', firstMatchedIndex, firstMatched:firstMatchedRow?{cp_code:firstMatchedRow.cp_code, name_ko:firstMatchedRow.name_ko, gm_code:firstMatchedRow.gm_code, depth:firstMatchedRow.depth}:null, skipped_ancestors:firstMatchedIndex>0?tree.slice(0,firstMatchedIndex).map(x=>({cp_code:x.cp_code,name_ko:x.name_ko,depth:x.depth})):[] }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_PATH_DECISION]', { version:'V055', mode:firstMatchedIndex>=0?'attach_under_existing_cp':'create_full_xx_path', firstMatchedIndex, firstMatched:firstMatchedRow?{cp_code:firstMatchedRow.cp_code, name_ko:firstMatchedRow.name_ko, gm_code:firstMatchedRow.gm_code, depth:firstMatchedRow.depth}:null, skipped_ancestors:firstMatchedIndex>0?tree.slice(0,firstMatchedIndex).map(x=>({cp_code:x.cp_code,name_ko:x.name_ko,depth:x.depth})):[] }); }catch(_l){}
 
   for(let i=startIndex;i<tree.length;i++){
     const priorMatched = existingByIndex.get(i);
@@ -529,13 +605,13 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
     const made=await makeUniqueChildGmCode(pool, parent, node.depth);
     const gmCode=made.gm_code;
     const seq=made.seq;
+    const sortOrder=await nextCategorySortOrder(pool, parent, node.depth);
     const path=tree.slice(0, i+1).map(x=>x.name_ko).filter(Boolean).join(' > ');
     const isLeaf = (i === tree.length-1) ? 'Y' : 'N';
     try{
       const tr = await findNameTranslations(pool, node.name_ko);
       const keywordText = translationKeywordString(tr) || node.name_ko;
-      const raw = { source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr, rule:'cp_code_only_else_xx', first_matched_cp:firstMatchedRow && firstMatchedRow.cp_code || '' };
-      try{ console.log('[GM_CATEGORY_INSERT_START]', { version:'V054', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, seq, path }); }catch(_l){}
+      try{ console.log('[GM_CATEGORY_INSERT_START]', { version:'V055', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, seq, sort_order:sortOrder, path }); }catch(_l){}
       if(parentCp){
         try{ await pool.query(`UPDATE gm_category SET leaf_yn='N', updated_at=now() WHERE cp_code::text=$1`, [parentCp]); }catch(_e){}
       }
@@ -549,13 +625,13 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
         depth: node.depth,
         leaf_yn: isLeaf,
         display_yn: 'Y',
-        sort_order: seq,
+        sort_order: sortOrder,
         name_ko: node.name_ko,
         keyword: keywordText,
         category_path: path,
         source_keyword: sourceKeyword,
         source: 'detail_auto',
-        raw_json: raw,
+        raw_json: {},
         translations: tr
       });
       row={
@@ -565,7 +641,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
         depth:toInt(inserted && inserted.depth, node.depth), leaf_yn:cleanText(inserted && inserted.leaf_yn || isLeaf), sort_order:toInt(inserted && inserted.sort_order, seq)
       };
       created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCp, gm_code:row.gm_code, path });
-      try{ console.log('[GM_CATEGORY_INSERT_OK]', { version:'V054', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, gm_code:row.gm_code, table:'gm_category' }); }catch(_l){}
+      try{ console.log('[GM_CATEGORY_INSERT_OK]', { version:'V055', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, gm_code:row.gm_code, table:'gm_category' }); }catch(_l){}
       parent=row;
     }catch(e){
       const err=Object.assign({ cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, path }, compactError(e), e && e.gm_category_insert_context ? { insert_context:e.gm_category_insert_context } : {});
@@ -576,7 +652,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
       parent={ src:'synthetic_failed', gm_code:gmCode, cp_code:node.cp_code, gm_parent_code:parentGm, cp_parent_code:parentCp, name_ko:node.name_ko, parent_name_ko:parentName, depth:node.depth, leaf_yn:isLeaf, sort_order:seq };
     }
   }
-  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { version:'V054', table:'gm_category', created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched:matched.slice(-12), errors }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { version:'V055', table:'gm_category', created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched:matched.slice(-12), errors }); }catch(_l){}
   return { applied:true, created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched, errors };
 }
 
