@@ -98,13 +98,6 @@ function nowKst(){
   const pad = n => String(n).padStart(2,'0');
   return d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate())+' '+pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+':'+pad(d.getUTCSeconds());
 }
-function roadInfo(raw){
-  raw = raw || {};
-  return {
-    road: clean(raw.receiver_road_address || raw.road_address || raw.address_road || raw.roadAddress || ''),
-    no: clean(raw.receiver_building_no || raw.building_no || raw.buildingNo || raw.bldg_no || '')
-  };
-}
 function ok(res, data){ res.json(Object.assign({ ok:true, version:VERSION }, data || {})); }
 function fail(res, status, message, extra){ res.status(status).json(Object.assign({ ok:false, version:VERSION, error:message }, extra || {})); }
 function pad(n, len){ return String(n).padStart(len, '0'); }
@@ -195,8 +188,6 @@ function buildOrderRow(raw, inputItems){
     receiver_sido: clean(raw.receiver_sido || raw.sido),
     receiver_sigungu: clean(raw.receiver_sigungu || raw.sigungu),
     receiver_eup_myeon_dong: clean(raw.receiver_eup_myeon_dong || raw.eup_myeon_dong || raw.dong),
-    receiver_road_address: roadInfo(raw).road,
-    receiver_building_no: roadInfo(raw).no,
     cafe24_order_no: cafeNo,
     address_id: clean(raw.address_id || raw.addressId || (raw.address && (raw.address.address_id || raw.address.addressId)) || '') || null
   };
@@ -231,7 +222,7 @@ async function upsertOrder(client, o){
     o.order_status, o.payment_status, o.shipping_status, o.cs_status,
     o.cancel_status, o.purchase_confirmed_yn,
     o.receiver_address_old, o.receiver_address_full, o.receiver_sido, o.receiver_sigungu, o.receiver_eup_myeon_dong,
-    o.receiver_road_address, o.receiver_building_no, o.cafe24_order_no, o.address_id, nowKst()
+    o.cafe24_order_no, o.address_id, nowKst()
   ];
   const upd = await client.query(`
     UPDATE gm_order SET
@@ -246,7 +237,7 @@ async function upsertOrder(client, o){
       order_status=$35, payment_status=$36, shipping_status=$37, cs_status=$38,
       cancel_status=$39, purchase_confirmed_yn=$40,
       receiver_address_old=$41, receiver_address_full=$42, receiver_sido=$43, receiver_sigungu=$44, receiver_eup_myeon_dong=$45,
-      receiver_road_address=$46, receiver_building_no=$47, cafe24_order_no=$48, address_id=$49, updated_at=$50
+      cafe24_order_no=$46, address_id=$47, updated_at=$48
     WHERE order_no=$1
   `, params);
   if(upd.rowCount) return 'updated';
@@ -262,9 +253,9 @@ async function upsertOrder(client, o){
       estimated_customs_fee, estimated_import_vat, total_payment_price,
       order_status, payment_status, shipping_status, cs_status,
       ordered_at, created_at, updated_at, cancel_status, purchase_confirmed_yn,
-      receiver_address_old, receiver_address_full, receiver_sido, receiver_sigungu, receiver_eup_myeon_dong, receiver_road_address, receiver_building_no, cafe24_order_no, address_id
+      receiver_address_old, receiver_address_full, receiver_sido, receiver_sigungu, receiver_eup_myeon_dong, cafe24_order_no, address_id
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$50,$50,$50,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$48,$48,$48,$39,$40,$41,$42,$43,$44,$45,$46,$47
     )
   `, params);
   return 'inserted';

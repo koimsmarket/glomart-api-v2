@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-/* GM_SEARCH_KEYWORD_ROUTE_V016_EXISTING_CHECK
+/* GM_SEARCH_KEYWORD_ROUTE_V017_RELATION_3COL
  * External search keyword normalization only.
  * Scope:
  * - Used by mobile/product/gm_search.html before CPKR / ALKR search.
@@ -15,7 +15,7 @@ const router = express.Router();
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V016_EXISTING_CHECK';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V017_RELATION_3COL';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -196,37 +196,54 @@ async function normalizeKeyword(pool, params){
 }
 
 
-async function existingHandler(req,res){
+function relationNorm(v){ return norm(v); }
+function normalizeRelationLang(v){ return normalizeLang(v); }
+function normalizeRelationRows(params){
+  const p = params || {};
+  const inputRows = Array.isArray(p.rows) ? p.rows : (Array.isArray(p.relatedKeywordRows) ? p.relatedKeywordRows : []);
+  const baseLang = normalizeRelationLang(p.gm_lang || p.gmLang || p.lang || p.keyword_lang_code || p.keywordLangCode || 'ko');
+  const baseKeyword = cleanText(p.keyword || p.mainKeyword || p.main_keyword || p.mainKeywordKo || p.keyword_ko || p.inputKeyword || p.input_keyword || '');
+  const related = Array.isArray(p.relatedKeywords) ? p.relatedKeywords : [];
+  const rows = [];
+  const seen = new Set();
+  function push(row){
+    const gmLang = normalizeRelationLang(row.gm_lang || row.gmLang || row.lang || baseLang);
+    const keyword = cleanText(row.keyword || row.keyword_ko || row.mainKeyword || baseKeyword);
+    const relatedKeyword = cleanText(row.related_keyword || row.relatedKeyword || row.related_keyword_ko || row.relatedKeywordKo || row.value || row.text || '');
+    if(!gmLang || !keyword || !relatedKeyword) return;
+    if(relationNorm(keyword) === relationNorm(relatedKeyword)) return;
+    const sig = gmLang + '|' + relationNorm(keyword) + '|' + relationNorm(relatedKeyword);
+    if(seen.has(sig)) return;
+    seen.add(sig);
+    rows.push({ gm_lang:gmLang, keyword, related_keyword:relatedKeyword });
+  }
+  inputRows.forEach(r => push(r || {}));
+  related.forEach(v => push({ gm_lang:baseLang, keyword:baseKeyword, related_keyword:(typeof v === 'string' ? v : (v && (v.related_keyword || v.relatedKeyword || v.value || v.text || v.keyword)) || '') }));
+  return rows.slice(0,100);
+}
+async function saveKeywordRelation(pool, params){
+  const rows = normalizeRelationRows(params);
+  if(!rows.length) return { ok:true, route_version:VERSION, saved:0, updated:0, skipped:true, reason:'no_relation_rows' };
+  let saved = 0, updated = 0;
+  for(const row of rows){
+    const sql = `
+      INSERT INTO gm_keyword_relation (gm_lang, keyword, related_keyword, hit_count, complete, created_at, updated_at)
+      VALUES ($1,$2,$3,1,'F',NOW(),NOW())
+      ON CONFLICT (gm_lang, keyword, related_keyword)
+      DO UPDATE SET hit_count = COALESCE(gm_keyword_relation.hit_count,0) + 1, updated_at = NOW()
+      RETURNING (xmax = 0) AS inserted`;
+    const r = await safeQuery(pool, sql, [row.gm_lang, row.keyword, row.related_keyword]);
+    if(r.rows && r.rows[0] && r.rows[0].inserted) saved++; else updated++;
+  }
+  try{ console.log('[GM_KEYWORD_RELATION_SAVE_3COL]', { count:rows.length, saved, updated }); }catch(_log){}
+  return { ok:true, route_version:VERSION, received:rows.length, saved, updated };
+}
+async function relationHandler(req,res){
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const params = Object.assign({}, req.query || {}, req.body || {});
-  const input = cleanText(params.keyword || params.q || params.inputKeyword || params.input_keyword || '');
-  const lang = normalizeLang(params.lang || params.gm_lang || 'ko');
-  if(!input){
-    return res.json({ ok:true, route_version:VERSION, exists:false, reason:'empty_keyword', keyword_ko:'', main_keyword_ko:'' });
-  }
-  try{
-    const row = await matchKeywordTranslate(pool, input, lang);
-    if(!row){
-      return res.json({ ok:true, route_version:VERSION, exists:false, keyword_original:input, lang });
-    }
-    return res.json({
-      ok:true,
-      route_version:VERSION,
-      exists:true,
-      keyword_original:input,
-      lang,
-      source:'gm_keyword_translate',
-      keyword_ko:row.keyword_ko,
-      main_keyword_ko:row.main_keyword_ko,
-      search_keyword_ko:row.search_keyword_ko,
-      matched_value:row.matched_value,
-      hit_count:row.row && row.row.hit_count
-    });
-  }catch(e){
-    console.error('[GM_SEARCH_KEYWORD_EXISTING_ERROR_V001]', String(e && e.message || e));
-    return fail(res, 500, 'keyword existing check failed', { detail:String(e && e.message || e) });
-  }
+  try{ return res.json(await saveKeywordRelation(pool, params)); }
+  catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_3COL_ERROR]', String(e && e.message || e)); return fail(res, 500, 'keyword relation save failed', { detail:String(e && e.message || e) }); }
 }
 
 async function handler(req,res){
@@ -243,11 +260,13 @@ async function handler(req,res){
   }
 }
 
-router.all('/api/gm/search/keyword/existing', existingHandler);
 router.all('/api/gm/search/keyword', handler);
+router.all('/api/gm/keyword/relation', relationHandler);
+router.all('/api/gm/search/keyword/relation', relationHandler);
 router.all('/api/gm/search/keyword/normalize', handler);
 router.all('/api/gm/search/normalize-keyword', handler);
 router.all('/api/gm/search/keyword-normalize', handler);
 
 router.normalizeKeyword = normalizeKeyword;
+router.saveKeywordRelation = saveKeywordRelation;
 module.exports = router;

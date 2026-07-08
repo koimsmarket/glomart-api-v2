@@ -1169,19 +1169,19 @@ function normalizeMallCategoryJson(p){
   if(!Array.isArray(src)) src = [];
   const out=[]; const seen=new Set();
   src.forEach((r)=>{
-    let id='', name='', href='', depth=out.length+1;
+    let id='', name='', href='', depth=out.length;
     if(r && typeof r === 'object'){
       id = cleanText(r.cp_code || r.cpCode || r.id || r.category_id || r.categoryId || r.cate_no || r.cateNo || r.code || '');
       name = cleanText(r.name_ko || r.nameKo || r.name || r.category_name || r.categoryName || r.title || r.label || '');
       href = cleanText(r.href || r.url || '');
-      depth = toInt(r.depth || r.level || depth, depth);
+      depth = (r.depth !== undefined || r.level !== undefined) ? toInt(r.depth !== undefined ? r.depth : r.level, depth) : depth;
     }else{
       name = cleanText(r);
     }
     if(!id && !name) return;
     const sig=(id||'')+'|'+name;
     if(seen.has(sig)) return; seen.add(sig);
-    out.push({ depth: out.length + 1, id, cp_code:id, name, name_ko:name, href });
+    out.push({ depth: depth, id, cp_code:id, name, name_ko:name, href });
   });
   return out;
 }

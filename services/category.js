@@ -198,7 +198,7 @@ function sanitizeCoupangCategoryTree(arr){
     const sig=(cp||'')+'|'+normalizeCategoryNameForMatch(name);
     if(seen.has(sig)) return;
     seen.add(sig);
-    out.push(Object.assign({}, x, { depth: out.length+1, cp_code: cp, name_ko: name }));
+    out.push(Object.assign({}, x, { depth: out.length, cp_code: cp, name_ko: name }));
   });
   return out;
 }
@@ -221,21 +221,21 @@ function parseCategoryTreeFromPayload(p){
   if(Array.isArray(src)){
     arr=src.map((x,i)=>{
       if(isPlainObject(x)) return {
-        depth: toInt(x.depth || x.level || (i+1), i+1),
+        depth: (x.depth !== undefined || x.level !== undefined) ? toInt(x.depth !== undefined ? x.depth : x.level, i) : i,
         cp_code: cleanText(x.cp_code || x.cpCode || x.id || x.code || x.categoryId || x.category_id || x.cate_no || x.cateNo || ''),
         name_ko: cleanText(x.name_ko || x.nameKo || x.name || x.categoryName || x.category_name || x.title || x.label || ''),
         href: cleanText(x.href || x.url || '')
       };
-      return { depth:i+1, cp_code:'', name_ko:cleanText(x), href:'' };
+      return { depth:i, cp_code:'', name_ko:cleanText(x), href:'' };
     }).filter(x=>x.name_ko || x.cp_code);
   }
   if(!arr.length){
     const path=cleanText(p.mall_category_path || p.mallCategoryPath || p.cp_category_path || p.cpCategoryPath || p.category_path || p.categoryPath || '');
-    if(path) arr=path.split(/\s*>\s*/).map((name,i)=>({depth:i+1, cp_code:'', name_ko:cleanText(name), href:''})).filter(x=>x.name_ko);
+    if(path) arr=path.split(/\s*>\s*/).map((name,i)=>({depth:i, cp_code:'', name_ko:cleanText(name), href:''})).filter(x=>x.name_ko);
   }
   const leafCode=cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode || p.mall_category_id || p.mallCategoryId || p.mall_category || p.mallCategory || '');
   if(arr.length && leafCode && !arr[arr.length-1].cp_code) arr[arr.length-1].cp_code=leafCode;
-  return sanitizeCoupangCategoryTree(arr.filter(x=>!/^쿠팡\s*홈$/i.test(x.name_ko)).map((x,i)=>Object.assign({}, x, { depth:i+1 })));
+  return sanitizeCoupangCategoryTree(arr.filter(x=>!/^쿠팡\s*홈$/i.test(x.name_ko)).map((x,i)=>Object.assign({}, x, { depth:i })));
 }
 async function findBaseCategoryRow(pool, code, name, parentCode){
   code=cleanText(code); name=cleanText(name); parentCode=cleanText(parentCode);
@@ -297,18 +297,18 @@ function normalizeGmCodeParts(code){
   return parts.slice(0,6);
 }
 function blockIndexForDepth(depth){
-  const d=toInt(depth,1);
-  if(d<=1) return 1;
-  if(d===2) return 2;
-  if(d===3) return 3;
-  if(d===4) return 4;
+  const d=toInt(depth,0);
+  if(d<=0) return 1;
+  if(d===1) return 2;
+  if(d===2) return 3;
+  if(d===3) return 4;
   return 5;
 }
 function buildChildGmCode(parentGmCode, childDepth, seq){
-  const depth=toInt(childDepth,1);
+  const depth=toInt(childDepth,0);
   let parts=normalizeGmCodeParts(parentGmCode || 'XX-00-000-0000-0000-0000');
   const idx=blockIndexForDepth(depth);
-  if(depth <= 1 && (!parentGmCode || /^XX-00-000-0000-0000-0000$/.test(cleanText(parentGmCode)))){
+  if(depth <= 0 && (!parentGmCode || /^XX-00-000-0000-0000-0000$/.test(cleanText(parentGmCode)))){
     parts=['XX', String(seq).padStart(2,'0'), '000', '0000', '0000', '0000'];
     return parts.join('-');
   }
@@ -333,14 +333,14 @@ async function gmCodeExists(pool, gmCode){
 async function nextGmChildSeq(pool, parentRow, childDepth){
   const parentGm=cleanText(parentRow && parentRow.gm_code);
   const parentCp=cleanText(parentRow && parentRow.cp_code);
-  const depth=toInt(childDepth,1);
+  const depth=toInt(childDepth,0);
   try{
     let rows=[];
     if(parentGm || parentCp){
       const r=await pool.query(`SELECT gm_code FROM gm_category WHERE (COALESCE(gm_parent_code,'')=$1 OR COALESCE(cp_parent_code,'')=$2) AND COALESCE(depth::int,0)=$3`, [parentGm, parentCp, depth]);
       rows=r.rows||[];
     }else{
-      const r=await pool.query(`SELECT gm_code FROM gm_category WHERE COALESCE(depth::int,0)=1 AND gm_code LIKE 'XX-%'`);
+      const r=await pool.query(`SELECT gm_code FROM gm_category WHERE COALESCE(depth::int,0)=0 AND gm_code LIKE 'XX-%'`);
       rows=r.rows||[];
     }
     let max=0;
@@ -351,7 +351,7 @@ async function nextGmChildSeq(pool, parentRow, childDepth){
 async function nextCategorySortOrder(pool, parentRow, childDepth){
   const parentGm=cleanText(parentRow && parentRow.gm_code);
   const parentCp=cleanText(parentRow && parentRow.cp_code);
-  const depth=toInt(childDepth,1);
+  const depth=toInt(childDepth,0);
   try{
     let r;
     if(parentGm || parentCp){
@@ -363,7 +363,7 @@ async function nextCategorySortOrder(pool, parentRow, childDepth){
       r=await pool.query(`SELECT COALESCE(MAX(COALESCE(sort_order::int,0)),0)::int + 1 AS next_sort
         FROM gm_category
         WHERE COALESCE(gm_parent_code,'')='' AND COALESCE(cp_parent_code,'')=''
-          AND COALESCE(depth::int,0)=1 AND gm_code LIKE 'XX-%'`);
+          AND COALESCE(depth::int,0)=0 AND gm_code LIKE 'XX-%'`);
     }
     return Number((r.rows && r.rows[0] && r.rows[0].next_sort) || 1) || 1;
   }catch(_e){ return 1; }
@@ -444,7 +444,7 @@ async function insertGmCategoryRow(pool, row){
   pushCategoryValue(cols, vals, 'cp_parent_code', row.cp_parent_code || '', columnMap);
   pushCategoryValue(cols, vals, 'cp_id', row.cp_id || '', columnMap);
   pushCategoryValue(cols, vals, 'parent_name_ko', row.parent_name_ko || '', columnMap);
-  pushCategoryValue(cols, vals, 'depth', toInt(row.depth,1), columnMap);
+  pushCategoryValue(cols, vals, 'depth', toInt(row.depth,0), columnMap);
   pushCategoryValue(cols, vals, 'leaf_yn', row.leaf_yn || 'Y', columnMap);
   pushCategoryValue(cols, vals, 'display_yn', row.display_yn || 'Y', columnMap);
   pushCategoryValue(cols, vals, 'sort_order', identity.sort_order || toInt(row.sort_order,0), columnMap);
@@ -521,7 +521,7 @@ async function insertDynamicFallbackRow(pool, row){
   const keywordText = row.keyword || translationKeywordString(tr) || row.name_ko;
   const vals = [
     cleanText(row.mall_code || 'CPKR'), cleanText(row.gm_code), cleanText(row.cp_code), cleanText(row.gm_parent_code||''), cleanText(row.cp_parent_code||''), cleanText(row.cp_id||''),
-    cleanText(row.parent_name_ko||''), toInt(row.depth,1), cleanText(row.leaf_yn||'Y'), cleanText(row.display_yn||'Y'), toInt(row.sort_order,0), cleanText(row.name_ko),
+    cleanText(row.parent_name_ko||''), toInt(row.depth,0), cleanText(row.leaf_yn||'Y'), cleanText(row.display_yn||'Y'), toInt(row.sort_order,0), cleanText(row.name_ko),
     keywordText, cleanText(row.category_path||''), cleanText(row.source_keyword||''), cleanText(row.source_product_id||''), cleanText(row.source_item_id||''), cleanText(row.source_vendor_item_id||'')
   ];
   const r = await pool.query(`INSERT INTO gm_category_dynamic (mall_code,gm_code,cp_code,gm_parent_code,cp_parent_code,cp_id,parent_name_ko,depth,leaf_yn,display_yn,sort_order,name_ko,keyword,category_path,source_keyword,source_product_id,source_item_id,source_vendor_item_id)
@@ -582,7 +582,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
 
   for(let i=startIndex;i<tree.length;i++){
     const priorMatched = existingByIndex.get(i);
-    const node=Object.assign({}, tree[i], { depth: parent ? (toInt(parent.depth,0)+1) : (i+1) });
+    const node=Object.assign({}, tree[i], { depth: toInt(tree[i] && tree[i].depth, i) });
     const parentCode=cleanText(parent && parent.cp_code || '');
     let row=null;
     if(priorMatched) row=priorMatched;
