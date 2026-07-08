@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-/* GM_SEARCH_KEYWORD_ROUTE_V014_NO_RELATION_FAST
+/* GM_SEARCH_KEYWORD_ROUTE_V016_EXISTING_CHECK
  * External search keyword normalization only.
  * Scope:
  * - Used by mobile/product/gm_search.html before CPKR / ALKR search.
@@ -15,7 +15,7 @@ const router = express.Router();
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V014_NO_RELATION_FAST';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V016_EXISTING_CHECK';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -195,6 +195,40 @@ async function normalizeKeyword(pool, params){
   };
 }
 
+
+async function existingHandler(req,res){
+  const pool = db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const params = Object.assign({}, req.query || {}, req.body || {});
+  const input = cleanText(params.keyword || params.q || params.inputKeyword || params.input_keyword || '');
+  const lang = normalizeLang(params.lang || params.gm_lang || 'ko');
+  if(!input){
+    return res.json({ ok:true, route_version:VERSION, exists:false, reason:'empty_keyword', keyword_ko:'', main_keyword_ko:'' });
+  }
+  try{
+    const row = await matchKeywordTranslate(pool, input, lang);
+    if(!row){
+      return res.json({ ok:true, route_version:VERSION, exists:false, keyword_original:input, lang });
+    }
+    return res.json({
+      ok:true,
+      route_version:VERSION,
+      exists:true,
+      keyword_original:input,
+      lang,
+      source:'gm_keyword_translate',
+      keyword_ko:row.keyword_ko,
+      main_keyword_ko:row.main_keyword_ko,
+      search_keyword_ko:row.search_keyword_ko,
+      matched_value:row.matched_value,
+      hit_count:row.row && row.row.hit_count
+    });
+  }catch(e){
+    console.error('[GM_SEARCH_KEYWORD_EXISTING_ERROR_V001]', String(e && e.message || e));
+    return fail(res, 500, 'keyword existing check failed', { detail:String(e && e.message || e) });
+  }
+}
+
 async function handler(req,res){
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
@@ -209,6 +243,7 @@ async function handler(req,res){
   }
 }
 
+router.all('/api/gm/search/keyword/existing', existingHandler);
 router.all('/api/gm/search/keyword', handler);
 router.all('/api/gm/search/keyword/normalize', handler);
 router.all('/api/gm/search/normalize-keyword', handler);

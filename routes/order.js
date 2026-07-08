@@ -99,9 +99,11 @@ function nowKst(){
   return d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate())+' '+pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+':'+pad(d.getUTCSeconds());
 }
 function roadInfo(raw){
-  const full = clean(raw.receiver_road_address || raw.road_address || raw.address_road || raw.receiver_address1 || raw.address1);
-  const m = full.match(/(.+?\s(?:대로|로|길))\s*([0-9]+(?:-[0-9]+)?)/);
-  return { road: clean(raw.receiver_road_address || raw.road_address || (m ? (m[1]+' '+m[2]) : full)), no: clean(raw.receiver_building_no || raw.building_no || raw.buildingNo || (m ? m[2] : '')) };
+  raw = raw || {};
+  return {
+    road: clean(raw.receiver_road_address || raw.road_address || raw.address_road || raw.roadAddress || ''),
+    no: clean(raw.receiver_building_no || raw.building_no || raw.buildingNo || raw.bldg_no || '')
+  };
 }
 function ok(res, data){ res.json(Object.assign({ ok:true, version:VERSION }, data || {})); }
 function fail(res, status, message, extra){ res.status(status).json(Object.assign({ ok:false, version:VERSION, error:message }, extra || {})); }
