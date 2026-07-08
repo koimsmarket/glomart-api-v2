@@ -422,6 +422,7 @@ function pickLang(p){
 
 function hasKoreanText(v){ return /[가-힣]/.test(cleanText(v)); }
 function looksLatinKeyword(v){ return /^[A-Za-z][A-Za-z0-9 ._\-']*$/.test(cleanText(v)); }
+function requireKoCanonical(v){ return !!cleanText(v) && hasKoreanText(v); }
 function boolToTF(v){
   if(v === true) return 'T';
   if(v === false) return 'F';
@@ -590,9 +591,17 @@ function keywordRelationComplete(trans){
 async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
   keywordKo = cleanText(keywordKo);
   relatedKo = cleanText(relatedKo);
+  // GM_KEYWORD_RELATION_KO_CANONICAL_GUARD_V011
+  // keyword_ko / related_keyword_ko / category_main_keyword_ko는 한국어 기준어만 저장한다.
+  // Glove, chicken, milk 같은 외국어/오타가 relation 기준 컬럼으로 들어오면 저장하지 않는다.
   if(!keywordKo || !relatedKo) return false;
+  if(!requireKoCanonical(keywordKo) || !requireKoCanonical(relatedKo)){
+    try{ console.warn('[GM_KEYWORD_RELATION_SKIP_NON_KO_V011]', { keyword_ko:keywordKo, related_keyword_ko:relatedKo }); }catch(_l){}
+    return false;
+  }
   await ensureKeywordRelationSchema(pool);
-  const categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
+  let categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
+  if(categoryMainKeywordKo && !requireKoCanonical(categoryMainKeywordKo)) categoryMainKeywordKo = keywordKo;
   const trans = enrichTranslationKo(options.translations || {}, relatedKo);
   const complete = keywordRelationComplete(trans);
   const cols = ['category_main_keyword_ko','keyword_ko','related_keyword_ko'];
@@ -648,6 +657,10 @@ async function saveKeywordMetaPayload(pool, payload){
   const relatedTranslations = pickRelatedTranslations(payload || {}, meta.raw || {});
   let saved = 0, skipped = 0;
   if(!keywordKo) return { keyword_ko:'', saved, skipped, related_count:0 };
+  if(!requireKoCanonical(keywordKo)){
+    try{ console.warn('[GM_KEYWORD_RELATION_META_SKIP_NON_KO_V011]', { keyword_ko:keywordKo, related_count:related.length }); }catch(_l){}
+    return { keyword_ko:'', input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:related.length, saved, skipped:related.length, reason:'keyword_ko_not_korean' };
+  }
   for(const rk of related){
     const t = relatedTransFor(relatedTranslations, rk);
     try{

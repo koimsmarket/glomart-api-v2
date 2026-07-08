@@ -465,7 +465,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
   meta=meta||{}; p=p||{};
   await ensureDynamicCategoryTable(pool);
   let tree=sanitizeCoupangCategoryTree(parseCategoryTreeFromPayload(p));
-  try{ console.log('[GM_CATEGORY_TREE_RECEIVE]', { version:'V052', rule:'cp_code_only_else_xx', tree_count:tree.length, leaf:cleanText(p.cp_fix_code || p.cpFixCode || ''), keyword:cleanText(meta.keyword || p.keyword || ''), sample:tree.slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_TREE_RECEIVE]', { version:'V054', rule:'cp_code_only_else_xx', tree_count:tree.length, leaf:cleanText(p.cp_fix_code || p.cpFixCode || ''), keyword:cleanText(meta.keyword || p.keyword || ''), sample:tree.slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_l){}
   if(!tree.length) return { applied:false, reason:'no_category_tree' };
 
   const created=[]; const matched=[]; const errors=[];
@@ -502,7 +502,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
     startIndex=firstMatchedIndex+1;
   }
 
-  try{ console.log('[GM_CATEGORY_PATH_DECISION]', { version:'V052', mode:firstMatchedIndex>=0?'attach_under_existing_cp':'create_full_xx_path', firstMatchedIndex, firstMatched:firstMatchedRow?{cp_code:firstMatchedRow.cp_code, name_ko:firstMatchedRow.name_ko, gm_code:firstMatchedRow.gm_code, depth:firstMatchedRow.depth}:null, skipped_ancestors:firstMatchedIndex>0?tree.slice(0,firstMatchedIndex).map(x=>({cp_code:x.cp_code,name_ko:x.name_ko,depth:x.depth})):[] }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_PATH_DECISION]', { version:'V054', mode:firstMatchedIndex>=0?'attach_under_existing_cp':'create_full_xx_path', firstMatchedIndex, firstMatched:firstMatchedRow?{cp_code:firstMatchedRow.cp_code, name_ko:firstMatchedRow.name_ko, gm_code:firstMatchedRow.gm_code, depth:firstMatchedRow.depth}:null, skipped_ancestors:firstMatchedIndex>0?tree.slice(0,firstMatchedIndex).map(x=>({cp_code:x.cp_code,name_ko:x.name_ko,depth:x.depth})):[] }); }catch(_l){}
 
   for(let i=startIndex;i<tree.length;i++){
     const priorMatched = existingByIndex.get(i);
@@ -535,7 +535,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
       const tr = await findNameTranslations(pool, node.name_ko);
       const keywordText = translationKeywordString(tr) || node.name_ko;
       const raw = { source:'detail_auto', mall_code:mallCode, category_path:path, source_keyword:sourceKeyword, source_product_id:cleanText(meta.product_id||''), source_item_id:cleanText(meta.item_id||''), source_vendor_item_id:cleanText(meta.vendor_item_id||''), translations:tr, rule:'cp_code_only_else_xx', first_matched_cp:firstMatchedRow && firstMatchedRow.cp_code || '' };
-      try{ console.log('[GM_CATEGORY_INSERT_START]', { version:'V052', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, seq, path }); }catch(_l){}
+      try{ console.log('[GM_CATEGORY_INSERT_START]', { version:'V054', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, seq, path }); }catch(_l){}
       if(parentCp){
         try{ await pool.query(`UPDATE gm_category SET leaf_yn='N', updated_at=now() WHERE cp_code::text=$1`, [parentCp]); }catch(_e){}
       }
@@ -565,7 +565,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
         depth:toInt(inserted && inserted.depth, node.depth), leaf_yn:cleanText(inserted && inserted.leaf_yn || isLeaf), sort_order:toInt(inserted && inserted.sort_order, seq)
       };
       created.push({ table:'gm_category', name:node.name_ko, cp_code:node.cp_code, parent_cp_code:parentCp, gm_code:row.gm_code, path });
-      try{ console.log('[GM_CATEGORY_INSERT_OK]', { version:'V052', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, gm_code:row.gm_code, table:'gm_category' }); }catch(_l){}
+      try{ console.log('[GM_CATEGORY_INSERT_OK]', { version:'V054', cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, gm_code:row.gm_code, table:'gm_category' }); }catch(_l){}
       parent=row;
     }catch(e){
       const err=Object.assign({ cp_code:node.cp_code, name_ko:node.name_ko, parent_cp_code:parentCp, parent_gm_code:parentGm, depth:node.depth, gm_code:gmCode, path }, compactError(e), e && e.gm_category_insert_context ? { insert_context:e.gm_category_insert_context } : {});
@@ -576,7 +576,7 @@ async function ensureDynamicCategoriesFromDetail(pool, p, meta){
       parent={ src:'synthetic_failed', gm_code:gmCode, cp_code:node.cp_code, gm_parent_code:parentGm, cp_parent_code:parentCp, name_ko:node.name_ko, parent_name_ko:parentName, depth:node.depth, leaf_yn:isLeaf, sort_order:seq };
     }
   }
-  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { version:'V052', table:'gm_category', created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched:matched.slice(-12), errors }); }catch(_l){}
+  try{ console.log('[GM_CATEGORY_DYNAMIC_RESULT]', { version:'V054', table:'gm_category', created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched:matched.slice(-12), errors }); }catch(_l){}
   return { applied:true, created_count:created.filter(x=>!x.error).length, matched_count:matched.length, error_count:errors.length, created, matched, errors };
 }
 
@@ -615,37 +615,20 @@ async function findCategoryCandidatesForKeyword(pool, keyword){
   }catch(e){ try{ console.warn('[GM_CATEGORY_CANDIDATE_FAIL]', Object.assign({keyword:kw}, compactError(e))); }catch(_l){} return []; }
 }
 async function findCpSelectedCodeForKeyword(pool, keyword){
-  // GM_CP_SELECTED_DECIDE_V047
-  // 검색어 매칭 후보가 있으면 검색어 자체가 아니라 반드시 cp_code를 selected로 저장한다.
-  // 단, 상세 CATEGORY_TREE가 있으면 findCpSelectedCodeForKeywordAndTree()가 path 비교로 먼저 확정한다.
-  // 여기서는 tree가 없는 검색 queue 단계의 fallback이므로 우선순위만으로 1개를 고른다.
+  // GM_CP_SELECTED_AMBIGUOUS_SAFE_V054
+  // 검색 queue 단계에서는 동명이인 카테고리를 확정하지 않는다.
+  // 예: "폭죽"처럼 여러 부모 아래 같은 name_ko가 있으면 상세 CATEGORY_TREE에서만 확정한다.
   const kw = cleanText(keyword);
   if(!kw) return '';
   const cand=await findCategoryCandidatesForKeyword(pool, kw);
   const exact=cand.filter(r=>isSlashExactNameMatch(r.name_ko, kw) || cleanText(r.keyword)===kw || cleanText(r.keyword_seed)===kw || cleanText(r.match_type)==='SLASH_EXACT');
-  const poolRows = exact.length ? exact : cand;
-  function rowScore(r){
-    let score=0;
-    const mt=cleanText(r.match_type).toUpperCase();
-    if(normalizeCategoryNameForMatch(r.name_ko) === normalizeCategoryNameForMatch(kw)) score += 500;
-    else if(mt === 'SLASH_EXACT' || isSlashExactNameMatch(r.name_ko, kw)) score += 480;
-    else if(mt === 'KEYWORD' || cleanText(r.keyword)===kw || cleanText(r.keyword_seed)===kw) score += 430;
-    else if(mt === 'KEYWORD_LIST') score += 400;
-    else if(mt === 'PARTIAL') score += 100;
-    if(cleanText(r.leaf_yn)==='Y') score += 60;
-    score += Math.min(toInt(r.depth,0),20) * 5;
-    score += Math.min(toInt(r.search_count,0),100);
-    return score;
+  let code='';
+  let selected=null;
+  if(exact.length === 1){
+    selected=exact[0];
+    code=cleanText(selected.cp_code);
   }
-  let best=null;
-  for(const r of poolRows){
-    const score=rowScore(r);
-    if(!best || score > best.score || (score===best.score && toInt(r.depth,0)>toInt(best.row.depth,0)) || (score===best.score && String(r.cp_code||'') < String(best.row.cp_code||''))){
-      best={row:r,score};
-    }
-  }
-  const code=best ? cleanText(best.row.cp_code) : '';
-  try{ console.log('[GM_CP_SELECTED_MATCH]', { keyword:kw, candidate_count:cand.length, exact_count:exact.length, cp_selected_code:code, selected:best&&{cp_code:best.row.cp_code,name_ko:best.row.name_ko,parent_name_ko:best.row.parent_name_ko,cp_parent_code:best.row.cp_parent_code,depth:best.row.depth,match_type:best.row.match_type,score:best.score}, candidates:cand.slice(0,8).map(r=>({cp_code:r.cp_code,name_ko:r.name_ko,parent_name_ko:r.parent_name_ko,cp_parent_code:r.cp_parent_code,depth:r.depth,match_type:r.match_type})) }); }catch(_l){}
+  try{ console.log('[GM_CP_SELECTED_MATCH]', { keyword:kw, candidate_count:cand.length, exact_count:exact.length, cp_selected_code:code, selected:selected&&{cp_code:selected.cp_code,name_ko:selected.name_ko,parent_name_ko:selected.parent_name_ko,cp_parent_code:selected.cp_parent_code,depth:selected.depth,match_type:selected.match_type}, candidates:cand.slice(0,8).map(r=>({cp_code:r.cp_code,name_ko:r.name_ko,parent_name_ko:r.parent_name_ko,cp_parent_code:r.cp_parent_code,depth:r.depth,match_type:r.match_type})) }); }catch(_l){}
   return code;
 }
 async function findCpSelectedCodeForKeywordAndTree(pool, keyword, tree){
@@ -681,11 +664,12 @@ function decideCpMatch(p, mallCode, cpFixCode, cpSelectedCode){
   const explicit = normalizeCpMatch(p.cp_match || p.cpMatch || '');
   if(explicit) return explicit;
   const fix=cleanText(cpFixCode);
-  const selected=cleanText(cpSelectedCode);
   if(!fix) return 'F';
-  // T는 selected와 상세 leaf가 같은 경우만 사용한다.
-  // 예: 푸룬 selected=432516, fix=445867 이면 셀러 등록 카테고리는 기록하되 cp_match='F'.
-  return (selected && selected === fix) ? 'T' : 'F';
+  const mall = cleanText(mallCode).toUpperCase();
+  // GM_CP_MATCH_DETAIL_FIX_V054
+  // cp_fix_code는 상세 CATEGORY_INFO leaf에서 직접 확인한 값이므로 CPKR 상세 수집에서는 T로 본다.
+  // cp_selected_code와 다르더라도 검색어 후보가 틀린 것이고, 상세 leaf 자체는 직접 검증값이다.
+  return mall === 'CPKR' ? 'T' : 'F';
 }
 async function applyCpFixLearning(pool, args){
   args=args||{};

@@ -31,12 +31,55 @@ function pick(obj, keys, def){
   }
   return def;
 }
+function decodeUrlMaybe(v){
+  let s = clean(v);
+  if(!s) return '';
+  for(let i=0;i<3;i++){
+    try{
+      const d = decodeURIComponent(s);
+      if(d === s) break;
+      s = d;
+    }catch(_e){ break; }
+  }
+  return s;
+}
 function normalizeUrl(v){
   const s = clean(v);
   if(!s) return '';
   if(/^https?:\/\//i.test(s)) return s;
   if(/^\/\//.test(s)) return 'https:' + s;
   return s;
+}
+function externalProductUrl(v){
+  let s = decodeUrlMaybe(v);
+  if(!s) return '';
+  try{
+    const u = new URL(s);
+    if(/koims1287\.cafe24\.com/i.test(u.hostname) && /gm_detail\.html/i.test(u.pathname)){
+      const keys = ['product_url','productUrl','pageUrl','sourceUrl','url'];
+      for(const k of keys){
+        const inner = decodeUrlMaybe(u.searchParams.get(k) || '');
+        if(/^https?:\/\//i.test(inner) && !/koims1287\.cafe24\.com/i.test(inner)) return inner;
+      }
+    }
+    if(/^https?:\/\//i.test(s)) return s;
+  }catch(_e){}
+  const m = s.match(/(?:product_url|productUrl|pageUrl|sourceUrl|url)=([^&]+)/i);
+  if(m){
+    const inner = decodeUrlMaybe(m[1]);
+    if(/^https?:\/\//i.test(inner)) return inner;
+  }
+  return normalizeUrl(s);
+}
+function nowKst(){
+  const d = new Date(Date.now() + 9*60*60*1000);
+  const pad = n => String(n).padStart(2,'0');
+  return d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate())+' '+pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+':'+pad(d.getUTCSeconds());
+}
+function roadInfo(raw){
+  const full = clean(raw.receiver_road_address || raw.road_address || raw.address_road || raw.receiver_address1 || raw.address1);
+  const m = full.match(/(.+?\s(?:대로|로|길))\s*([0-9]+(?:-[0-9]+)?)/);
+  return { road: clean(raw.receiver_road_address || raw.road_address || (m ? (m[1]+' '+m[2]) : full)), no: clean(raw.receiver_building_no || raw.building_no || raw.buildingNo || (m ? m[2] : '')) };
 }
 function ok(res, data){ res.json(Object.assign({ ok:true, version:VERSION }, data || {})); }
 function fail(res, status, message, extra){ res.status(status).json(Object.assign({ ok:false, version:VERSION, error:message }, extra || {})); }
@@ -128,7 +171,10 @@ function buildOrderRow(raw, inputItems){
     receiver_sido: clean(raw.receiver_sido || raw.sido),
     receiver_sigungu: clean(raw.receiver_sigungu || raw.sigungu),
     receiver_eup_myeon_dong: clean(raw.receiver_eup_myeon_dong || raw.eup_myeon_dong || raw.dong),
-    cafe24_order_no: cafeNo
+    receiver_road_address: roadInfo(raw).road,
+    receiver_building_no: roadInfo(raw).no,
+    cafe24_order_no: cafeNo,
+    address_id: clean(raw.address_id || raw.addressId || (raw.address && (raw.address.address_id || raw.address.addressId)) || '') || null
   };
   if(!orderRow.total_product_price || !orderRow.total_payment_price){
     let product = 0, delivery = 0, extra = 0;
@@ -161,7 +207,7 @@ async function upsertOrder(client, o){
     o.order_status, o.payment_status, o.shipping_status, o.cs_status,
     o.cancel_status, o.purchase_confirmed_yn,
     o.receiver_address_old, o.receiver_address_full, o.receiver_sido, o.receiver_sigungu, o.receiver_eup_myeon_dong,
-    o.cafe24_order_no
+    o.receiver_road_address, o.receiver_building_no, o.cafe24_order_no, o.address_id, nowKst()
   ];
   const upd = await client.query(`
     UPDATE gm_order SET
@@ -176,7 +222,7 @@ async function upsertOrder(client, o){
       order_status=$35, payment_status=$36, shipping_status=$37, cs_status=$38,
       cancel_status=$39, purchase_confirmed_yn=$40,
       receiver_address_old=$41, receiver_address_full=$42, receiver_sido=$43, receiver_sigungu=$44, receiver_eup_myeon_dong=$45,
-      cafe24_order_no=$46, updated_at=now()
+      receiver_road_address=$46, receiver_building_no=$47, cafe24_order_no=$48, address_id=$49, updated_at=$50
     WHERE order_no=$1
   `, params);
   if(upd.rowCount) return 'updated';
@@ -192,21 +238,44 @@ async function upsertOrder(client, o){
       estimated_customs_fee, estimated_import_vat, total_payment_price,
       order_status, payment_status, shipping_status, cs_status,
       ordered_at, created_at, updated_at, cancel_status, purchase_confirmed_yn,
-      receiver_address_old, receiver_address_full, receiver_sido, receiver_sigungu, receiver_eup_myeon_dong, cafe24_order_no
+      receiver_address_old, receiver_address_full, receiver_sido, receiver_sigungu, receiver_eup_myeon_dong, receiver_road_address, receiver_building_no, cafe24_order_no, address_id
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,now(),now(),now(),$39,$40,$41,$42,$43,$44,$45,$46
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$50,$50,$50,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49
     )
   `, params);
   return 'inserted';
 }
+function mergeDuplicateItems(inputItems){
+  const map = new Map();
+  for(const it of inputItems || []){
+    const mallCode = clean(itemVal(it, ['mall_code','mallCode','source_mall','sourceMall'], '')).toUpperCase();
+    const sourceMall = sourceMallFrom(itemVal(it, ['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(it, ['source_uid','sourceUid'], ''), itemVal(it, ['product_url','source_url','url'], ''), mallCode);
+    const k = sourceUidFrom(itemVal(it, ['source_uid','sourceUid','product_uid','uid'], ''), sourceMall, itemVal(it, ['source_key','sourceKey','key'], '')) || clean(itemVal(it, ['pi_ii_vi','piIiVi'], ''));
+    const key = clean(sourceMall + '|' + k + '|' + itemVal(it, ['option_name','optionName','option_value','optionValue'], ''));
+    if(!key){ continue; }
+    if(!map.has(key)){ map.set(key, Object.assign({}, it)); continue; }
+    const prev = map.get(key);
+    const q1 = Math.max(1, money(itemVal(prev, ['quantity','qty'], 1), 1));
+    const q2 = Math.max(1, money(itemVal(it, ['quantity','qty'], 1), 1));
+    prev.quantity = q1 + q2;
+    prev.qty = prev.quantity;
+    const a1 = money(itemVal(prev, ['product_amount','amount','line_amount'], 0), 0);
+    const a2 = money(itemVal(it, ['product_amount','amount','line_amount'], 0), 0);
+    if(a1 || a2) prev.product_amount = a1 + a2;
+  }
+  return Array.from(map.values());
+}
 async function replaceOrderItems(client, orderRow, inputItems){
   await client.query('DELETE FROM gm_order_item WHERE order_no=$1', [orderRow.order_no]);
+  inputItems = mergeDuplicateItems(inputItems);
   let itemCount = 0;
   for(const src of inputItems){
     const qty = Math.max(1, money(itemVal(src, ['quantity','qty'], 1), 1));
     const mallCode = clean(itemVal(src, ['mall_code','mallCode','source_mall','sourceMall'], '')).toUpperCase();
     const pi = clean(itemVal(src, ['pi_ii_vi','piIiVi','source_key','sourceKey','key','product_uid','uid'], '')) || (mallCode ? mallCode + '_' + itemCount : 'ITEM_' + itemCount);
-    const unit = money(itemVal(src, ['customer_order_price','mall_sale_price','sale_price','price','normal_price'], 0), 0);
+    const mallUnit = money(itemVal(src, ['mall_sale_price','mall_unit_price','source_sale_price','external_sale_price','coupang_sale_price','ali_sale_price','gm_coupang_price','gm_ali_price','raw_price','rawPrice'], 0), 0);
+    const customerUnit = money(itemVal(src, ['customer_order_price','sale_price','price','normal_price','gm_price'], mallUnit), mallUnit);
+    const unit = customerUnit || mallUnit;
     const amount = money(itemVal(src, ['product_amount','amount','line_amount'], 0), 0) || (unit * qty);
     const sourceMall = sourceMallFrom(itemVal(src, ['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(src, ['source_uid','sourceUid'], ''), itemVal(src, ['product_url','source_url','url'], ''), mallCode);
     const sourceUid = sourceUidFrom(itemVal(src, ['source_uid','sourceUid','product_uid','uid'], ''), sourceMall, itemVal(src, ['source_key','sourceKey','key'], '')) || pi;
@@ -218,21 +287,21 @@ async function replaceOrderItems(client, orderRow, inputItems){
         product_url, thumb_file_name, hs_code, origin_country, carrier_name, tracking_number,
         item_order_status, item_shipping_status, created_at, updated_at, cafe24_order_no, source_mall, source_uid
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,now(),now(),$25,$26,$27
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25,$26,$27,$28
       )
     `, [
       orderRow.order_no, pi, clean(itemVal(src, ['product_name','productName','name','title'], '')),
       clean(itemVal(src, ['option_name','optionName'], '')), clean(itemVal(src, ['option_value','optionValue','selected_option','selectedOption'], '')),
-      qty, money(itemVal(src, ['mall_sale_price','sale_price','normal_price','price'], unit), unit), unit,
+      qty, mallUnit || unit, unit,
       itemVal(src, ['final_supply_price','supply_price'], null) == null ? null : money(itemVal(src, ['final_supply_price','supply_price'], null), 0),
       amount, clean(itemVal(src, ['delivery_type','ship_type','shipping_type'], '')),
       money(itemVal(src, ['delivery_fee','shipping_fee'], 0), 0), money(itemVal(src, ['extra_area_delivery_fee','extra_fee'], 0), 0),
       mallCode, clean(itemVal(src, ['supplier_id','supplierId'], '')), clean(itemVal(src, ['supplier_name','supplierName','seller','seller_name'], '')),
-      normalizeUrl(itemVal(src, ['product_url','source_url','url'], '')), clean(itemVal(src, ['thumb_file_name','thumb','thumb_url','image','image_url'], '')),
+      externalProductUrl(itemVal(src, ['product_url','source_url','url','productUrl','pageUrl'], '')), clean(itemVal(src, ['thumb_file_name','thumb','thumb_url','image','image_url'], '')),
       clean(itemVal(src, ['hs_code','hsCode'], '')), clean(itemVal(src, ['origin_country','origin','country'], '')),
       clean(itemVal(src, ['carrier_name','carrier'], '')), clean(itemVal(src, ['tracking_number','tracking'], '')),
-      clean(itemVal(src, ['item_order_status','order_status'], 'ordered')), clean(itemVal(src, ['item_shipping_status','shipping_status'], 'pending')),
-      orderRow.cafe24_order_no || null, sourceMall, sourceUid
+      'READY_TO_ORDER', clean(itemVal(src, ['item_shipping_status','shipping_status'], 'pending')),
+      nowKst(), orderRow.cafe24_order_no || null, sourceMall, sourceUid
     ]);
     itemCount++;
   }
@@ -287,8 +356,8 @@ router.post('/api/gm/order/link', async (req, res) => {
   if(!client) return fail(res, 500, 'DB client connect failed');
   try{
     await client.query('BEGIN');
-    await client.query('UPDATE gm_order SET cafe24_order_no=$2, updated_at=now() WHERE order_no=$1', [orderNo, cafeNo]);
-    await client.query('UPDATE gm_order_item SET cafe24_order_no=$2, updated_at=now() WHERE order_no=$1', [orderNo, cafeNo]);
+    await client.query('UPDATE gm_order SET cafe24_order_no=$2, updated_at=$3 WHERE order_no=$1', [orderNo, cafeNo, nowKst()]);
+    await client.query('UPDATE gm_order_item SET cafe24_order_no=$2, updated_at=$3 WHERE order_no=$1', [orderNo, cafeNo, nowKst()]);
     await client.query('COMMIT');
     ok(res, { action:'order.link', order_no:orderNo, cafe24_order_no:cafeNo });
   }catch(e){
