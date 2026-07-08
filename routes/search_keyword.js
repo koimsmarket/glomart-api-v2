@@ -17,7 +17,7 @@ const router = express.Router();
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V005_KO_CANONICAL_GUARD';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V006_FAST_FALLBACK_KO_GUARD';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -39,6 +39,14 @@ function norm(v){
   return cleanText(v).toLowerCase().replace(/[\s"'“”‘’.,/\\|_\-()\[\]{}]+/g, '');
 }
 function hasKo(v){ return /[가-힣]/.test(cleanText(v)); }
+
+const KO_OVERRIDES = {
+  'chicken':'치킨','chikin':'치킨','chickin':'치킨','banana':'바나나','benanan':'바나나','glove':'장갑','gloves':'장갑',
+  'milk':'우유','egg':'계란','eggs':'계란','onion':'양파','fireworks':'불꽃놀이','firework':'불꽃놀이','firecracker':'폭죽',
+  'stool':'걸상','lamb ribs':'양갈비','prune':'푸룬','cat':'고양이','apple':'사과'
+};
+function koOverride(v){ const k=cleanText(v).toLowerCase().replace(/[\s\u00a0\u200b-\u200d\ufeff"'“”‘’]+/g,' ').trim(); return cleanText(KO_OVERRIDES[k]||''); }
+function koOrEmpty(v){ v=cleanText(v); return hasKo(v) ? v : (koOverride(v)||''); }
 
 function langColumn(prefix, lang){
   const l = normalizeLang(lang);
@@ -151,15 +159,19 @@ async function normalizeKeyword(pool, params){
   }
 
   const candidates = [];
+  const overrideKo = koOverride(input);
+  if(overrideKo) candidates.push(buildCandidate('local_ko_override', overrideKo, input, {}, 80));
   const c1 = await matchCategory(pool, input, lang); if(c1) candidates.push(c1);
   const c2 = await matchRelation(pool, input, lang); if(c2) candidates.push(c2);
   const c3 = await matchKeywordTranslate(pool, input, lang); if(c3) candidates.push(c3);
 
-  const priority = { gm_category:1, gm_keyword_relation:2, gm_keyword_translate:3, fallback:9 };
+  const priority = { gm_category:1, gm_keyword_relation:2, gm_keyword_translate:3, local_ko_override:4, fallback:9 };
   candidates.sort((a,b)=> (priority[a.source] || 99) - (priority[b.source] || 99) || b.score - a.score);
 
   const best = candidates[0] || buildCandidate('fallback', input, input, {}, 0);
-  const ko = cleanText(best.search_keyword_ko || input);
+  const fallback = best.source === 'fallback';
+  const ko = fallback ? koOrEmpty(input) : koOrEmpty(best.search_keyword_ko || input);
+  const searchText = ko || input;
 
   return {
     ok:true,
@@ -167,30 +179,30 @@ async function normalizeKeyword(pool, params){
     keyword_original: input,
     input_keyword: input,
     lang,
-    matched: best.source !== 'fallback',
+    matched: !fallback,
     source: best.source,
     priority: priority[best.source] || 9,
     keyword_ko: ko,
     main_keyword_ko: ko,
-    search_keyword_ko: ko,
-    normalized_keyword: ko,
-    keyword_canonical: ko,
+    search_keyword_ko: searchText,
+    normalized_keyword: searchText,
+    keyword_canonical: searchText,
     matched_keyword: best.matched_value,
     matched_value: best.matched_value,
-    need_dictionary_save: best.source === 'fallback',
-    coupang_refine_required: best.source === 'fallback',
-    fallback: best.source === 'fallback',
+    need_dictionary_save: fallback,
+    coupang_refine_required: fallback,
+    fallback: fallback,
     searchKeywordMeta: {
       inputKeyword: input,
       originalKeyword: input,
-      mainKeyword: ko,
-      normalizedKeyword: ko,
+      mainKeyword: searchText,
+      normalizedKeyword: searchText,
       keywordKo: ko,
       source: best.source,
       priority: priority[best.source] || 9,
       matchedKeyword: best.matched_value,
-      need_dictionary_save: best.source === 'fallback',
-      coupangRefineRequired: best.source === 'fallback',
+      need_dictionary_save: fallback,
+      coupangRefineRequired: fallback,
       relatedKeywords: []
     },
     candidates: candidates.map(c => ({

@@ -71,6 +71,28 @@ function externalProductUrl(v){
   }
   return normalizeUrl(s);
 }
+
+function priceFromUrl(rawUrl, keys){
+  let s = decodeUrlMaybe(rawUrl);
+  keys = keys || [];
+  if(!s) return 0;
+  function rxEscape(x){ return String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  for(const k of keys){
+    const m = s.match(new RegExp('(?:^|[&?])' + rxEscape(k) + '=([^&]+)', 'i'));
+    if(m){
+      const n = money(decodeUrlMaybe(m[1]), 0);
+      if(n > 0) return n;
+    }
+  }
+  try{
+    const u = new URL(s, 'https://koims1287.cafe24.com');
+    for(const k of keys){
+      const n = money(decodeUrlMaybe(u.searchParams.get(k) || ''), 0);
+      if(n > 0) return n;
+    }
+  }catch(_e){}
+  return 0;
+}
 function nowKst(){
   const d = new Date(Date.now() + 9*60*60*1000);
   const pad = n => String(n).padStart(2,'0');
@@ -273,8 +295,9 @@ async function replaceOrderItems(client, orderRow, inputItems){
     const qty = Math.max(1, money(itemVal(src, ['quantity','qty'], 1), 1));
     const mallCode = clean(itemVal(src, ['mall_code','mallCode','source_mall','sourceMall'], '')).toUpperCase();
     const pi = clean(itemVal(src, ['pi_ii_vi','piIiVi','source_key','sourceKey','key','product_uid','uid'], '')) || (mallCode ? mallCode + '_' + itemCount : 'ITEM_' + itemCount);
-    const mallUnit = money(itemVal(src, ['mall_sale_price','mall_unit_price','source_sale_price','external_sale_price','coupang_sale_price','ali_sale_price','gm_coupang_price','gm_ali_price','raw_price','rawPrice'], 0), 0);
-    const customerUnit = money(itemVal(src, ['customer_order_price','sale_price','price','normal_price','gm_price'], mallUnit), mallUnit);
+    const rawUrlForPrice = itemVal(src, ['product_url','source_url','url','productUrl','pageUrl'], '');
+    const mallUnit = money(itemVal(src, ['mall_sale_price','mall_unit_price','source_sale_price','external_sale_price','coupang_sale_price','ali_sale_price','gm_coupang_price','gm_ali_price','raw_price','rawPrice'], 0), 0) || priceFromUrl(rawUrlForPrice, ['gm_coupang_price','gm_ali_price','mall_sale_price','raw_price']);
+    const customerUnit = money(itemVal(src, ['customer_order_price','sale_price','price','normal_price','gm_price'], 0), 0) || priceFromUrl(rawUrlForPrice, ['gm_price','customer_order_price']) || mallUnit;
     const unit = customerUnit || mallUnit;
     const amount = money(itemVal(src, ['product_amount','amount','line_amount'], 0), 0) || (unit * qty);
     const sourceMall = sourceMallFrom(itemVal(src, ['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(src, ['source_uid','sourceUid'], ''), itemVal(src, ['product_url','source_url','url'], ''), mallCode);

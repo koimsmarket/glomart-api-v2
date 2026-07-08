@@ -1,48 +1,39 @@
 -- 31_gm_order_operating_patch.sql
--- 현재 운영/테스트 DB 반영용 임시 패치
--- 테스트 후 migration_operating/03,04,21 파일을 원본 migrations에 반영하고 이 패치는 제거한다.
+-- 현재 운영 DB 테스트용 패치.
+-- 테스트 성공 후 아래 변경은 migration_operating/03,04,21의 최종본에 흡수하고 이 파일은 운영 원본 migration에는 남기지 않는다.
 
 BEGIN;
 
--- 기존 테스트 주문/주문상품/중복 주소록 데이터 삭제
+-- 주문 테스트 데이터 초기화: 주문 저장 검증을 위해 기존 쓰레기 데이터 제거
 TRUNCATE TABLE gm_order_item RESTART IDENTITY CASCADE;
 TRUNCATE TABLE gm_order RESTART IDENTITY CASCADE;
 TRUNCATE TABLE gm_member_address RESTART IDENTITY CASCADE;
 
--- gm_order 보강
-ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS address_id TEXT;
+-- gm_order: 실제 테이블에 없고 자동주문/배송지 선택에 필요한 컬럼만 추가
+ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS address_id BIGINT;
 ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS receiver_road_address TEXT;
-ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS receiver_building_no TEXT;
-CREATE INDEX IF NOT EXISTS idx_gm_order_address_id ON gm_order(address_id);
-CREATE INDEX IF NOT EXISTS idx_gm_order_cafe24_order_no ON gm_order(cafe24_order_no);
+ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS receiver_building_no VARCHAR(40);
 
--- gm_order_item 보강
+-- gm_order_item: 이미 존재하는 핵심 컬럼의 기본값/상태 정리
 ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS mall_sale_price INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS customer_order_price INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS source_mall TEXT;
+ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS source_mall VARCHAR(20);
 ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS source_uid TEXT;
-ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS cafe24_order_no TEXT;
-ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS sales_confirmed_at TIMESTAMP;
-ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS return_deadline_at TIMESTAMP;
-ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS incentive_calculated_yn TEXT DEFAULT 'N';
-ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS incentive_calculated_at TIMESTAMP;
-ALTER TABLE gm_order_item ADD COLUMN IF NOT EXISTS incentive_settlement_month TEXT;
+
 ALTER TABLE gm_order_item ALTER COLUMN item_order_status SET DEFAULT 'READY_TO_ORDER';
 UPDATE gm_order_item SET item_order_status='READY_TO_ORDER' WHERE item_order_status IS DISTINCT FROM 'READY_TO_ORDER';
-CREATE INDEX IF NOT EXISTS idx_gm_order_item_source_uid ON gm_order_item(source_uid);
+
+-- 같은 주문 안에서 동일 외부상품 중복 저장 방지
 DROP INDEX IF EXISTS uq_gm_order_item_order_source_uid;
-CREATE UNIQUE INDEX uq_gm_order_item_order_source_uid
-  ON gm_order_item (order_no, source_mall, source_uid, COALESCE(option_name,''), COALESCE(option_value,''))
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_order_item_order_source_uid
+  ON gm_order_item(order_no, source_uid)
   WHERE source_uid IS NOT NULL AND source_uid <> '';
 
--- gm_member / gm_member_address 보강
-ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS default_road_address TEXT;
-ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS default_building_no VARCHAR(40);
-ALTER TABLE gm_member ADD COLUMN IF NOT EXISTS last_address_id VARCHAR(40);
-
+-- gm_member_address: 주문 시 INSERT 금지. 기존 쓰레기 주소는 위 TRUNCATE로 제거.
 ALTER TABLE gm_member_address ADD COLUMN IF NOT EXISTS road_address TEXT;
 ALTER TABLE gm_member_address ADD COLUMN IF NOT EXISTS building_no VARCHAR(40);
 ALTER TABLE gm_member_address ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP;
-CREATE INDEX IF NOT EXISTS idx_gm_member_address_last_used ON gm_member_address(member_id, last_used_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_member_address_member_last_used
+  ON gm_member_address(member_id, last_used_at DESC);
 
 COMMIT;

@@ -420,9 +420,6 @@ function pickLang(p){
   return cleanText(p.lang || p.gm_lang || p.ui_lang_code || p.lang_code || p.country_lang || (p.searchKeywordMeta && (p.searchKeywordMeta.lang || p.searchKeywordMeta.gm_lang)) || 'ko').toLowerCase() || 'ko';
 }
 
-function hasKoreanText(v){ return /[가-힣]/.test(cleanText(v)); }
-function looksLatinKeyword(v){ return /^[A-Za-z][A-Za-z0-9 ._\-']*$/.test(cleanText(v)); }
-function requireKoCanonical(v){ return !!cleanText(v) && hasKoreanText(v); }
 function boolToTF(v){
   if(v === true) return 'T';
   if(v === false) return 'F';
@@ -591,17 +588,9 @@ function keywordRelationComplete(trans){
 async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
   keywordKo = cleanText(keywordKo);
   relatedKo = cleanText(relatedKo);
-  // GM_KEYWORD_RELATION_KO_CANONICAL_GUARD_V011
-  // keyword_ko / related_keyword_ko / category_main_keyword_ko는 한국어 기준어만 저장한다.
-  // Glove, chicken, milk 같은 외국어/오타가 relation 기준 컬럼으로 들어오면 저장하지 않는다.
   if(!keywordKo || !relatedKo) return false;
-  if(!requireKoCanonical(keywordKo) || !requireKoCanonical(relatedKo)){
-    try{ console.warn('[GM_KEYWORD_RELATION_SKIP_NON_KO_V011]', { keyword_ko:keywordKo, related_keyword_ko:relatedKo }); }catch(_l){}
-    return false;
-  }
   await ensureKeywordRelationSchema(pool);
-  let categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
-  if(categoryMainKeywordKo && !requireKoCanonical(categoryMainKeywordKo)) categoryMainKeywordKo = keywordKo;
+  const categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
   const trans = enrichTranslationKo(options.translations || {}, relatedKo);
   const complete = keywordRelationComplete(trans);
   const cols = ['category_main_keyword_ko','keyword_ko','related_keyword_ko'];
@@ -657,10 +646,6 @@ async function saveKeywordMetaPayload(pool, payload){
   const relatedTranslations = pickRelatedTranslations(payload || {}, meta.raw || {});
   let saved = 0, skipped = 0;
   if(!keywordKo) return { keyword_ko:'', saved, skipped, related_count:0 };
-  if(!requireKoCanonical(keywordKo)){
-    try{ console.warn('[GM_KEYWORD_RELATION_META_SKIP_NON_KO_V011]', { keyword_ko:keywordKo, related_count:related.length }); }catch(_l){}
-    return { keyword_ko:'', input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:related.length, saved, skipped:related.length, reason:'keyword_ko_not_korean' };
-  }
   for(const rk of related){
     const t = relatedTransFor(relatedTranslations, rk);
     try{
@@ -710,22 +695,17 @@ function keywordWideComplete(trans, mainKeywordKo){
   return KEYWORD_LANGS.every(l => !!cleanText(l === 'ko' ? (t.ko || mainKeywordKo) : t[l])) ? 'T' : 'F';
 }
 async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, inc=1, translationsArg=null){
-  // GM_KEYWORD_TRANSLATE_KO_CANONICAL_SAVE_V010
-  // input_keyword는 사용자가 입력한 원문/오타/정제어 alias를 보관할 수 있지만,
-  // main_keyword_ko / keyword_ko는 반드시 한국어 기준어만 허용한다.
-  mainKeywordKo = cleanText(mainKeywordKo || '');
-  inputKeyword = cleanText(inputKeyword || mainKeywordKo);
-  if(!mainKeywordKo || !hasKoreanText(mainKeywordKo)) return false;
+  mainKeywordKo = cleanText(mainKeywordKo || inputKeyword);
+  if(!mainKeywordKo) return false;
   await ensureKeywordTranslateTable(pool);
   const trans = Object.assign({}, translationsArg || {});
   trans.ko = cleanText(trans.ko || mainKeywordKo);
-  if(!hasKoreanText(trans.ko)) trans.ko = mainKeywordKo;
   // 단일어 호출 호환: 과거 방식으로 들어와도 해당 lang 컬럼만 보강한다.
   const l0 = cleanText(lang).toLowerCase();
   if(l0 && l0 !== 'all' && l0 !== 'ko' && cleanText(inputKeyword)) trans[l0] = cleanText(inputKeyword);
   const complete = keywordWideComplete(trans, mainKeywordKo);
   const cols = ['lang','input_keyword','main_keyword_ko','hit_count','updated_at','created_at','translate_complete'];
-  const vals = ['all', inputKeyword || mainKeywordKo, mainKeywordKo, Math.max(0, toInt(inc,1)), new Date().toISOString().slice(0,10), new Date().toISOString().slice(0,10), complete];
+  const vals = ['all', mainKeywordKo, mainKeywordKo, Math.max(0, toInt(inc,1)), new Date().toISOString().slice(0,10), new Date().toISOString().slice(0,10), complete];
   for(const l of KEYWORD_LANGS){ cols.push('keyword_'+l); vals.push(cleanText(trans[l] || (l==='ko' ? mainKeywordKo : ''))); }
   const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
   const upd=[];
@@ -745,48 +725,15 @@ async function saveKeywordTranslatePayload(pool, payload){
   payload = payload || {};
   await ensureKeywordTranslateTable(pool);
   const meta = pickKeywordMeta(payload);
-
-  // GM_KEYWORD_TRANSLATE_KO_CANONICAL_SAVE_V010
-  // 우선순위: 클라이언트가 확정해서 보낸 한국어 기준어 > 번역결과 ko > meta의 한국어값.
-  // searchKeywordMeta.mainKeyword는 쿠팡 correctedQuery(banana/chicken)일 수 있으므로
-  // keyword_ko로 바로 사용하면 안 된다.
-  let mainKeywordKo = cleanText(
-    payload.keyword_ko || payload.keywordKo || payload.main_keyword_ko || payload.mainKeywordKo ||
-    payload.canonical_keyword_ko || payload.canonicalKeywordKo ||
-    (payload.mainKeywordTranslations && payload.mainKeywordTranslations.ko) ||
-    (payload.keywordTranslations && payload.keywordTranslations.mainKeywordTranslations && payload.keywordTranslations.mainKeywordTranslations.ko) ||
-    ''
-  );
-  if(!mainKeywordKo && hasKoreanText(meta.mainKeyword)) mainKeywordKo = cleanText(meta.mainKeyword);
-  if(!mainKeywordKo || !hasKoreanText(mainKeywordKo)){
-    try{ console.warn('[GM_KEYWORD_TRANSLATE_SKIP_NO_KO_V010]', { input:meta.inputKeyword || payload.inputKeyword, meta_main:meta.mainKeyword, payload_keyword_ko:payload.keyword_ko }); }catch(_l){}
-    return { skipped:true, reason:'no_korean_canonical_keyword', mainKeyword:'', inputKeyword:cleanText(meta.inputKeyword || payload.inputKeyword || payload.input_keyword || '') };
-  }
-
+  const mainKeywordKo = cleanText(meta.mainKeyword || payload.main_keyword_ko || payload.mainKeywordKo || payload.keyword_ko || payload.keyword || '');
+  const inputKeyword = cleanText(meta.inputKeyword || payload.inputKeyword || payload.input_keyword || mainKeywordKo);
   const lang = pickLang(payload);
   const translations = pickKeywordTranslations(payload, Object.assign({}, meta.raw || {}, { mainKeyword:mainKeywordKo }));
   translations.ko = cleanText(translations.ko || mainKeywordKo);
-  if(!hasKoreanText(translations.ko)) translations.ko = mainKeywordKo;
-
-  // correctedQuery가 영어/로마자이고 keyword_en이 비어 있으면 영어 컬럼 보강 후보로 사용한다.
-  const corrected = cleanText(payload.correctedKeyword || payload.corrected_keyword || payload.correctedQuery || payload.corrected_query || meta.correctedKeyword || '');
-  if(!cleanText(translations.en) && corrected && looksLatinKeyword(corrected)) translations.en = corrected;
-
-  function uniqAlias(list){
-    const out=[]; const seen=new Set();
-    function add(v){ v=cleanText(v); if(!v) return; const k=v.toLowerCase().replace(/[\s"'“”‘’]/g,''); if(seen.has(k)) return; seen.add(k); out.push(v); }
-    (Array.isArray(list)?list:[]).forEach(add);
-    add(meta.inputKeyword); add(payload.inputKeyword); add(payload.input_keyword); add(payload.originalKeyword); add(payload.original_keyword); add(meta.originalKeyword); add(corrected); add(mainKeywordKo);
-    return out;
-  }
-  const aliases = uniqAlias([].concat(payload.input_keywords || [], payload.candidate_input_keywords || []));
-
   let alias_saved = 0, relation_saved = 0, relation_skipped = 0;
-  for(const alias of aliases){
-    const aliasLang = hasKoreanText(alias) ? 'ko' : (looksLatinKeyword(alias) ? 'en' : lang);
-    if(await upsertKeywordTranslate(pool, aliasLang, alias, mainKeywordKo, alias === meta.inputKeyword ? 1 : 0, translations)) alias_saved++;
+  if(mainKeywordKo){
+    if(await upsertKeywordTranslate(pool, lang, inputKeyword || mainKeywordKo, mainKeywordKo, 1, translations)) alias_saved++;
   }
-
   const relatedTranslations = pickRelatedTranslations(payload, meta.raw || {});
   for(const rk of meta.relatedKeywords){
     const t = relatedTransFor(relatedTranslations, rk);
@@ -796,8 +743,9 @@ async function saveKeywordTranslatePayload(pool, payload){
       else relation_skipped++;
     }catch(e){ relation_skipped++; try{ console.warn('[GM_KEYWORD_RELATION_SAVE_FAIL]', { keyword_ko:mainKeywordKo, related_keyword_ko:rk, message:e && e.message }); }catch(_l){} }
   }
-  return { mainKeyword: mainKeywordKo, inputKeyword:aliases[0] || mainKeywordKo, aliases, lang, wide:true, ko_canonical:true, alias_saved, relation_saved, relation_skipped, related_count: meta.relatedKeywords.length, mainKeywordTranslations: translations, relatedKeywordTranslations: relatedTranslations };
+  return { mainKeyword: mainKeywordKo, inputKeyword, lang, wide:true, alias_saved, relation_saved, relation_skipped, related_count: meta.relatedKeywords.length, mainKeywordTranslations: translations, relatedKeywordTranslations: relatedTranslations };
 }
+
 
 function ids(b){
   const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
@@ -1762,7 +1710,16 @@ async function upsertProduct(pool, raw, parent={}){
   const categoryTreeForSave = (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length) ? categoryTreeForMatch : mallCategoryJson;
   let cpSelectedCode = pickCpSelectedCode(p);
   const cpFixCode = pickCpFixCode(p);
-  const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode);
+  try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
+
+  // CATEGORY_TREE 기반 신규 카테고리는 selected 매칭보다 먼저 처리한다.
+  // 그래야 path에 새로 들어온 cp_code도 즉시 gm_category 후보가 되어 selected/fix 비교가 가능하다.
+  let category_dynamic = null;
+  try{
+    if(cpFixCode || (Array.isArray(categoryTreeForSave) && categoryTreeForSave.length)){
+      category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: categoryTreeForSave, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
+    }
+  }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
   if(!cpSelectedCode){
     if((cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length)) && searchKeyword){
       cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
@@ -1771,6 +1728,7 @@ async function upsertProduct(pool, raw, parent={}){
     // 검색어로 카테고리 후보가 잡히지 않으면 상품이 미아가 되지 않도록 검색어를 임시 selected로 보관한다.
     if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
   }
+  const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode, cpSelectedCode);
   // cp_selected_code는 검색어 기준 후보 코드다. 상세 leaf(cp_fix_code)가 확인되어도 selected를 leaf로 덮어쓰지 않는다.
   // 예: 푸룬 검색은 selected=432516(건자두/푸룬), fix=445867(셀러가 올린 실제 leaf)로 함께 보관한다.
   await ensureProductCpColumns(pool);
@@ -1783,15 +1741,6 @@ async function upsertProduct(pool, raw, parent={}){
   const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
-
-  // CATEGORY_TREE 기반 신규 카테고리는 상품 upsert보다 먼저 처리한다.
-  // 상품 저장 SQL이 실패해도 카테고리 학습이 유실되지 않게 하기 위함이다.
-  let category_dynamic = null;
-  try{
-    if(cpFixCode || (Array.isArray(categoryTreeForSave) && categoryTreeForSave.length)){
-      category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: categoryTreeForSave, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
-    }
-  }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
 
   const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
   try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
@@ -2250,7 +2199,15 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
       option_json_rows: oj0 && Array.isArray(oj0.rows) ? oj0.rows.length : 0,
       deep_option_arrays: collectPayloadContainers(p,4).reduce((n,o)=>n + (Array.isArray(o.optionRows)?o.optionRows.length:0) + (Array.isArray(o.optionCombos)?o.optionCombos.length:0) + (Array.isArray(o.aliOptionCombos)?o.aliOptionCombos.length:0),0),
       has_detail_json: !!(p.detail_json || p.detailJson),
-      keys: Object.keys(p).slice(0,40)
+      category_alias_counts: {
+        categoryTree: Array.isArray(p.categoryTree) ? p.categoryTree.length : 0,
+        category_tree: Array.isArray(p.category_tree) ? p.category_tree.length : 0,
+        categoryTreeJson: Array.isArray(p.categoryTreeJson) ? p.categoryTreeJson.length : (cleanText(p.categoryTreeJson) ? 'text' : 0),
+        cpCategoryTree: Array.isArray(p.cpCategoryTree) ? p.cpCategoryTree.length : 0,
+        mall_category_json: Array.isArray(p.mall_category_json) ? p.mall_category_json.length : (cleanText(p.mall_category_json) ? 'text' : 0),
+        categoryInfo: p.categoryInfo && typeof p.categoryInfo === 'object' ? Object.keys(p.categoryInfo).length : 0
+      },
+      keys: Object.keys(p).slice(0,60)
     });
   }catch(_log){}
   const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : (p.payload && Array.isArray(p.payload.items) ? p.payload.items : (p.payload && Array.isArray(p.payload.products) ? p.payload.products : null)));
