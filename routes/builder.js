@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V024_DEV_SELECTED_DELETE';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V025_DELETE_SELECTED_FIX';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -806,6 +806,19 @@ router.get('/api/gm/builder/delete-list', async (req,res)=>{
   }
 });
 
+function normalizeDeleteKeyInput(k){
+  // accepts: {key:{category_id:'1'}}, {category_id:'1'}, {keys:['category_id'],values:['1']}
+  const x = (k && k.key) ? k.key : k;
+  if(x && Array.isArray(x.keys) && Array.isArray(x.values)){
+    const o={};
+    x.keys.forEach((c,i)=>{ if(clean(c)) o[clean(c)] = clean(x.values[i]); });
+    return o;
+  }
+  const o={};
+  Object.keys(x || {}).forEach(c=>{ if(clean(c) && c !== 'label') o[clean(c)] = clean(x[c]); });
+  return o;
+}
+
 router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), async (req,res)=>{
   const spec = tableSpec((req.query && req.query.table) || (req.body && req.body.table));
   if(!spec) return fail(res, 400, 'invalid table');
@@ -819,15 +832,49 @@ router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), as
   let deleted=0;
   try{
     const cols = await getColumns(client, spec.table);
-    const allowed = deleteKeySets(spec, cols).map(ks => ks.join('|'));
+    const allowedSets = deleteKeySets(spec, cols);
+    const allowed = allowedSets.map(ks => ks.join('|'));
     await client.query('BEGIN');
+
+    // Fast and safest path for gm_category: UI list always carries category_id.
+    if(spec.table === 'gm_category'){
+      const ids=[];
+      const nonIdKeys=[];
+      for(const k of keys){
+        const obj = normalizeDeleteKeyInput(k);
+        const id = clean(obj.category_id);
+        if(/^\d+$/.test(id)) ids.push(Number(id));
+        else nonIdKeys.push(obj);
+      }
+      if(ids.length){
+        const r = await client.query('DELETE FROM gm_category WHERE category_id = ANY($1::int[])', [ids]);
+        deleted += r.rowCount || 0;
+        result.push({ key:'category_id', action:'DELETE_BATCH', requested:ids.length, deleted:r.rowCount || 0, ids:ids.slice(0,50) });
+      }
+      // keep support for cp_code/gm_code rows if no category_id exists.
+      for(const obj of nonIdKeys){
+        const ks = Object.keys(obj || {}).map(clean).filter(Boolean).sort();
+        if(!ks.length){ result.push({ key:'', action:'SKIP', reason:'EMPTY_KEY' }); continue; }
+        const sig = ks.join('|');
+        if(!allowed.includes(sig)){ result.push({ key:JSON.stringify(obj), action:'SKIP', reason:'KEY_NOT_ALLOWED', allowed:allowedSets }); continue; }
+        const vals = ks.map(c => clean(obj[c]));
+        if(vals.some(v => v === '')){ result.push({ key:JSON.stringify(obj), action:'SKIP', reason:'EMPTY_VALUE' }); continue; }
+        const where = ks.map((c,i)=>`${qIdent(c)}::text=$${i+1}`).join(' AND ');
+        const r = await client.query(`DELETE FROM ${qIdent(spec.table)} WHERE ${where}`, vals);
+        deleted += r.rowCount || 0;
+        result.push({ key:ks.map((c,i)=>`${c}=${vals[i]}`).join('+'), action:'DELETE', deleted:r.rowCount || 0 });
+      }
+      await client.query('COMMIT');
+      return ok(res, { table:spec.table, requested:keys.length, deleted, result });
+    }
+
     for(const k of keys){
-      const obj = k && k.key ? k.key : k;
+      const obj = normalizeDeleteKeyInput(k);
       const ks = Object.keys(obj || {}).map(clean).filter(Boolean).sort();
       if(!ks.length){ result.push({ key:'', action:'SKIP', reason:'EMPTY_KEY' }); continue; }
       const sig = ks.join('|');
       if(!allowed.includes(sig)){
-        result.push({ key:JSON.stringify(obj), action:'SKIP', reason:'KEY_NOT_ALLOWED' });
+        result.push({ key:JSON.stringify(obj), action:'SKIP', reason:'KEY_NOT_ALLOWED', allowed:allowedSets });
         continue;
       }
       const vals = ks.map(c => clean(obj[c]));

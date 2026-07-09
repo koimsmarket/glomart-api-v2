@@ -431,7 +431,12 @@ async function devOverwriteAll(apply){
 
 let deleteRowsCache=[];
 function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-function keyToObj(k){ const o={}; if(k&&Array.isArray(k.keys)){ k.keys.forEach((c,i)=>o[c]=k.values[i]); } return o; }
+function keyToObj(k){
+  const o={};
+  if(k&&Array.isArray(k.keys)){ k.keys.forEach((c,i)=>o[c]=String(k.values[i]??'')); return o; }
+  if(k&&typeof k==='object'){ Object.keys(k).forEach(c=>{ if(c!=='label') o[c]=String(k[c]??''); }); }
+  return o;
+}
 async function loadDeleteList(){
   const table=document.getElementById('delTable').value;
   const q=document.getElementById('delQuery').value.trim();
@@ -461,6 +466,7 @@ async function deleteSelectedRows(){
   const r=await fetch(`${API}/api/gm/builder/delete-selected?table=${encodeURIComponent(table)}&confirm=DELETE%20SELECTED`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,keys,confirm:'DELETE SELECTED'})});
   const j=await r.json();
   log(j);
+  alert(j.ok ? `삭제 완료: ${j.deleted||0}건` : `삭제 실패: ${j.error||j.message||'unknown'}`);
   await loadDeleteList();
   await loadDashboard(false);
 }
