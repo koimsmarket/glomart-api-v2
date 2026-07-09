@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-/* GM_SEARCH_KEYWORD_ROUTE_V017_RELATION_3COL
+/* GM_SEARCH_KEYWORD_ROUTE_V018_RELATION_3COL_SIMPLE
  * External search keyword normalization only.
  * Scope:
  * - Used by mobile/product/gm_search.html before CPKR / ALKR search.
@@ -15,7 +15,7 @@ const router = express.Router();
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V017_RELATION_3COL';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V018_RELATION_3COL_SIMPLE';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -235,9 +235,45 @@ async function saveKeywordRelation(pool, params){
     const r = await safeQuery(pool, sql, [row.gm_lang, row.keyword, row.related_keyword]);
     if(r.rows && r.rows[0] && r.rows[0].inserted) saved++; else updated++;
   }
-  try{ console.log('[GM_KEYWORD_RELATION_SAVE_3COL]', { count:rows.length, saved, updated }); }catch(_log){}
+  try{ console.log('[GM_KEYWORD_RELATION_SAVE_3COL_V018]', { count:rows.length, saved, updated }); }catch(_log){}
   return { ok:true, route_version:VERSION, received:rows.length, saved, updated };
 }
+
+async function existingKeywordHandler(req,res){
+  const pool = db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const params = Object.assign({}, req.query || {}, req.body || {});
+  const keyword = cleanText(params.keyword || params.keyword_ko || params.main_keyword_ko || params.q || '');
+  const lang = normalizeLang(params.lang || params.gm_lang || params.ui_lang_code || 'ko');
+  if(!keyword) return res.json({ ok:true, route_version:VERSION, exists:false, keyword:'', lang });
+  try{
+    const n = norm(keyword);
+    const col = langColumn('keyword', lang);
+    const sql = `
+      SELECT input_keyword, main_keyword_ko, keyword_ko, ${col} AS matched_value, hit_count, updated_at
+      FROM gm_keyword_translate
+      WHERE LOWER(REGEXP_REPLACE(COALESCE(main_keyword_ko::text,''), '[[:space:]"''“”‘’.,/\\|_\-()\[\]{}]+', '', 'g')) = $1
+         OR LOWER(REGEXP_REPLACE(COALESCE(keyword_ko::text,''), '[[:space:]"''“”‘’.,/\\|_\-()\[\]{}]+', '', 'g')) = $1
+         OR LOWER(REGEXP_REPLACE(COALESCE(${col}::text,''), '[[:space:]"''“”‘’.,/\\|_\-()\[\]{}]+', '', 'g')) = $1
+      ORDER BY COALESCE(hit_count,0) DESC, updated_at DESC NULLS LAST
+      LIMIT 1`;
+    const r = await safeQuery(pool, sql, [n]);
+    const row = r.rows && r.rows[0];
+    return res.json({
+      ok:true,
+      route_version:VERSION,
+      exists:!!row,
+      keyword,
+      lang,
+      keyword_ko: row ? cleanText(row.main_keyword_ko || row.keyword_ko || '') : '',
+      row: row || null
+    });
+  }catch(e){
+    console.error('[GM_SEARCH_KEYWORD_EXISTING_ERROR_V018]', String(e && e.message || e));
+    return fail(res, 500, 'keyword existing check failed', { detail:String(e && e.message || e) });
+  }
+}
+
 async function relationHandler(req,res){
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
@@ -260,6 +296,8 @@ async function handler(req,res){
   }
 }
 
+router.all('/api/gm/search/keyword/existing', existingKeywordHandler);
+router.all('/api/gm/search/keyword/exists', existingKeywordHandler);
 router.all('/api/gm/search/keyword', handler);
 router.all('/api/gm/keyword/relation', relationHandler);
 router.all('/api/gm/search/keyword/relation', relationHandler);
