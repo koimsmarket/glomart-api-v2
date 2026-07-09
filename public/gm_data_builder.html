@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V016 Selected Delete</title>
+<title>GM Safe Update Builder V017 Selected Delete Fix</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -26,7 +26,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V016 Selected Delete</h1>
+<h1>GM Safe Update Builder V017 Selected Delete Fix</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -462,11 +462,13 @@ async function deleteSelectedRows(){
   if(!selected.length){ alert('삭제할 행을 선택하세요.'); return; }
   const x=prompt(`${selected.length}개 행을 삭제합니다. 실행하려면 DELETE SELECTED 를 입력하세요.`);
   if(x !== 'DELETE SELECTED') return;
-  const keys=selected.map(r=>({key:keyToObj(r.key)}));
-  const r=await fetch(`${API}/api/gm/builder/delete-selected?table=${encodeURIComponent(table)}&confirm=DELETE%20SELECTED`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,keys,confirm:'DELETE SELECTED'})});
-  const j=await r.json();
-  log(j);
-  alert(j.ok ? `삭제 완료: ${j.deleted||0}건` : `삭제 실패: ${j.error||j.message||'unknown'}`);
+  const keys=selected.map(r=>({key:keyToObj(r.key), label:r.label||'', row:r.row||{}}));
+  const ids=selected.map(r=>keyToObj(r.key).category_id || (r.row&&r.row.category_id) || '').filter(Boolean);
+  const r=await fetch(`${API}/api/gm/builder/delete-selected?table=${encodeURIComponent(table)}&confirm=DELETE%20SELECTED`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,keys,ids,category_ids:ids,confirm:'DELETE SELECTED'})});
+  const txt=await r.text();
+  let j; try{ j=JSON.parse(txt); }catch(e){ j={ok:false,error:'NON_JSON_RESPONSE',status:r.status,text:txt.slice(0,500)}; }
+  log({action:'delete-selected-response', status:r.status, sent:{table, count:selected.length, ids}, response:j});
+  alert(j.ok ? `삭제 완료: ${j.deleted||0}건` : `삭제 실패: ${j.error||j.message||'unknown'} / status=${r.status}`);
   await loadDeleteList();
   await loadDashboard(false);
 }

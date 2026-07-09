@@ -836,20 +836,28 @@ router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), as
     const allowed = allowedSets.map(ks => ks.join('|'));
     await client.query('BEGIN');
 
-    // Fast and safest path for gm_category: UI list always carries category_id.
+    // Fast and safest path for gm_category: delete by explicit category_id first.
+    // V063: accept ids/category_ids from UI and avoid relying only on nested key parsing.
     if(spec.table === 'gm_category'){
       const ids=[];
       const nonIdKeys=[];
+      const pushId=(v)=>{ const id=clean(v); if(/^\d+$/.test(id) && !ids.includes(id)) ids.push(id); };
+      (Array.isArray(req.body && req.body.ids) ? req.body.ids : []).forEach(pushId);
+      (Array.isArray(req.body && req.body.category_ids) ? req.body.category_ids : []).forEach(pushId);
       for(const k of keys){
         const obj = normalizeDeleteKeyInput(k);
-        const id = clean(obj.category_id);
-        if(/^\d+$/.test(id)) ids.push(Number(id));
-        else nonIdKeys.push(obj);
+        pushId(obj.category_id);
+        // last-resort: allow a label/meta copied from UI to carry category_id=13384
+        const blob = JSON.stringify(k || {});
+        const m = blob.match(/category_id[\"'=:\s]+(\d+)/i);
+        if(m) pushId(m[1]);
+        if(!clean(obj.category_id)) nonIdKeys.push(obj);
       }
       if(ids.length){
-        const r = await client.query('DELETE FROM gm_category WHERE category_id = ANY($1::int[])', [ids]);
+        // category_id may be int/bigint/numeric depending on migration state. Text compare is safest for dev delete.
+        const r = await client.query('DELETE FROM gm_category WHERE category_id::text = ANY($1::text[])', [ids]);
         deleted += r.rowCount || 0;
-        result.push({ key:'category_id', action:'DELETE_BATCH', requested:ids.length, deleted:r.rowCount || 0, ids:ids.slice(0,50) });
+        result.push({ key:'category_id', action:'DELETE_BATCH_TEXT', requested:ids.length, deleted:r.rowCount || 0, ids:ids.slice(0,100) });
       }
       // keep support for cp_code/gm_code rows if no category_id exists.
       for(const obj of nonIdKeys){
@@ -865,7 +873,7 @@ router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), as
         result.push({ key:ks.map((c,i)=>`${c}=${vals[i]}`).join('+'), action:'DELETE', deleted:r.rowCount || 0 });
       }
       await client.query('COMMIT');
-      return ok(res, { table:spec.table, requested:keys.length, deleted, result });
+      return ok(res, { table:spec.table, requested:keys.length, requested_ids:ids.length, deleted, result });
     }
 
     for(const k of keys){
