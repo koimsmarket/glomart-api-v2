@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V023_DEV_FILE_RESTORE';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V024_DEV_SELECTED_DELETE';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -160,6 +160,7 @@ const TABLES = {
     // DEV: use Coupang category no as the upsert key. Before official launch this can be changed to ['gm_code'].
     key: ['cp_code'],
     keyAny: [['cp_code'], ['gm_code']],
+    deleteKeys: [['category_id'], ['cp_code'], ['gm_code']],
     order: 'depth ASC, sort_order ASC, gm_code ASC',
     critical: ['cp_code','gm_code','name_ko'],
     numeric: ['category_id','depth','sort_order','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
@@ -458,6 +459,47 @@ function pickKey(row, spec) {
   }
   return null;
 }
+
+function deleteKeySets(spec, columns=[]) {
+  const colSet = new Set(columns || []);
+  const sets = [];
+  function add(ks){
+    if(!Array.isArray(ks) || !ks.length) return;
+    const cleanKs = ks.map(k => clean(k)).filter(Boolean);
+    if(!cleanKs.length) return;
+    if(colSet.size && !cleanKs.every(k => colSet.has(k))) return;
+    const sig = cleanKs.join('|');
+    if(!sets.some(x => x.join('|') === sig)) sets.push(cleanKs);
+  }
+  (spec.deleteKeys || []).forEach(add);
+  keySets(spec).forEach(add);
+  if(!sets.length && Array.isArray(columns)){
+    for(const c of ['id','category_id','product_uid','order_no','message_id','address_id','gm_code','cp_code']){
+      if(colSet.has(c)){ add([c]); break; }
+    }
+  }
+  return sets;
+}
+function pickDeleteKey(row, spec, columns=[]) {
+  for(const ks of deleteKeySets(spec, columns)){
+    const ok = ks.every(k => clean(row[k]) !== '');
+    if(ok) return { keys:ks, values:ks.map(k => clean(row[k])), label:ks.map(k => clean(row[k])).join('+') };
+  }
+  return null;
+}
+function rowLabel(row, columns=[]) {
+  const preferred = ['category_id','gm_code','cp_code','name_ko','product_uid','pi_ii_vi','product_name','title','keyword','order_no','member_id','created_at','updated_at'];
+  const parts = [];
+  for(const c of preferred){
+    if(columns.includes(c) && clean(row[c]) !== '') parts.push(`${c}=${clean(row[c])}`);
+    if(parts.length >= 6) break;
+  }
+  if(parts.length) return parts.join(' | ');
+  return columns.slice(0,8).map(c => `${c}=${clean(row[c])}`).join(' | ');
+}
+function deleteConfirmOk(req){
+  return clean((req.query && req.query.confirm) || (req.body && req.body.confirm) || '') === 'DELETE SELECTED';
+}
 function isNumberValue(v) {
   if (v === null || v === undefined || clean(v) === '') return false;
   const n = Number(String(v).replace(/,/g,''));
@@ -723,6 +765,86 @@ async function upsertObject(client, table, obj, keyCols, allowBlank=false) {
 
 router.get('/api/gm/builder/tables', (req,res)=>{
   ok(res, { tables:Object.keys(TABLES).map(k=>({ key:k, table:TABLES[k].table, keys:keySets(TABLES[k]) })) });
+});
+
+
+router.get('/api/gm/builder/delete-list', async (req,res)=>{
+  const spec = tableSpec(req.query.table);
+  if(!spec) return fail(res, 400, 'invalid table');
+  const db = dbFrom(req);
+  const limit = Math.min(Math.max(Number(req.query.limit || 200), 1), 1000);
+  const offset = Math.max(Number(req.query.offset || 0), 0);
+  const q = clean(req.query.q || '');
+  try{
+    let cols = await getColumns(db, spec.table);
+    if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
+    const delSets = deleteKeySets(spec, cols);
+    const textCols = cols.filter(c => !/^password_/i.test(c));
+    const params=[];
+    let where='';
+    if(q){
+      params.push('%' + q + '%');
+      where = 'WHERE ' + textCols.map(c => `${qIdent(c)}::text ILIKE $1`).join(' OR ');
+    }
+    params.push(limit, offset);
+    const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ${where} ORDER BY ${spec.order} LIMIT $${params.length-1} OFFSET $${params.length}`;
+    const r = await db.query(sql, params);
+    const rows = r.rows.map(row => {
+      const key = pickDeleteKey(row, spec, cols);
+      const compact = {};
+      for(const c of cols){
+        const v = row[c];
+        if(v === null || v === undefined || clean(v) === '') continue;
+        compact[c] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        if(Object.keys(compact).length >= 18) break;
+      }
+      return { key, label:rowLabel(row, cols), row:compact };
+    });
+    ok(res, { table:spec.table, key:String(req.query.table||''), columns:cols, deleteKeys:delSets, count:rows.length, limit, offset, q, rows });
+  }catch(e){
+    fail(res, 500, 'delete list failed', { detail:String(e && e.message || e) });
+  }
+});
+
+router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), async (req,res)=>{
+  const spec = tableSpec((req.query && req.query.table) || (req.body && req.body.table));
+  if(!spec) return fail(res, 400, 'invalid table');
+  if(!deleteConfirmOk(req)) return fail(res, 403, 'DELETE_CONFIRM_REQUIRED', { required:'DELETE SELECTED' });
+  const keys = Array.isArray(req.body && req.body.keys) ? req.body.keys : [];
+  if(!keys.length) return fail(res, 400, 'NO_KEYS');
+  if(keys.length > 1000) return fail(res, 400, 'TOO_MANY_KEYS', { max:1000 });
+  const db = dbFrom(req);
+  const client = await db.connect();
+  const result=[];
+  let deleted=0;
+  try{
+    const cols = await getColumns(client, spec.table);
+    const allowed = deleteKeySets(spec, cols).map(ks => ks.join('|'));
+    await client.query('BEGIN');
+    for(const k of keys){
+      const obj = k && k.key ? k.key : k;
+      const ks = Object.keys(obj || {}).map(clean).filter(Boolean).sort();
+      if(!ks.length){ result.push({ key:'', action:'SKIP', reason:'EMPTY_KEY' }); continue; }
+      const sig = ks.join('|');
+      if(!allowed.includes(sig)){
+        result.push({ key:JSON.stringify(obj), action:'SKIP', reason:'KEY_NOT_ALLOWED' });
+        continue;
+      }
+      const vals = ks.map(c => clean(obj[c]));
+      if(vals.some(v => v === '')){ result.push({ key:JSON.stringify(obj), action:'SKIP', reason:'EMPTY_VALUE' }); continue; }
+      const where = ks.map((c,i)=>`${qIdent(c)}::text=$${i+1}`).join(' AND ');
+      const r = await client.query(`DELETE FROM ${qIdent(spec.table)} WHERE ${where}`, vals);
+      deleted += r.rowCount || 0;
+      result.push({ key:ks.map((c,i)=>`${c}=${vals[i]}`).join('+'), action:'DELETE', deleted:r.rowCount || 0 });
+    }
+    await client.query('COMMIT');
+    ok(res, { table:spec.table, requested:keys.length, deleted, result });
+  }catch(e){
+    await client.query('ROLLBACK').catch(()=>{});
+    fail(res, 500, 'delete selected failed', { detail:String(e && e.message || e), deleted, result });
+  }finally{
+    client.release();
+  }
 });
 
 router.get('/api/gm/builder/export', async (req,res)=>{

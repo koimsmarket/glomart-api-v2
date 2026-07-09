@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V015 Dev File Restore</title>
+<title>GM Safe Update Builder V016 Selected Delete</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -21,11 +21,12 @@ button.red{background:#c0392b}button.gray{background:#666}button.green{backgroun
 .statusTitle{font-size:18px;font-weight:800}.small{font-size:12px;color:#666}.badge{display:inline-block;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:800;background:#e9ecef;color:#333}.badge.prepare{background:#fff3cd;color:#8a5a00}.badge.warning{background:#ffe0b2;color:#a14b00}.badge.danger{background:#ffd6d6;color:#a00000}.badge.normal{background:#dff6dd;color:#126b20}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #eee;padding:7px 6px;text-align:left}th{background:#f5f7fb}.num{text-align:right;font-variant-numeric:tabular-nums}.plus{color:#0b7a30;font-weight:800}.minus{color:#b00020;font-weight:800}
 pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-wrap;max-height:260px;overflow:auto}
+.scrollBox{max-height:360px;overflow:auto;border:1px solid #ddd;border-radius:10px;background:#fff;margin-top:10px}.delRow{display:grid;grid-template-columns:34px 1fr;gap:8px;padding:8px;border-bottom:1px solid #eee;align-items:start}.delRow:hover{background:#f8fbff}.delLabel{font-weight:700;font-size:13px}.delMeta{font-size:12px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.inlineGrid{display:grid;grid-template-columns:1fr 1.2fr 110px 110px;gap:10px;align-items:end}
 </style>
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V015 Dev File Restore</h1>
+<h1>GM Safe Update Builder V016 Selected Delete</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -117,6 +118,25 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <p class="small">파일명에 gm_category, gm_product 등 테이블명이 포함되어야 자동 매칭됩니다. 각 파일의 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 전체 테이블 초기화는 하지 않습니다.</p>
 </div>
 
+
+<div class="card" style="margin-top:16px;border-color:#f0b8b8;background:#fffafa">
+<h2>개발용 선택 삭제</h2>
+<p class="small">전 테이블 공통 개발용 삭제 기능입니다. 테이블을 선택하고 검색 후 스크롤 리스트에서 삭제할 행만 체크하세요. 전체 초기화는 하지 않습니다.</p>
+<div class="inlineGrid">
+  <div><label>대상</label><select id="delTable"></select></div>
+  <div><label>검색어 / 코드 / ID</label><input id="delQuery" placeholder="예: XX-03, 194276, 식품, product_uid"></div>
+  <div><label>조회수</label><input id="delLimit" value="200"></div>
+  <div><button class="gray" onclick="loadDeleteList()">조회</button></div>
+</div>
+<div style="margin-top:8px">
+  <button class="gray" onclick="toggleDeleteChecks(true)">전체 선택</button>
+  <button class="gray" onclick="toggleDeleteChecks(false)">선택 해제</button>
+  <button class="red" onclick="deleteSelectedRows()">선택 삭제</button>
+</div>
+<div id="deleteSummary" class="small" style="margin-top:8px">조회 전</div>
+<div id="deleteList" class="scrollBox"><div class="delRow"><div></div><div class="small">조회 전</div></div></div>
+</div>
+
 <div class="card" style="margin-top:16px">
 <h2>Cafe24 회원 CSV 업로드</h2>
 <p class="small">Cafe24 회원명부 CSV 96개 컬럼은 cafe24_raw_json에 원본 보존하고, 주문에 필요한 핵심 컬럼만 gm_member / gm_member_address에 반영합니다. BLANK/빈값은 기존 서버값을 덮어쓰지 않습니다. DRY RUN은 검증 결과 CSV만 다운로드하고, APPLY는 실제 저장 후 결과 CSV를 다운로드합니다.</p>
@@ -180,7 +200,7 @@ const tableNameMap = {
   gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
 };
 function fill(){
-  for(const id of ['downTable','upTable','devTable']){
+  for(const id of ['downTable','upTable','devTable','delTable']){
     document.getElementById(id).innerHTML = Object.entries(tables).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
   }
 }
@@ -405,6 +425,43 @@ async function devOverwriteAll(apply){
     result.push({file:f.name,table:key,mode:'file_restore',result:apply?'DEV_APPLY_REQUESTED':'DEV_DRYRUN_REQUESTED'});
   }
   log(result);
+  await loadDashboard(false);
+}
+
+
+let deleteRowsCache=[];
+function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function keyToObj(k){ const o={}; if(k&&Array.isArray(k.keys)){ k.keys.forEach((c,i)=>o[c]=k.values[i]); } return o; }
+async function loadDeleteList(){
+  const table=document.getElementById('delTable').value;
+  const q=document.getElementById('delQuery').value.trim();
+  const limit=document.getElementById('delLimit').value || '200';
+  const url=`${API}/api/gm/builder/delete-list?table=${encodeURIComponent(table)}&q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`;
+  const r=await fetch(url);
+  const j=await r.json();
+  if(!j.ok){ log(j); return; }
+  deleteRowsCache=j.rows||[];
+  document.getElementById('deleteSummary').textContent=`${j.table} / 조회 ${j.count}건 / 삭제키: ${(j.deleteKeys||[]).map(x=>x.join('+')).join(' 또는 ')}`;
+  document.getElementById('deleteList').innerHTML=deleteRowsCache.map((x,i)=>{
+    const disabled=x.key?'':'disabled';
+    const keyLabel=x.key?x.key.label:'삭제키 없음';
+    const meta=Object.entries(x.row||{}).map(([k,v])=>`${k}=${v}`).join(' | ');
+    return `<div class="delRow"><div><input type="checkbox" class="delCheck" data-idx="${i}" ${disabled}></div><div><div class="delLabel">${escapeHtml(keyLabel)} / ${escapeHtml(x.label||'')}</div><div class="delMeta" title="${escapeHtml(meta)}">${escapeHtml(meta)}</div></div></div>`;
+  }).join('') || '<div class="delRow"><div></div><div class="small">결과 없음</div></div>';
+  log({action:'delete-list', table:j.table, count:j.count, deleteKeys:j.deleteKeys});
+}
+function toggleDeleteChecks(on){ document.querySelectorAll('.delCheck:not(:disabled)').forEach(x=>x.checked=!!on); }
+async function deleteSelectedRows(){
+  const table=document.getElementById('delTable').value;
+  const selected=[...document.querySelectorAll('.delCheck:checked')].map(ch=>deleteRowsCache[Number(ch.dataset.idx)]).filter(Boolean);
+  if(!selected.length){ alert('삭제할 행을 선택하세요.'); return; }
+  const x=prompt(`${selected.length}개 행을 삭제합니다. 실행하려면 DELETE SELECTED 를 입력하세요.`);
+  if(x !== 'DELETE SELECTED') return;
+  const keys=selected.map(r=>({key:keyToObj(r.key)}));
+  const r=await fetch(`${API}/api/gm/builder/delete-selected?table=${encodeURIComponent(table)}&confirm=DELETE%20SELECTED`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({table,keys,confirm:'DELETE SELECTED'})});
+  const j=await r.json();
+  log(j);
+  await loadDeleteList();
   await loadDashboard(false);
 }
 
