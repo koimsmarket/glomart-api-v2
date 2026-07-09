@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V014 Dev Overwrite</title>
+<title>GM Safe Update Builder V015 Dev File Restore</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -25,7 +25,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V014 Dev Overwrite</h1>
+<h1>GM Safe Update Builder V015 Dev File Restore</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -37,7 +37,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <div>
       <button class="green" onclick="loadDashboard(false)">상태 새로고침</button>
       <button class="orange" onclick="saveSnapshot()">스냅샷 저장</button>
-      <button class="red" onclick="resetAll()">개발용 전체 초기화</button>
+      
     </div>
   </div>
   <div class="grid3">
@@ -61,7 +61,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <b>안전 정책</b><br>
 일반 업로드는 UPDATE ONLY 입니다. 기준키가 DB에 없으면 SKIP 됩니다.<br>
 빈칸은 기본값 컬럼 외에는 기존 DB 값을 유지합니다.<br>
-개발용 강제 덮어쓰기/전체 교체는 아래 <b>개발용 강제 복원</b> 영역에서만 실행됩니다.
+개발용 파일 강제 업로드는 아래 영역에서만 실행됩니다. 전체 초기화는 하지 않습니다.
 </div>
 
 <div class="grid">
@@ -94,8 +94,8 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 
 
 <div class="card" style="margin-top:16px;border-color:#f0b8b8;background:#fffafa">
-<h2>개발용 강제 복원</h2>
-<p class="small">개발 기간 전용입니다. 일반 안전규칙, blocked 컬럼, 빈값 유지 규칙을 무시합니다. <b>전체 교체</b>는 해당 테이블을 TRUNCATE 후 CSV 그대로 다시 INSERT합니다. 잘못 들어간 테스트 데이터를 삭제하고 원본 CSV로 복원할 때 사용합니다.</p>
+<h2>개발용 파일 강제 업로드</h2>
+<p class="small">개발 기간 전용입니다. 전체 초기화 없이, 선택한 CSV 행과 충돌하는 기존 행만 삭제 후 CSV 그대로 다시 INSERT합니다. 일반 안전규칙, blocked 컬럼, 빈값 유지 규칙을 적용하지 않습니다.</p>
 <div class="grid">
   <div>
     <label>대상</label>
@@ -104,21 +104,17 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <input type="file" id="devFile" accept=".csv,text/csv">
   </div>
   <div>
-    <label>모드</label>
-    <select id="devMode">
-      <option value="replace">전체 교체: TRUNCATE 후 INSERT</option>
-      <option value="upsert">강제 UPSERT: 같은 키는 모든 컬럼 덮어쓰기</option>
-    </select>
+    <label>실행</label><br>
     <button class="gray" onclick="devOverwrite(false)">개발용 검증</button>
-    <button class="red" onclick="devOverwrite(true)">DEV OVERWRITE 실행</button>
+    <button class="red" onclick="devOverwrite(true)">선택 파일 강제 업로드</button>
   </div>
 </div>
 <hr>
 <label>전체 복원용 CSV 여러 개</label>
 <input type="file" id="devMultiFiles" accept=".csv,text/csv" multiple>
-<button class="gray" onclick="devOverwriteAll(false)">전체 개발용 검증</button>
-<button class="red" onclick="devOverwriteAll(true)">전체 DEV OVERWRITE</button>
-<p class="small">파일명에 gm_category, gm_product 등 테이블명이 포함되어야 자동 매칭됩니다. 전체 교체는 선택된 파일 순서대로 진행됩니다.</p>
+<button class="gray" onclick="devOverwriteAll(false)">여러 파일 검증</button>
+<button class="red" onclick="devOverwriteAll(true)">여러 파일 강제 업로드</button>
+<p class="small">파일명에 gm_category, gm_product 등 테이블명이 포함되어야 자동 매칭됩니다. 각 파일의 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 전체 테이블 초기화는 하지 않습니다.</p>
 </div>
 
 <div class="card" style="margin-top:16px">
@@ -219,12 +215,6 @@ async function loadDashboard(save){
 }
 async function saveSnapshot(){
   const r=await fetch(`${API}/api/gm/dashboard/snapshot`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});
-  const j=await r.json(); log(j); await loadDashboard(false);
-}
-async function resetAll(){
-  const x=prompt('개발용 전체 초기화입니다. 실행하려면 RESET ALL 을 입력하세요.');
-  if(x!=='RESET ALL') return;
-  const r=await fetch(`${API}/api/gm/db/reset`,{method:'POST'});
   const j=await r.json(); log(j); await loadDashboard(false);
 }
 async function download(){
@@ -384,39 +374,35 @@ function downloadCafe24MemberExport(){ location.href = `${API}/api/gm/builder/ca
 
 async function uploadDevOne(tableKey,file,apply,mode){
   const text=await readCsvText(file);
-  const url=`${API}/api/gm/builder/dev-overwrite?table=${encodeURIComponent(tableKey)}&mode=${encodeURIComponent(mode||'replace')}&apply=${apply?'YES':'NO'}${apply?'&confirm=DEV%20OVERWRITE':''}`;
+  const url=`${API}/api/gm/builder/dev-overwrite?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}${apply?'&confirm=DEV%20FILE%20RESTORE':''}`;
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
-  await downloadCsvResponse(r,(apply?'dev_overwrite':'dev_dryrun')+'_'+(mode||'replace')+'_'+tableKey+'_'+Date.now()+'.csv');
-  log({action:'dev-overwrite', table:tableKey, mode:mode||'replace', apply, status:r.status, file:file.name});
+  await downloadCsvResponse(r,(apply?'dev_file_restore':'dev_dryrun')+'_'+tableKey+'_'+Date.now()+'.csv');
+  log({action:'dev-file-restore', table:tableKey, apply, status:r.status, file:file.name});
 }
 async function devOverwrite(apply){
   const f=document.getElementById('devFile').files[0];
   if(!f){ alert('CSV 파일을 선택하세요.'); return; }
   const t=document.getElementById('devTable').value;
-  const mode=document.getElementById('devMode').value;
   if(apply){
-    const msg = mode==='replace' ? 'DEV OVERWRITE' : 'DEV UPSERT';
-    const x=prompt(`개발용 강제 ${mode==='replace'?'전체 교체':'UPSERT'}입니다. 실행하려면 ${msg} 를 입력하세요.`);
-    if(x !== msg) return;
+    const x=prompt('선택한 CSV 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 실행하려면 DEV FILE RESTORE 를 입력하세요.');
+    if(x !== 'DEV FILE RESTORE') return;
   }
-  await uploadDevOne(t,f,apply,mode);
+  await uploadDevOne(t,f,apply,'file_restore');
   await loadDashboard(false);
 }
 async function devOverwriteAll(apply){
   const files=[...document.getElementById('devMultiFiles').files];
   if(!files.length){ alert('CSV 파일들을 선택하세요.'); return; }
-  const mode=document.getElementById('devMode').value;
   if(apply){
-    const msg = mode==='replace' ? 'DEV OVERWRITE ALL' : 'DEV UPSERT ALL';
-    const x=prompt(`전체 개발용 강제 ${mode==='replace'?'교체':'UPSERT'}입니다. 실행하려면 ${msg} 를 입력하세요.`);
-    if(x !== msg) return;
+    const x=prompt('여러 CSV 파일을 강제 업로드합니다. 전체 초기화는 하지 않습니다. 실행하려면 DEV FILE RESTORE ALL 을 입력하세요.');
+    if(x !== 'DEV FILE RESTORE ALL') return;
   }
   const result=[];
   for(const f of files){
     const key=inferTableFromFileName(f.name);
     if(!key){ result.push({file:f.name,result:'SKIP',reason:'파일명에서 테이블명 추정 실패'}); continue; }
-    await uploadDevOne(key,f,apply,mode);
-    result.push({file:f.name,table:key,mode,result:apply?'DEV_APPLY_REQUESTED':'DEV_DRYRUN_REQUESTED'});
+    await uploadDevOne(key,f,apply,'file_restore');
+    result.push({file:f.name,table:key,mode:'file_restore',result:apply?'DEV_APPLY_REQUESTED':'DEV_DRYRUN_REQUESTED'});
   }
   log(result);
   await loadDashboard(false);

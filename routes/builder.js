@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V022_DEV_OVERWRITE';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V023_DEV_FILE_RESTORE';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -970,11 +970,12 @@ async function handleCategoryFastImport(req, res, spec, rows, apply, db) {
 
 
 
-// GM_DEV_OVERWRITE_BUILDER_V001
-// 개발 기간 전용: 안전장치/blocked/빈값 유지 규칙을 무시하고 CSV 기준으로 테이블을 강제 복원한다.
-// apply=YES + confirm=DEV%20OVERWRITE 가 없으면 실제 DB에는 반영하지 않는다.
+// GM_DEV_FILE_RESTORE_BUILDER_V002
+// 개발 기간 전용: 안전장치/blocked/빈값 유지 규칙을 무시하고 선택한 CSV 행만 강제 복원한다.
+// 전체 테이블 TRUNCATE/초기화는 하지 않는다.
+// apply=YES + confirm=DEV FILE RESTORE 가 없으면 실제 DB에는 반영하지 않는다.
 function devOverwriteConfirmed(req){
-  return String(req.query.apply || '').toUpperCase() === 'YES' && String(req.query.confirm || '') === 'DEV OVERWRITE';
+  return String(req.query.apply || '').toUpperCase() === 'YES' && String(req.query.confirm || '') === 'DEV FILE RESTORE';
 }
 function rowColumnsFromRows(rows, dbColumns){
   const dbSet = new Set(dbColumns);
@@ -1028,6 +1029,75 @@ async function insertDevRows(client, table, inputCols, rows, batchSize){
   }
   return inserted;
 }
+
+function devRestoreKeySets(spec, inputCols){
+  const input = new Set(inputCols || []);
+  const out = [];
+  function add(keys){
+    keys = (keys || []).filter(Boolean);
+    if(!keys.length) return;
+    if(!keys.every(k => input.has(k))) return;
+    const sig = keys.join('|');
+    if(out.some(x => x.join('|') === sig)) return;
+    out.push(keys);
+  }
+  // table-specific strong keys that may be unique even if not the normal safe-update key.
+  const t = spec.table;
+  if(t === 'gm_category'){
+    add(['category_id']); add(['cp_code']); add(['gm_code']);
+  }else if(t === 'gm_product'){
+    add(['product_uid']); add(['mall_code','pi_ii_vi']); add(['mall_code','product_id','item_id','vendor_item_id']);
+  }else if(t === 'gm_product_option'){
+    add(['option_id']); add(['mall_code','pi_ii_vi']); add(['mall_code','product_id','item_id','vendor_item_id']);
+  }else if(t === 'gm_member'){
+    add(['member_id']);
+  }else if(t === 'gm_member_address'){
+    add(['address_id']); add(['member_id','address_name']);
+  }else if(t === 'gm_supplier'){
+    add(['gm_supplier_id']); add(['seller_name']);
+  }else if(t === 'gm_order'){
+    add(['order_no']);
+  }else if(t === 'gm_order_item'){
+    add(['order_no','pi_ii_vi']); add(['order_item_id']);
+  }else if(t === 'gm_basket'){
+    add(['basket_id']); add(['member_id','pi_ii_vi']); add(['guest_key','pi_ii_vi']);
+  }else if(t === 'gm_keyword_translate'){
+    add(['lang','input_keyword']);
+  }else if(t === 'gm_keyword_relation'){
+    add(['keyword_ko','related_keyword_ko']);
+  }
+  for(const ks of keySets(spec)) add(ks);
+  if(spec.key) add(spec.key);
+  return out;
+}
+async function deleteDevConflictingRows(client, spec, inputCols, rows, batchSize){
+  const table = spec.table;
+  const keySetsForDelete = devRestoreKeySets(spec, inputCols);
+  if(!keySetsForDelete.length) throw new Error('DEV_FILE_RESTORE_KEY_NOT_FOUND');
+  let deleted = 0;
+  for(const row of rows){
+    const ors=[]; const params=[];
+    for(const keys of keySetsForDelete){
+      const vals = keys.map(k => devCellValue(row[k]));
+      if(vals.some(v => v === null || v === undefined)) continue;
+      const ands=[];
+      for(let i=0;i<keys.length;i++){
+        params.push(vals[i]);
+        ands.push(`${qIdent(keys[i])}=$${params.length}`);
+      }
+      if(ands.length) ors.push('('+ands.join(' AND ')+')');
+    }
+    if(!ors.length) continue;
+    const r = await client.query(`DELETE FROM ${qIdent(table)} WHERE ${ors.join(' OR ')}`, params);
+    deleted += r.rowCount || 0;
+  }
+  return { deleted, keySets:keySetsForDelete };
+}
+async function restoreDevRowsByFile(client, spec, inputCols, rows, batchSize){
+  const del = await deleteDevConflictingRows(client, spec, inputCols, rows, batchSize);
+  const inserted = await insertDevRows(client, spec.table, inputCols, rows, batchSize);
+  return { deleted:del.deleted, inserted, keySets:del.keySets };
+}
 async function upsertDevRows(client, spec, inputCols, rows, batchSize){
   let upserted = 0;
   const table = spec.table;
@@ -1052,7 +1122,8 @@ async function upsertDevRows(client, spec, inputCols, rows, batchSize){
   return { upserted, keys };
 }
 async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
-  const mode = String(req.query.mode || 'replace').toLowerCase() === 'upsert' ? 'upsert' : 'replace';
+  // V023: selected-file restore only. No full-table TRUNCATE. No safe-update blocked/critical/blank rules.
+  const mode = 'file_restore';
   const batchSize = Math.min(Math.max(Number(req.query.batchSize || 500), 50), 1000);
   const confirmed = devOverwriteConfirmed(req);
   const columns = await getColumns(db, spec.table);
@@ -1060,13 +1131,14 @@ async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
   const outCols = ['row_no','table','key','result','column_name','value','reason'];
   const result=[];
   const start=Date.now();
-  let applied=0;
+  let applied=0, deleted=0;
+  let usedKeys=[];
 
   if(!inputCols.length){
     result.push(resultRow('', spec.table, '', 'FAIL', '', '', 'NO_MATCHING_COLUMNS'));
     const csv = toCsv(result, outCols);
     res.setHeader('Content-Type','text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="gm_dev_overwrite_result_${Date.now()}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="gm_dev_file_restore_result_${Date.now()}.csv"`);
     return res.end(csv);
   }
 
@@ -1074,34 +1146,32 @@ async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
   try{
     if(client) await client.query('BEGIN');
     if(!confirmed){
-      result.push(resultRow('', spec.table, '', 'DRY_RUN', '', '', `DEV_OVERWRITE_READY mode=${mode} rows=${rows.length} columns=${inputCols.length}`));
-      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'VALID_DEV_OVERWRITE', '', '', 'DRY_RUN'));
-    }else if(mode === 'replace'){
-      await client.query(`TRUNCATE TABLE ${qIdent(spec.table)} RESTART IDENTITY CASCADE`);
-      applied = await insertDevRows(client, spec.table, inputCols, rows, batchSize);
-      await syncSerialSequences(client, spec.table, columns);
-      result.push(resultRow('', spec.table, '', 'TRUNCATED', '', '', 'RESTART_IDENTITY_CASCADE'));
-      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'INSERTED_DEV_REPLACE', '', '', 'APPLIED'));
+      usedKeys = devRestoreKeySets(spec, inputCols);
+      result.push(resultRow('', spec.table, usedKeys.map(k=>k.join('+')).join(' / '), 'DRY_RUN', '', '', `DEV_FILE_RESTORE_READY rows=${rows.length} columns=${inputCols.length}; selected rows only; no truncate`));
+      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'VALID_DEV_FILE_RESTORE', '', '', 'DRY_RUN'));
     }else{
-      const r = await upsertDevRows(client, spec, inputCols, rows, batchSize);
-      applied = r.upserted;
+      const r = await restoreDevRowsByFile(client, spec, inputCols, rows, batchSize);
+      applied = r.inserted;
+      deleted = r.deleted;
+      usedKeys = r.keySets || [];
       await syncSerialSequences(client, spec.table, columns);
-      result.push(resultRow('', spec.table, (r.keys||[]).join('+'), 'UPSERT_KEY', '', '', 'DEV_FORCE_UPSERT'));
-      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'UPSERTED_DEV_FORCE', '', '', 'APPLIED'));
+      result.push(resultRow('', spec.table, usedKeys.map(k=>k.join('+')).join(' / '), 'RESTORE_KEY', '', '', 'DELETE_MATCHING_ROWS_THEN_INSERT; NO_TRUNCATE'));
+      result.push(resultRow('', spec.table, '', 'DELETE_MATCHED_ROWS', '', '', String(deleted)));
+      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'RESTORED_DEV_FILE_ROW', '', '', 'APPLIED'));
     }
     if(client) await client.query('COMMIT');
-    try{ console.log('[GM_DEV_OVERWRITE_DONE_V001]', JSON.stringify({ table:spec.table, mode, rows:rows.length, columns:inputCols.length, applied, confirmed, ms:Date.now()-start })); }catch(_){}
+    try{ console.log('[GM_DEV_FILE_RESTORE_DONE_V023]', JSON.stringify({ table:spec.table, rows:rows.length, columns:inputCols.length, applied, deleted, confirmed, keys:usedKeys, ms:Date.now()-start })); }catch(_){}
   }catch(e){
     if(client) await client.query('ROLLBACK').catch(()=>{});
     result.push(resultRow('', spec.table, '', 'FAIL', '', '', String(e && e.message || e)));
-    try{ console.error('[GM_DEV_OVERWRITE_FAIL_V001]', spec.table, String(e && e.message || e)); }catch(_){}
+    try{ console.error('[GM_DEV_FILE_RESTORE_FAIL_V023]', spec.table, String(e && e.message || e)); }catch(_){}
   }finally{
     if(client) client.release();
   }
-  result.unshift(resultRow('', spec.table, '', confirmed?'SUMMARY_APPLIED':'SUMMARY_DRY_RUN', '', '', `mode=${mode}; rows=${rows.length}; columns=${inputCols.length}; applied=${applied}; shown_max=2000`));
+  result.unshift(resultRow('', spec.table, '', confirmed?'SUMMARY_APPLIED':'SUMMARY_DRY_RUN', '', '', `mode=${mode}; rows=${rows.length}; columns=${inputCols.length}; deleted=${deleted}; inserted=${applied}; shown_max=2000`));
   const csv = toCsv(result, outCols);
   res.setHeader('Content-Type','text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="gm_dev_overwrite_${mode}_${spec.table}_${Date.now()}.csv"`);
+  res.setHeader('Content-Disposition', `attachment; filename="gm_dev_file_restore_${spec.table}_${Date.now()}.csv"`);
   res.end(csv);
 }
 
@@ -1114,7 +1184,7 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
   let rows = parseCsv(req.body);
   const maxRows = Math.min(Math.max(Number(req.query.maxRows || 200000), 1), 500000);
   if(rows.length > maxRows) rows = rows.slice(0, maxRows);
-  if(apply && !devOverwriteConfirmed(req)) return fail(res, 403, 'DEV_OVERWRITE_CONFIRM_REQUIRED', { required:'confirm=DEV OVERWRITE' });
+  if(apply && !devOverwriteConfirmed(req)) return fail(res, 403, 'DEV_FILE_RESTORE_CONFIRM_REQUIRED', { required:'confirm=DEV FILE RESTORE' });
   try { return await handleDevOverwriteImport(req, res, spec, rows, apply, db); }
   catch(e){ return fail(res, 500, 'dev overwrite failed', { detail:String(e && e.message || e) }); }
 });
