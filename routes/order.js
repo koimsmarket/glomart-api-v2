@@ -209,7 +209,25 @@ function buildOrderRow(raw, inputItems){
   }
   return orderRow;
 }
+
+const columnCache = new Map();
+async function tableColumns(client, table){
+  if(columnCache.has(table)) return columnCache.get(table);
+  const r = await client.query(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = $1
+  `, [table]);
+  const set = new Set((r.rows || []).map(row => String(row.column_name || '').toLowerCase()));
+  columnCache.set(table, set);
+  return set;
+}
+async function hasColumn(client, table, column){
+  const set = await tableColumns(client, table);
+  return set.has(String(column || '').toLowerCase());
+}
 async function upsertOrder(client, o){
+  const hasAddressId = await hasColumn(client, 'gm_order', 'address_id');
   const params = [
     o.order_no, o.member_id, o.guest_key, o.orderer_name, o.orderer_phone, o.orderer_mobile, o.orderer_email,
     o.receiver_name, o.receiver_phone, o.receiver_mobile, o.receiver_safe_phone,
@@ -222,8 +240,16 @@ async function upsertOrder(client, o){
     o.order_status, o.payment_status, o.shipping_status, o.cs_status,
     o.cancel_status, o.purchase_confirmed_yn,
     o.receiver_address_old, o.receiver_address_full, o.receiver_sido, o.receiver_sigungu, o.receiver_eup_myeon_dong,
-    o.cafe24_order_no, o.address_id, nowKst()
+    o.cafe24_order_no, nowKst()
   ];
+  let extraUpdate = '', extraInsertCols = '', extraInsertVals = '';
+  if(hasAddressId){
+    params.push(o.address_id || null);
+    extraUpdate = ', address_id=$48';
+    extraInsertCols = ', address_id';
+    extraInsertVals = ', $48';
+  }
+  const timeIdx = 47;
   const upd = await client.query(`
     UPDATE gm_order SET
       member_id=$2, guest_key=$3, orderer_name=$4, orderer_phone=$5, orderer_mobile=$6, orderer_email=$7,
@@ -237,7 +263,7 @@ async function upsertOrder(client, o){
       order_status=$35, payment_status=$36, shipping_status=$37, cs_status=$38,
       cancel_status=$39, purchase_confirmed_yn=$40,
       receiver_address_old=$41, receiver_address_full=$42, receiver_sido=$43, receiver_sigungu=$44, receiver_eup_myeon_dong=$45,
-      cafe24_order_no=$46, address_id=$47, updated_at=$48
+      cafe24_order_no=$46, updated_at=$${timeIdx}${extraUpdate}
     WHERE order_no=$1
   `, params);
   if(upd.rowCount) return 'updated';
@@ -253,9 +279,9 @@ async function upsertOrder(client, o){
       estimated_customs_fee, estimated_import_vat, total_payment_price,
       order_status, payment_status, shipping_status, cs_status,
       ordered_at, created_at, updated_at, cancel_status, purchase_confirmed_yn,
-      receiver_address_old, receiver_address_full, receiver_sido, receiver_sigungu, receiver_eup_myeon_dong, cafe24_order_no, address_id
+      receiver_address_old, receiver_address_full, receiver_sido, receiver_sigungu, receiver_eup_myeon_dong, cafe24_order_no${extraInsertCols}
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$48,$48,$48,$39,$40,$41,$42,$43,$44,$45,$46,$47
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$47,$47,$47,$39,$40,$41,$42,$43,$44,$45,$46${extraInsertVals}
     )
   `, params);
   return 'inserted';

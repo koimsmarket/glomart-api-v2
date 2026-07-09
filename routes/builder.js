@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V021_SMARTFIT_EXPORT';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V022_DEV_OVERWRITE';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -967,6 +967,157 @@ async function handleCategoryFastImport(req, res, spec, rows, apply, db) {
   try { console.log('[GM_CATEGORY_FAST_IMPORT_DONE_V018]', JSON.stringify({ total:rows.length, processed, applied, invalid, skipped, apply, ms:Date.now()-startTime })); } catch(_) {}
   res.end();
 }
+
+
+
+// GM_DEV_OVERWRITE_BUILDER_V001
+// 개발 기간 전용: 안전장치/blocked/빈값 유지 규칙을 무시하고 CSV 기준으로 테이블을 강제 복원한다.
+// apply=YES + confirm=DEV%20OVERWRITE 가 없으면 실제 DB에는 반영하지 않는다.
+function devOverwriteConfirmed(req){
+  return String(req.query.apply || '').toUpperCase() === 'YES' && String(req.query.confirm || '') === 'DEV OVERWRITE';
+}
+function rowColumnsFromRows(rows, dbColumns){
+  const dbSet = new Set(dbColumns);
+  const seen = new Set();
+  const out = [];
+  for(const row of rows){
+    for(const c of Object.keys(row||{})){
+      if(c === '__row_no') continue;
+      if(!dbSet.has(c)) continue;
+      if(seen.has(c)) continue;
+      seen.add(c); out.push(c);
+    }
+  }
+  return out;
+}
+function devCellValue(v){
+  const x = clean(v);
+  return x === '' ? null : x;
+}
+function pickDevConflictKeys(spec, inputCols){
+  const input = new Set(inputCols || []);
+  for(const ks of keySets(spec)){
+    if((ks||[]).length && ks.every(k=>input.has(k))) return ks;
+  }
+  return (spec.key || []).filter(k=>input.has(k));
+}
+async function syncSerialSequences(client, table, cols){
+  for(const col of cols){
+    try{
+      const seq = await client.query(`SELECT pg_get_serial_sequence($1,$2) AS seq`, [table, col]);
+      const seqName = seq.rows && seq.rows[0] && seq.rows[0].seq;
+      if(!seqName) continue;
+      await client.query(`SELECT setval($1, COALESCE((SELECT MAX(${qIdent(col)}) FROM ${qIdent(table)}),0) + 1, false)`, [seqName]);
+    }catch(e){ try{ console.warn('[GM_DEV_OVERWRITE_SEQUENCE_SYNC_SKIP]', table, col, String(e&&e.message||e)); }catch(_){} }
+  }
+}
+async function insertDevRows(client, table, inputCols, rows, batchSize){
+  let inserted = 0;
+  if(!rows.length || !inputCols.length) return inserted;
+  for(let i=0;i<rows.length;i+=batchSize){
+    const batch = rows.slice(i, i+batchSize);
+    const params=[];
+    const values=[];
+    for(const row of batch){
+      const one=[];
+      for(const c of inputCols){ params.push(devCellValue(row[c])); one.push('$'+params.length); }
+      values.push('('+one.join(',')+')');
+    }
+    await client.query(`INSERT INTO ${qIdent(table)} (${inputCols.map(qIdent).join(',')}) VALUES ${values.join(',')}`, params);
+    inserted += batch.length;
+  }
+  return inserted;
+}
+async function upsertDevRows(client, spec, inputCols, rows, batchSize){
+  let upserted = 0;
+  const table = spec.table;
+  const keys = pickDevConflictKeys(spec, inputCols);
+  if(!keys.length) throw new Error('DEV_OVERWRITE_UPSERT_KEY_NOT_FOUND');
+  const updateCols = inputCols.filter(c => !keys.includes(c));
+  for(let i=0;i<rows.length;i+=batchSize){
+    const batch = rows.slice(i, i+batchSize);
+    const params=[];
+    const values=[];
+    for(const row of batch){
+      const one=[];
+      for(const c of inputCols){ params.push(devCellValue(row[c])); one.push('$'+params.length); }
+      values.push('('+one.join(',')+')');
+    }
+    const updateSql = updateCols.length
+      ? updateCols.map(c => `${qIdent(c)}=EXCLUDED.${qIdent(c)}`).join(',')
+      : keys.map(c => `${qIdent(c)}=EXCLUDED.${qIdent(c)}`).join(',');
+    await client.query(`INSERT INTO ${qIdent(table)} (${inputCols.map(qIdent).join(',')}) VALUES ${values.join(',')} ON CONFLICT (${keys.map(qIdent).join(',')}) DO UPDATE SET ${updateSql}`, params);
+    upserted += batch.length;
+  }
+  return { upserted, keys };
+}
+async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
+  const mode = String(req.query.mode || 'replace').toLowerCase() === 'upsert' ? 'upsert' : 'replace';
+  const batchSize = Math.min(Math.max(Number(req.query.batchSize || 500), 50), 1000);
+  const confirmed = devOverwriteConfirmed(req);
+  const columns = await getColumns(db, spec.table);
+  const inputCols = rowColumnsFromRows(rows, columns);
+  const outCols = ['row_no','table','key','result','column_name','value','reason'];
+  const result=[];
+  const start=Date.now();
+  let applied=0;
+
+  if(!inputCols.length){
+    result.push(resultRow('', spec.table, '', 'FAIL', '', '', 'NO_MATCHING_COLUMNS'));
+    const csv = toCsv(result, outCols);
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="gm_dev_overwrite_result_${Date.now()}.csv"`);
+    return res.end(csv);
+  }
+
+  const client = confirmed ? await db.connect() : null;
+  try{
+    if(client) await client.query('BEGIN');
+    if(!confirmed){
+      result.push(resultRow('', spec.table, '', 'DRY_RUN', '', '', `DEV_OVERWRITE_READY mode=${mode} rows=${rows.length} columns=${inputCols.length}`));
+      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'VALID_DEV_OVERWRITE', '', '', 'DRY_RUN'));
+    }else if(mode === 'replace'){
+      await client.query(`TRUNCATE TABLE ${qIdent(spec.table)} RESTART IDENTITY CASCADE`);
+      applied = await insertDevRows(client, spec.table, inputCols, rows, batchSize);
+      await syncSerialSequences(client, spec.table, columns);
+      result.push(resultRow('', spec.table, '', 'TRUNCATED', '', '', 'RESTART_IDENTITY_CASCADE'));
+      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'INSERTED_DEV_REPLACE', '', '', 'APPLIED'));
+    }else{
+      const r = await upsertDevRows(client, spec, inputCols, rows, batchSize);
+      applied = r.upserted;
+      await syncSerialSequences(client, spec.table, columns);
+      result.push(resultRow('', spec.table, (r.keys||[]).join('+'), 'UPSERT_KEY', '', '', 'DEV_FORCE_UPSERT'));
+      for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'UPSERTED_DEV_FORCE', '', '', 'APPLIED'));
+    }
+    if(client) await client.query('COMMIT');
+    try{ console.log('[GM_DEV_OVERWRITE_DONE_V001]', JSON.stringify({ table:spec.table, mode, rows:rows.length, columns:inputCols.length, applied, confirmed, ms:Date.now()-start })); }catch(_){}
+  }catch(e){
+    if(client) await client.query('ROLLBACK').catch(()=>{});
+    result.push(resultRow('', spec.table, '', 'FAIL', '', '', String(e && e.message || e)));
+    try{ console.error('[GM_DEV_OVERWRITE_FAIL_V001]', spec.table, String(e && e.message || e)); }catch(_){}
+  }finally{
+    if(client) client.release();
+  }
+  result.unshift(resultRow('', spec.table, '', confirmed?'SUMMARY_APPLIED':'SUMMARY_DRY_RUN', '', '', `mode=${mode}; rows=${rows.length}; columns=${inputCols.length}; applied=${applied}; shown_max=2000`));
+  const csv = toCsv(result, outCols);
+  res.setHeader('Content-Type','text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="gm_dev_overwrite_${mode}_${spec.table}_${Date.now()}.csv"`);
+  res.end(csv);
+}
+
+
+router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','application/csv'], limit:'80mb' }), async (req,res)=>{
+  const spec = tableSpec(req.query.table);
+  if (!spec) return fail(res, 400, 'invalid table');
+  const apply = String(req.query.apply || '').toUpperCase() === 'YES';
+  const db = dbFrom(req);
+  let rows = parseCsv(req.body);
+  const maxRows = Math.min(Math.max(Number(req.query.maxRows || 200000), 1), 500000);
+  if(rows.length > maxRows) rows = rows.slice(0, maxRows);
+  if(apply && !devOverwriteConfirmed(req)) return fail(res, 403, 'DEV_OVERWRITE_CONFIRM_REQUIRED', { required:'confirm=DEV OVERWRITE' });
+  try { return await handleDevOverwriteImport(req, res, spec, rows, apply, db); }
+  catch(e){ return fail(res, 500, 'dev overwrite failed', { detail:String(e && e.message || e) }); }
+});
 
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);

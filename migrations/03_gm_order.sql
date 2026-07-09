@@ -5,6 +5,7 @@
 CREATE TABLE IF NOT EXISTS gm_order (
   order_no TEXT NOT NULL,
   cafe24_order_no TEXT,
+  address_id VARCHAR(80),
   member_id TEXT,
   guest_key TEXT,
   orderer_name TEXT NOT NULL,
