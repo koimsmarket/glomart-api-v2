@@ -237,7 +237,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const root=s(req.query.root || '')==='1';
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
     const params=[]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
-    if(q){ params.push('%'+q+'%'); where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length} OR t.search_source ILIKE $${params.length} OR t.search_ko ILIKE $${params.length} OR t.description ILIKE $${params.length})`); }
+    if(q){ params.push('%'+q+'%'); where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length} OR t.search_source ILIKE $${params.length} OR t.search_ko ILIKE $${params.length})`); }
     if(category){ params.push(category); where.push(`t.category_no=$${params.length}`); }
     if(root) where.push(`t.space_id IS NULL`);
     if(mine && member){ params.push(member); where.push(`t.creator_member_id=$${params.length}`); }
@@ -246,7 +246,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const r=await pool.query(`SELECT t.*, sp.space_title_source, sp.space_title_ko, sp.author_nickname AS space_author_nickname, m.member_name, m.member_nickname FROM gm_smartfit_template t
       LEFT JOIN gm_smartfit_space sp ON sp.space_id=t.space_id
       LEFT JOIN gm_member m ON m.member_id=t.creator_member_id
-      WHERE ${where.join(' AND ')} ORDER BY t.updated_at DESC LIMIT ${lim}`, params);
+      WHERE ${where.join(' AND ')} ORDER BY t.ranking_score DESC, t.updated_at DESC LIMIT ${lim}`, params);
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template')), count:r.rowCount, limit });
   }catch(e){ fail(res,500,'template list failed',{ detail:String(e.message||e) }); }
 });
