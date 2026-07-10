@@ -1,8 +1,11 @@
 'use strict';
 const express = require('express');
+const multer = require('multer');
+const sharp = require('sharp');
+const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V017_SPACE_TEMPLATE_SAVE_FIX';
+const VERSION = 'GM_SMARTFIT_SERVER_V018_R2_IMAGE_UPLOAD';
 console.log('[GM_SMARTFIT_ROUTE] loaded', VERSION);
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -137,21 +140,114 @@ function coalesceSpaceTitle(row){ return s(row.space_title_source || row.space_t
 function addImageUrls(row, type){
   const count=imageCount(row.image_count);
   const id=type==='space' ? i(row.space_id,0) : i(row.template_id,0);
-  const prefix=type==='space' ? 'I' : 'T';
-  const root=type==='space' ? 'space' : 'template';
-  const bucketBase=s(process.env.R2_PUBLIC_BASE || process.env.GM_R2_PUBLIC_BASE || '');
-  const folderStart=Math.floor((Math.max(1,id)-1)/200)*200 + 1;
-  const folder='A'+String(folderStart).padStart(8,'0');
-  const seq=String(((id-1)%200)+1).padStart(4,'0');
-  const images=[];
-  for(let k=0;k<count;k++){
-    const name=`${prefix}${seq}${String.fromCharCode(65+k)}.webp`;
-    const path=`${root}/${folder}/image/${name}`;
-    const smallPath=`${root}/${folder}/small/${name}`;
-    images.push({ path, small_path:smallPath, url: bucketBase ? `${bucketBase.replace(/\/$/,'')}/${path}` : path, small_url: bucketBase ? `${bucketBase.replace(/\/$/,'')}/${smallPath}` : smallPath });
-  }
+  let images=[];
+  try{ if(id>0) images=r2.imageFiles(type,id,count); }catch(_){ images=[]; }
   return Object.assign({}, row, { image_count:count, image_files:images });
 }
+
+/* GM_SMARTFIT_R2_UPLOAD_V001
+ * 업로드 규칙은 services/r2.js 상단의 GM_R2_STORAGE_RULE_V001 주석을 기준으로 한다.
+ * - 현재 화면: 최대 5장
+ * - 파일명/경로: ID당 10장까지 영구 예약
+ * - DB: URL 미저장, 업로드 성공 후 image_count만 갱신
+ */
+const smartfitImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { files: 5, fileSize: 15 * 1024 * 1024 },
+  fileFilter: (_req,file,cb)=>{
+    const okType=/^image\/(jpeg|png|webp)$/i.test(String(file.mimetype||''));
+    cb(okType ? null : new Error('JPG, PNG, WEBP 이미지만 업로드할 수 있습니다.'), okType);
+  }
+});
+
+async function assertImageOwner(pool, type, id, member){
+  if(type==='space'){
+    const row=(await pool.query("SELECT space_id, owner_member_id, creator_member_id FROM gm_smartfit_space WHERE space_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id])).rows[0];
+    if(!row) throw new Error('space not found');
+    if(!(await isOwnerOrAdmin(pool,member,row.owner_member_id || row.creator_member_id))) throw new Error('permission denied');
+    return row;
+  }
+  const row=(await pool.query("SELECT template_id, creator_member_id FROM gm_smartfit_template WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id])).rows[0];
+  if(!row) throw new Error('template not found');
+  if(!(await isOwnerOrAdmin(pool,member,row.creator_member_id))) throw new Error('permission denied');
+  return row;
+}
+
+async function toWebpUnder(buffer, options){
+  const width=options.width;
+  const height=options.height;
+  const maxBytes=options.maxBytes;
+  const qualities=options.qualities || [82,76,70,64,58,52,46,40];
+  let last=null;
+  for(const quality of qualities){
+    let pipe=sharp(buffer,{ failOn:'warning' }).rotate().resize({ width, height, fit:'inside', withoutEnlargement:true });
+    last=await pipe.webp({ quality, effort:5 }).toBuffer();
+    if(last.length<=maxBytes) return last;
+  }
+  if(last && last.length<=maxBytes) return last;
+  throw new Error(`이미지 최적화 후에도 ${Math.round(maxBytes/1024)}KB를 초과합니다.`);
+}
+
+router.get('/api/gm/smartfit/r2/health', async (req,res)=>{
+  try{ ok(res,{ r2:await r2.health() }); }
+  catch(e){ fail(res,503,'r2 unavailable',{ detail:String(e.message||e) }); }
+});
+
+router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images',5), async (req,res)=>{
+  const pool=db(req);
+  try{
+    const type=r2.normalizeType(req.body.resource_type || req.body.type || req.body.mode);
+    const id=r2.normalizeId(req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id);
+    const member=s(req.body.member_id || req.body.memberId || '');
+    if(!member) return fail(res,401,'login required');
+    const files=Array.isArray(req.files) ? req.files : [];
+    if(!files.length) return fail(res,400,'images required');
+    await assertImageOwner(pool,type,id,member);
+
+    const uploaded=[];
+    for(let idx=0; idx<files.length; idx++){
+      const imageNo=idx+1;
+      const original=await toWebpUnder(files[idx].buffer,{ width:1600, height:1600, maxBytes:300*1024 });
+      const small=await toWebpUnder(files[idx].buffer,{ width:480, height:480, maxBytes:100*1024, qualities:[78,70,62,54,46,40] });
+      const imageKey=r2.keyFor(type,id,imageNo,'image');
+      const smallKey=r2.keyFor(type,id,imageNo,'small');
+      await r2.putWebp(imageKey,original);
+      await r2.putWebp(smallKey,small);
+      uploaded.push({ image_no:imageNo, path:imageKey, small_path:smallKey, url:r2.publicUrl(imageKey), small_url:r2.publicUrl(smallKey), bytes:original.length, small_bytes:small.length });
+    }
+
+    const stale=[];
+    for(let imageNo=files.length+1; imageNo<=r2.RESERVED_IMAGES_PER_ID; imageNo++){
+      stale.push(r2.keyFor(type,id,imageNo,'image'),r2.keyFor(type,id,imageNo,'small'));
+    }
+    await r2.deleteKeys(stale);
+
+    if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2',[files.length,id]);
+    else await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[files.length,id]);
+
+    ok(res,{ resource_type:type, resource_id:id, image_count:files.length, images:uploaded });
+  }catch(e){
+    fail(res,400,'image upload failed',{ detail:String(e.message||e) });
+  }
+});
+
+router.post('/api/gm/smartfit/image/delete', async (req,res)=>{
+  const pool=db(req);
+  try{
+    const b=req.body||{};
+    const type=r2.normalizeType(b.resource_type || b.type || b.mode);
+    const id=r2.normalizeId(b.resource_id || b.id || b.space_id || b.template_id);
+    const member=s(b.member_id || b.memberId || '');
+    if(!member) return fail(res,401,'login required');
+    await assertImageOwner(pool,type,id,member);
+    const keys=[];
+    for(let imageNo=1; imageNo<=r2.RESERVED_IMAGES_PER_ID; imageNo++) keys.push(r2.keyFor(type,id,imageNo,'image'),r2.keyFor(type,id,imageNo,'small'));
+    await r2.deleteKeys(keys);
+    if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=0, updated_at=CURRENT_TIMESTAMP WHERE space_id=$1',[id]);
+    else await pool.query('UPDATE gm_smartfit_template SET image_count=0, updated_at=CURRENT_TIMESTAMP WHERE template_id=$1',[id]);
+    ok(res,{ resource_type:type, resource_id:id, image_count:0, deleted:true });
+  }catch(e){ fail(res,400,'image delete failed',{ detail:String(e.message||e) }); }
+});
 
 router.get('/api/gm/smartfit/health', (req,res)=>ok(res,{ service:'smartfit', route:req.path }));
 
