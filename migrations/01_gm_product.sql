@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS gm_product (
   order_count INTEGER NOT NULL DEFAULT 0,
   order_qty_total INTEGER NOT NULL DEFAULT 0,
   product_grade TEXT,
+  smartfit_template_count BIGINT NOT NULL DEFAULT 0,
   last_seen_at TIMESTAMP,
   last_cart_at TIMESTAMP,
   last_wish_at TIMESTAMP,
@@ -131,3 +132,8 @@ ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS option_json JSONB NOT NULL DEFAU
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS detail_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS mall_category_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS product_url TEXT NOT NULL DEFAULT '';
+
+
+-- SmartFit V016: MAIN/SUB 구분 없이 공개 활성 Template 포함 수를 빠르게 표시한다.
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS smartfit_template_count BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_gm_product_smartfit_template_count_v016 ON gm_product (smartfit_template_count DESC);

@@ -1,4 +1,4 @@
--- GM SmartFit Server Schema V015
+-- GM SmartFit Server Schema V016
 -- 기준: source_lang = 작성자 현재 gm_lang. 국적 기준 저장 금지.
 -- V015: Space/Template 동시 구축. Template.space_id는 NULL 허용(미분류)이며 나중에 이동 가능.
 -- 콘텐츠 원문은 *_source / description / search_source 에 저장하고, ko 보조 검색값만 *_ko / search_ko 로 저장한다.
@@ -153,6 +153,8 @@ CREATE TABLE IF NOT EXISTS gm_smartfit_template (
   reuse_count BIGINT NOT NULL DEFAULT 0,
   build_cart_count BIGINT NOT NULL DEFAULT 0,
   item_add_count BIGINT NOT NULL DEFAULT 0,
+  purchase_count BIGINT NOT NULL DEFAULT 0,
+  ranking_score NUMERIC(20,6) NOT NULL DEFAULT 0,
   review_count BIGINT NOT NULL DEFAULT 0,
   rating_sum NUMERIC(18,2) NOT NULL DEFAULT 0,
   rating_avg NUMERIC(8,4) NOT NULL DEFAULT 0,
@@ -218,7 +220,11 @@ ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS search_fr;
 ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS search_es;
 ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS category_code;
 
-ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS purchase_count;
+-- V016 확정: 기존 테이블에도 최소 집계 컬럼만 추가한다.
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS purchase_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE gm_smartfit_template ADD COLUMN IF NOT EXISTS ranking_score NUMERIC(20,6) NOT NULL DEFAULT 0;
+
+-- purchase_count 유지: Template 경유 구매 수 집계
 ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS order_count;
 ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS sales_amount;
 ALTER TABLE gm_smartfit_template DROP COLUMN IF EXISTS cancel_count;
@@ -232,6 +238,7 @@ CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_creator_v014 ON gm_smartfit_
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_space_v014 ON gm_smartfit_template (creator_member_id, space_id, is_deleted, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_favorite_v014 ON gm_smartfit_template (creator_member_id, favorite_yn, is_deleted, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_category_v013 ON gm_smartfit_template (category_no, visibility, is_active);
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_rank_v016 ON gm_smartfit_template (ranking_score DESC, updated_at DESC) WHERE visibility='public' AND search_visible='T' AND is_active='T' AND is_deleted='F';
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_public_v013 ON gm_smartfit_template (visibility, search_visible, is_deleted, is_active, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gm_smartfit_template_trash_v013 ON gm_smartfit_template (creator_member_id, is_deleted, deleted_at DESC);
 
