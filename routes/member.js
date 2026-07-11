@@ -187,21 +187,14 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       passwordMeta ? passwordMeta.password_updated_at : null,
       passwordMeta ? passwordMeta.password_migrated : 'N'];
     const mr=await client.query(sql, vals);
-    let address=null;
-    if(p.default_zipcode || p.default_address1 || p.default_address2){
-      const a=addressPayload(Object.assign({}, b, {
-        receiver_name:p.default_receiver_name, receiver_phone:p.default_receiver_phone, receiver_mobile:p.default_receiver_mobile, zipcode:p.default_zipcode,
-        address1:p.default_address1, address2:p.default_address2, address_old:p.default_address_old, address_full:p.default_address_full,
-        sido:p.default_sido, sigungu:p.default_sigungu, eup_myeon_dong:p.default_eup_myeon_dong,
-        customs_clearance_code:p.customs_clearance_code, delivery_memo:p.delivery_memo, is_default:'Y'
-      }), p.member_id);
-      await client.query(`UPDATE gm_member_address SET is_default='N', updated_at=NOW() WHERE member_id=$1`, [p.member_id]);
-      const ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
-        ON CONFLICT (address_id) DO UPDATE SET address_name=EXCLUDED.address_name,receiver_name=EXCLUDED.receiver_name,receiver_phone=EXCLUDED.receiver_phone,receiver_mobile=EXCLUDED.receiver_mobile,zipcode=EXCLUDED.zipcode,address1=EXCLUDED.address1,address2=EXCLUDED.address2,address_old=EXCLUDED.address_old,address_full=EXCLUDED.address_full,sido=EXCLUDED.sido,sigungu=EXCLUDED.sigungu,eup_myeon_dong=EXCLUDED.eup_myeon_dong,customs_clearance_code=EXCLUDED.customs_clearance_code,delivery_memo=EXCLUDED.delivery_memo,is_default=EXCLUDED.is_default,updated_at=NOW() RETURNING *`,
-        [a.address_id,a.member_id,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
-      address=ar.rows[0];
-    }
+    // 회원 동기화는 gm_member만 갱신한다.
+    // 주문서 진입/회원 동기화 과정에서 gm_member_address를 자동 INSERT/UPDATE하지 않는다.
+    // 배송지 등록·수정은 전용 address/upsert API에서만 처리한다.
+    const ar=await client.query(`SELECT * FROM gm_member_address
+      WHERE member_id=$1
+      ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC
+      LIMIT 1`, [p.member_id]);
+    const address=ar.rows[0] || null;
     await client.query('COMMIT');
     res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address});
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
@@ -299,20 +292,48 @@ router.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/
 router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], async (req,res)=>{
   const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+
+  const givenAddressId=s(b.address_id || b.addressId || b.id || b.ma_idx);
   const a=addressPayload(b, memberId);
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
   try{
     await client.query('BEGIN');
-    if(a.is_default==='Y') await client.query(`UPDATE gm_member_address SET is_default='N', updated_at=NOW() WHERE member_id=$1`, [memberId]);
-    const ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
-      ON CONFLICT (address_id) DO UPDATE SET address_name=EXCLUDED.address_name,receiver_name=EXCLUDED.receiver_name,receiver_phone=EXCLUDED.receiver_phone,receiver_mobile=EXCLUDED.receiver_mobile,zipcode=EXCLUDED.zipcode,address1=EXCLUDED.address1,address2=EXCLUDED.address2,address_old=EXCLUDED.address_old,address_full=EXCLUDED.address_full,sido=EXCLUDED.sido,sigungu=EXCLUDED.sigungu,eup_myeon_dong=EXCLUDED.eup_myeon_dong,customs_clearance_code=EXCLUDED.customs_clearance_code,delivery_memo=EXCLUDED.delivery_memo,is_default=EXCLUDED.is_default,updated_at=NOW() RETURNING *`,
-      [a.address_id,a.member_id,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
-    if(a.is_default==='Y'){
-      await client.query(`UPDATE gm_member SET default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,default_zipcode=$5,default_address1=$6,default_address2=$7,default_address_old=$8,default_address_full=$9,default_sido=$10,default_sigungu=$11,default_eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,updated_at=NOW() WHERE member_id=$1`,
-        [memberId,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo]);
+    let ar;
+
+    if(givenAddressId){
+      // 기존 배송지 수정: 존재하는 address_id만 UPDATE한다.
+      // 잘못된/오래된 address_id를 새 배송지로 INSERT하지 않는다.
+      ar=await client.query(`UPDATE gm_member_address SET
+        address_name=$3,receiver_name=$4,receiver_phone=$5,receiver_mobile=$6,zipcode=$7,address1=$8,address2=$9,address_old=$10,address_full=$11,
+        sido=$12,sigungu=$13,eup_myeon_dong=$14,customs_clearance_code=$15,delivery_memo=$16,is_default=$17,updated_at=NOW()
+        WHERE address_id=$1 AND member_id=$2
+        RETURNING *`,
+        [givenAddressId,memberId,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
+      if(!ar.rowCount){
+        await client.query('ROLLBACK');
+        return res.status(404).json({ok:false,error:'address_id not found; use a new-address request without address_id'});
+      }
+    }else{
+      // 새 배송지 추가: address_id가 없는 명시적 추가 요청에서만 INSERT한다.
+      // 동일 회원·동일 주소는 fingerprint 기반 address_id로 중복 생성하지 않는다.
+      ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
+        ON CONFLICT (address_id) DO UPDATE SET
+          address_name=EXCLUDED.address_name,receiver_name=EXCLUDED.receiver_name,receiver_phone=EXCLUDED.receiver_phone,receiver_mobile=EXCLUDED.receiver_mobile,
+          zipcode=EXCLUDED.zipcode,address1=EXCLUDED.address1,address2=EXCLUDED.address2,address_old=EXCLUDED.address_old,address_full=EXCLUDED.address_full,
+          sido=EXCLUDED.sido,sigungu=EXCLUDED.sigungu,eup_myeon_dong=EXCLUDED.eup_myeon_dong,customs_clearance_code=EXCLUDED.customs_clearance_code,
+          delivery_memo=EXCLUDED.delivery_memo,is_default=EXCLUDED.is_default,updated_at=NOW()
+        RETURNING *`,
+        [a.address_id,a.member_id,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
     }
-    await client.query('COMMIT'); res.json({ok:true,address:ar.rows[0]});
+
+    const saved=ar.rows[0];
+    if(saved.is_default==='Y') await client.query(`UPDATE gm_member_address SET is_default='N', updated_at=NOW() WHERE member_id=$1 AND address_id<>$2`, [memberId,saved.address_id]);
+    if(saved.is_default==='Y'){
+      await client.query(`UPDATE gm_member SET default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,default_zipcode=$5,default_address1=$6,default_address2=$7,default_address_old=$8,default_address_full=$9,default_sido=$10,default_sigungu=$11,default_eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,updated_at=NOW() WHERE member_id=$1`,
+        [memberId,saved.receiver_name,saved.receiver_phone,saved.receiver_mobile,saved.zipcode,saved.address1,saved.address2,saved.address_old,saved.address_full,saved.sido,saved.sigungu,saved.eup_myeon_dong,saved.customs_clearance_code,saved.delivery_memo]);
+    }
+    await client.query('COMMIT'); res.json({ok:true,address:saved,action:givenAddressId?'updated':'created'});
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
   finally{ client.release(); }
 });
@@ -321,6 +342,13 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
 router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (req,res)=>{
   const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+
+  // 주문서 진입·회원 자동 동기화에서는 주소록을 생성/삭제하지 않는다.
+  // 주소록 전체 동기화는 관리 화면에서 명시적으로 address_sync_yn=Y를 보낸 경우에만 허용한다.
+  const explicitSync = yn(b.address_sync_yn || b.sync_addresses_yn || b.explicit_sync_yn) === 'Y';
+  if(!explicitSync){
+    return res.json({ok:true,skipped:true,reason:'explicit address_sync_yn=Y is required'});
+  }
   const input = Array.isArray(b.addresses) ? b.addresses : [];
   const currentRaw = b.current_address && typeof b.current_address === 'object' ? b.current_address : null;
   const rawList = input.slice();

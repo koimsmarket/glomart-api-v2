@@ -20,13 +20,68 @@ function pickMeta(payload){
   const related=uniq(m.relatedKeywords||m.related_keywords||p.relatedKeywords||p.related_keywords||p.suggestKeywords||p.suggest_keywords||p.recommendKeywords||p.recommend_keywords||[]);
   return {gm_lang,keyword_ko,related};
 }
-async function ensureRelationTable(pool){
+let relationSchemaReadyPromise = null;
+async function reconcileRelationTable(pool){
+  // Existing databases may already have the old 30-column table and migration 26
+  // is not re-run automatically. Reconcile it in place once per server process.
   await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_relation (
-    gm_lang VARCHAR(10) NOT NULL,
-    keyword_ko TEXT NOT NULL,
-    related_keyword_ko TEXT NOT NULL,
-    PRIMARY KEY (gm_lang, keyword_ko, related_keyword_ko)
+    gm_lang VARCHAR(10),
+    keyword_ko TEXT,
+    related_keyword_ko TEXT
   )`);
+  await pool.query('ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS gm_lang VARCHAR(10)');
+  await pool.query('ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS keyword_ko TEXT');
+  await pool.query('ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS related_keyword_ko TEXT');
+
+  await pool.query(`DO $$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='keyword') THEN
+      EXECUTE 'UPDATE gm_keyword_relation SET keyword_ko=COALESCE(NULLIF(BTRIM(keyword_ko),''''),NULLIF(BTRIM(keyword::text),'''')) WHERE keyword_ko IS NULL OR BTRIM(keyword_ko)=''''';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='related_keyword') THEN
+      EXECUTE 'UPDATE gm_keyword_relation SET related_keyword_ko=COALESCE(NULLIF(BTRIM(related_keyword_ko),''''),NULLIF(BTRIM(related_keyword::text),'''')) WHERE related_keyword_ko IS NULL OR BTRIM(related_keyword_ko)=''''';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='lang') THEN
+      EXECUTE 'UPDATE gm_keyword_relation SET gm_lang=COALESCE(NULLIF(BTRIM(gm_lang),''''),NULLIF(BTRIM(lang::text),'''')) WHERE gm_lang IS NULL OR BTRIM(gm_lang)=''''';
+    END IF;
+  END $$`);
+
+  await pool.query(`UPDATE gm_keyword_relation
+    SET gm_lang=CASE WHEN COALESCE(keyword_ko,'') ~ '[가-힣]' THEN 'ko' ELSE 'en' END
+    WHERE gm_lang IS NULL OR BTRIM(gm_lang)=''`);
+  await pool.query(`UPDATE gm_keyword_relation SET gm_lang=LOWER(SPLIT_PART(REPLACE(gm_lang,'_','-'),'-',1))`);
+  await pool.query(`UPDATE gm_keyword_relation SET gm_lang=CASE gm_lang WHEN 'kr' THEN 'ko' WHEN 'cn' THEN 'zh' WHEN 'jp' THEN 'ja' WHEN 'vn' THEN 'vi' ELSE gm_lang END`);
+  await pool.query(`DELETE FROM gm_keyword_relation WHERE COALESCE(BTRIM(keyword_ko),'')='' OR COALESCE(BTRIM(related_keyword_ko),'')=''`);
+  await pool.query(`DELETE FROM gm_keyword_relation a USING gm_keyword_relation b
+    WHERE a.ctid < b.ctid AND a.gm_lang=b.gm_lang AND a.keyword_ko=b.keyword_ko AND a.related_keyword_ko=b.related_keyword_ko`);
+
+  await pool.query(`DO $$
+  DECLARE c RECORD; r RECORD;
+  BEGIN
+    FOR r IN SELECT conname FROM pg_constraint WHERE conrelid='gm_keyword_relation'::regclass AND contype IN ('p','u') LOOP
+      EXECUTE format('ALTER TABLE gm_keyword_relation DROP CONSTRAINT IF EXISTS %I',r.conname);
+    END LOOP;
+    FOR c IN SELECT column_name FROM information_schema.columns
+      WHERE table_schema=current_schema() AND table_name='gm_keyword_relation'
+        AND column_name NOT IN ('gm_lang','keyword_ko','related_keyword_ko')
+    LOOP
+      EXECUTE format('ALTER TABLE gm_keyword_relation DROP COLUMN IF EXISTS %I CASCADE',c.column_name);
+    END LOOP;
+  END $$`);
+  await pool.query('ALTER TABLE gm_keyword_relation ALTER COLUMN gm_lang SET NOT NULL');
+  await pool.query('ALTER TABLE gm_keyword_relation ALTER COLUMN keyword_ko SET NOT NULL');
+  await pool.query('ALTER TABLE gm_keyword_relation ALTER COLUMN related_keyword_ko SET NOT NULL');
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='gm_keyword_relation'::regclass AND conname='gm_keyword_relation_pkey') THEN
+      ALTER TABLE gm_keyword_relation ADD CONSTRAINT gm_keyword_relation_pkey PRIMARY KEY (gm_lang,keyword_ko,related_keyword_ko);
+    END IF;
+  END $$`);
+}
+async function ensureRelationTable(pool){
+  if(!relationSchemaReadyPromise){
+    relationSchemaReadyPromise=reconcileRelationTable(pool).catch(err=>{ relationSchemaReadyPromise=null; throw err; });
+  }
+  return relationSchemaReadyPromise;
 }
 function normalizeRows(params){
   const p=params||{}; const meta=pickMeta(p); const rows=[]; const seen=new Set();
@@ -36,13 +91,13 @@ function normalizeRows(params){
     const gm_lang=normalizeLang(r.gm_lang||r.gmLang||r.lang||meta.gm_lang);
     const keyword_ko=cleanText(r.keyword_ko||r.keywordKo||r.keyword||r.mainKeyword||meta.keyword_ko);
     const related_keyword_ko=cleanText(r.related_keyword_ko||r.relatedKeywordKo||r.related_keyword||r.relatedKeyword||r.value||r.text||'');
-    if(!keyword_ko||!related_keyword_ko||norm(keyword_ko)===norm(related_keyword_ko)) return;
+    if(!keyword_ko||!related_keyword_ko) return;
     const sig=gm_lang+'|'+norm(keyword_ko)+'|'+norm(related_keyword_ko);
     if(seen.has(sig)) return; seen.add(sig); rows.push({gm_lang,keyword_ko,related_keyword_ko});
   }
   inputRows.forEach(push);
   meta.related.forEach(v=>push({gm_lang:meta.gm_lang,keyword_ko:meta.keyword_ko,related_keyword_ko:v}));
-  return rows.slice(0,100);
+  return rows.slice(0,5000);
 }
 async function saveRelations(pool, params){
   await ensureRelationTable(pool);

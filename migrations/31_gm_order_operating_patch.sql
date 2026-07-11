@@ -7,7 +7,6 @@ BEGIN;
 -- 주문 테스트 데이터 초기화: 주문 저장 검증을 위해 기존 쓰레기 데이터 제거
 TRUNCATE TABLE gm_order_item RESTART IDENTITY CASCADE;
 TRUNCATE TABLE gm_order RESTART IDENTITY CASCADE;
-TRUNCATE TABLE gm_member_address RESTART IDENTITY CASCADE;
 
 -- gm_order: 배송지 선택 참조용 address_id만 추가. 도로명/건물번호 분리는 주문서 주소검색 작업에서 별도 처리
 ALTER TABLE gm_order ADD COLUMN IF NOT EXISTS address_id VARCHAR(80);
@@ -27,7 +26,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_order_item_order_source_uid
   ON gm_order_item(order_no, source_uid)
   WHERE source_uid IS NOT NULL AND source_uid <> '';
 
--- gm_member_address: 주문 시 INSERT 금지. 기존 쓰레기 주소는 위 TRUNCATE로 제거.
+-- gm_member_address: 주문 시 INSERT 금지. 회원 배송지는 서버 재시작/배포 시 보존한다.
 ALTER TABLE gm_member_address ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP;
 CREATE INDEX IF NOT EXISTS idx_gm_member_address_member_last_used
   ON gm_member_address(member_id, last_used_at DESC);
