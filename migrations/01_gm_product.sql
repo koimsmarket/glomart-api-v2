@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS gm_product (
   delivery_fee INTEGER,
   delivery_eta_text TEXT,
   delivery_type TEXT,
+  jeju_delivery_yn TEXT NOT NULL DEFAULT 'T',
+  jeju_extra_delivery_fee INTEGER NOT NULL DEFAULT 0,
+  island_delivery_yn TEXT NOT NULL DEFAULT 'T',
+  island_extra_delivery_fee INTEGER NOT NULL DEFAULT 0,
   tax_type TEXT,
   overseas_direct_yn TEXT NOT NULL DEFAULT 'N',
   review_count INTEGER,
@@ -132,6 +136,10 @@ ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS option_json JSONB NOT NULL DEFAU
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS detail_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS mall_category_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS product_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS jeju_delivery_yn TEXT NOT NULL DEFAULT 'T';
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS jeju_extra_delivery_fee INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS island_delivery_yn TEXT NOT NULL DEFAULT 'T';
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS island_extra_delivery_fee INTEGER NOT NULL DEFAULT 0;
 
 
 -- SmartFit V016: MAIN/SUB 구분 없이 공개 활성 Template 포함 수를 빠르게 표시한다.
