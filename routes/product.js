@@ -577,13 +577,14 @@ async function saveKeywordTranslatePayload(pool, payload){
   };
 }
 async function ensureKeywordRelationSchema(pool){
-  // 운영 DB 보호: 테이블 drop 없이 필요한 컬럼만 안전 추가한다.
-  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_complete CHAR(1) NOT NULL DEFAULT 'F'`); }catch(e){}
-  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_updated_at DATE`); }catch(e){}
-}
-function keywordRelationComplete(trans){
-  trans = trans || {};
-  return KEYWORD_LANGS.filter(l => l !== 'ko').every(lang => !!cleanText(trans[lang] || '')) ? 'T' : 'F';
+  // 확정 구조: gm_keyword_relation은 아래 3개 필드만 사용한다.
+  // 기존 데이터는 보존하고, 컬럼 삭제는 운영 migration에서 수행한다.
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_relation (
+    category_main_keyword_ko TEXT NOT NULL DEFAULT '',
+    keyword_ko TEXT NOT NULL,
+    related_keyword_ko TEXT NOT NULL,
+    PRIMARY KEY (keyword_ko, related_keyword_ko)
+  )`);
 }
 async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
   keywordKo = cleanText(keywordKo);
@@ -591,32 +592,19 @@ async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
   if(!keywordKo || !relatedKo) return false;
   await ensureKeywordRelationSchema(pool);
   const categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
-  const trans = enrichTranslationKo(options.translations || {}, relatedKo);
-  const complete = keywordRelationComplete(trans);
-  const cols = ['category_main_keyword_ko','keyword_ko','related_keyword_ko'];
-  const vals = [categoryMainKeywordKo, keywordKo, relatedKo];
-  KEYWORD_LANGS.filter(l => l !== 'ko').forEach(lang => {
-    cols.push('related_keyword_' + lang);
-    vals.push(cleanText(trans[lang] || ''));
-  });
-  cols.push('translate_complete'); vals.push(complete);
-  cols.push('translate_updated_at'); vals.push(complete === 'T' ? new Date().toISOString().slice(0,10) : null);
-  const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
-  const langCols = KEYWORD_LANGS.filter(l => l !== 'ko').map(l => 'related_keyword_' + l);
-  const updateParts = [];
-  updateParts.push(`category_main_keyword_ko=CASE WHEN EXCLUDED.category_main_keyword_ko IS NULL OR EXCLUDED.category_main_keyword_ko::text='' THEN gm_keyword_relation.category_main_keyword_ko ELSE EXCLUDED.category_main_keyword_ko END`);
-  langCols.forEach(c => {
-    // 기존 row가 있어도 번역 컬럼이 비어 있고 EXCLUDED가 값을 가져오면 반드시 보강한다.
-    updateParts.push(`${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END`);
-  });
-  updateParts.push(`translate_complete=CASE WHEN ${langCols.map(c => `(CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END) IS NOT NULL AND (CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END)::text<>''`).join(' AND ')} THEN 'T' ELSE 'F' END`);
-  updateParts.push(`translate_updated_at=CASE WHEN ${langCols.map(c => `(CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END) IS NOT NULL AND (CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END)::text<>''`).join(' AND ')} THEN CURRENT_DATE ELSE gm_keyword_relation.translate_updated_at END`);
-  updateParts.push(`updated_at=CURRENT_DATE`);
-  const sql = `INSERT INTO gm_keyword_relation (${cols.join(',')}) VALUES (${placeholders})
+  await pool.query(`
+    INSERT INTO gm_keyword_relation (
+      category_main_keyword_ko,
+      keyword_ko,
+      related_keyword_ko
+    ) VALUES ($1,$2,$3)
     ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET
-      ${updateParts.join(',\n      ')}`;
-  await pool.query(sql, vals);
-  try{ if(complete !== 'T') console.log('[GM_KEYWORD_RELATION_PENDING]', { keyword_ko:keywordKo, related_keyword_ko:relatedKo, complete }); }catch(_log){}
+      category_main_keyword_ko = CASE
+        WHEN EXCLUDED.category_main_keyword_ko IS NULL OR EXCLUDED.category_main_keyword_ko::text=''
+        THEN gm_keyword_relation.category_main_keyword_ko
+        ELSE EXCLUDED.category_main_keyword_ko
+      END
+  `, [categoryMainKeywordKo, keywordKo, relatedKo]);
   return true;
 }
 async function saveKeywordRelationStats(pool, keywordKo, relatedKo, categoryMainKeywordKo){
@@ -1987,26 +1975,19 @@ router.post('/api/gm/keyword/relation/status', async (req,res)=>{
     }
     const r = await pool.query(`
       SELECT v.related_keyword_ko,
-             COALESCE(gr.translate_complete,'F') AS translate_complete,
-             gr.related_keyword_en, gr.related_keyword_zh, gr.related_keyword_vi, gr.related_keyword_ja, gr.related_keyword_tw,
-             gr.related_keyword_th, gr.related_keyword_uz, gr.related_keyword_ne, gr.related_keyword_km, gr.related_keyword_id,
-             gr.related_keyword_tl, gr.related_keyword_mn, gr.related_keyword_my, gr.related_keyword_kk, gr.related_keyword_si,
-             gr.related_keyword_ru, gr.related_keyword_bn, gr.related_keyword_ur, gr.related_keyword_lo, gr.related_keyword_hi,
-             gr.related_keyword_tr, gr.related_keyword_fa, gr.related_keyword_es, gr.related_keyword_fr
+             CASE WHEN gr.related_keyword_ko IS NULL THEN 'F' ELSE 'T' END AS saved
       FROM unnest($2::text[]) AS v(related_keyword_ko)
       LEFT JOIN gm_keyword_relation gr
         ON gr.keyword_ko=$1 AND gr.related_keyword_ko=v.related_keyword_ko
     `, [keywordKo, related]);
-    const langCols = KEYWORD_LANGS.filter(l => l !== 'ko').map(l => 'related_keyword_' + l);
     const pending=[], complete=[], missing=[];
     for(const row of (r.rows||[])){
       const rk = cleanText(row.related_keyword_ko);
-      const done = cleanText(row.translate_complete).toUpperCase() === 'T' && langCols.every(c => !!cleanText(row[c] || ''));
-      if(done) complete.push(rk);
-      else { pending.push(rk); missing.push({ related_keyword_ko:rk, translate_complete:cleanText(row.translate_complete)||'F' }); }
+      if(cleanText(row.saved).toUpperCase()==='T') complete.push(rk);
+      else { pending.push(rk); missing.push({ related_keyword_ko:rk, saved:'F' }); }
     }
-    try{ console.log('[GM_KEYWORD_RELATION_STATUS]', { keyword_ko:keywordKo, related_count:related.length, pending:pending.length, complete:complete.length }); }catch(_l){}
-    return ok(res, { mainKeyword:keywordKo, keyword_ko:keywordKo, related_count:related.length, pending, complete, pending_count:pending.length, complete_count:complete.length, missing });
+    try{ console.log('[GM_KEYWORD_RELATION_STATUS]', { keyword_ko:keywordKo, related_count:related.length, pending:pending.length, complete:complete.length, mode:'three-fields' }); }catch(_l){}
+    return ok(res, { mainKeyword:keywordKo, keyword_ko:keywordKo, related_count:related.length, pending, complete, pending_count:pending.length, complete_count:complete.length, missing, mode:'three-fields' });
   }catch(e){
     console.error('[GM_KEYWORD_RELATION_STATUS_ERROR]', e);
     return fail(res, 500, 'keyword relation status failed', { detail:String(e && e.message || e) });
