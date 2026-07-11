@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const keywordRelation = require('../services/keyword_relation');
 
 /* GM_SEARCH_KEYWORD_ROUTE_V018_RELATION_3COL_SIMPLE
  * External search keyword normalization only.
@@ -196,47 +197,65 @@ async function normalizeKeyword(pool, params){
 }
 
 
-function relationNorm(v){ return norm(v); }
-function normalizeRelationLang(v){ return normalizeLang(v); }
-function normalizeRelationRows(params){
-  const p = params || {};
-  const inputRows = Array.isArray(p.rows) ? p.rows : (Array.isArray(p.relatedKeywordRows) ? p.relatedKeywordRows : []);
-  const baseLang = normalizeRelationLang(p.gm_lang || p.gmLang || p.lang || p.keyword_lang_code || p.keywordLangCode || 'ko');
-  const baseKeyword = cleanText(p.keyword || p.mainKeyword || p.main_keyword || p.mainKeywordKo || p.keyword_ko || p.inputKeyword || p.input_keyword || '');
-  const related = Array.isArray(p.relatedKeywords) ? p.relatedKeywords : [];
-  const rows = [];
-  const seen = new Set();
-  function push(row){
-    const gmLang = normalizeRelationLang(row.gm_lang || row.gmLang || row.lang || baseLang);
-    const keyword = cleanText(row.keyword || row.keyword_ko || row.mainKeyword || baseKeyword);
-    const relatedKeyword = cleanText(row.related_keyword || row.relatedKeyword || row.related_keyword_ko || row.relatedKeywordKo || row.value || row.text || '');
-    if(!gmLang || !keyword || !relatedKeyword) return;
-    if(relationNorm(keyword) === relationNorm(relatedKeyword)) return;
-    const sig = gmLang + '|' + relationNorm(keyword) + '|' + relationNorm(relatedKeyword);
-    if(seen.has(sig)) return;
-    seen.add(sig);
-    rows.push({ gm_lang:gmLang, keyword, related_keyword:relatedKeyword });
+async function relationHandler(req,res){
+  const pool = db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const params = Object.assign({}, req.query || {}, req.body || {});
+  try{
+    const out = await keywordRelation.saveRelations(pool, params);
+    try{ console.log('[GM_KEYWORD_RELATION_SAVE_3COL]', out); }catch(_log){}
+    return res.json(Object.assign({ route_version:VERSION }, out));
+  }catch(e){
+    console.error('[GM_KEYWORD_RELATION_SAVE_3COL_ERROR]', String(e && e.message || e));
+    return fail(res, 500, 'keyword relation save failed', { detail:String(e && e.message || e) });
   }
-  inputRows.forEach(r => push(r || {}));
-  related.forEach(v => push({ gm_lang:baseLang, keyword:baseKeyword, related_keyword:(typeof v === 'string' ? v : (v && (v.related_keyword || v.relatedKeyword || v.value || v.text || v.keyword)) || '') }));
-  return rows.slice(0,100);
 }
-async function saveKeywordRelation(pool, params){
-  const rows = normalizeRelationRows(params);
-  if(!rows.length) return { ok:true, route_version:VERSION, saved:0, updated:0, skipped:true, reason:'no_relation_rows' };
-  let saved = 0, updated = 0;
-  for(const row of rows){
-    const sql = `
-      INSERT INTO gm_keyword_relation (gm_lang, keyword, related_keyword, hit_count, complete, created_at, updated_at)
-      VALUES ($1,$2,$3,1,'F',NOW(),NOW())
-      ON CONFLICT (gm_lang, keyword, related_keyword)
-      DO UPDATE SET hit_count = COALESCE(gm_keyword_relation.hit_count,0) + 1, updated_at = NOW()
-      RETURNING (xmax = 0) AS inserted`;
-    const r = await safeQuery(pool, sql, [row.gm_lang, row.keyword, row.related_keyword]);
-    if(r.rows && r.rows[0] && r.rows[0].inserted) saved++; else updated++;
+
+async function relationStatusHandler(req,res){
+  const pool = db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const params = Object.assign({}, req.query || {}, req.body || {});
+  try{
+    const out = await keywordRelation.relationStatus(pool, params);
+    try{ console.log('[GM_KEYWORD_RELATION_STATUS_3COL]', { gm_lang:out.gm_lang, keyword_ko:out.keyword_ko, related_count:out.related_count, pending_count:out.pending_count, complete_count:out.complete_count }); }catch(_log){}
+    return res.json(Object.assign({ route_version:VERSION }, out));
+  }catch(e){
+    console.error('[GM_KEYWORD_RELATION_STATUS_ERROR]', String(e && e.message || e));
+    return fail(res, 500, 'keyword relation status failed', { detail:String(e && e.message || e) });
   }
-  try{ console.log('[GM_KEYWORD_RELATION_SAVE_3COL_V018]', { count:rows.length, saved, updated }); }catch(_log){}
-  return { ok:true, route_version:VERSION, received:rows.length, saved, updated };
+}
+
+async function keywordTranslateHandler(req,res){
+  const pool = db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const params = Object.assign({}, req.query || {}, req.body || {});
+  try{
+    const out = await keywordRelation.saveKeywordTranslate(pool, params);
+    return res.json(Object.assign({ ok:true, route_version:VERSION }, out));
+  }catch(e){
+    console.error('[GM_KEYWORD_TRANSLATE_SAVE_ERROR]', String(e && e.message || e));
+    return fail(res, 500, 'keyword translate save failed', { detail:String(e && e.message || e) });
+  }
+}
+
+async function keywordLookupHandler(req,res){
+  const pool = db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const params = Object.assign({}, req.query || {}, req.body || {});
+  const input = cleanText(params.input_keyword || params.keyword || params.q || '');
+  const lang = normalizeLang(params.lang || params.gm_lang || 'ko');
+  if(!input) return fail(res, 400, 'input_keyword required');
+  try{
+    await keywordRelation.ensureTranslateTable(pool);
+    const r = await safeQuery(pool, `SELECT lang,input_keyword,main_keyword_ko,keyword_ko,hit_count,updated_at
+      FROM gm_keyword_translate
+      WHERE input_keyword=$1 OR keyword_${lang}=$1 OR main_keyword_ko=$1 OR keyword_ko=$1
+      ORDER BY CASE WHEN keyword_${lang}=$1 THEN 0 WHEN input_keyword=$1 THEN 1 ELSE 2 END, hit_count DESC, updated_at DESC NULLS LAST
+      LIMIT 1`, [input]);
+    return res.json({ ok:true, route_version:VERSION, found:!!r.rows[0], item:r.rows[0]||null });
+  }catch(e){
+    return fail(res, 500, 'keyword lookup failed', { detail:String(e && e.message || e) });
+  }
 }
 
 async function existingKeywordHandler(req,res){
@@ -274,14 +293,6 @@ async function existingKeywordHandler(req,res){
   }
 }
 
-async function relationHandler(req,res){
-  const pool = db(req);
-  if(!pool) return fail(res, 500, 'DB pool is not attached');
-  const params = Object.assign({}, req.query || {}, req.body || {});
-  try{ return res.json(await saveKeywordRelation(pool, params)); }
-  catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_3COL_ERROR]', String(e && e.message || e)); return fail(res, 500, 'keyword relation save failed', { detail:String(e && e.message || e) }); }
-}
-
 async function handler(req,res){
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
@@ -301,10 +312,14 @@ router.all('/api/gm/search/keyword/exists', existingKeywordHandler);
 router.all('/api/gm/search/keyword', handler);
 router.all('/api/gm/keyword/relation', relationHandler);
 router.all('/api/gm/search/keyword/relation', relationHandler);
+router.all('/api/gm/keyword/relation/status', relationStatusHandler);
+router.all('/api/gm/search/keyword/relation/status', relationStatusHandler);
+router.all('/api/gm/keyword/translate', keywordTranslateHandler);
+router.all('/api/gm/keyword/lookup', keywordLookupHandler);
 router.all('/api/gm/search/keyword/normalize', handler);
 router.all('/api/gm/search/normalize-keyword', handler);
 router.all('/api/gm/search/keyword-normalize', handler);
 
 router.normalizeKeyword = normalizeKeyword;
-router.saveKeywordRelation = saveKeywordRelation;
+router.saveKeywordRelation = keywordRelation.saveRelations;
 module.exports = router;
