@@ -1076,6 +1076,7 @@ function detailSignalStats(optionJson, thumbJson, detailJson, p){
 }
 async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee){
   const stats = detailSignalStats(optionJson, thumbJson, detailJson, p);
+  const remoteDelivery = normalizeRemoteDeliveryPolicy(p);
   const hasDetail = stats.option_count > 0 || stats.thumb_count > 1 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
   if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats, id };
   const q = `
@@ -1113,13 +1114,18 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       return_policy_text = COALESCE(NULLIF($24,''), return_policy_text),
       exchange_policy_text = COALESCE(NULLIF($25,''), exchange_policy_text),
       return_shipping_fee = CASE WHEN $26::int > 0 THEN $26::int ELSE return_shipping_fee END,
+      jeju_delivery_yn = $27,
+      jeju_extra_delivery_fee = CASE WHEN $27='F' THEN 0 ELSE GREATEST(0,$28::int) END,
+      island_delivery_yn = $29,
+      island_extra_delivery_fee = CASE WHEN $29='F' THEN 0 ELSE GREATEST(0,$30::int) END,
       updated_at = now()
-    WHERE product_uid = $1 OR (mall_code=$27 AND pi_ii_vi=$28)
+    WHERE product_uid = $1 OR (mall_code=$31 AND pi_ii_vi=$32)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
       CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
       COALESCE(NULLIF(detail_json->>'block_count','')::int,0) AS detail_block_count,
-      supplier_name, cp_fix_code, cp_match, buyable_qty, return_shipping_fee
+      supplier_name, cp_fix_code, cp_match, buyable_qty, return_shipping_fee,
+      jeju_delivery_yn, jeju_extra_delivery_fee, island_delivery_yn, island_extra_delivery_fee
   `;
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
@@ -1140,6 +1146,8 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
     returnFee || 0,
+    remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
+    remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
     cleanText(id.mallCode || ''), cleanText(id.pi || '')
   ];
   const r = await pool.query(q, vals);
@@ -1181,7 +1189,8 @@ function normalizeMallCategoryJson(p){
     if(!id && !name) return;
     const sig=(id||'')+'|'+name;
     if(seen.has(sig)) return; seen.add(sig);
-    out.push({ depth: depth, id, cp_code:id, name, name_ko:name, href });
+    // DB에는 카테고리 경로 복원에 필요한 최소값만 저장한다.
+    out.push({ depth: depth, id, name });
   });
   return out;
 }
@@ -1680,6 +1689,19 @@ function pickReturnShippingFee(p, mallSalePrice){
   return 0;
 }
 
+
+function normalizeRemoteDeliveryPolicy(p){
+  p = p || {};
+  const jejuYn = cleanText(p.jeju_delivery_yn ?? p.jejuDeliveryYn ?? 'T').toUpperCase() === 'F' ? 'F' : 'T';
+  const islandYn = cleanText(p.island_delivery_yn ?? p.islandDeliveryYn ?? 'T').toUpperCase() === 'F' ? 'F' : 'T';
+  return {
+    jeju_delivery_yn: jejuYn,
+    jeju_extra_delivery_fee: jejuYn === 'F' ? 0 : Math.max(0, parseMoney(p.jeju_extra_delivery_fee ?? p.jejuExtraDeliveryFee ?? 0, 0)),
+    island_delivery_yn: islandYn,
+    island_extra_delivery_fee: islandYn === 'F' ? 0 : Math.max(0, parseMoney(p.island_extra_delivery_fee ?? p.islandExtraDeliveryFee ?? 0, 0))
+  };
+}
+
 async function upsertProduct(pool, raw, parent={}){
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
@@ -1741,6 +1763,7 @@ async function upsertProduct(pool, raw, parent={}){
   const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
+  const remoteDelivery = normalizeRemoteDeliveryPolicy(p);
 
   const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
   try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
@@ -1749,7 +1772,8 @@ async function upsertProduct(pool, raw, parent={}){
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
     'mall_category','mall_category_json','cp_selected_code','cp_fix_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
     'product_name','mall_product_name','option_count','option_json','thumb_json','detail_json','seasonal_text',
-    'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type','tax_type','overseas_direct_yn',
+    'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type',
+    'jeju_delivery_yn','jeju_extra_delivery_fee','island_delivery_yn','island_extra_delivery_fee','tax_type','overseas_direct_yn',
     'review_count','mall_sales_count','certification_no_1','certification_no_2',
     'supplier_id','supplier_name','business_number','online_sales_number','ceo_name','supplier_mobile','supplier_phone','supplier_email','supplier_address',
     'product_url','thumb_origin_url','soldout_yn','hit_count','sale_status','product_grade',
@@ -1766,8 +1790,9 @@ async function upsertProduct(pool, raw, parent={}){
     '$25','$26','$27','$28','$29','$30','$31','$32',
     '$33','$34','$35','$36','$37','$38','$39','$40',
     '$41','$42','$43','$44','$45','$46','$47','$48',
-    '$49','$50','1','$51','$52','$53','$54','$55',
+    '$49','$50','$51','$52','1','$53','$54','$55',
     '$56','$57','$58','$59','$60','$61','$62','$63',
+    '$64','$65','$66','$67',
     'now()','now()','now()'
   ];
   const sql = `
@@ -1819,6 +1844,10 @@ async function upsertProduct(pool, raw, parent={}){
       delivery_fee=EXCLUDED.delivery_fee,
       delivery_eta_text=EXCLUDED.delivery_eta_text,
       delivery_type=EXCLUDED.delivery_type,
+      jeju_delivery_yn=EXCLUDED.jeju_delivery_yn,
+      jeju_extra_delivery_fee=CASE WHEN EXCLUDED.jeju_delivery_yn='F' THEN 0 ELSE EXCLUDED.jeju_extra_delivery_fee END,
+      island_delivery_yn=EXCLUDED.island_delivery_yn,
+      island_extra_delivery_fee=CASE WHEN EXCLUDED.island_delivery_yn='F' THEN 0 ELSE EXCLUDED.island_extra_delivery_fee END,
       tax_type=COALESCE(NULLIF(EXCLUDED.tax_type,''), gm_product.tax_type),
       review_count=EXCLUDED.review_count,
       mall_sales_count=EXCLUDED.mall_sales_count,
@@ -1866,8 +1895,10 @@ async function upsertProduct(pool, raw, parent={}){
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     productOptionLinkJson ? safeJsonString(productOptionLinkJson) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
-    pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
-    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
+    pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p),
+    remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
+    remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
+    taxType, cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
     cleanText(p.certification_no_1 || p.certificationNo1 || ''), cleanText(p.certification_no_2 || p.certificationNo2 || ''),
     standardCoupangSupplier ? '' : pickSupplierId(p), standardCoupangSupplier ? '' : pickSupplierName(p),
     standardCoupangSupplier ? '' : pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
@@ -1897,6 +1928,14 @@ async function upsertProduct(pool, raw, parent={}){
     throw e;
   }
   try{ console.log('[GM_PRODUCT_UPSERT_TRACE_OUT]', { uid:id.uid, row:(r.rows&&r.rows[0])||null }); }catch(_trace){}
+  try{ console.log('[GM_PRODUCT_REMOTE_DELIVERY_SAVE]', {
+    product_uid:id.uid,
+    jeju_delivery_yn:remoteDelivery.jeju_delivery_yn,
+    jeju_extra_delivery_fee:remoteDelivery.jeju_extra_delivery_fee,
+    island_delivery_yn:remoteDelivery.island_delivery_yn,
+    island_extra_delivery_fee:remoteDelivery.island_extra_delivery_fee,
+    return_shipping_fee:returnFee
+  }); }catch(_trace){}
   let cp_learning = null;
   try{
     cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
