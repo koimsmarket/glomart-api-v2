@@ -35,9 +35,9 @@ CREATE TABLE IF NOT EXISTS gm_product (
   delivery_fee INTEGER,
   delivery_eta_text TEXT,
   delivery_type TEXT,
-  jeju_delivery_yn TEXT NOT NULL DEFAULT 'T',
+  jeju_delivery_yn TEXT NOT NULL DEFAULT 'F',
   jeju_extra_delivery_fee INTEGER NOT NULL DEFAULT 0,
-  island_delivery_yn TEXT NOT NULL DEFAULT 'T',
+  island_delivery_yn TEXT NOT NULL DEFAULT 'F',
   island_extra_delivery_fee INTEGER NOT NULL DEFAULT 0,
   tax_type TEXT,
   overseas_direct_yn TEXT NOT NULL DEFAULT 'N',
@@ -136,12 +136,98 @@ ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS option_json JSONB NOT NULL DEFAU
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS detail_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS mall_category_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS product_url TEXT NOT NULL DEFAULT '';
-ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS jeju_delivery_yn TEXT NOT NULL DEFAULT 'T';
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS jeju_delivery_yn TEXT NOT NULL DEFAULT 'F';
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS jeju_extra_delivery_fee INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS island_delivery_yn TEXT NOT NULL DEFAULT 'T';
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS island_delivery_yn TEXT NOT NULL DEFAULT 'F';
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS island_extra_delivery_fee INTEGER NOT NULL DEFAULT 0;
 
 
 -- SmartFit V016: MAIN/SUB 구분 없이 공개 활성 Template 포함 수를 빠르게 표시한다.
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS smartfit_template_count BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_gm_product_smartfit_template_count_v016 ON gm_product (smartfit_template_count DESC);
+
+-- 제주/도서산간 배송상태 최종 규칙
+-- Y = 추가배송비 있음, N = 배송 불가, F = 무료배송
+-- 기존 T/F 이진 구조가 확인될 때만 기존값을 1회 변환한다.
+DO $$
+DECLARE
+  jeju_default text;
+  island_default text;
+  legacy_schema boolean := false;
+BEGIN
+  SELECT column_default INTO jeju_default
+  FROM information_schema.columns
+  WHERE table_schema = current_schema()
+    AND table_name = 'gm_product'
+    AND column_name = 'jeju_delivery_yn';
+
+  SELECT column_default INTO island_default
+  FROM information_schema.columns
+  WHERE table_schema = current_schema()
+    AND table_name = 'gm_product'
+    AND column_name = 'island_delivery_yn';
+
+  legacy_schema :=
+    coalesce(jeju_default, '') ILIKE '%T%'
+    OR coalesce(island_default, '') ILIKE '%T%'
+    OR EXISTS (
+      SELECT 1 FROM gm_product
+      WHERE upper(coalesce(jeju_delivery_yn, '')) = 'T'
+         OR upper(coalesce(island_delivery_yn, '')) = 'T'
+    );
+
+  IF legacy_schema THEN
+    UPDATE gm_product
+    SET
+      jeju_delivery_yn = CASE
+        WHEN upper(coalesce(jeju_delivery_yn, '')) = 'F' THEN 'N'
+        WHEN upper(coalesce(jeju_delivery_yn, '')) = 'T'
+             AND coalesce(jeju_extra_delivery_fee, 0) > 0 THEN 'Y'
+        WHEN upper(coalesce(jeju_delivery_yn, '')) = 'T' THEN 'F'
+        WHEN upper(coalesce(jeju_delivery_yn, '')) IN ('Y', 'N')
+          THEN upper(jeju_delivery_yn)
+        ELSE CASE
+          WHEN coalesce(jeju_extra_delivery_fee, 0) > 0 THEN 'Y'
+          ELSE 'F'
+        END
+      END,
+      island_delivery_yn = CASE
+        WHEN upper(coalesce(island_delivery_yn, '')) = 'F' THEN 'N'
+        WHEN upper(coalesce(island_delivery_yn, '')) = 'T'
+             AND coalesce(island_extra_delivery_fee, 0) > 0 THEN 'Y'
+        WHEN upper(coalesce(island_delivery_yn, '')) = 'T' THEN 'F'
+        WHEN upper(coalesce(island_delivery_yn, '')) IN ('Y', 'N')
+          THEN upper(island_delivery_yn)
+        ELSE CASE
+          WHEN coalesce(island_extra_delivery_fee, 0) > 0 THEN 'Y'
+          ELSE 'F'
+        END
+      END;
+  END IF;
+END $$;
+
+UPDATE gm_product
+SET jeju_extra_delivery_fee = 0
+WHERE jeju_delivery_yn IN ('N', 'F');
+
+UPDATE gm_product
+SET island_extra_delivery_fee = 0
+WHERE island_delivery_yn IN ('N', 'F');
+
+ALTER TABLE gm_product
+  ALTER COLUMN jeju_delivery_yn TYPE TEXT,
+  ALTER COLUMN island_delivery_yn TYPE TEXT,
+  ALTER COLUMN jeju_delivery_yn SET DEFAULT 'F',
+  ALTER COLUMN island_delivery_yn SET DEFAULT 'F';
+
+ALTER TABLE gm_product
+  DROP CONSTRAINT IF EXISTS gm_product_jeju_delivery_yn_check;
+ALTER TABLE gm_product
+  DROP CONSTRAINT IF EXISTS gm_product_island_delivery_yn_check;
+
+ALTER TABLE gm_product
+  ADD CONSTRAINT gm_product_jeju_delivery_yn_check
+    CHECK (jeju_delivery_yn IN ('Y', 'N', 'F')),
+  ADD CONSTRAINT gm_product_island_delivery_yn_check
+    CHECK (island_delivery_yn IN ('Y', 'N', 'F'));
+

@@ -1103,9 +1103,9 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       exchange_policy_text = COALESCE(NULLIF($25,''), exchange_policy_text),
       return_shipping_fee = CASE WHEN $26::int > 0 THEN $26::int ELSE return_shipping_fee END,
       jeju_delivery_yn = $27,
-      jeju_extra_delivery_fee = CASE WHEN $27='F' THEN 0 ELSE GREATEST(0,$28::int) END,
+      jeju_extra_delivery_fee = CASE WHEN $27='Y' THEN GREATEST(0,$28::int) ELSE 0 END,
       island_delivery_yn = $29,
-      island_extra_delivery_fee = CASE WHEN $29='F' THEN 0 ELSE GREATEST(0,$30::int) END,
+      island_extra_delivery_fee = CASE WHEN $29='Y' THEN GREATEST(0,$30::int) ELSE 0 END,
       updated_at = now()
     WHERE product_uid = $1 OR (mall_code=$31 AND pi_ii_vi=$32)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
@@ -1680,13 +1680,16 @@ function pickReturnShippingFee(p, mallSalePrice){
 
 function normalizeRemoteDeliveryPolicy(p){
   p = p || {};
-  const jejuYn = cleanText(p.jeju_delivery_yn ?? p.jejuDeliveryYn ?? 'T').toUpperCase() === 'F' ? 'F' : 'T';
-  const islandYn = cleanText(p.island_delivery_yn ?? p.islandDeliveryYn ?? 'T').toUpperCase() === 'F' ? 'F' : 'T';
+  const normalizeRemoteMode = (v, fee) => { const m = cleanText(v).toUpperCase(); if (m === 'N') return 'N'; if (m === 'Y') return fee > 0 ? 'Y' : 'F'; if (m === 'F') return 'F'; return fee > 0 ? 'Y' : 'F'; };
+  const jejuFeeRaw = Math.max(0, parseMoney(p.jeju_extra_delivery_fee ?? p.jejuExtraDeliveryFee ?? 0, 0));
+  const islandFeeRaw = Math.max(0, parseMoney(p.island_extra_delivery_fee ?? p.islandExtraDeliveryFee ?? 0, 0));
+  const jejuYn = normalizeRemoteMode(p.jeju_delivery_yn ?? p.jejuDeliveryYn, jejuFeeRaw);
+  const islandYn = normalizeRemoteMode(p.island_delivery_yn ?? p.islandDeliveryYn, islandFeeRaw);
   return {
     jeju_delivery_yn: jejuYn,
-    jeju_extra_delivery_fee: jejuYn === 'F' ? 0 : Math.max(0, parseMoney(p.jeju_extra_delivery_fee ?? p.jejuExtraDeliveryFee ?? 0, 0)),
+    jeju_extra_delivery_fee: jejuYn === 'Y' ? jejuFeeRaw : 0,
     island_delivery_yn: islandYn,
-    island_extra_delivery_fee: islandYn === 'F' ? 0 : Math.max(0, parseMoney(p.island_extra_delivery_fee ?? p.islandExtraDeliveryFee ?? 0, 0))
+    island_extra_delivery_fee: islandYn === 'Y' ? islandFeeRaw : 0
   };
 }
 
@@ -1833,9 +1836,9 @@ async function upsertProduct(pool, raw, parent={}){
       delivery_eta_text=EXCLUDED.delivery_eta_text,
       delivery_type=EXCLUDED.delivery_type,
       jeju_delivery_yn=EXCLUDED.jeju_delivery_yn,
-      jeju_extra_delivery_fee=CASE WHEN EXCLUDED.jeju_delivery_yn='F' THEN 0 ELSE EXCLUDED.jeju_extra_delivery_fee END,
+      jeju_extra_delivery_fee=CASE WHEN EXCLUDED.jeju_delivery_yn='Y' THEN EXCLUDED.jeju_extra_delivery_fee ELSE 0 END,
       island_delivery_yn=EXCLUDED.island_delivery_yn,
-      island_extra_delivery_fee=CASE WHEN EXCLUDED.island_delivery_yn='F' THEN 0 ELSE EXCLUDED.island_extra_delivery_fee END,
+      island_extra_delivery_fee=CASE WHEN EXCLUDED.island_delivery_yn='Y' THEN EXCLUDED.island_extra_delivery_fee ELSE 0 END,
       tax_type=COALESCE(NULLIF(EXCLUDED.tax_type,''), gm_product.tax_type),
       review_count=EXCLUDED.review_count,
       mall_sales_count=EXCLUDED.mall_sales_count,
