@@ -39,12 +39,14 @@
 const {
   S3Client,
   PutObjectCommand,
+  CopyObjectCommand,
   DeleteObjectsCommand,
   HeadBucketCommand,
 } = require('@aws-sdk/client-s3');
 
 const MAX_RESOURCE_ID = 100000000000;
 const RESERVED_IMAGES_PER_ID = 10;
+const CURRENT_UI_IMAGE_LIMIT = 5;
 
 function clean(v) {
   return String(v == null ? '' : v).trim();
@@ -167,6 +169,158 @@ async function deleteKeys(keys) {
   return list.length;
 }
 
+
+
+function encodeCopySource(bucket, key) {
+  return `${bucket}/${String(key).split('/').map(encodeURIComponent).join('/')}`;
+}
+
+async function copyObject(sourceKey, targetKey, cacheControl = 'public, max-age=31536000, immutable') {
+  const c = config();
+  await client().send(new CopyObjectCommand({
+    Bucket: c.bucket,
+    Key: targetKey,
+    CopySource: encodeCopySource(c.bucket, sourceKey),
+    ContentType: 'image/webp',
+    CacheControl: cacheControl,
+    MetadataDirective: 'REPLACE',
+  }));
+  return { key: targetKey, url: publicUrl(targetKey) };
+}
+
+function tempKey(requestId, group, size, imageNo) {
+  const safeRequest = clean(requestId).replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safeRequest) throw new Error('request_id required');
+  if (!['stage', 'backup'].includes(group)) throw new Error('temp group invalid');
+  if (!['image', 'small'].includes(size)) throw new Error('temp size invalid');
+  const number = Number(imageNo);
+  if (!Number.isInteger(number) || number < 1 || number > RESERVED_IMAGES_PER_ID) {
+    throw new Error(`image_no must be 1~${RESERVED_IMAGES_PER_ID}`);
+  }
+  return `temp/edit/${safeRequest}/${group}/${size}/${String(number).padStart(2, '0')}.webp`;
+}
+
+function normalizeImagePlan(plan, maxFinalImages = CURRENT_UI_IMAGE_LIMIT) {
+  if (!Array.isArray(plan)) throw new Error('images manifest must be an array');
+  if (plan.length > maxFinalImages) throw new Error(`현재 화면에서는 최대 ${maxFinalImages}장까지 저장할 수 있습니다.`);
+  const usedSourceSlots = new Set();
+  return plan.map((raw, index) => {
+    const row = raw || {};
+    const type = clean(row.type).toLowerCase();
+    const finalSlot = index + 1;
+    if (type === 'existing') {
+      const sourceSlot = Number(row.source_slot ?? row.sourceSlot);
+      if (!Number.isInteger(sourceSlot) || sourceSlot < 1 || sourceSlot > RESERVED_IMAGES_PER_ID) {
+        throw new Error(`existing source_slot must be 1~${RESERVED_IMAGES_PER_ID}`);
+      }
+      if (usedSourceSlots.has(sourceSlot)) throw new Error('동일한 기존 이미지를 두 번 사용할 수 없습니다.');
+      usedSourceSlots.add(sourceSlot);
+      return { type, sourceSlot, finalSlot };
+    }
+    if (type === 'new') {
+      const fileIndex = Number(row.file_index ?? row.fileIndex);
+      if (!Number.isInteger(fileIndex) || fileIndex < 0) throw new Error('new file_index invalid');
+      return { type, fileIndex, finalSlot };
+    }
+    throw new Error('image type must be existing or new');
+  });
+}
+
+/*
+ * GM_R2_IMAGE_REORDER_V001
+ * - 내부 알고리즘은 슬롯 01~10을 영구 지원한다.
+ * - 현재 UI/API 제한은 5장이다(CURRENT_UI_IMAGE_LIMIT).
+ * - 화면의 최종 배열이 정답이며 중간 빈 슬롯을 허용하지 않는다.
+ * - 기존 파일의 이동은 R2 내부 Copy, 새 파일은 stage 업로드 후 Copy한다.
+ * - image/small은 항상 한 쌍으로 처리한다.
+ * - 실패 시 backup에서 기존 01~oldCount를 복구한다.
+ */
+async function applyImagePlan({ type, id, oldCount, plan, newFiles, requestId }) {
+  const resourceType = normalizeType(type);
+  const resourceId = normalizeId(id);
+  const previousCount = Math.max(0, Math.min(RESERVED_IMAGES_PER_ID, Number(oldCount) || 0));
+  const normalizedPlan = normalizeImagePlan(plan, CURRENT_UI_IMAGE_LIMIT);
+  const buffers = Array.isArray(newFiles) ? newFiles : [];
+  const tempKeys = [];
+  let backupReady = false;
+
+  try {
+    // 1) 기존 최종 상태 전체 백업. 이후 어떤 순서 변경/덮어쓰기에도 복구 가능하다.
+    for (let slot = 1; slot <= previousCount; slot += 1) {
+      for (const size of ['image', 'small']) {
+        const source = keyFor(resourceType, resourceId, slot, size);
+        const backup = tempKey(requestId, 'backup', size, slot);
+        await copyObject(source, backup);
+        tempKeys.push(backup);
+      }
+    }
+    backupReady = true;
+
+    // 2) 최종 배열을 stage 01~N으로 만든다.
+    for (const item of normalizedPlan) {
+      for (const size of ['image', 'small']) {
+        const stage = tempKey(requestId, 'stage', size, item.finalSlot);
+        if (item.type === 'existing') {
+          const source = keyFor(resourceType, resourceId, item.sourceSlot, size);
+          await copyObject(source, stage);
+        } else {
+          const file = buffers[item.fileIndex];
+          if (!file || !file[size]) throw new Error(`new image file_index ${item.fileIndex} is missing`);
+          await putWebp(stage, file[size], 'private, max-age=0, no-store');
+        }
+        tempKeys.push(stage);
+      }
+    }
+
+    // 3) stage를 최종 01~N에 배치한다.
+    for (let slot = 1; slot <= normalizedPlan.length; slot += 1) {
+      for (const size of ['image', 'small']) {
+        await copyObject(tempKey(requestId, 'stage', size, slot), keyFor(resourceType, resourceId, slot, size));
+      }
+    }
+
+    // 4) N+1~10을 모두 정리하여 항상 01~image_count 연속 규칙을 보장한다.
+    const stale = [];
+    for (let slot = normalizedPlan.length + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) {
+      stale.push(keyFor(resourceType, resourceId, slot, 'image'));
+      stale.push(keyFor(resourceType, resourceId, slot, 'small'));
+    }
+    await deleteKeys(stale);
+
+    return {
+      image_count: normalizedPlan.length,
+      images: imageFiles(resourceType, resourceId, normalizedPlan.length),
+      operations: normalizedPlan.map(item => ({
+        final_slot: item.finalSlot,
+        action: item.type === 'existing' ? (item.sourceSlot === item.finalSlot ? 'keep' : 'copy') : 'upload',
+        source_slot: item.type === 'existing' ? item.sourceSlot : null,
+      })),
+    };
+  } catch (error) {
+    // 최종 배치 중 실패했다면 기존 상태로 복구한다.
+    if (backupReady) {
+      try {
+        for (let slot = 1; slot <= previousCount; slot += 1) {
+          for (const size of ['image', 'small']) {
+            await copyObject(tempKey(requestId, 'backup', size, slot), keyFor(resourceType, resourceId, slot, size));
+          }
+        }
+        const removeNew = [];
+        for (let slot = previousCount + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) {
+          removeNew.push(keyFor(resourceType, resourceId, slot, 'image'));
+          removeNew.push(keyFor(resourceType, resourceId, slot, 'small'));
+        }
+        await deleteKeys(removeNew);
+      } catch (restoreError) {
+        error.restore_error = String(restoreError && restoreError.message || restoreError);
+      }
+    }
+    throw error;
+  } finally {
+    try { await deleteKeys(tempKeys); } catch (_) { /* temp는 lifecycle 정리도 가능 */ }
+  }
+}
+
 async function health() {
   const c = config();
   await client().send(new HeadBucketCommand({ Bucket: c.bucket }));
@@ -193,6 +347,7 @@ function imageFiles(type, id, count) {
 module.exports = {
   MAX_RESOURCE_ID,
   RESERVED_IMAGES_PER_ID,
+  CURRENT_UI_IMAGE_LIMIT,
   config,
   client,
   normalizeType,
@@ -203,7 +358,11 @@ module.exports = {
   keyFor,
   publicUrl,
   putWebp,
+  copyObject,
   deleteKeys,
+  tempKey,
+  normalizeImagePlan,
+  applyImagePlan,
   health,
   imageFiles,
 };
