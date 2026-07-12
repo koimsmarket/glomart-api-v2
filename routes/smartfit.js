@@ -6,7 +6,7 @@ const sharp = require('sharp');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V020_R2_IMAGE_REORDER';
+const VERSION = 'GM_SMARTFIT_SERVER_V021_R2_IMAGE_TRANSFER';
 console.log('[GM_SMARTFIT_ROUTE] loaded', VERSION);
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -197,7 +197,15 @@ router.get('/api/gm/smartfit/r2/health', async (req,res)=>{
 
 router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images', r2.CURRENT_UI_IMAGE_LIMIT), async (req,res)=>{
   const pool=db(req);
+  const startedAt=Date.now();
   try{
+    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_START_V021]', {
+      resource_type:s(req.body.resource_type || req.body.type || req.body.mode),
+      resource_id:s(req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id),
+      member_id:s(req.body.member_id || req.body.memberId || ''),
+      file_count:Array.isArray(req.files) ? req.files.length : 0,
+      manifest:s(req.body.manifest || '').slice(0,500)
+    });
     const type=r2.normalizeType(req.body.resource_type || req.body.type || req.body.mode);
     const id=r2.normalizeId(req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id);
     const member=s(req.body.member_id || req.body.memberId || '');
@@ -231,8 +239,14 @@ router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images',
     if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2',[result.image_count,id]);
     else await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[result.image_count,id]);
 
+    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_DONE_V021]', { resource_type:type, resource_id:id, image_count:result.image_count, ms:Date.now()-startedAt });
     ok(res,{ resource_type:type, resource_id:id, image_count:result.image_count, images:result.images, operations:result.operations, reserved_limit:r2.RESERVED_IMAGES_PER_ID, current_limit:r2.CURRENT_UI_IMAGE_LIMIT });
   }catch(e){
+    console.error('[GM_SMARTFIT_IMAGE_UPLOAD_FAIL_V021]', {
+      message:String(e && e.message || e),
+      stack:String(e && e.stack || '').slice(0,1500),
+      ms:Date.now()-startedAt
+    });
     fail(res,400,'image upload failed',{ detail:String(e.message||e), restore_error:e && e.restore_error ? e.restore_error : undefined });
   }
 });
