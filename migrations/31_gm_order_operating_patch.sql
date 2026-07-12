@@ -30,5 +30,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_order_item_order_source_uid
 ALTER TABLE gm_member_address ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP;
 CREATE INDEX IF NOT EXISTS idx_gm_member_address_member_last_used
   ON gm_member_address(member_id, last_used_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gm_member_address_default_recent
+  ON gm_member_address(member_id, is_default DESC, last_used_at DESC, updated_at DESC);
+
+-- 주의: gm_member_address는 운영 회원 주소록이므로 이 migration에서 TRUNCATE하지 않는다.
 
 COMMIT;

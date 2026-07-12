@@ -284,7 +284,7 @@ router.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/
   if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
   try{
     const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1',[memberId]);
-    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC, created_at DESC',[memberId]);
+    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC',[memberId]);
     res.json(memberMeResponse(m.rows[0]||null, a.rows));
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
@@ -299,6 +299,7 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
   try{
     await client.query('BEGIN');
     let ar;
+    let newAddressExisted=false;
 
     if(givenAddressId){
       // 기존 배송지 수정: 존재하는 address_id만 UPDATE한다.
@@ -315,16 +316,17 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
       }
     }else{
       // 새 배송지 추가: address_id가 없는 명시적 추가 요청에서만 INSERT한다.
-      // 동일 회원·동일 주소는 fingerprint 기반 address_id로 중복 생성하지 않는다.
-      ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
-        ON CONFLICT (address_id) DO UPDATE SET
-          address_name=EXCLUDED.address_name,receiver_name=EXCLUDED.receiver_name,receiver_phone=EXCLUDED.receiver_phone,receiver_mobile=EXCLUDED.receiver_mobile,
-          zipcode=EXCLUDED.zipcode,address1=EXCLUDED.address1,address2=EXCLUDED.address2,address_old=EXCLUDED.address_old,address_full=EXCLUDED.address_full,
-          sido=EXCLUDED.sido,sigungu=EXCLUDED.sigungu,eup_myeon_dong=EXCLUDED.eup_myeon_dong,customs_clearance_code=EXCLUDED.customs_clearance_code,
-          delivery_memo=EXCLUDED.delivery_memo,is_default=EXCLUDED.is_default,updated_at=NOW()
-        RETURNING *`,
-        [a.address_id,a.member_id,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
+      // 동일 주소가 이미 있으면 기존 행을 반환하고 UPDATE/UPSERT하지 않는다.
+      const existing=await client.query(`SELECT * FROM gm_member_address WHERE address_id=$1 AND member_id=$2 LIMIT 1`, [a.address_id,memberId]);
+      if(existing.rowCount){
+        newAddressExisted=true;
+        ar=existing;
+      }else{
+        ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at,last_used_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW(),NULL)
+          RETURNING *`,
+          [a.address_id,a.member_id,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
+      }
     }
 
     const saved=ar.rows[0];
@@ -333,7 +335,41 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
       await client.query(`UPDATE gm_member SET default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,default_zipcode=$5,default_address1=$6,default_address2=$7,default_address_old=$8,default_address_full=$9,default_sido=$10,default_sigungu=$11,default_eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,updated_at=NOW() WHERE member_id=$1`,
         [memberId,saved.receiver_name,saved.receiver_phone,saved.receiver_mobile,saved.zipcode,saved.address1,saved.address2,saved.address_old,saved.address_full,saved.sido,saved.sigungu,saved.eup_myeon_dong,saved.customs_clearance_code,saved.delivery_memo]);
     }
-    await client.query('COMMIT'); res.json({ok:true,address:saved,action:givenAddressId?'updated':'created'});
+    await client.query('COMMIT'); res.json({ok:true,address:saved,action:givenAddressId?'updated':(newAddressExisted?'existing':'created')});
+  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
+  finally{ client.release(); }
+});
+
+
+// 기존 배송지 선택: INSERT/UPSERT 없이 선택한 address_id만 기본/최근 사용으로 갱신한다.
+router.post(['/api/gm/member/address/select','/api/member/address/select'], async (req,res)=>{
+  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const memberId=pick(b, ['member_id','memberId']);
+  const addressId=pick(b, ['address_id','addressId','id','ma_idx']);
+  if(!memberId || !addressId) return res.status(400).json({ok:false,error:'member_id and address_id are required'});
+  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
+  try{
+    await client.query('BEGIN');
+    const ar=await client.query(`UPDATE gm_member_address
+      SET is_default='Y', last_used_at=NOW(), updated_at=NOW()
+      WHERE member_id=$1 AND address_id=$2
+      RETURNING *`, [memberId,addressId]);
+    if(!ar.rowCount){
+      await client.query('ROLLBACK');
+      return res.status(404).json({ok:false,error:'address_id not found'});
+    }
+    await client.query(`UPDATE gm_member_address
+      SET is_default='N', updated_at=NOW()
+      WHERE member_id=$1 AND address_id<>$2 AND is_default='Y'`, [memberId,addressId]);
+    const saved=ar.rows[0];
+    await client.query(`UPDATE gm_member SET
+      default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,
+      default_zipcode=$5,default_address1=$6,default_address2=$7,default_address_old=$8,default_address_full=$9,
+      default_sido=$10,default_sigungu=$11,default_eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,updated_at=NOW()
+      WHERE member_id=$1`,
+      [memberId,saved.receiver_name,saved.receiver_phone,saved.receiver_mobile,saved.zipcode,saved.address1,saved.address2,saved.address_old,saved.address_full,saved.sido,saved.sigungu,saved.eup_myeon_dong,saved.customs_clearance_code,saved.delivery_memo]);
+    await client.query('COMMIT');
+    res.json({ok:true,address:saved,action:'selected'});
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
   finally{ client.release(); }
 });
@@ -399,7 +435,7 @@ router.get(['/api/gm/member/address/list','/api/member/address/list'], async (re
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
   try{
-    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, updated_at DESC, created_at DESC',[memberId]);
+    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC',[memberId]);
     res.json({ok:true,items:a.rows,default_address:a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
@@ -412,7 +448,7 @@ router.get(['/api/gm/member/address/default','/api/member/address/default'], asy
       SELECT *
       FROM gm_member_address
       WHERE member_id=$1
-      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+      ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC
       LIMIT 1
     `,[memberId]);
     res.json({ok:true,address:a.rows[0]||null});

@@ -1,6 +1,6 @@
 'use strict';
 
-/* GM_R2_STORAGE_RULE_V001
+/* GM_R2_STORAGE_RULE_V002
  * SmartFit Cloudflare R2 공통 저장 규칙
  *
  * [DB 원칙]
@@ -26,10 +26,12 @@
  *
  * [파일명]
  * - 한 ID당 10장까지 번호 공간을 영구 예약한다. 현재 UI는 5장까지만 허용한다.
- * - 최종 폴더 안 상대 ID: 001~100
+ * - 파일명 식별번호: 실제 ID 끝 4자리(0000~9999)
+ * - 폴더가 ID 구간을 분리하므로 10,000 이후 같은 끝 4자리가 나와도 키 충돌은 없다.
  * - 이미지 순번: 01~10
- * - Space 원본: si001_01.webp / 축소: ss001_01.webp
- * - Template 원본: ti001_01.webp / 축소: ts001_01.webp
+ * - Space 원본: si0001_01.webp / 축소: ss0001_01.webp
+ * - Template 원본: ti0001_01.webp / 축소: ts0001_01.webp
+ * - 예: ID 1 -> 0001, ID 1000 -> 1000, ID 10000 -> 0000
  *
  * 이 주석과 계산 함수는 서버/R2/관리자 화면에서 공통 규격으로 유지한다.
  */
@@ -111,8 +113,15 @@ function folderParts(id) {
   return [level1, level2, level3].map(v => String(v).padStart(3, '0'));
 }
 
+function fileIdSuffix(id) {
+  // 파일명에는 실제 DB ID의 끝 4자리를 그대로 사용한다.
+  // 폴더 경로가 100개 단위로 분리되므로 ID 1과 10001의 suffix가 같아도 전체 R2 key는 다르다.
+  return String(normalizeId(id) % 10000).padStart(4, '0');
+}
+
+// 기존 호출부/외부 참조 호환용 별칭. 반환 규칙은 V002부터 4자리이다.
 function localId(id) {
-  return String(((normalizeId(id) - 1) % 100) + 1).padStart(3, '0');
+  return fileIdSuffix(id);
 }
 
 function keyFor(type, id, imageNo, size = 'image') {
@@ -126,7 +135,7 @@ function keyFor(type, id, imageNo, size = 'image') {
   const root = resourceType;
   const first = resourceType === 'space' ? 's' : 't';
   const second = size === 'image' ? 'i' : 's';
-  const file = `${first}${second}${localId(id)}_${String(number).padStart(2, '0')}.webp`;
+  const file = `${first}${second}${fileIdSuffix(id)}_${String(number).padStart(2, '0')}.webp`;
   return `${root}/${folderParts(id).join('/')}/${file}`;
 }
 
@@ -189,6 +198,7 @@ module.exports = {
   normalizeType,
   normalizeId,
   folderParts,
+  fileIdSuffix,
   localId,
   keyFor,
   publicUrl,
