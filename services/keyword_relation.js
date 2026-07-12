@@ -97,7 +97,7 @@ function normalizeRows(params){
   }
   inputRows.forEach(push);
   meta.related.forEach(v=>push({gm_lang:meta.gm_lang,keyword_ko:meta.keyword_ko,related_keyword_ko:v}));
-  return rows.slice(0,5000);
+  return rows.slice(0,100);
 }
 async function saveRelations(pool, params){
   await ensureRelationTable(pool);

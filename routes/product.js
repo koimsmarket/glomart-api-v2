@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const keywordRelation = require('../services/keyword_relation');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function cleanText(v){ return String(v || '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
 function toInt(v, def=0){
@@ -1552,7 +1551,6 @@ async function upsertProduct(pool, raw, parent={}){
     detail_patch = { applied:false, error:compactError(e) };
     console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
   }
-  await keywordRelation.captureProductKeywordMeta(pool, id.uid, Object.assign({}, parent || {}, p || {}, { keyword_ko:searchKeyword, relatedKeywords }));
   const detail_stats = detailSignalStats(optionJson, thumbJson, detailJson || {}, p);
   return {
     ok:true,
@@ -1565,18 +1563,7 @@ async function upsertProduct(pool, raw, parent={}){
 
 
 
-router.post(['/api/gm/search/log','/api/gm/search_log','/api/gm/search/log/save'], async (req,res)=>{
-  const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
-  if(!pool) return fail(res, 500, 'DB pool is not attached');
-  try{
-    const row = await saveSearchLogPayload(pool, p);
-    return ok(res, { action:'search.log', item:row });
-  }catch(e){
-    console.error('[GM_SEARCH_LOG_SAVE_ERROR]', compactError(e));
-    return fail(res, 500, 'search log save failed', { detail:String(e && e.message || e), error_detail:compactError(e) });
-  }
-});
-
+// Search log and keyword-relation routes are owned by server.js/routes/search_keyword.js.
 router.post('/api/gm/product/queue', async (req,res)=>{
   const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
   if(!pool) return fail(res, 500, 'DB pool is not attached');

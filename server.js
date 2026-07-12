@@ -1,4 +1,5 @@
 const express = require('express');
+const keywordRelationService = require('./services/keyword_relation');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -1183,7 +1184,22 @@ app.post('/api/gm/search/log', async (req,res)=>{
       rawJsonText
     ]);
     if(!alreadyCountedThisSearch) await upsertSearchStats(row);
-    ok(res, { action:'search.log', inserted:true, counted:!alreadyCountedThisSearch, search_id:ins.rows && ins.rows[0] && ins.rows[0].search_id, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
+    // 연관검색어 저장 실패가 검색로그 전체를 500으로 만들지 않도록 분리한다.
+    let relationResult = null;
+    try{
+      relationResult = await keywordRelationService.saveRelations(pool, {
+        gm_lang: keywordLangCode || uiLangCode || 'ko',
+        keyword_ko: cleanText(b.keyword_ko || b.keywordKo || row.keyword_canonical || row.keyword_normalized || keywordOriginal),
+        relatedKeywords: b.related_keywords || b.relatedKeywords || b.relations || b.related || []
+      });
+    }catch(relationError){
+      console.error('[GM_KEYWORD_RELATION_SAVE_ERROR]', {
+        message:String(relationError && relationError.message || relationError),
+        keyword:row.keyword_canonical || row.keyword_normalized,
+        gm_lang:keywordLangCode || uiLangCode || 'ko'
+      });
+    }
+    ok(res, { action:'search.log', inserted:true, counted:!alreadyCountedThisSearch, search_id:ins.rows && ins.rows[0] && ins.rows[0].search_id, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code, keyword_relation:relationResult });
   }catch(e){
     fail(res, 500, 'search log failed', { detail:String(e && e.message || e) });
   }
