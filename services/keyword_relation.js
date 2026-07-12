@@ -22,68 +22,66 @@ function pickMeta(payload){
 }
 let relationSchemaReadyPromise = null;
 async function reconcileRelationTable(pool){
-  // ADD COLUMN cannot move gm_lang to the first physical position. Rebuild the
-  // table once when the order/schema is not exactly the final three columns.
+  // 개발 단계 확정 방식: 기존 구조가 정확하지 않으면 보존/변환하지 않고
+  // 테이블을 삭제한 뒤 최종 3컬럼 구조로 새로 만든다.
   const client=await pool.connect();
   try{
     await client.query('BEGIN');
-    await client.query(`CREATE TABLE IF NOT EXISTS gm_keyword_relation (
-      gm_lang VARCHAR(10), keyword_ko TEXT, related_keyword_ko TEXT
-    )`);
-    await client.query('ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS gm_lang VARCHAR(10)');
-    await client.query('ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS keyword_ko TEXT');
-    await client.query('ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS related_keyword_ko TEXT');
-    await client.query(`DO $$ BEGIN
-      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='keyword') THEN
-        EXECUTE 'UPDATE gm_keyword_relation SET keyword_ko=COALESCE(NULLIF(BTRIM(keyword_ko),''''),NULLIF(BTRIM(keyword::text),'''')) WHERE keyword_ko IS NULL OR BTRIM(keyword_ko)=''''';
-      END IF;
-      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='related_keyword') THEN
-        EXECUTE 'UPDATE gm_keyword_relation SET related_keyword_ko=COALESCE(NULLIF(BTRIM(related_keyword_ko),''''),NULLIF(BTRIM(related_keyword::text),'''')) WHERE related_keyword_ko IS NULL OR BTRIM(related_keyword_ko)=''''';
-      END IF;
-      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='lang') THEN
-        EXECUTE 'UPDATE gm_keyword_relation SET gm_lang=COALESCE(NULLIF(BTRIM(gm_lang),''''),NULLIF(BTRIM(lang::text),'''')) WHERE gm_lang IS NULL OR BTRIM(gm_lang)=''''';
-      END IF;
-    END $$`);
-    await client.query(`UPDATE gm_keyword_relation SET gm_lang=CASE WHEN COALESCE(keyword_ko,'') ~ '[가-힣]' THEN 'ko' ELSE 'en' END WHERE gm_lang IS NULL OR BTRIM(gm_lang)=''`);
-    await client.query(`UPDATE gm_keyword_relation SET gm_lang=LOWER(SPLIT_PART(REPLACE(gm_lang,'_','-'),'-',1))`);
-    await client.query(`UPDATE gm_keyword_relation SET gm_lang=CASE gm_lang WHEN 'kr' THEN 'ko' WHEN 'cn' THEN 'zh' WHEN 'jp' THEN 'ja' WHEN 'vn' THEN 'vi' ELSE gm_lang END`);
 
-    const c=await client.query(`SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' ORDER BY ordinal_position`);
-    const names=(c.rows||[]).map(r=>r.column_name);
-    const exact=names.length===3 && names[0]==='gm_lang' && names[1]==='keyword_ko' && names[2]==='related_keyword_ko';
+    const exists=await client.query(`
+      SELECT to_regclass('public.gm_keyword_relation') AS table_name
+    `);
+
+    let exact=false;
+    if(exists.rows[0]&&exists.rows[0].table_name){
+      const columns=await client.query(`
+        SELECT column_name,data_type,is_nullable,ordinal_position
+          FROM information_schema.columns
+         WHERE table_schema='public'
+           AND table_name='gm_keyword_relation'
+         ORDER BY ordinal_position
+      `);
+      const names=(columns.rows||[]).map(r=>r.column_name);
+      exact=(
+        names.length===3 &&
+        names[0]==='gm_lang' &&
+        names[1]==='keyword_ko' &&
+        names[2]==='related_keyword_ko'
+      );
+    }
+
     if(!exact){
-      await client.query('DROP TABLE IF EXISTS gm_keyword_relation__new');
-      await client.query(`CREATE TABLE gm_keyword_relation__new (
+      await client.query('DROP TABLE IF EXISTS gm_keyword_relation CASCADE');
+      await client.query(`CREATE TABLE gm_keyword_relation (
         gm_lang VARCHAR(10) NOT NULL,
         keyword_ko TEXT NOT NULL,
         related_keyword_ko TEXT NOT NULL,
-        CONSTRAINT gm_keyword_relation__new_pkey PRIMARY KEY (gm_lang,keyword_ko,related_keyword_ko)
+        CONSTRAINT gm_keyword_relation_pkey
+          PRIMARY KEY (gm_lang,keyword_ko,related_keyword_ko)
       )`);
-      await client.query(`INSERT INTO gm_keyword_relation__new (gm_lang,keyword_ko,related_keyword_ko)
-        SELECT DISTINCT gm_lang,BTRIM(keyword_ko),BTRIM(related_keyword_ko)
-        FROM gm_keyword_relation
-        WHERE COALESCE(BTRIM(gm_lang),'')<>'' AND COALESCE(BTRIM(keyword_ko),'')<>'' AND COALESCE(BTRIM(related_keyword_ko),'')<>''
-        ON CONFLICT DO NOTHING`);
-      await client.query('DROP TABLE gm_keyword_relation CASCADE');
-      await client.query('ALTER TABLE gm_keyword_relation__new RENAME TO gm_keyword_relation');
-      await client.query('ALTER TABLE gm_keyword_relation RENAME CONSTRAINT gm_keyword_relation__new_pkey TO gm_keyword_relation_pkey');
-    }else{
-      await client.query(`DELETE FROM gm_keyword_relation WHERE COALESCE(BTRIM(gm_lang),'')='' OR COALESCE(BTRIM(keyword_ko),'')='' OR COALESCE(BTRIM(related_keyword_ko),'')=''`);
-      await client.query(`DELETE FROM gm_keyword_relation a USING gm_keyword_relation b WHERE a.ctid<b.ctid AND a.gm_lang=b.gm_lang AND a.keyword_ko=b.keyword_ko AND a.related_keyword_ko=b.related_keyword_ko`);
-      await client.query('ALTER TABLE gm_keyword_relation ALTER COLUMN gm_lang SET NOT NULL');
-      await client.query('ALTER TABLE gm_keyword_relation ALTER COLUMN keyword_ko SET NOT NULL');
-      await client.query('ALTER TABLE gm_keyword_relation ALTER COLUMN related_keyword_ko SET NOT NULL');
-      await client.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='gm_keyword_relation'::regclass AND conname='gm_keyword_relation_pkey') THEN ALTER TABLE gm_keyword_relation ADD CONSTRAINT gm_keyword_relation_pkey PRIMARY KEY (gm_lang,keyword_ko,related_keyword_ko); END IF; END $$`);
+      console.log('[GM_KEYWORD_RELATION_RECREATE_OK]', {
+        columns:['gm_lang','keyword_ko','related_keyword_ko']
+      });
     }
+
     await client.query('COMMIT');
   }catch(err){
     try{await client.query('ROLLBACK');}catch(_rollback){}
+    console.error('[GM_KEYWORD_RELATION_RECREATE_ERROR]', {
+      message:err&&err.message,
+      code:err&&err.code
+    });
     throw err;
-  }finally{ client.release(); }
+  }finally{
+    client.release();
+  }
 }
 async function ensureRelationTable(pool){
   if(!relationSchemaReadyPromise){
-    relationSchemaReadyPromise=reconcileRelationTable(pool).catch(err=>{ relationSchemaReadyPromise=null; throw err; });
+    relationSchemaReadyPromise=reconcileRelationTable(pool).catch(err=>{
+      relationSchemaReadyPromise=null;
+      throw err;
+    });
   }
   return relationSchemaReadyPromise;
 }
