@@ -1,81 +1,60 @@
 -- 26_gm_keyword_relation.sql
--- Final related-search table: exactly 3 columns.
--- 1) gm_lang  2) keyword_ko  3) related_keyword_ko
--- Existing rows are preserved; legacy columns are migrated and removed.
+-- Final master schema: gm_lang, keyword_ko, related_keyword_ko.
+-- Existing rows are preserved. Physical column order is rebuilt so CSV export
+-- is always: gm_lang,keyword_ko,related_keyword_ko.
 
-CREATE TABLE IF NOT EXISTS gm_keyword_relation (
-  gm_lang VARCHAR(10),
-  keyword_ko TEXT,
-  related_keyword_ko TEXT
-);
-
-ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS gm_lang VARCHAR(10);
-ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS keyword_ko TEXT;
-ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS related_keyword_ko TEXT;
+ALTER TABLE IF EXISTS gm_product ADD COLUMN IF NOT EXISTS keyword TEXT;
+ALTER TABLE IF EXISTS gm_category ADD COLUMN IF NOT EXISTS keyword TEXT;
 
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='gm_keyword_relation' AND column_name='keyword') THEN
-    EXECUTE 'UPDATE gm_keyword_relation SET keyword_ko=COALESCE(NULLIF(keyword_ko,'''') , NULLIF(keyword::text,'''')) WHERE keyword_ko IS NULL OR keyword_ko=''''';
+  IF to_regclass('public.gm_keyword_relation') IS NULL THEN
+    CREATE TABLE gm_keyword_relation (
+      gm_lang VARCHAR(10) NOT NULL,
+      keyword_ko TEXT NOT NULL,
+      related_keyword_ko TEXT NOT NULL,
+      CONSTRAINT gm_keyword_relation_pkey PRIMARY KEY (gm_lang, keyword_ko, related_keyword_ko)
+    );
+    RETURN;
   END IF;
-  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='gm_keyword_relation' AND column_name='related_keyword') THEN
-    EXECUTE 'UPDATE gm_keyword_relation SET related_keyword_ko=COALESCE(NULLIF(related_keyword_ko,'''') , NULLIF(related_keyword::text,'''')) WHERE related_keyword_ko IS NULL OR related_keyword_ko=''''';
+
+  ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS gm_lang VARCHAR(10);
+  ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS keyword_ko TEXT;
+  ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS related_keyword_ko TEXT;
+
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='gm_keyword_relation' AND column_name='keyword') THEN
+    EXECUTE 'UPDATE gm_keyword_relation SET keyword_ko=COALESCE(NULLIF(BTRIM(keyword_ko),''''),NULLIF(BTRIM(keyword::text),'''')) WHERE keyword_ko IS NULL OR BTRIM(keyword_ko)=''''';
   END IF;
-  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='gm_keyword_relation' AND column_name='lang') THEN
-    EXECUTE 'UPDATE gm_keyword_relation SET gm_lang=COALESCE(NULLIF(gm_lang,'''') , NULLIF(lang::text,'''')) WHERE gm_lang IS NULL OR gm_lang=''''';
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='gm_keyword_relation' AND column_name='related_keyword') THEN
+    EXECUTE 'UPDATE gm_keyword_relation SET related_keyword_ko=COALESCE(NULLIF(BTRIM(related_keyword_ko),''''),NULLIF(BTRIM(related_keyword::text),'''')) WHERE related_keyword_ko IS NULL OR BTRIM(related_keyword_ko)=''''';
   END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='gm_keyword_relation' AND column_name='lang') THEN
+    EXECUTE 'UPDATE gm_keyword_relation SET gm_lang=COALESCE(NULLIF(BTRIM(gm_lang),''''),NULLIF(BTRIM(lang::text),'''')) WHERE gm_lang IS NULL OR BTRIM(gm_lang)=''''';
+  END IF;
+
+  UPDATE gm_keyword_relation
+     SET gm_lang=CASE WHEN COALESCE(keyword_ko,'') ~ '[가-힣]' THEN 'ko' ELSE 'en' END
+   WHERE gm_lang IS NULL OR BTRIM(gm_lang)='';
+  UPDATE gm_keyword_relation SET gm_lang=LOWER(SPLIT_PART(REPLACE(gm_lang,'_','-'),'-',1));
+  UPDATE gm_keyword_relation SET gm_lang=CASE gm_lang WHEN 'kr' THEN 'ko' WHEN 'cn' THEN 'zh' WHEN 'jp' THEN 'ja' WHEN 'vn' THEN 'vi' ELSE gm_lang END;
+
+  DROP TABLE IF EXISTS gm_keyword_relation__new;
+  CREATE TABLE gm_keyword_relation__new (
+    gm_lang VARCHAR(10) NOT NULL,
+    keyword_ko TEXT NOT NULL,
+    related_keyword_ko TEXT NOT NULL,
+    CONSTRAINT gm_keyword_relation__new_pkey PRIMARY KEY (gm_lang, keyword_ko, related_keyword_ko)
+  );
+
+  INSERT INTO gm_keyword_relation__new (gm_lang, keyword_ko, related_keyword_ko)
+  SELECT DISTINCT gm_lang, BTRIM(keyword_ko), BTRIM(related_keyword_ko)
+    FROM gm_keyword_relation
+   WHERE COALESCE(BTRIM(gm_lang),'')<>''
+     AND COALESCE(BTRIM(keyword_ko),'')<>''
+     AND COALESCE(BTRIM(related_keyword_ko),'')<>''
+  ON CONFLICT DO NOTHING;
+
+  DROP TABLE gm_keyword_relation CASCADE;
+  ALTER TABLE gm_keyword_relation__new RENAME TO gm_keyword_relation;
+  ALTER TABLE gm_keyword_relation RENAME CONSTRAINT gm_keyword_relation__new_pkey TO gm_keyword_relation_pkey;
 END $$;
-
-UPDATE gm_keyword_relation
-SET gm_lang = CASE
-  WHEN COALESCE(keyword_ko,'') ~ '[가-힣]' THEN 'ko'
-  ELSE 'en'
-END
-WHERE gm_lang IS NULL OR BTRIM(gm_lang)='';
-
-UPDATE gm_keyword_relation SET gm_lang=LOWER(SPLIT_PART(REPLACE(gm_lang,'_','-'),'-',1));
-UPDATE gm_keyword_relation SET gm_lang='ko' WHERE gm_lang='kr';
-UPDATE gm_keyword_relation SET gm_lang='zh' WHERE gm_lang='cn';
-UPDATE gm_keyword_relation SET gm_lang='ja' WHERE gm_lang='jp';
-UPDATE gm_keyword_relation SET gm_lang='vi' WHERE gm_lang='vn';
-
-DELETE FROM gm_keyword_relation
-WHERE COALESCE(BTRIM(keyword_ko),'')='' OR COALESCE(BTRIM(related_keyword_ko),'')='';
-
-DELETE FROM gm_keyword_relation a
-USING gm_keyword_relation b
-WHERE a.ctid < b.ctid
-  AND a.gm_lang=b.gm_lang
-  AND a.keyword_ko=b.keyword_ko
-  AND a.related_keyword_ko=b.related_keyword_ko;
-
-DO $$
-DECLARE c RECORD;
-BEGIN
-  FOR c IN
-    SELECT column_name
-    FROM information_schema.columns
-    WHERE table_schema=current_schema()
-      AND table_name='gm_keyword_relation'
-      AND column_name NOT IN ('gm_lang','keyword_ko','related_keyword_ko')
-  LOOP
-    EXECUTE format('ALTER TABLE gm_keyword_relation DROP COLUMN IF EXISTS %I CASCADE', c.column_name);
-  END LOOP;
-END $$;
-
-ALTER TABLE gm_keyword_relation ALTER COLUMN gm_lang SET NOT NULL;
-ALTER TABLE gm_keyword_relation ALTER COLUMN keyword_ko SET NOT NULL;
-ALTER TABLE gm_keyword_relation ALTER COLUMN related_keyword_ko SET NOT NULL;
-
-DO $$
-DECLARE r RECORD;
-BEGIN
-  FOR r IN SELECT conname FROM pg_constraint WHERE conrelid='gm_keyword_relation'::regclass AND contype IN ('p','u') LOOP
-    EXECUTE format('ALTER TABLE gm_keyword_relation DROP CONSTRAINT IF EXISTS %I',r.conname);
-  END LOOP;
-END $$;
-
-ALTER TABLE gm_keyword_relation
-  ADD CONSTRAINT gm_keyword_relation_pkey PRIMARY KEY (gm_lang,keyword_ko,related_keyword_ko);
-
-COMMENT ON TABLE gm_keyword_relation IS 'Related search terms. Exactly three fields: gm_lang, keyword_ko, related_keyword_ko.';
