@@ -391,11 +391,13 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const member=s(req.query.member_id || req.query.memberId || '');
     const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
     const root=s(req.query.root || '')==='1';
+    const spaceId=nullableId(req.query.space_id || req.query.spaceId);
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
     const params=[]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
     if(q){ params.push('%'+q+'%'); where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length} OR t.search_source ILIKE $${params.length} OR t.search_ko ILIKE $${params.length})`); }
     if(category){ params.push(category); where.push(`t.category_no=$${params.length}`); }
-    if(root) where.push(`t.space_id IS NULL`);
+    if(spaceId !== null){ params.push(spaceId); where.push(`t.space_id=$${params.length}`); }
+    else if(root) where.push(`t.space_id IS NULL`);
     if(mine && member){ params.push(member); where.push(`t.creator_member_id=$${params.length}`); }
     else { where.push(`t.visibility='public'`); where.push(`COALESCE(t.search_visible,'T')='T'`); }
     params.push(limit); const lim='$'+params.length;
@@ -460,22 +462,14 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
   finally{ client.release(); }
 });
 
-router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
-  try{
-    const pool=db(req); const id=i(req.params.template_id,0);
-    const r=await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,\'F\')<>\'T\'', [id,'T']);
-    const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
-    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id,'T']);
-    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
-  }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
-});
-
-
+/* Static routes must precede /template/:template_id. */
 router.get('/api/gm/smartfit/space/detail', async (req,res)=>{
   try{
     const pool=db(req); const id=i(req.query.space_id || req.query.spaceId,0);
+    const member=s(req.query.member_id || req.query.memberId || '');
+    if(!member) return fail(res,401,'login required');
     if(!id) return fail(res,400,'space_id required');
-    const r=await pool.query("SELECT * FROM gm_smartfit_space WHERE space_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id]);
+    const r=await pool.query("SELECT * FROM gm_smartfit_space WHERE space_id=$1 AND owner_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id,member]);
     const space=r.rows[0]; if(!space) return fail(res,404,'space not found');
     ok(res,{ space:addImageUrls(Object.assign({},space,{ title:coalesceSpaceTitle(space), author:displayAuthor(space) }),'space') });
   }catch(e){ fail(res,500,'space detail failed',{ detail:String(e.message||e) }); }
@@ -484,11 +478,59 @@ router.get('/api/gm/smartfit/space/detail', async (req,res)=>{
 router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
   try{
     const pool=db(req); const id=i(req.query.template_id || req.query.templateId,0);
+    const member=s(req.query.member_id || req.query.memberId || '');
+    if(!member) return fail(res,401,'login required');
     if(!id) return fail(res,400,'template_id required');
-    const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id]);
+    const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id,member]);
     const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
     const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[id]);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows });
+  }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
+});
+
+router.get('/api/gm/smartfit/item/list', async (req,res)=>{
+  try{
+    const pool=db(req);
+    const templateId=i(req.query.template_id || req.query.templateId,0);
+    const member=s(req.query.member_id || req.query.memberId || '');
+    const q=s(req.query.q || req.query.keyword || '');
+    const limit=Math.min(120, Math.max(1, i(req.query.limit,120)));
+    if(!member) return fail(res,401,'login required');
+    if(!templateId) return fail(res,400,'template_id required');
+    const owned=await pool.query("SELECT template_id FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[templateId,member]);
+    if(!owned.rowCount) return fail(res,404,'template not found');
+    const params=[templateId];
+    const where=["i.template_id=$1", "i.is_active='T'", "COALESCE(i.is_deleted,'F')<>'T'"];
+    if(q){
+      params.push('%'+q+'%');
+      const p='$'+params.length;
+      where.push(`(i.product_uid ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p} OR COALESCE(p.mall_product_name,'') ILIKE ${p})`);
+    }
+    params.push(limit); const lim='$'+params.length;
+    const r=await pool.query(`SELECT
+        i.item_id, i.template_id, i.item_role, i.mall_code, i.product_uid, i.qty, i.sort_no,
+        p.product_name, p.mall_product_name,
+        p.mall_sale_price AS sale_price, p.final_supply_price,
+        p.product_url, p.thumb_origin_url AS thumb_url,
+        p.delivery_type, p.delivery_fee, p.delivery_eta_text, p.soldout_yn,
+        p.source_mall, p.pi_ii_vi, p.updated_at
+      FROM gm_smartfit_item i
+      LEFT JOIN gm_product p ON p.product_uid=i.product_uid
+      WHERE ${where.join(' AND ')}
+      ORDER BY i.sort_no, i.item_id
+      LIMIT ${lim}`, params);
+    ok(res,{ items:r.rows, count:r.rowCount, template_id:templateId, limit });
+  }catch(e){ fail(res,500,'item list failed',{ detail:String(e.message||e) }); }
+});
+
+router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
+  try{
+    const pool=db(req); const id=i(req.params.template_id,0);
+    if(!id) return fail(res,404,'template not found');
+    const r=await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,\'F\')<>\'T\'', [id,'T']);
+    const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
+    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id,'T']);
+    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
 });
 
