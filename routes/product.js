@@ -1220,6 +1220,55 @@ const {
 } = require('../services/category');
 
 
+// GM_SEARCH_CATEGORY_ONCE_V019
+// 검색어별 카테고리 판정은 서버에서 최초 1회만 수행하고,
+// 같은 검색의 CPKR/ALKR 및 모든 chunk/item에 동일 값을 강제 적용한다.
+// 상품별 gm_category 조회는 절대 수행하지 않는다.
+const __gmSearchCategoryOnce = new Map();
+const GM_SEARCH_CATEGORY_ONCE_TTL_MS = Math.max(30000, Number(process.env.GM_SEARCH_CATEGORY_ONCE_TTL_MS || 90000));
+
+function searchCategoryOnceKey(keyword){
+  return normalizeKeywordValue(keyword);
+}
+
+async function resolveSearchCategoryOnce(pool, keyword){
+  const normalized = searchCategoryOnceKey(keyword);
+  if(!normalized) return { value:'', cache_hit:false, reason:'empty_keyword' };
+
+  const now = Date.now();
+  const cached = __gmSearchCategoryOnce.get(normalized);
+  if(cached && cached.expires_at > now){
+    if(cached.promise) return { value:await cached.promise, cache_hit:true, reason:'pending_reuse' };
+    return { value:cached.value, cache_hit:true, reason:'value_reuse' };
+  }
+
+  // 오래된 항목을 가볍게 정리해 메모리가 계속 늘지 않게 한다.
+  if(__gmSearchCategoryOnce.size > 500){
+    for(const [k,v] of __gmSearchCategoryOnce){
+      if(!v || v.expires_at <= now) __gmSearchCategoryOnce.delete(k);
+      if(__gmSearchCategoryOnce.size <= 300) break;
+    }
+  }
+
+  const promise = (async()=>{
+    try{
+      const matched = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
+      // 정상적인 미매치는 검색어를 selected 값으로 사용한다.
+      return matched || cleanText(keyword);
+    }catch(e){
+      // DB 오류 때문에 검색 상품 전체 저장이 중단되지 않게 검색어를 사용하되, 1회만 경고한다.
+      console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), error:compactError(e) });
+      return cleanText(keyword);
+    }
+  })();
+
+  __gmSearchCategoryOnce.set(normalized, { promise, expires_at:now + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
+  const value = await promise;
+  __gmSearchCategoryOnce.set(normalized, { value, expires_at:Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
+  return { value, cache_hit:false, reason:'resolved' };
+}
+
+
 let __gmRemoteDeliverySchemaEnsured = false;
 let __gmRemoteDeliverySchemaPromise = null;
 async function ensureProductRemoteDeliverySchema(pool){
@@ -1715,10 +1764,20 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
-    // 검색 단계에서 확정되어 전달된 cp_selected_code를 그대로 사용한다.
-    // 서버 queue에서는 gm_category 재조회, 캐시, fallback을 수행하지 않는다.
-    const queueParent = p;
-    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
+    // 서버에서 검색어 카테고리를 최초 1회만 판정한다.
+    // 이후 같은 검색의 모든 chunk/item에는 동일 selected 값을 강제로 넣는다.
+    const categoryOnce = await resolveSearchCategoryOnce(pool, keyword);
+    const queueCpSelectedCode = cleanText(categoryOnce.value);
+    const queueParent = Object.assign({}, p, {
+      cp_selected_code:queueCpSelectedCode,
+      cpSelectedCode:queueCpSelectedCode
+    });
+    const queueItems = items.map(item=>Object.assign({}, item || {}, {
+      cp_selected_code:queueCpSelectedCode,
+      cpSelectedCode:queueCpSelectedCode
+    }));
+    console.log('[GM_SEARCH_CATEGORY_ONCE]', { keyword, cp_selected_code:queueCpSelectedCode, cache_hit:categoryOnce.cache_hit, reason:categoryOnce.reason, request_id:requestId, chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
+    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:queueItems.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
         request_id, mall_code, keyword, items_json, item_count, status, retry_count, created_at
@@ -1731,7 +1790,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
         status=CASE WHEN gm_product_upsert_queue.status IN ('done','processing') THEN gm_product_upsert_queue.status ELSE 'pending' END,
         error_message=NULL
       RETURNING queue_id, request_id, status, item_count
-    `, [requestId, mallCode, keyword, JSON.stringify(items), items.length]);
+    `, [requestId, mallCode, keyword, JSON.stringify(queueItems), queueItems.length]);
     console.log('[GM_PRODUCT_QUEUE] inserted', {
       queue_id:r.rows[0] && r.rows[0].queue_id,
       request_id:r.rows[0] && r.rows[0].request_id,
@@ -1739,7 +1798,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       item_count:r.rows[0] && r.rows[0].item_count,
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0),
-      cp_selected_code:cleanText(p.cp_selected_code || p.cpSelectedCode || '')
+      cp_selected_code:queueCpSelectedCode
     });
 
     // GM_QUEUE_INLINE_UPSERT_V016
@@ -1750,7 +1809,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
     const uidSeen = new Set();
     const duplicateUidSamples = [];
     const inlineResults = [];
-    for(const item of items){
+    for(const item of queueItems){
       try{
         const probe = normalizeProductPayload(item, queueParent);
         if(probe && probe.id && probe.id.uid){
