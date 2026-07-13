@@ -126,6 +126,36 @@ function normalizeQueueItems(p){
   const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : []);
   return items.filter(Boolean);
 }
+
+// 검색 카테고리는 논리 검색 요청당 최초 1회만 판정한다.
+// 상품별 upsert에서는 gm_category를 다시 조회하지 않는다.
+const GM_SEARCH_CATEGORY_RESOLVE = new Map();
+const GM_SEARCH_CATEGORY_RESOLVE_TTL_MS = 2 * 60 * 1000;
+function searchCategoryResolveKeys(p, keyword){
+  const requestKey = cleanText(p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || p.request_id || p.requestId || p.search_request_id || p.searchRequestId || '');
+  const kw = cleanText(keyword);
+  const keys=[];
+  if(requestKey) keys.push('REQ:' + requestKey);
+  if(kw) keys.push('KW:' + kw);
+  return keys;
+}
+function getResolvedSearchCategory(keys){
+  const now=Date.now();
+  for(const key of keys){
+    const hit=GM_SEARCH_CATEGORY_RESOLVE.get(key);
+    if(!hit) continue;
+    if(now-hit.ts > GM_SEARCH_CATEGORY_RESOLVE_TTL_MS){
+      GM_SEARCH_CATEGORY_RESOLVE.delete(key);
+      continue;
+    }
+    return hit.value;
+  }
+  return '';
+}
+function setResolvedSearchCategory(keys, value){
+  const row={ value:cleanText(value), ts:Date.now() };
+  keys.forEach(key=>GM_SEARCH_CATEGORY_RESOLVE.set(key,row));
+}
 function makeRequestId(p, items){
   const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
@@ -1439,9 +1469,9 @@ async function upsertProduct(pool, raw, parent={}){
       category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: categoryTreeForSave, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
     }
   }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
-  // cp_selected_code는 검색 단계의 판정값을 보존한다.
-  // 상세 cp_fix_code가 확인되어도 일반 CP_CODE/검색어 fallback을 덮어쓰지 않는다.
-  // 단, 상세 path로 확정된 임시 GM_CODE만 실제 cp_code로 치환한다.
+  // 검색 상품은 queue 진입 시 최초 1회 확정된 cp_selected_code를 그대로 저장한다.
+  // 여기서는 상품별 gm_category 조회나 상품별 fallback을 절대 수행하지 않는다.
+  // 상세 상품만 상세 path를 근거로 임시 GM_CODE 확정/치환을 수행한다.
   const confirmedProvisionalMappings = category_dynamic && Array.isArray(category_dynamic.confirmed_provisional_mappings)
     ? category_dynamic.confirmed_provisional_mappings
         .map(x=>({ gm_code:cleanText(x && x.gm_code), cp_code:cleanText(x && x.cp_code) }))
@@ -1453,37 +1483,20 @@ async function upsertProduct(pool, raw, parent={}){
       : []).concat(confirmedProvisionalMappings.map(x=>x.gm_code))
   ));
   const hasDetailCategoryEvidence=!!(cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length));
-  let incomingType=classifySelectedCode(cpSelectedCode);
-  // 검색 단계에서 최초 1회 확정되어 전달된 cp_selected_code를 그대로 보존한다.
-  // 검색 결과 상품별로 값을 지우거나 gm_category를 다시 조회하지 않는다.
-  // 상세 요청에서 전달된 fallback 문자열이 현재 검색어와 다를 때만 이전 상태 누수로 제거한다.
-  if(hasDetailCategoryEvidence && incomingType==='KEYWORD_FALLBACK'
-      && normalizeCategoryNameForMatch(cpSelectedCode)!==normalizeCategoryNameForMatch(searchKeyword)){
-    cpSelectedCode='';
-    incomingType='EMPTY';
-  }
-  if(incomingType==='EMPTY'){
-    if(hasDetailCategoryEvidence){
-      // 상세 path가 있으면 해당 상품에 한해서만 tree 매칭을 수행한다.
-      if(searchKeyword){
-        cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
-      }
-      if(!cpSelectedCode && searchKeyword){
-        cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
-      }
-    }else{
-      // 검색 큐에서 selected가 누락된 비정상 payload는 DB 재조회하지 않고 검색어만 보관한다.
-      cpSelectedCode = searchKeyword;
+
+  if(hasDetailCategoryEvidence){
+    const incomingType=classifySelectedCode(cpSelectedCode);
+    if(incomingType==='EMPTY' && searchKeyword){
+      cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
+      if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
+      if(!cpSelectedCode) cpSelectedCode = searchKeyword;
+    }
+    if(classifySelectedCode(cpSelectedCode)==='GM_CODE'){
+      const selectedMapping=confirmedProvisionalMappings.find(x=>x.gm_code===cleanText(cpSelectedCode));
+      if(selectedMapping) cpSelectedCode=selectedMapping.cp_code;
     }
   }
-  // 기존 KEYWORD_FALLBACK은 검색 당시 카테고리 미매치 기록이므로 상세에서 임의 변경하지 않는다.
-  if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
 
-  // 임시 GM_CODE가 상세 path와 정확히 일치해 확정된 경우에만 실제 cp_code로 치환한다.
-  if(classifySelectedCode(cpSelectedCode)==='GM_CODE'){
-    const selectedMapping=confirmedProvisionalMappings.find(x=>x.gm_code===cleanText(cpSelectedCode));
-    if(selectedMapping) cpSelectedCode=selectedMapping.cp_code;
-  }
   const previousSelectedForLearning = confirmedProvisionalCodes[0] || (classifySelectedCode(incomingCpSelectedCode)==='GM_CODE' ? incomingCpSelectedCode : '');
   const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode, cpSelectedCode);
   await ensureProductCpColumns(pool);
@@ -1724,6 +1737,27 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
+    // 최초 검색 시 한 번만 keyword → cp_selected_code를 확정한다.
+    // 같은 검색의 모든 mall/chunk/item은 이 값을 공유한다.
+    const resolveKeys = searchCategoryResolveKeys(p, keyword);
+    let queueCpSelectedCode = getResolvedSearchCategory(resolveKeys);
+    let categoryResolvedNow = false;
+    if(!queueCpSelectedCode && keyword){
+      queueCpSelectedCode = await findCpSelectedCodeForKeyword(pool, keyword);
+      if(!queueCpSelectedCode) queueCpSelectedCode = keyword;
+      setResolvedSearchCategory(resolveKeys, queueCpSelectedCode);
+      categoryResolvedNow = true;
+    }
+    const queueParent = Object.assign({}, p, {
+      cp_selected_code: queueCpSelectedCode,
+      cpSelectedCode: queueCpSelectedCode
+    });
+    console.log('[GM_SEARCH_CATEGORY_RESOLVE_ONCE]', {
+      keyword,
+      request_id:cleanText(p.request_id || p.requestId || p.search_run_id || p.searchRunId || ''),
+      cp_selected_code:queueCpSelectedCode,
+      resolved_now:categoryResolvedNow
+    });
     console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
@@ -1744,7 +1778,8 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       status:r.rows[0] && r.rows[0].status,
       item_count:r.rows[0] && r.rows[0].item_count,
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
-      chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
+      chunk_total:toInt(p.chunk_total||p.chunkTotal,0),
+      cp_selected_code:queueCpSelectedCode
     });
 
     // GM_QUEUE_INLINE_UPSERT_V016
@@ -1757,14 +1792,14 @@ router.post('/api/gm/product/queue', async (req,res)=>{
     const inlineResults = [];
     for(const item of items){
       try{
-        const probe = normalizeProductPayload(item, p);
+        const probe = normalizeProductPayload(item, queueParent);
         if(probe && probe.id && probe.id.uid){
           if(uidSeen.has(probe.id.uid)) duplicateUidSamples.push(probe.id.uid);
           else uidSeen.add(probe.id.uid);
         }
       }catch(_dupProbe){}
       try{
-        inlineResults.push(await upsertProduct(pool, item, p));
+        inlineResults.push(await upsertProduct(pool, item, queueParent));
       }catch(e){
         inlineResults.push({ ok:false, error:String(e && e.message || e), error_detail:compactError(e), uid:cleanText(item && (item.product_uid || item.productUid || item.pi_ii_vi || item.piIiVi || '')), title_sample:cleanText(item && (item.title || item.name || item.productName || item.product_name || '')).slice(0,120) });
       }
