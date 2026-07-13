@@ -136,11 +136,6 @@ async function isOwnerOrAdmin(pool, memberId, ownerId){
   if(s(memberId) && s(memberId)===s(ownerId)) return true;
   return isAdmin(await getMember(pool, memberId));
 }
-async function requireKnownMember(pool, memberId){
-  const id=s(memberId);
-  if(!id) return null;
-  return await getMember(pool,id);
-}
 function coalesceTitle(row){ return s(row.template_title_source || row.template_title_ko || row.template_title_gm_lang || row.template_title_en || row.template_title || row.title); }
 function coalesceSpaceTitle(row){ return s(row.space_title_source || row.space_title_ko || row.space_title_gm_lang || row.space_title_en || row.space_title || row.title); }
 function addImageUrls(row, type){
@@ -229,7 +224,7 @@ router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images',
   const pool=db(req);
   const startedAt=Date.now();
   try{
-    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_START_V022]', {
+    console.log('[SMARTFIT_IMAGE_SYNC] START', {
       resource_type:s(req.body.resource_type || req.body.type || req.body.mode),
       resource_id:s(req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id),
       member_id:s(req.body.member_id || req.body.memberId || ''),
@@ -278,10 +273,10 @@ router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images',
     if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2',[result.image_count,id]);
     else await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[result.image_count,id]);
 
-    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_DONE_V022]', { resource_type:type, resource_id:id, image_count:result.image_count, ms:Date.now()-startedAt });
+    console.log('[SMARTFIT_IMAGE_SYNC] DONE', { resource_type:type, resource_id:id, image_count:result.image_count, ms:Date.now()-startedAt });
     ok(res,{ resource_type:type, resource_id:id, image_count:result.image_count, images:result.images, operations:result.operations, reserved_limit:r2.RESERVED_IMAGES_PER_ID, current_limit:r2.CURRENT_UI_IMAGE_LIMIT });
   }catch(e){
-    console.error('[GM_SMARTFIT_IMAGE_UPLOAD_FAIL_V022]', {
+    console.error('[SMARTFIT_IMAGE_SYNC] FAIL', {
       message:String(e && e.message || e),
       stack:String(e && e.stack || '').slice(0,1500),
       ms:Date.now()-startedAt
@@ -331,22 +326,26 @@ router.get('/api/gm/smartfit/category/search', async (req,res)=>{
 router.get('/api/gm/smartfit/space/list', async (req,res)=>{
   try{
     const pool=db(req); const member=s(req.query.member_id || req.query.memberId || '');
-    if(!member) return fail(res,401,'login required');
-    if(!(await requireKnownMember(pool,member))) return fail(res,401,'invalid member');
+    const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
     const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
-    const q=s(req.query.q || req.query.keyword || '');
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
-    const params=[member]; const where=[`sp.is_active='T'`, `COALESCE(sp.is_deleted,'F')<>'T'`, `sp.owner_member_id=$1`];
+    const params=[]; const where=[`sp.is_active='T'`, `COALESCE(sp.is_deleted,'F')<>'T'`];
     if(category){ params.push(category); where.push(`sp.category_no=$${params.length}`); }
-    if(q){ params.push('%'+q+'%'); where.push(`(sp.space_title_source ILIKE $${params.length} OR sp.space_title_ko ILIKE $${params.length} OR sp.description ILIKE $${params.length})`); }
+    if(mine && member){ params.push(member); where.push(`sp.owner_member_id=$${params.length}`); }
+    else { where.push(`sp.visibility='public'`); where.push(`COALESCE(sp.search_visible,'T')='T'`); }
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT sp.*, m.member_name, m.member_nickname FROM gm_smartfit_space sp LEFT JOIN gm_member m ON m.member_id=sp.owner_member_id WHERE ${where.join(' AND ')} ORDER BY sp.updated_at DESC LIMIT ${lim}`, params);
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceSpaceTitle(x), author:displayAuthor(x) }),'space')), count:r.rowCount });
   }catch(e){ fail(res,500,'space list failed',{ detail:String(e.message||e) }); }
 });
 
+/* GM_SMARTFIT_SAVE_FLOW_V034
+ * 기본정보 저장 단계에서는 image_count를 변경하지 않는다.
+ * 신규 레코드는 image_count=0으로 생성하고, 수정은 기존 값을 유지한다.
+ * 이미지 선택/변경은 기본정보 저장 성공 후 /image/upload에서 R2 동기화가 모두 완료된 뒤에만 image_count를 갱신한다.
+ */
 router.post('/api/gm/smartfit/space/save', async (req,res)=>{
-  console.log('[GM_SMARTFIT_SPACE_SAVE_REQUEST_V017]', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), mode:s((req.body||{}).mode), title:s((req.body||{}).space_title_source || (req.body||{}).space_title || (req.body||{}).space_name) });
+  console.log('[SMARTFIT_SAVE_DB] SPACE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), mode:s((req.body||{}).mode), title:s((req.body||{}).space_title_source || (req.body||{}).space_title || (req.body||{}).space_name) });
   const pool=db(req); const client=await pool.connect();
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.owner_member_id);
@@ -368,16 +367,17 @@ router.post('/api/gm/smartfit/space/save', async (req,res)=>{
       const r=await client.query(`UPDATE gm_smartfit_space SET source_lang=$1, space_title_source=$2, space_title_ko=$3, author_nickname=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, visibility=$14, search_visible=$15,
         is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$16 RETURNING *`,
-        [sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility),spaceId]);
+        [sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),imageCount(old.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility),spaceId]);
       saved=r.rows[0];
     }else{
       const r=await client.query(`INSERT INTO gm_smartfit_space (creator_member_id, owner_member_id, source_lang, space_title_source, space_title_ko, author_nickname, category_no, image_count,
         link01, link02, link03, link04, link05, link06, description, visibility, search_visible)
         VALUES ($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-        [member,sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility)]);
+        [member,sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),0,links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
     await client.query('COMMIT');
+    console.log('[SMARTFIT_SAVE_DB] SPACE_DONE', { space_id:saved && saved.space_id, image_count:imageCount(saved && saved.image_count) });
     ok(res,{ space:addImageUrls(Object.assign({},saved,{ title:coalesceSpaceTitle(saved), author:displayAuthor(saved) }),'space') });
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'space save failed',{ detail:String(e.message||e) }); }
   finally{ client.release(); }
@@ -389,19 +389,18 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const q=s(req.query.q || req.query.keyword || '');
     const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
     const member=s(req.query.member_id || req.query.memberId || '');
-    if(!member) return fail(res,401,'login required');
-    if(!(await requireKnownMember(pool,member))) return fail(res,401,'invalid member');
+    const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
     const root=s(req.query.root || '')==='1';
-    const spaceId=nullableId(req.query.space_id || req.query.spaceId);
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
-    const params=[member]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`, `t.creator_member_id=$1`];
+    const params=[]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
     if(q){ params.push('%'+q+'%'); where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length} OR t.search_source ILIKE $${params.length} OR t.search_ko ILIKE $${params.length})`); }
     if(category){ params.push(category); where.push(`t.category_no=$${params.length}`); }
     if(root) where.push(`t.space_id IS NULL`);
-    else if(spaceId){ params.push(spaceId); where.push(`t.space_id=$${params.length}`); }
+    if(mine && member){ params.push(member); where.push(`t.creator_member_id=$${params.length}`); }
+    else { where.push(`t.visibility='public'`); where.push(`COALESCE(t.search_visible,'T')='T'`); }
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT t.*, sp.space_title_source, sp.space_title_ko, sp.author_nickname AS space_author_nickname, m.member_name, m.member_nickname FROM gm_smartfit_template t
-      LEFT JOIN gm_smartfit_space sp ON sp.space_id=t.space_id AND sp.owner_member_id=$1
+      LEFT JOIN gm_smartfit_space sp ON sp.space_id=t.space_id
       LEFT JOIN gm_member m ON m.member_id=t.creator_member_id
       WHERE ${where.join(' AND ')} ORDER BY t.ranking_score DESC, t.updated_at DESC LIMIT ${lim}`, params);
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template')), count:r.rowCount, limit });
@@ -409,7 +408,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
 });
 
 router.post('/api/gm/smartfit/template/save', async (req,res)=>{
-  console.log('[GM_SMARTFIT_TEMPLATE_SAVE_REQUEST_V017]', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
+  console.log('[SMARTFIT_SAVE_DB] TEMPLATE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
   const pool=db(req); const client=await pool.connect();
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.creatorMemberId);
@@ -434,13 +433,13 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
-        [spaceIdValue,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
+        [spaceIdValue,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(old.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
       saved=r.rows[0];
     }else{
       const r=await client.query(`INSERT INTO gm_smartfit_template (space_id, creator_member_id, source_lang, template_title_source, template_title_ko, category_no, image_count,
         link01, link02, link03, link04, link05, link06, description, search_source, search_ko, keyword_count, content_json, visibility, search_visible)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20) RETURNING *`,
-        [spaceIdValue,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(b.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
+        [spaceIdValue,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),0,links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
     if(Array.isArray(b.items)){
@@ -455,18 +454,28 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       }
     }
     await client.query('COMMIT');
+    console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
     ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template') });
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'template save failed',{ detail:String(e.message||e) }); }
   finally{ client.release(); }
 });
 
+router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
+  try{
+    const pool=db(req); const id=i(req.params.template_id,0);
+    const r=await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,\'F\')<>\'T\'', [id,'T']);
+    const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
+    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id,'T']);
+    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
+  }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
+});
+
+
 router.get('/api/gm/smartfit/space/detail', async (req,res)=>{
   try{
-    const pool=db(req); const id=i(req.query.space_id || req.query.spaceId,0); const member=s(req.query.member_id || req.query.memberId || '');
-    if(!member) return fail(res,401,'login required');
-    if(!(await requireKnownMember(pool,member))) return fail(res,401,'invalid member');
+    const pool=db(req); const id=i(req.query.space_id || req.query.spaceId,0);
     if(!id) return fail(res,400,'space_id required');
-    const r=await pool.query("SELECT * FROM gm_smartfit_space WHERE space_id=$1 AND owner_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id,member]);
+    const r=await pool.query("SELECT * FROM gm_smartfit_space WHERE space_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id]);
     const space=r.rows[0]; if(!space) return fail(res,404,'space not found');
     ok(res,{ space:addImageUrls(Object.assign({},space,{ title:coalesceSpaceTitle(space), author:displayAuthor(space) }),'space') });
   }catch(e){ fail(res,500,'space detail failed',{ detail:String(e.message||e) }); }
@@ -474,44 +483,13 @@ router.get('/api/gm/smartfit/space/detail', async (req,res)=>{
 
 router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
   try{
-    const pool=db(req); const id=i(req.query.template_id || req.query.templateId,0); const member=s(req.query.member_id || req.query.memberId || '');
-    if(!member) return fail(res,401,'login required');
-    if(!(await requireKnownMember(pool,member))) return fail(res,401,'invalid member');
+    const pool=db(req); const id=i(req.query.template_id || req.query.templateId,0);
     if(!id) return fail(res,400,'template_id required');
-    const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id,member]);
+    const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id]);
     const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
     const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[id]);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
-});
-
-router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
-  try{
-    const pool=db(req); const id=i(req.params.template_id,0); const member=s(req.query.member_id || req.query.memberId || '');
-    if(!member) return fail(res,401,'login required');
-    if(!(await requireKnownMember(pool,member))) return fail(res,401,'invalid member');
-    const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1", [id,member]);
-    const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
-    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id]);
-    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
-  }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
-});
-
-router.get('/api/gm/smartfit/item/list', async (req,res)=>{
-  try{
-    const pool=db(req); const member=s(req.query.member_id || req.query.memberId || ''); const templateId=i(req.query.template_id || req.query.templateId,0);
-    if(!member) return fail(res,401,'login required');
-    if(!(await requireKnownMember(pool,member))) return fail(res,401,'invalid member');
-    if(!templateId) return fail(res,400,'template_id required');
-    const own=(await pool.query("SELECT template_id FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[templateId,member])).rows[0];
-    if(!own) return fail(res,404,'template not found');
-    const q=s(req.query.q || req.query.keyword || '');
-    const params=[templateId]; const where=[`i.template_id=$1`,`i.is_active='T'`,`COALESCE(i.is_deleted,'F')<>'T'`];
-    if(q){ params.push('%'+q+'%'); where.push(`(i.product_uid ILIKE $${params.length})`); }
-    const limit=Math.min(200,Math.max(1,i(req.query.limit,120))); params.push(limit);
-    const r=await pool.query(`SELECT i.* FROM gm_smartfit_item i WHERE ${where.join(' AND ')} ORDER BY i.sort_no,i.item_id LIMIT $${params.length}`,params);
-    ok(res,{items:r.rows,count:r.rowCount});
-  }catch(e){ fail(res,500,'item list failed',{detail:String(e.message||e)}); }
 });
 
 router.post('/api/gm/smartfit/space/favorite', async (req,res)=>{
