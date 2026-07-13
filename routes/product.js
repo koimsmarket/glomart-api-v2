@@ -126,6 +126,71 @@ function normalizeQueueItems(p){
   const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : []);
   return items.filter(Boolean);
 }
+
+// GM_CATEGORY_SEARCH_RESOLVE_ONCE_V014
+// 동일 검색 요청의 모든 mall/chunk/item은 최초 1회 판정한 cp_selected_code를 공유한다.
+// requestId가 누락되는 ALKR residual chunk도 같은 keyword의 단기 캐시를 재사용한다.
+const GM_CATEGORY_RESOLVE_CACHE = new Map();
+const GM_CATEGORY_RESOLVE_TTL_MS = Math.max(30000, Number(process.env.GM_CATEGORY_RESOLVE_TTL_MS || 120000));
+const GM_CATEGORY_RESOLVE_MAX = Math.max(100, Number(process.env.GM_CATEGORY_RESOLVE_MAX || 2000));
+
+function categoryResolveRequestBase(p){
+  let v = cleanText(p && (p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || p.request_id || p.requestId || p.search_request_id || p.searchRequestId));
+  if(!v) return '';
+  // queue 저장용 mall/chunk suffix가 붙은 값도 최초 검색 단위로 환원한다.
+  v = v.replace(/_(?:CPKR|ALKR)(?:_C\d{1,4})?$/i, '').replace(/_C\d{1,4}$/i, '');
+  return v;
+}
+function categoryResolveKeys(p, keyword){
+  const kw = normalizeCategoryNameForMatch(keyword);
+  if(!kw) return [];
+  const base = categoryResolveRequestBase(p);
+  const keys = [];
+  if(base) keys.push('REQ|' + base + '|' + kw);
+  // Runtime의 residual ALKR payload처럼 requestId가 없는 후속 chunk를 최초 판정과 연결한다.
+  keys.push('KW|' + kw);
+  return Array.from(new Set(keys));
+}
+function pruneCategoryResolveCache(now=Date.now()){
+  for(const [k,v] of GM_CATEGORY_RESOLVE_CACHE){
+    if(!v || Number(v.expires_at || 0) <= now) GM_CATEGORY_RESOLVE_CACHE.delete(k);
+  }
+  while(GM_CATEGORY_RESOLVE_CACHE.size > GM_CATEGORY_RESOLVE_MAX){
+    const first = GM_CATEGORY_RESOLVE_CACHE.keys().next();
+    if(first.done) break;
+    GM_CATEGORY_RESOLVE_CACHE.delete(first.value);
+  }
+}
+async function resolveSearchSelectedCodeOnce(pool, p, keyword){
+  const keys = categoryResolveKeys(p, keyword);
+  if(!keys.length) return '';
+  const now = Date.now();
+  pruneCategoryResolveCache(now);
+  for(const key of keys){
+    const hit = GM_CATEGORY_RESOLVE_CACHE.get(key);
+    if(hit && hit.expires_at > now){
+      const value = await hit.promise;
+      try{ console.log('[GM_CP_SELECTED_REQUEST_RESOLVE]', { keyword, cache_hit:true, key, cp_selected_code:value }); }catch(_l){}
+      return value;
+    }
+  }
+  const promise = (async()=>{
+    const selected = await findCpSelectedCodeForKeyword(pool, keyword);
+    return cleanText(selected) || cleanText(keyword);
+  })();
+  const entry = { promise, expires_at:now + GM_CATEGORY_RESOLVE_TTL_MS };
+  for(const key of keys) GM_CATEGORY_RESOLVE_CACHE.set(key, entry);
+  try{
+    const value = await promise;
+    try{ console.log('[GM_CP_SELECTED_REQUEST_RESOLVE]', { keyword, cache_hit:false, keys, cp_selected_code:value }); }catch(_l){}
+    return value;
+  }catch(e){
+    for(const key of keys){
+      if(GM_CATEGORY_RESOLVE_CACHE.get(key) === entry) GM_CATEGORY_RESOLVE_CACHE.delete(key);
+    }
+    throw e;
+  }
+}
 function makeRequestId(p, items){
   const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
@@ -1453,12 +1518,13 @@ async function upsertProduct(pool, raw, parent={}){
       : []).concat(confirmedProvisionalMappings.map(x=>x.gm_code))
   ));
   const hasDetailCategoryEvidence=!!(cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length));
+  const requestResolvedSelected = cleanText(parent && (parent.resolved_cp_selected_code || parent.resolvedCpSelectedCode));
   let incomingType=classifySelectedCode(cpSelectedCode);
-  // 검색 큐는 상품별 독립 판정이어야 한다. 상세 근거가 없는 검색 결과에서 전달된 selected는
-  // 이전 상품/이전 검색 상태가 섞였을 수 있으므로 신뢰하지 않고 현재 검색어로 다시 계산한다.
+  // 검색 큐에서는 최초 검색 시 1회 확정한 값을 모든 chunk/item이 공유한다.
+  // item 자체의 selected는 이전 상품 상태가 섞일 수 있으므로 사용하지 않는다.
   if(!hasDetailCategoryEvidence){
-    cpSelectedCode='';
-    incomingType='EMPTY';
+    cpSelectedCode=requestResolvedSelected;
+    incomingType=classifySelectedCode(cpSelectedCode);
   }else if(incomingType==='KEYWORD_FALLBACK'
       && normalizeCategoryNameForMatch(cpSelectedCode)!==normalizeCategoryNameForMatch(searchKeyword)){
     // 상세 요청의 fallback 문자열도 현재 검색어와 다르면 이전 상태 누수로 보고 제거한다.
@@ -1752,6 +1818,16 @@ router.post('/api/gm/product/queue', async (req,res)=>{
     // 스키마 변경 후 worker가 조용히 실패하면 gm_product가 계속 비는 문제가 있었다.
     // 검색 chunk는 보통 10개 단위이므로 queue 수신 즉시 같은 프로세스에서 upsert까지 수행한다.
     // 기존 queue 테이블은 진단/재처리용으로 유지한다.
+    // 검색어 카테고리는 상품별이 아니라 최초 검색 요청 단위로 정확히 1회 판정한다.
+    // 이후 모든 mall/chunk/item은 같은 resolved_cp_selected_code를 사용한다.
+    const resolvedCpSelectedCode = keyword
+      ? await resolveSearchSelectedCodeOnce(pool, p, keyword)
+      : '';
+    const inlineParent = Object.assign({}, p, {
+      resolved_cp_selected_code:resolvedCpSelectedCode,
+      resolvedCpSelectedCode:resolvedCpSelectedCode
+    });
+
     const uidSeen = new Set();
     const duplicateUidSamples = [];
     const inlineResults = [];
@@ -1764,7 +1840,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
         }
       }catch(_dupProbe){}
       try{
-        inlineResults.push(await upsertProduct(pool, item, p));
+        inlineResults.push(await upsertProduct(pool, item, inlineParent));
       }catch(e){
         inlineResults.push({ ok:false, error:String(e && e.message || e), error_detail:compactError(e), uid:cleanText(item && (item.product_uid || item.productUid || item.pi_ii_vi || item.piIiVi || '')), title_sample:cleanText(item && (item.title || item.name || item.productName || item.product_name || '')).slice(0,120) });
       }
