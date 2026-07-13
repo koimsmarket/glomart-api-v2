@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const keywordRelation = require('../services/keyword_relation');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function cleanText(v){ return String(v || '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
 function toInt(v, def=0){
@@ -1280,30 +1279,26 @@ function pickReturnShippingFee(p, mallSalePrice){
 
 function normalizeRemoteDeliveryPolicy(p){
   p = p || {};
-  // [GLOMART REMOTE DELIVERY POLICY — 수정 금지]
-  // Y=추가배송비, N=배송불가, F=페이지에서 무료 명시, NULL=정보 없음.
-  // NULL을 F로 바꾸면 Cafe24 제주/도서산간 fallback이 영구적으로 차단된다.
-  const rawMode = v => cleanText(v).toUpperCase();
-  const normalizeRemoteMode = (v, fee, feeProvided) => {
-    const m = rawMode(v);
-    if(m === 'N' || m === 'F') return m;
-    if(m === 'Y') return fee > 0 ? 'Y' : 'F';
-    if(feeProvided && fee > 0) return 'Y';
+  // [GLOMART ORDER/DELIVERY PROTECTED — 주문/장바구니 연관 작업자 수정 금지]
+  // 판정 기준은 *_delivery_yn이다.
+  // Y=추가배송비, N=배송불가, F=명시적 무료, NULL=정보 없음(Cafe24 fallback).
+  // status가 NULL이면 fee가 0이어도 F로 변환하지 않는다.
+  const normalizeRemoteMode = (v) => {
+    const m = cleanText(v).toUpperCase();
+    if (m === 'Y' || m === 'N' || m === 'F') return m;
+    if (m === 'T' || m === 'TRUE' || m === '1') return 'Y';
+    if (m === 'FALSE') return 'N';
     return null;
   };
-  const jejuFeeValue = p.jeju_extra_delivery_fee !== undefined ? p.jeju_extra_delivery_fee : p.jejuExtraDeliveryFee;
-  const islandFeeValue = p.island_extra_delivery_fee !== undefined ? p.island_extra_delivery_fee : p.islandExtraDeliveryFee;
-  const jejuFeeProvided = jejuFeeValue !== undefined && jejuFeeValue !== null && cleanText(jejuFeeValue) !== '';
-  const islandFeeProvided = islandFeeValue !== undefined && islandFeeValue !== null && cleanText(islandFeeValue) !== '';
-  const jejuFeeRaw = jejuFeeProvided ? Math.max(0, parseMoney(jejuFeeValue, 0)) : null;
-  const islandFeeRaw = islandFeeProvided ? Math.max(0, parseMoney(islandFeeValue, 0)) : null;
-  const jejuYn = normalizeRemoteMode(p.jeju_delivery_yn ?? p.jejuDeliveryYn, jejuFeeRaw || 0, jejuFeeProvided);
-  const islandYn = normalizeRemoteMode(p.island_delivery_yn ?? p.islandDeliveryYn, islandFeeRaw || 0, islandFeeProvided);
+  const jejuFeeRaw = Math.max(0, parseMoney(p.jeju_extra_delivery_fee ?? p.jejuExtraDeliveryFee ?? 0, 0));
+  const islandFeeRaw = Math.max(0, parseMoney(p.island_extra_delivery_fee ?? p.islandExtraDeliveryFee ?? 0, 0));
+  const jejuYn = normalizeRemoteMode(p.jeju_delivery_yn ?? p.jejuDeliveryYn);
+  const islandYn = normalizeRemoteMode(p.island_delivery_yn ?? p.islandDeliveryYn);
   return {
     jeju_delivery_yn: jejuYn,
-    jeju_extra_delivery_fee: jejuYn === 'Y' ? jejuFeeRaw : (jejuYn === null ? null : 0),
+    jeju_extra_delivery_fee: jejuYn === 'Y' ? jejuFeeRaw : 0,
     island_delivery_yn: islandYn,
-    island_extra_delivery_fee: islandYn === 'Y' ? islandFeeRaw : (islandYn === null ? null : 0)
+    island_extra_delivery_fee: islandYn === 'Y' ? islandFeeRaw : 0
   };
 }
 
@@ -1386,8 +1381,8 @@ async function upsertProduct(pool, raw, parent={}){
     'return_available_yn','exchange_available_yn','return_policy_text','exchange_policy_text','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days',
     'last_seen_at','created_at','updated_at'
   ];
-  // V021: productColumns와 placeholder 순서를 1:1로 고정한다.
-  // V020 오류: soldout_yn 자리에 literal 1이 들어가고, soldout 값이 hit_count에 들어가 insert가 전부 실패했다.
+  // V022: productColumns와 placeholder 순서를 1:1로 고정한다.
+  // soldout_yn=$54, hit_count=1, sale_status=$55 순서가 반드시 유지되어야 한다.
   const valuesSql = [
     '$1','$2','$3','$4','$5','$6','$7','$8',
     '$9','$10::jsonb','$11','$12','$13','$14','$15','$16',
@@ -1395,7 +1390,7 @@ async function upsertProduct(pool, raw, parent={}){
     '$25','$26','$27','$28','$29','$30','$31','$32',
     '$33','$34','$35','$36','$37','$38','$39','$40',
     '$41','$42','$43','$44','$45','$46','$47','$48',
-    '$49','$50','$51','$52','1','$53','$54','$55',
+    '$49','$50','$51','$52','$53','$54','1','$55',
     '$56','$57','$58','$59','$60','$61','$62','$63',
     '$64','$65','$66','$67',
     'now()','now()','now()'
@@ -1450,9 +1445,9 @@ async function upsertProduct(pool, raw, parent={}){
       delivery_eta_text=EXCLUDED.delivery_eta_text,
       delivery_type=EXCLUDED.delivery_type,
       jeju_delivery_yn=EXCLUDED.jeju_delivery_yn,
-      jeju_extra_delivery_fee=CASE WHEN EXCLUDED.jeju_delivery_yn='Y' THEN EXCLUDED.jeju_extra_delivery_fee WHEN EXCLUDED.jeju_delivery_yn IS NULL THEN NULL ELSE 0 END,
+      jeju_extra_delivery_fee=CASE WHEN EXCLUDED.jeju_delivery_yn='Y' THEN EXCLUDED.jeju_extra_delivery_fee ELSE 0 END,
       island_delivery_yn=EXCLUDED.island_delivery_yn,
-      island_extra_delivery_fee=CASE WHEN EXCLUDED.island_delivery_yn='Y' THEN EXCLUDED.island_extra_delivery_fee WHEN EXCLUDED.island_delivery_yn IS NULL THEN NULL ELSE 0 END,
+      island_extra_delivery_fee=CASE WHEN EXCLUDED.island_delivery_yn='Y' THEN EXCLUDED.island_extra_delivery_fee ELSE 0 END,
       tax_type=COALESCE(NULLIF(EXCLUDED.tax_type,''), gm_product.tax_type),
       review_count=EXCLUDED.review_count,
       mall_sales_count=EXCLUDED.mall_sales_count,
@@ -1566,7 +1561,6 @@ async function upsertProduct(pool, raw, parent={}){
     detail_patch = { applied:false, error:compactError(e) };
     console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
   }
-  await keywordRelation.captureProductKeywordMeta(pool, id.uid, Object.assign({}, parent || {}, p || {}, { keyword_ko:searchKeyword, relatedKeywords }));
   const detail_stats = detailSignalStats(optionJson, thumbJson, detailJson || {}, p);
   return {
     ok:true,
@@ -1579,18 +1573,7 @@ async function upsertProduct(pool, raw, parent={}){
 
 
 
-router.post(['/api/gm/search/log','/api/gm/search_log','/api/gm/search/log/save'], async (req,res)=>{
-  const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
-  if(!pool) return fail(res, 500, 'DB pool is not attached');
-  try{
-    const row = await saveSearchLogPayload(pool, p);
-    return ok(res, { action:'search.log', item:row });
-  }catch(e){
-    console.error('[GM_SEARCH_LOG_SAVE_ERROR]', compactError(e));
-    return fail(res, 500, 'search log save failed', { detail:String(e && e.message || e), error_detail:compactError(e) });
-  }
-});
-
+// Search log and keyword-relation routes are owned by server.js/routes/search_keyword.js.
 router.post('/api/gm/product/queue', async (req,res)=>{
   const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
   if(!pool) return fail(res, 500, 'DB pool is not attached');
