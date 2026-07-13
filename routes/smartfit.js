@@ -175,19 +175,44 @@ async function assertImageOwner(pool, type, id, member){
   return row;
 }
 
+/* GM_SMARTFIT_IMAGE_RESIZE_V022
+ * - 정사각형 변환/크롭/여백 추가를 하지 않는다.
+ * - 가로형·세로형 모두 원본 비율을 그대로 유지한다.
+ * - EXIF 방향을 rotate()로 보정한 뒤 긴 변 한도 안에서만 축소한다.
+ * - 작은 이미지는 withoutEnlargement로 확대하지 않는다.
+ * - 품질 조정만으로 용량 제한을 못 맞추면, 같은 비율로 단계 축소한다.
+ */
 async function toWebpUnder(buffer, options){
-  const width=options.width;
-  const height=options.height;
-  const maxBytes=options.maxBytes;
+  const maxWidth=Math.max(1,Number(options.width)||1);
+  const maxHeight=Math.max(1,Number(options.height)||1);
+  const maxBytes=Math.max(1,Number(options.maxBytes)||1);
   const qualities=options.qualities || [82,76,70,64,58,52,46,40];
+  const scales=options.scales || [1,0.9,0.8,0.7,0.6,0.5,0.4];
   let last=null;
-  for(const quality of qualities){
-    let pipe=sharp(buffer,{ failOn:'warning' }).rotate().resize({ width, height, fit:'inside', withoutEnlargement:true });
-    last=await pipe.webp({ quality, effort:5 }).toBuffer();
-    if(last.length<=maxBytes) return last;
+
+  for(const scale of scales){
+    const width=Math.max(1,Math.floor(maxWidth*scale));
+    const height=Math.max(1,Math.floor(maxHeight*scale));
+
+    for(const quality of qualities){
+      last=await sharp(buffer,{ failOn:'warning' })
+        .rotate()
+        .resize({
+          width,
+          height,
+          fit:'inside',
+          withoutEnlargement:true,
+          fastShrinkOnLoad:true
+        })
+        .webp({ quality, effort:5, smartSubsample:true })
+        .toBuffer();
+
+      if(last.length<=maxBytes) return last;
+    }
   }
-  if(last && last.length<=maxBytes) return last;
-  throw new Error(`이미지 최적화 후에도 ${Math.round(maxBytes/1024)}KB를 초과합니다.`);
+
+  const actualKb=last ? Math.ceil(last.length/1024) : 0;
+  throw new Error(`이미지 최적화 후에도 ${Math.round(maxBytes/1024)}KB를 초과합니다. (${actualKb}KB)`);
 }
 
 router.get('/api/gm/smartfit/r2/health', async (req,res)=>{
@@ -199,7 +224,7 @@ router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images',
   const pool=db(req);
   const startedAt=Date.now();
   try{
-    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_START_V021]', {
+    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_START_V022]', {
       resource_type:s(req.body.resource_type || req.body.type || req.body.mode),
       resource_id:s(req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id),
       member_id:s(req.body.member_id || req.body.memberId || ''),
@@ -207,7 +232,16 @@ router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images',
       manifest:s(req.body.manifest || '').slice(0,500)
     });
     const type=r2.normalizeType(req.body.resource_type || req.body.type || req.body.mode);
-    const id=r2.normalizeId(req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id);
+    const rawResourceId=req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id;
+    if(rawResourceId===undefined || rawResourceId===null || String(rawResourceId).trim()===''){
+      console.error('[SMARTFIT_INTERNAL_ID_MISSING_V023]', {
+        resource_type:type,
+        member_id:s(req.body.member_id || req.body.memberId || ''),
+        file_count:Array.isArray(req.files) ? req.files.length : 0
+      });
+      return fail(res,500,'smartfit internal error',{ code:'SMARTFIT_INTERNAL_ID_MISSING', detail:'resource_id was not returned from the basic information save response' });
+    }
+    const id=r2.normalizeId(rawResourceId);
     const member=s(req.body.member_id || req.body.memberId || '');
     if(!member) return fail(res,401,'login required');
     const ownerRow=await assertImageOwner(pool,type,id,member);
@@ -239,10 +273,10 @@ router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images',
     if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2',[result.image_count,id]);
     else await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[result.image_count,id]);
 
-    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_DONE_V021]', { resource_type:type, resource_id:id, image_count:result.image_count, ms:Date.now()-startedAt });
+    console.log('[GM_SMARTFIT_IMAGE_UPLOAD_DONE_V022]', { resource_type:type, resource_id:id, image_count:result.image_count, ms:Date.now()-startedAt });
     ok(res,{ resource_type:type, resource_id:id, image_count:result.image_count, images:result.images, operations:result.operations, reserved_limit:r2.RESERVED_IMAGES_PER_ID, current_limit:r2.CURRENT_UI_IMAGE_LIMIT });
   }catch(e){
-    console.error('[GM_SMARTFIT_IMAGE_UPLOAD_FAIL_V021]', {
+    console.error('[GM_SMARTFIT_IMAGE_UPLOAD_FAIL_V022]', {
       message:String(e && e.message || e),
       stack:String(e && e.stack || '').slice(0,1500),
       ms:Date.now()-startedAt
