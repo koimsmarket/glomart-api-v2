@@ -701,12 +701,12 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       return_policy_text = COALESCE(NULLIF($24,''), return_policy_text),
       exchange_policy_text = COALESCE(NULLIF($25,''), exchange_policy_text),
       return_shipping_fee = CASE WHEN $26::int > 0 THEN $26::int ELSE return_shipping_fee END,
-      jeju_delivery_yn = $27,
-      jeju_extra_delivery_fee = CASE WHEN $27='Y' THEN GREATEST(0,$28::int) ELSE 0 END,
-      island_delivery_yn = $29,
-      island_extra_delivery_fee = CASE WHEN $29='Y' THEN GREATEST(0,$30::int) ELSE 0 END,
+      jeju_delivery_yn = CASE WHEN $27::boolean THEN $28 ELSE jeju_delivery_yn END,
+      jeju_extra_delivery_fee = CASE WHEN $27::boolean THEN $29::int ELSE jeju_extra_delivery_fee END,
+      island_delivery_yn = CASE WHEN $30::boolean THEN $31 ELSE island_delivery_yn END,
+      island_extra_delivery_fee = CASE WHEN $30::boolean THEN $32::int ELSE island_extra_delivery_fee END,
       updated_at = now()
-    WHERE product_uid = $1 OR (mall_code=$31 AND pi_ii_vi=$32)
+    WHERE product_uid = $1 OR (mall_code=$33 AND pi_ii_vi=$34)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
       CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
@@ -733,8 +733,8 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
     returnFee || 0,
-    remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
-    remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
+    remoteDelivery.jeju_provided, remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
+    remoteDelivery.island_provided, remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
     cleanText(id.mallCode || ''), cleanText(id.pi || '')
   ];
   const r = await pool.query(q, vals);
@@ -1279,26 +1279,53 @@ function pickReturnShippingFee(p, mallSalePrice){
 
 function normalizeRemoteDeliveryPolicy(p){
   p = p || {};
-  // [GLOMART ORDER/DELIVERY PROTECTED — 주문/장바구니 연관 작업자 수정 금지]
-  // 판정 기준은 *_delivery_yn이다.
-  // Y=추가배송비, N=배송불가, F=명시적 무료, NULL=정보 없음(Cafe24 fallback).
-  // status가 NULL이면 fee가 0이어도 F로 변환하지 않는다.
-  const normalizeRemoteMode = (v) => {
-    const m = cleanText(v).toUpperCase();
-    if (m === 'Y' || m === 'N' || m === 'F') return m;
-    if (m === 'T' || m === 'TRUE' || m === '1') return 'Y';
-    if (m === 'FALSE') return 'N';
-    return null;
+  // 서버가 지역배송 상태의 유효성만 검증한다.
+  // 필드 미제공은 기존 DB 값 유지, 명시적 null은 NULL 저장이다.
+  const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const pickProvided = (snake, camel) => {
+    if(own(p, snake)) return { provided:true, value:p[snake] };
+    if(own(p, camel)) return { provided:true, value:p[camel] };
+    return { provided:false, value:undefined };
   };
-  const jejuFeeRaw = Math.max(0, parseMoney(p.jeju_extra_delivery_fee ?? p.jejuExtraDeliveryFee ?? 0, 0));
-  const islandFeeRaw = Math.max(0, parseMoney(p.island_extra_delivery_fee ?? p.islandExtraDeliveryFee ?? 0, 0));
-  const jejuYn = normalizeRemoteMode(p.jeju_delivery_yn ?? p.jejuDeliveryYn);
-  const islandYn = normalizeRemoteMode(p.island_delivery_yn ?? p.islandDeliveryYn);
+  const normalizeMode = (v) => {
+    if(v === null || v === undefined || cleanText(v) === '') return null;
+    const m = cleanText(v).toUpperCase();
+    return (m === 'Y' || m === 'N' || m === 'F') ? m : null;
+  };
+  const normalizeOne = (statusSnake, statusCamel, feeSnake, feeCamel) => {
+    const statusRaw = pickProvided(statusSnake, statusCamel);
+    const feeRaw = pickProvided(feeSnake, feeCamel);
+    let status = statusRaw.provided ? normalizeMode(statusRaw.value) : null;
+    let fee = feeRaw.provided && feeRaw.value !== null && feeRaw.value !== ''
+      ? Math.max(0, parseMoney(feeRaw.value, 0))
+      : null;
+
+    // 상태 없이 금액만 명시된 구형 payload를 안전하게 해석한다.
+    if(!statusRaw.provided && feeRaw.provided){
+      status = fee === null ? null : (fee > 0 ? 'Y' : 'F');
+    }
+    if(status === 'N') fee = null;
+    else if(status === 'F') fee = 0;
+    else if(status === 'Y' && fee === null) fee = 0;
+    else if(status === null && statusRaw.provided) fee = null;
+
+    return {
+      provided: statusRaw.provided || feeRaw.provided,
+      status_provided: statusRaw.provided,
+      fee_provided: feeRaw.provided,
+      status,
+      fee
+    };
+  };
+  const jeju = normalizeOne('jeju_delivery_yn','jejuDeliveryYn','jeju_extra_delivery_fee','jejuExtraDeliveryFee');
+  const island = normalizeOne('island_delivery_yn','islandDeliveryYn','island_extra_delivery_fee','islandExtraDeliveryFee');
   return {
-    jeju_delivery_yn: jejuYn,
-    jeju_extra_delivery_fee: jejuYn === 'Y' ? jejuFeeRaw : 0,
-    island_delivery_yn: islandYn,
-    island_extra_delivery_fee: islandYn === 'Y' ? islandFeeRaw : 0
+    jeju_provided: jeju.provided,
+    jeju_delivery_yn: jeju.status,
+    jeju_extra_delivery_fee: jeju.fee,
+    island_provided: island.provided,
+    island_delivery_yn: island.status,
+    island_extra_delivery_fee: island.fee
   };
 }
 
@@ -1444,10 +1471,10 @@ async function upsertProduct(pool, raw, parent={}){
       delivery_fee=EXCLUDED.delivery_fee,
       delivery_eta_text=EXCLUDED.delivery_eta_text,
       delivery_type=EXCLUDED.delivery_type,
-      jeju_delivery_yn=EXCLUDED.jeju_delivery_yn,
-      jeju_extra_delivery_fee=CASE WHEN EXCLUDED.jeju_delivery_yn='Y' THEN EXCLUDED.jeju_extra_delivery_fee ELSE 0 END,
-      island_delivery_yn=EXCLUDED.island_delivery_yn,
-      island_extra_delivery_fee=CASE WHEN EXCLUDED.island_delivery_yn='Y' THEN EXCLUDED.island_extra_delivery_fee ELSE 0 END,
+      jeju_delivery_yn=CASE WHEN $68::boolean THEN EXCLUDED.jeju_delivery_yn ELSE gm_product.jeju_delivery_yn END,
+      jeju_extra_delivery_fee=CASE WHEN $68::boolean THEN EXCLUDED.jeju_extra_delivery_fee ELSE gm_product.jeju_extra_delivery_fee END,
+      island_delivery_yn=CASE WHEN $69::boolean THEN EXCLUDED.island_delivery_yn ELSE gm_product.island_delivery_yn END,
+      island_extra_delivery_fee=CASE WHEN $69::boolean THEN EXCLUDED.island_extra_delivery_fee ELSE gm_product.island_extra_delivery_fee END,
       tax_type=COALESCE(NULLIF(EXCLUDED.tax_type,''), gm_product.tax_type),
       review_count=EXCLUDED.review_count,
       mall_sales_count=EXCLUDED.mall_sales_count,
@@ -1516,7 +1543,9 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
     returnFee, toInt(p.exchange_shipping_fee || p.exchangeShippingFee, 0),
     p.return_period_days == null && p.returnPeriodDays == null ? null : toInt(p.return_period_days || p.returnPeriodDays, 0),
-    p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
+    p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0),
+    remoteDelivery.jeju_provided,
+    remoteDelivery.island_provided
   ];
 
   try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
