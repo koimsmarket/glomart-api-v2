@@ -1217,6 +1217,73 @@ const {
 } = require('../services/category');
 
 
+let __gmRemoteDeliverySchemaEnsured = false;
+let __gmRemoteDeliverySchemaPromise = null;
+async function ensureProductRemoteDeliverySchema(pool){
+  if(__gmRemoteDeliverySchemaEnsured) return true;
+  if(__gmRemoteDeliverySchemaPromise) return __gmRemoteDeliverySchemaPromise;
+
+  __gmRemoteDeliverySchemaPromise = (async function(){
+    const stmts = [
+      `ALTER TABLE gm_product ALTER COLUMN jeju_delivery_yn DROP NOT NULL`,
+      `ALTER TABLE gm_product ALTER COLUMN jeju_delivery_yn DROP DEFAULT`,
+      `ALTER TABLE gm_product ALTER COLUMN jeju_extra_delivery_fee DROP NOT NULL`,
+      `ALTER TABLE gm_product ALTER COLUMN jeju_extra_delivery_fee DROP DEFAULT`,
+      `ALTER TABLE gm_product ALTER COLUMN island_delivery_yn DROP NOT NULL`,
+      `ALTER TABLE gm_product ALTER COLUMN island_delivery_yn DROP DEFAULT`,
+      `ALTER TABLE gm_product ALTER COLUMN island_extra_delivery_fee DROP NOT NULL`,
+      `ALTER TABLE gm_product ALTER COLUMN island_extra_delivery_fee DROP DEFAULT`
+    ];
+
+    for(const sql of stmts){
+      await pool.query(sql);
+    }
+
+    const verify = await pool.query(`
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'gm_product'
+        AND column_name = ANY($1::text[])
+      ORDER BY column_name
+    `, [[
+      'jeju_delivery_yn',
+      'jeju_extra_delivery_fee',
+      'island_delivery_yn',
+      'island_extra_delivery_fee'
+    ]]);
+
+    const rows = verify.rows || [];
+    const expected = new Set([
+      'jeju_delivery_yn',
+      'jeju_extra_delivery_fee',
+      'island_delivery_yn',
+      'island_extra_delivery_fee'
+    ]);
+    const invalid = rows.filter(function(row){
+      expected.delete(row.column_name);
+      return row.is_nullable !== 'YES' || row.column_default != null;
+    });
+
+    if(expected.size || invalid.length){
+      const e = new Error('remote delivery schema verification failed');
+      e.code = 'GM_REMOTE_DELIVERY_SCHEMA_VERIFY_FAIL';
+      e.detail = JSON.stringify({ missing:Array.from(expected), invalid:invalid });
+      throw e;
+    }
+
+    __gmRemoteDeliverySchemaEnsured = true;
+    try{ console.log('[GM_PRODUCT_REMOTE_DELIVERY_DDL_OK]', rows); }catch(_log){}
+    return true;
+  })().catch(function(e){
+    __gmRemoteDeliverySchemaPromise = null;
+    try{ console.error('[GM_PRODUCT_REMOTE_DELIVERY_DDL_FAIL]', compactError(e)); }catch(_log){}
+    throw e;
+  });
+
+  return __gmRemoteDeliverySchemaPromise;
+}
+
 let __gmLightJsonColumnsEnsured = false;
 async function ensureProductLightJsonColumns(pool){
   if(__gmLightJsonColumnsEnsured) return;
@@ -1382,6 +1449,7 @@ async function upsertProduct(pool, raw, parent={}){
   // 예: 푸룬 검색은 selected=432516(건자두/푸룬), fix=445867(셀러가 올린 실제 leaf)로 함께 보관한다.
   await ensureProductCpColumns(pool);
   await ensureProductLightJsonColumns(pool);
+  await ensureProductRemoteDeliverySchema(pool);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
   const detailJsonRaw = normalizeDetailJson(p);
