@@ -1205,6 +1205,8 @@ function pickTaxType(p){
 
 const {
   pickCpSelectedCode,
+  classifySelectedCode,
+  normalizeCategoryNameForMatch,
   pickCpFixCode,
   normalizeCpMatch,
   ensureProductCpColumns,
@@ -1425,6 +1427,7 @@ async function upsertProduct(pool, raw, parent={}){
   const categoryTreeForMatch = parseCategoryTreeFromPayload(p);
   const categoryTreeForSave = (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length) ? categoryTreeForMatch : mallCategoryJson;
   let cpSelectedCode = pickCpSelectedCode(p);
+  const incomingCpSelectedCode = cpSelectedCode;
   const cpFixCode = pickCpFixCode(p);
   try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
 
@@ -1436,17 +1439,53 @@ async function upsertProduct(pool, raw, parent={}){
       category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: categoryTreeForSave, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
     }
   }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
-  if(!cpSelectedCode){
+  // cp_selected_code는 검색 단계의 판정값을 보존한다.
+  // 상세 cp_fix_code가 확인되어도 일반 CP_CODE/검색어 fallback을 덮어쓰지 않는다.
+  // 단, 상세 path로 확정된 임시 GM_CODE만 실제 cp_code로 치환한다.
+  const confirmedProvisionalMappings = category_dynamic && Array.isArray(category_dynamic.confirmed_provisional_mappings)
+    ? category_dynamic.confirmed_provisional_mappings
+        .map(x=>({ gm_code:cleanText(x && x.gm_code), cp_code:cleanText(x && x.cp_code) }))
+        .filter(x=>x.gm_code && x.cp_code)
+    : [];
+  const confirmedProvisionalCodes = Array.from(new Set(
+    (category_dynamic && Array.isArray(category_dynamic.confirmed_provisional_codes)
+      ? category_dynamic.confirmed_provisional_codes.map(cleanText).filter(Boolean)
+      : []).concat(confirmedProvisionalMappings.map(x=>x.gm_code))
+  ));
+  const hasDetailCategoryEvidence=!!(cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length));
+  let incomingType=classifySelectedCode(cpSelectedCode);
+  // 검색 큐는 상품별 독립 판정이어야 한다. 상세 근거가 없는 검색 결과에서 전달된 selected는
+  // 이전 상품/이전 검색 상태가 섞였을 수 있으므로 신뢰하지 않고 현재 검색어로 다시 계산한다.
+  if(!hasDetailCategoryEvidence){
+    cpSelectedCode='';
+    incomingType='EMPTY';
+  }else if(incomingType==='KEYWORD_FALLBACK'
+      && normalizeCategoryNameForMatch(cpSelectedCode)!==normalizeCategoryNameForMatch(searchKeyword)){
+    // 상세 요청의 fallback 문자열도 현재 검색어와 다르면 이전 상태 누수로 보고 제거한다.
+    cpSelectedCode='';
+    incomingType='EMPTY';
+  }
+  // 상세 처리에서는 검색 당시 확보된 CP_CODE/GM_CODE/정상 fallback을 그대로 보존한다.
+  if(incomingType==='EMPTY'){
+    // 상세 path가 있으면 기존 tree 매칭을 먼저 사용한다.
+    // 동명 카테고리가 여러 부모에 있는 경우 일반 keyword 매칭보다 안전하다.
     if((cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length)) && searchKeyword){
       cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
     }
-    if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
-    // 검색어로 카테고리 후보가 잡히지 않으면 상품이 미아가 되지 않도록 검색어를 임시 selected로 보관한다.
-    if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
+    if(!cpSelectedCode && searchKeyword){
+      cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
+    }
   }
+  // 기존 KEYWORD_FALLBACK은 검색 당시 카테고리 미매치 기록이므로 상세에서 임의 변경하지 않는다.
+  if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
+
+  // 임시 GM_CODE가 상세 path와 정확히 일치해 확정된 경우에만 실제 cp_code로 치환한다.
+  if(classifySelectedCode(cpSelectedCode)==='GM_CODE'){
+    const selectedMapping=confirmedProvisionalMappings.find(x=>x.gm_code===cleanText(cpSelectedCode));
+    if(selectedMapping) cpSelectedCode=selectedMapping.cp_code;
+  }
+  const previousSelectedForLearning = confirmedProvisionalCodes[0] || (classifySelectedCode(incomingCpSelectedCode)==='GM_CODE' ? incomingCpSelectedCode : '');
   const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode, cpSelectedCode);
-  // cp_selected_code는 검색어 기준 후보 코드다. 상세 leaf(cp_fix_code)가 확인되어도 selected를 leaf로 덮어쓰지 않는다.
-  // 예: 푸룬 검색은 selected=432516(건자두/푸룬), fix=445867(셀러가 올린 실제 leaf)로 함께 보관한다.
   await ensureProductCpColumns(pool);
   await ensureProductLightJsonColumns(pool);
   await ensureProductRemoteDeliverySchema(pool);
@@ -1635,8 +1674,8 @@ async function upsertProduct(pool, raw, parent={}){
   }); }catch(_trace){}
   let cp_learning = null;
   try{
-    cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
-    try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
+    cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, previous_selected_code:previousSelectedForLearning, previous_selected_codes:confirmedProvisionalCodes, previous_selected_mappings:confirmedProvisionalMappings, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
+    try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, previous_selected_code:previousSelectedForLearning, previous_selected_codes:confirmedProvisionalCodes, previous_selected_mappings:confirmedProvisionalMappings, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
     if(cpFixCode && searchKeyword){
       try{ await updateSearchLogCategoryByKeyword(pool, { keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode }); }
       catch(_sl){ try{ console.warn('[GM_SEARCH_LOG_CATEGORY_UPDATE_FAIL]', Object.assign({ keyword:searchKeyword, cp_fix_code:cpFixCode }, compactError(_sl))); }catch(_l){} }
