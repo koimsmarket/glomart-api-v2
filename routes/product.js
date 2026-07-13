@@ -127,35 +127,6 @@ function normalizeQueueItems(p){
   return items.filter(Boolean);
 }
 
-// 검색 카테고리는 논리 검색 요청당 최초 1회만 판정한다.
-// 상품별 upsert에서는 gm_category를 다시 조회하지 않는다.
-const GM_SEARCH_CATEGORY_RESOLVE = new Map();
-const GM_SEARCH_CATEGORY_RESOLVE_TTL_MS = 2 * 60 * 1000;
-function searchCategoryResolveKeys(p, keyword){
-  const requestKey = cleanText(p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || p.request_id || p.requestId || p.search_request_id || p.searchRequestId || '');
-  const kw = cleanText(keyword);
-  const keys=[];
-  if(requestKey) keys.push('REQ:' + requestKey);
-  if(kw) keys.push('KW:' + kw);
-  return keys;
-}
-function getResolvedSearchCategory(keys){
-  const now=Date.now();
-  for(const key of keys){
-    const hit=GM_SEARCH_CATEGORY_RESOLVE.get(key);
-    if(!hit) continue;
-    if(now-hit.ts > GM_SEARCH_CATEGORY_RESOLVE_TTL_MS){
-      GM_SEARCH_CATEGORY_RESOLVE.delete(key);
-      continue;
-    }
-    return hit.value;
-  }
-  return '';
-}
-function setResolvedSearchCategory(keys, value){
-  const row={ value:cleanText(value), ts:Date.now() };
-  keys.forEach(key=>GM_SEARCH_CATEGORY_RESOLVE.set(key,row));
-}
 function makeRequestId(p, items){
   const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
@@ -1459,7 +1430,10 @@ async function upsertProduct(pool, raw, parent={}){
   let cpSelectedCode = pickCpSelectedCode(p);
   const incomingCpSelectedCode = cpSelectedCode;
   const cpFixCode = pickCpFixCode(p);
-  try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
+  const hasDetailCategoryPayload = !!(cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length));
+  if(hasDetailCategoryPayload){
+    try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
+  }
 
   // CATEGORY_TREE 기반 신규 카테고리는 selected 매칭보다 먼저 처리한다.
   // 그래야 path에 새로 들어온 cp_code도 즉시 gm_category 후보가 되어 selected/fix 비교가 가능하다.
@@ -1513,7 +1487,9 @@ async function upsertProduct(pool, raw, parent={}){
   const remoteDelivery = normalizeRemoteDeliveryPolicy(p);
 
   const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
-  try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
+  if(hasDetailCategoryEvidence){
+    try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
+  }
 
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
@@ -1688,7 +1664,9 @@ async function upsertProduct(pool, raw, parent={}){
   let cp_learning = null;
   try{
     cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, previous_selected_code:previousSelectedForLearning, previous_selected_codes:confirmedProvisionalCodes, previous_selected_mappings:confirmedProvisionalMappings, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
-    try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, previous_selected_code:previousSelectedForLearning, previous_selected_codes:confirmedProvisionalCodes, previous_selected_mappings:confirmedProvisionalMappings, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
+    if(hasDetailCategoryEvidence || (cp_learning && cp_learning.applied)){
+      try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, previous_selected_code:previousSelectedForLearning, previous_selected_codes:confirmedProvisionalCodes, previous_selected_mappings:confirmedProvisionalMappings, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
+    }
     if(cpFixCode && searchKeyword){
       try{ await updateSearchLogCategoryByKeyword(pool, { keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode }); }
       catch(_sl){ try{ console.warn('[GM_SEARCH_LOG_CATEGORY_UPDATE_FAIL]', Object.assign({ keyword:searchKeyword, cp_fix_code:cpFixCode }, compactError(_sl))); }catch(_l){} }
@@ -1737,27 +1715,9 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
-    // 최초 검색 시 한 번만 keyword → cp_selected_code를 확정한다.
-    // 같은 검색의 모든 mall/chunk/item은 이 값을 공유한다.
-    const resolveKeys = searchCategoryResolveKeys(p, keyword);
-    let queueCpSelectedCode = getResolvedSearchCategory(resolveKeys);
-    let categoryResolvedNow = false;
-    if(!queueCpSelectedCode && keyword){
-      queueCpSelectedCode = await findCpSelectedCodeForKeyword(pool, keyword);
-      if(!queueCpSelectedCode) queueCpSelectedCode = keyword;
-      setResolvedSearchCategory(resolveKeys, queueCpSelectedCode);
-      categoryResolvedNow = true;
-    }
-    const queueParent = Object.assign({}, p, {
-      cp_selected_code: queueCpSelectedCode,
-      cpSelectedCode: queueCpSelectedCode
-    });
-    console.log('[GM_SEARCH_CATEGORY_RESOLVE_ONCE]', {
-      keyword,
-      request_id:cleanText(p.request_id || p.requestId || p.search_run_id || p.searchRunId || ''),
-      cp_selected_code:queueCpSelectedCode,
-      resolved_now:categoryResolvedNow
-    });
+    // 검색 단계에서 확정되어 전달된 cp_selected_code를 그대로 사용한다.
+    // 서버 queue에서는 gm_category 재조회, 캐시, fallback을 수행하지 않는다.
+    const queueParent = p;
     console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
@@ -1779,7 +1739,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       item_count:r.rows[0] && r.rows[0].item_count,
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0),
-      cp_selected_code:queueCpSelectedCode
+      cp_selected_code:cleanText(p.cp_selected_code || p.cpSelectedCode || '')
     });
 
     // GM_QUEUE_INLINE_UPSERT_V016
