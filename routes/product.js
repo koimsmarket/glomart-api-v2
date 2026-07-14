@@ -514,8 +514,47 @@ function pickOptionValue(p){
     p.variant_value || p.variantValue || p.optionText || p.option_text || ''
   );
 }
+function pickDeliveryTextDirect(p){
+  return firstNonEmpty(p || {}, ['delivery_eta_text','deliveryEtaText','deliveryRangeText','delivery_range_text','deliveryDateText','delivery_date_text','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
+}
 function pickDeliveryText(p){
-  return firstNonEmpty(p, ['delivery_eta_text','deliveryEtaText','deliveryRangeText','delivery_range_text','deliveryDateText','delivery_date_text','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
+  p=p||{};
+  // 상품 공통 배송일을 최우선으로 사용한다.
+  const direct=pickDeliveryTextDirect(p);
+  if(direct) return direct;
+
+  // ALKR 상세 payload는 상품 배송일이 옵션 행에만 남는 경로가 있다.
+  // 배송일은 상품 공통 속성이므로 옵션 중 실제 날짜/term으로 해석 가능한 첫 값을
+  // gm_product용 원문으로 승격한다. 값이 없거나 파싱 불가하면 빈값을 반환하여
+  // 기존 DB 배송 term을 유지(COALESCE/NULLIF)한다.
+  const lists=[
+    p.optionCombos,p.aliOptionCombos,p.flatOptionRows,p.optionRows,
+    p.visibleOptions,p.options,p.vendorItemOptions,p.itemOptions
+  ];
+  for(const list of lists){
+    if(!Array.isArray(list)) continue;
+    for(const row of list){
+      if(!row || typeof row!=='object' || Array.isArray(row)) continue;
+      const raw=pickDeliveryTextDirect(row);
+      if(raw && normalizeDeliveryTerm(raw,p)) return raw;
+    }
+  }
+
+  // 서버 표준 option_json.rows 배열에서 배송일은 10번째 값(index 9)이다.
+  const optionJsonCandidates=[p.option_json,p.optionJson];
+  for(const candidate of optionJsonCandidates){
+    let obj=candidate;
+    if(typeof obj==='string'){
+      try{ obj=JSON.parse(obj); }catch(_e){ obj=null; }
+    }
+    const rows=obj && Array.isArray(obj.rows) ? obj.rows : [];
+    for(const row of rows){
+      if(!Array.isArray(row)) continue;
+      const raw=cleanText(row[9] || '');
+      if(raw && normalizeDeliveryTerm(raw,p)) return raw;
+    }
+  }
+  return '';
 }
 
 // 배송일은 절대 날짜 문구를 장기 보관하지 않고 "최소일/최대일" term으로 저장한다.
