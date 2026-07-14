@@ -517,6 +517,92 @@ function pickOptionValue(p){
 function pickDeliveryText(p){
   return firstNonEmpty(p, ['delivery_eta_text','deliveryEtaText','deliveryRangeText','delivery_range_text','deliveryDateText','delivery_date_text','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
 }
+
+// 배송일은 절대 날짜 문구를 장기 보관하지 않고 "최소일/최대일" term으로 저장한다.
+// 예: 7월 17일 ~ 7월 19일, 수집일 7월 14일 => 3/5
+// 이미 term(3/5)으로 들어온 값은 그대로 검증하여 사용한다.
+function deliveryBaseDate(p){
+  p=p||{};
+  const candidates=[
+    p.deliveryCollectedAt,p.delivery_collected_at,p.collectedAt,p.collected_at,
+    p.cacheSavedAt,p.cache_saved_at,p.cachedAt,p.cached_at,
+    p.lastSeenAt,p.last_seen_at,p.createdAt,p.created_at,p.updatedAt,p.updated_at
+  ];
+  for(const v of candidates){
+    if(v===undefined||v===null||cleanText(v)==='') continue;
+    const d=new Date(v);
+    if(!Number.isNaN(d.getTime())) return d;
+  }
+  return new Date();
+}
+function kstDayNumber(v){
+  const d=v instanceof Date?v:new Date(v);
+  if(Number.isNaN(d.getTime())) return null;
+  const kstMs=d.getTime()+(9*60*60*1000);
+  const x=new Date(kstMs);
+  return Date.UTC(x.getUTCFullYear(),x.getUTCMonth(),x.getUTCDate())/86400000;
+}
+function absoluteDeliveryDay(month,day,base){
+  const baseDay=kstDayNumber(base);
+  if(baseDay===null) return null;
+  const kstMs=base.getTime()+(9*60*60*1000);
+  const b=new Date(kstMs);
+  let year=b.getUTCFullYear();
+  let target=Date.UTC(year,Number(month)-1,Number(day))/86400000;
+  if(target+183<baseDay) target=Date.UTC(year+1,Number(month)-1,Number(day))/86400000;
+  return target;
+}
+function validDeliveryTerm(min,max){
+  min=Number(min); max=Number(max);
+  if(!Number.isFinite(min)||!Number.isFinite(max)) return '';
+  min=Math.max(0,Math.round(min)); max=Math.max(0,Math.round(max));
+  if(min>max||max>365) return '';
+  return String(min)+'/'+String(max);
+}
+function normalizeDeliveryTerm(raw,p){
+  const text=cleanText(raw||'');
+  if(!text) return '';
+  let m=text.match(/^\s*(\d{1,3})\s*\/\s*(\d{1,3})\s*(?:일)?\s*$/);
+  if(m) return validDeliveryTerm(m[1],m[2]);
+
+  const base=deliveryBaseDate(p);
+  const baseDay=kstDayNumber(base);
+  if(baseDay===null) return '';
+
+  m=text.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*[-~–—]\s*(?:(\d{1,2})\s*월\s*)?(\d{1,2})\s*일/);
+  if(m){
+    const d1=absoluteDeliveryDay(m[1],m[2],base);
+    let d2=absoluteDeliveryDay(m[3]||m[1],m[4],base);
+    if(d1===null||d2===null) return '';
+    if(d2<d1) d2=Date.UTC(new Date(d2*86400000).getUTCFullYear(),new Date(d2*86400000).getUTCMonth()+1,new Date(d2*86400000).getUTCDate())/86400000;
+    return validDeliveryTerm(d1-baseDay,d2-baseDay);
+  }
+  // 절대 날짜 범위를 먼저 판정한 뒤에만 순수 term 문구(예: 3~5일)를 판정한다.
+  // 그렇지 않으면 "7월 15일 ~ 17일"을 15/17로 오인한다.
+  m=text.match(/(?:^|\s)(\d{1,3})\s*(?:일)?\s*[-~–—]\s*(\d{1,3})\s*일(?:\s|$)/);
+  if(m) return validDeliveryTerm(m[1],m[2]);
+  if(/오늘/.test(text)) return '0/0';
+  if(/내일/.test(text)) return '1/1';
+  if(/모레/.test(text)) return '2/2';
+  m=text.match(/(?:주문일\s*)?\+\s*(\d{1,3})\s*일/);
+  if(m) return validDeliveryTerm(m[1],m[1]);
+  m=text.match(/(\d{1,3})\s*일\s*(?:내|이내)\s*배송\s*예정/);
+  if(m) return validDeliveryTerm(m[1],m[1]);
+  m=text.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if(m){
+    const d=absoluteDeliveryDay(m[1],m[2],base);
+    return d===null?'':validDeliveryTerm(d-baseDay,d-baseDay);
+  }
+  m=text.match(/(?:^|\s)(\d{1,2})\s*\/\s*(\d{1,2})(?:\s|$)/);
+  if(m){
+    const d=absoluteDeliveryDay(m[1],m[2],base);
+    return d===null?'':validDeliveryTerm(d-baseDay,d-baseDay);
+  }
+  return '';
+}
+function pickDeliveryTerm(p){
+  return normalizeDeliveryTerm(pickDeliveryText(p),p);
+}
 function pickDeliveryType(p){
   return cleanText(firstNonEmpty(p, ['delivery_type','deliveryType','searchDeliveryType','shipping_type','shippingType','shipLabel','shippingLabel','delivery_badge','deliveryBadge','shipping_badge','shippingBadge']));
 }
@@ -1052,7 +1138,7 @@ function optionRowsFromOptionJson(optionJson, id, p){
       normal_price: parseMoney(r[6], 0),
       discount_price: 0,
       delivery_fee: parseMoney(r[8], 0),
-      delivery_eta_text: cleanText(r[9] || ''),
+      delivery_eta_text: normalizeDeliveryTerm(r[9] || '', p),
       delivery_type: cleanText(r[7] || ''),
       soldout_yn: soldoutYn,
       sale_status: soldoutYn === 'Y' ? 'soldout' : 'active',
@@ -1146,7 +1232,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           normal_price=COALESCE(EXCLUDED.normal_price, gm_product_option.normal_price),
           discount_price=EXCLUDED.discount_price,
           delivery_fee=EXCLUDED.delivery_fee,
-          delivery_eta_text=EXCLUDED.delivery_eta_text,
+          delivery_eta_text=COALESCE(NULLIF(EXCLUDED.delivery_eta_text,''), gm_product_option.delivery_eta_text),
           delivery_type=EXCLUDED.delivery_type,
           soldout_yn=EXCLUDED.soldout_yn,
           sale_status=EXCLUDED.sale_status,
@@ -1706,7 +1792,7 @@ async function upsertProduct(pool, raw, parent={}){
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     productOptionLinkJson ? safeJsonString(productOptionLinkJson) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
-    pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p),
+    pickDeliveryFee(p), pickDeliveryTerm(p), pickDeliveryType(p),
     remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
     remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
     taxType, cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
@@ -1732,7 +1818,7 @@ async function upsertProduct(pool, raw, parent={}){
     remoteDelivery.island_provided
   ];
 
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, delivery_eta_text:pickDeliveryText(p), delivery_type:pickDeliveryType(p) }); }catch(_trace){}
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, delivery_eta_text_raw:pickDeliveryText(p), delivery_eta_text:pickDeliveryTerm(p), delivery_type:pickDeliveryType(p) }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);
