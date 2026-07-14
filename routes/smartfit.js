@@ -4,8 +4,19 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V038_DIRECT_R2_UPLOAD';
+const VERSION = 'GM_SMARTFIT_SERVER_V039_R2_ENV_DIAG';
+function r2EnvStatus(){
+  return {
+    account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
+    access: !!String(process.env.R2_ACCESS_KEY_ID || '').trim(),
+    secret: !!String(process.env.R2_SECRET_ACCESS_KEY || '').trim(),
+    bucket: !!String(process.env.R2_BUCKET_NAME || '').trim(),
+    endpoint: !!String(process.env.R2_ENDPOINT || '').trim(),
+    publicBase: !!String(process.env.R2_PUBLIC_BASE_URL || process.env.R2_PUBLIC_BASE || process.env.GM_R2_PUBLIC_BASE || '').trim()
+  };
+}
 console.log('[GM_SMARTFIT_ROUTE] loaded', VERSION);
+console.log('[SMARTFIT_R2_ENV_BOOT]', r2EnvStatus());
 
 router.get('/api/gm/smartfit/health', (_req,res)=>{
   res.json({ok:true,version:VERSION,routes:['space/detail','template/detail','item/list','image/prepare','image/commit']});
@@ -179,6 +190,7 @@ router.post('/api/gm/smartfit/image/prepare', express.json({limit:'128kb'}), asy
   const pool=db(req);
   try{
     const b=req.body||{};
+    console.log('[SMARTFIT_R2_ENV_PREPARE]', r2EnvStatus());
     const type=r2.normalizeType(b.resource_type || b.type || b.mode);
     const id=r2.normalizeId(b.resource_id || b.id || b.space_id || b.template_id);
     const member=s(b.member_id || b.memberId || '');
