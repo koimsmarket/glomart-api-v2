@@ -1220,52 +1220,91 @@ const {
 } = require('../services/category');
 
 
-// GM_SEARCH_CATEGORY_ONCE_V019
-// 검색어별 카테고리 판정은 서버에서 최초 1회만 수행하고,
-// 같은 검색의 CPKR/ALKR 및 모든 chunk/item에 동일 값을 강제 적용한다.
-// 상품별 gm_category 조회는 절대 수행하지 않는다.
-const __gmSearchCategoryOnce = new Map();
+// GM_SEARCH_CATEGORY_ONCE_V020
+// 카테고리 판정은 검색 요청(requestId + keyword)마다 정확히 1회만 수행한다.
+// CPKR chunk들은 같은 requestId를 공유하고, requestId가 비어 오는 후발 ALKR 결과는
+// 동일 keyword의 가장 최근 검색 판정값만 재사용한다. 서로 다른 검색어/검색 요청 간 값 공유는 금지한다.
+const __gmSearchCategoryByRequest = new Map();
+const __gmLatestSearchCategoryByKeyword = new Map();
 const GM_SEARCH_CATEGORY_ONCE_TTL_MS = Math.max(30000, Number(process.env.GM_SEARCH_CATEGORY_ONCE_TTL_MS || 90000));
 
-function searchCategoryOnceKey(keyword){
+function searchCategoryKeywordKey(keyword){
   return normalizeKeywordValue(keyword);
 }
 
-async function resolveSearchCategoryOnce(pool, keyword){
-  const normalized = searchCategoryOnceKey(keyword);
-  if(!normalized) return { value:'', cache_hit:false, reason:'empty_keyword' };
+function searchCategoryRequestToken(p){
+  return cleanText(
+    p.request_id || p.requestId || p.search_request_id || p.searchRequestId ||
+    p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || ''
+  );
+}
+
+function cleanupSearchCategoryOnce(now){
+  if(__gmSearchCategoryByRequest.size > 500){
+    for(const [k,v] of __gmSearchCategoryByRequest){
+      if(!v || v.expires_at <= now) __gmSearchCategoryByRequest.delete(k);
+      if(__gmSearchCategoryByRequest.size <= 300) break;
+    }
+  }
+  if(__gmLatestSearchCategoryByKeyword.size > 300){
+    for(const [k,v] of __gmLatestSearchCategoryByKeyword){
+      if(!v || v.expires_at <= now) __gmLatestSearchCategoryByKeyword.delete(k);
+      if(__gmLatestSearchCategoryByKeyword.size <= 200) break;
+    }
+  }
+}
+
+async function resolveSearchCategoryOnce(pool, keyword, requestToken){
+  const keywordKey = searchCategoryKeywordKey(keyword);
+  if(!keywordKey) return { value:'', cache_hit:false, reason:'empty_keyword' };
 
   const now = Date.now();
-  const cached = __gmSearchCategoryOnce.get(normalized);
-  if(cached && cached.expires_at > now){
-    if(cached.promise) return { value:await cached.promise, cache_hit:true, reason:'pending_reuse' };
-    return { value:cached.value, cache_hit:true, reason:'value_reuse' };
+  cleanupSearchCategoryOnce(now);
+  const token = cleanText(requestToken);
+
+  // 정상 검색 요청: requestId + keyword를 절대 키로 사용한다.
+  if(token){
+    const requestKey = token + '::' + keywordKey;
+    const cached = __gmSearchCategoryByRequest.get(requestKey);
+    if(cached && cached.expires_at > now){
+      if(cached.promise) return { value:await cached.promise, cache_hit:true, reason:'request_pending_reuse' };
+      return { value:cached.value, cache_hit:true, reason:'request_value_reuse' };
+    }
+
+    const promise = (async()=>{
+      try{
+        const matched = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
+        return matched || cleanText(keyword);
+      }catch(e){
+        console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), request_id:token, error:compactError(e) });
+        return cleanText(keyword);
+      }
+    })();
+
+    __gmSearchCategoryByRequest.set(requestKey, { promise, expires_at:now + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
+    const value = await promise;
+    const expiresAt = Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS;
+    __gmSearchCategoryByRequest.set(requestKey, { value, expires_at:expiresAt });
+    __gmLatestSearchCategoryByKeyword.set(keywordKey, { value, request_token:token, expires_at:expiresAt });
+    return { value, cache_hit:false, reason:'request_resolved' };
   }
 
-  // 오래된 항목을 가볍게 정리해 메모리가 계속 늘지 않게 한다.
-  if(__gmSearchCategoryOnce.size > 500){
-    for(const [k,v] of __gmSearchCategoryOnce){
-      if(!v || v.expires_at <= now) __gmSearchCategoryOnce.delete(k);
-      if(__gmSearchCategoryOnce.size <= 300) break;
-    }
+  // ALKR 잔여 결과처럼 requestId가 비어 있는 경우에만 같은 keyword의 최신 검색값을 사용한다.
+  const latest = __gmLatestSearchCategoryByKeyword.get(keywordKey);
+  if(latest && latest.expires_at > now){
+    return { value:latest.value, cache_hit:true, reason:'latest_keyword_reuse' };
   }
 
-  const promise = (async()=>{
-    try{
-      const matched = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
-      // 정상적인 미매치는 검색어를 selected 값으로 사용한다.
-      return matched || cleanText(keyword);
-    }catch(e){
-      // DB 오류 때문에 검색 상품 전체 저장이 중단되지 않게 검색어를 사용하되, 1회만 경고한다.
-      console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), error:compactError(e) });
-      return cleanText(keyword);
-    }
-  })();
-
-  __gmSearchCategoryOnce.set(normalized, { promise, expires_at:now + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
-  const value = await promise;
-  __gmSearchCategoryOnce.set(normalized, { value, expires_at:Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
-  return { value, cache_hit:false, reason:'resolved' };
+  // 선행 CPKR 요청을 찾지 못한 독립 요청은 해당 keyword로 1회 판정한다.
+  try{
+    const matched = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
+    const value = matched || cleanText(keyword);
+    __gmLatestSearchCategoryByKeyword.set(keywordKey, { value, request_token:'', expires_at:Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
+    return { value, cache_hit:false, reason:'keyword_resolved_without_request' };
+  }catch(e){
+    console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), request_id:'', error:compactError(e) });
+    return { value:cleanText(keyword), cache_hit:false, reason:'keyword_error_fallback' };
+  }
 }
 
 
@@ -1766,7 +1805,8 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   try{
     // 서버에서 검색어 카테고리를 최초 1회만 판정한다.
     // 이후 같은 검색의 모든 chunk/item에는 동일 selected 값을 강제로 넣는다.
-    const categoryOnce = await resolveSearchCategoryOnce(pool, keyword);
+    const categoryRequestToken = searchCategoryRequestToken(p);
+    const categoryOnce = await resolveSearchCategoryOnce(pool, keyword, categoryRequestToken);
     const queueCpSelectedCode = cleanText(categoryOnce.value);
     const queueParent = Object.assign({}, p, {
       cp_selected_code:queueCpSelectedCode,
@@ -1776,7 +1816,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       cp_selected_code:queueCpSelectedCode,
       cpSelectedCode:queueCpSelectedCode
     }));
-    console.log('[GM_SEARCH_CATEGORY_ONCE]', { keyword, cp_selected_code:queueCpSelectedCode, cache_hit:categoryOnce.cache_hit, reason:categoryOnce.reason, request_id:requestId, chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
+    console.log('[GM_SEARCH_CATEGORY_ONCE]', { keyword, cp_selected_code:queueCpSelectedCode, cache_hit:categoryOnce.cache_hit, reason:categoryOnce.reason, request_id:requestId, category_request_token:categoryRequestToken, chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:queueItems.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
