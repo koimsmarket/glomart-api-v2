@@ -1,13 +1,15 @@
 'use strict';
 const express = require('express');
 const crypto = require('crypto');
-const multer = require('multer');
-const sharp = require('sharp');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V021_R2_IMAGE_TRANSFER';
+const VERSION = 'GM_SMARTFIT_SERVER_V038_DIRECT_R2_UPLOAD';
 console.log('[GM_SMARTFIT_ROUTE] loaded', VERSION);
+
+router.get('/api/gm/smartfit/health', (_req,res)=>{
+  res.json({ok:true,version:VERSION,routes:['space/detail','template/detail','item/list','image/prepare','image/commit']});
+});
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v){ return v === undefined || v === null ? '' : String(v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
@@ -146,22 +148,11 @@ function addImageUrls(row, type){
   return Object.assign({}, row, { image_count:count, image_files:images });
 }
 
-/* GM_SMARTFIT_R2_UPLOAD_V001
- * 업로드 규칙은 services/r2.js 상단의 GM_R2_STORAGE_RULE_V001 주석을 기준으로 한다.
- * - 내부 알고리즘/파일 슬롯: 최대 10장
- * - 현재 UI/API 업로드 제한: 최대 5장
- * - 파일명/경로: ID당 10장까지 영구 예약
- * - DB: URL 미저장, 업로드 성공 후 image_count만 갱신
+/* GM_SMARTFIT_R2_DIRECT_UPLOAD_V038
+ * 사용자 기기: 회전/리사이즈/WebP/썸네일 생성 후 R2 Presigned PUT URL로 직접 업로드.
+ * Cloudtype: ID·소유권 확인, 서명 URL 발급, R2 HEAD/COPY/DELETE, image_count 갱신만 담당.
+ * 이미지 본문은 Cloudtype를 통과하지 않는다.
  */
-const smartfitImageUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { files: r2.CURRENT_UI_IMAGE_LIMIT, fileSize: 15 * 1024 * 1024 },
-  fileFilter: (_req,file,cb)=>{
-    const okType=/^image\/(jpeg|png|webp)$/i.test(String(file.mimetype||''));
-    cb(okType ? null : new Error('JPG, PNG, WEBP 이미지만 업로드할 수 있습니다.'), okType);
-  }
-});
-
 async function assertImageOwner(pool, type, id, member){
   if(type==='space'){
     const row=(await pool.query("SELECT space_id, owner_member_id, creator_member_id, image_count FROM gm_smartfit_space WHERE space_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id])).rows[0];
@@ -174,114 +165,56 @@ async function assertImageOwner(pool, type, id, member){
   if(!(await isOwnerOrAdmin(pool,member,row.creator_member_id))) throw new Error('permission denied');
   return row;
 }
-
-/* GM_SMARTFIT_IMAGE_RESIZE_V022
- * - 정사각형 변환/크롭/여백 추가를 하지 않는다.
- * - 가로형·세로형 모두 원본 비율을 그대로 유지한다.
- * - EXIF 방향을 rotate()로 보정한 뒤 긴 변 한도 안에서만 축소한다.
- * - 작은 이미지는 withoutEnlargement로 확대하지 않는다.
- * - 품질 조정만으로 용량 제한을 못 맞추면, 같은 비율로 단계 축소한다.
- */
-async function toWebpUnder(buffer, options){
-  const maxWidth=Math.max(1,Number(options.width)||1);
-  const maxHeight=Math.max(1,Number(options.height)||1);
-  const maxBytes=Math.max(1,Number(options.maxBytes)||1);
-  const qualities=options.qualities || [82,76,70,64,58,52,46,40];
-  const scales=options.scales || [1,0.9,0.8,0.7,0.6,0.5,0.4];
-  let last=null;
-
-  for(const scale of scales){
-    const width=Math.max(1,Math.floor(maxWidth*scale));
-    const height=Math.max(1,Math.floor(maxHeight*scale));
-
-    for(const quality of qualities){
-      last=await sharp(buffer,{ failOn:'warning' })
-        .rotate()
-        .resize({
-          width,
-          height,
-          fit:'inside',
-          withoutEnlargement:true,
-          fastShrinkOnLoad:true
-        })
-        .webp({ quality, effort:5, smartSubsample:true })
-        .toBuffer();
-
-      if(last.length<=maxBytes) return last;
-    }
-  }
-
-  const actualKb=last ? Math.ceil(last.length/1024) : 0;
-  throw new Error(`이미지 최적화 후에도 ${Math.round(maxBytes/1024)}KB를 초과합니다. (${actualKb}KB)`);
+function parseImageManifest(raw){
+  let manifest=raw;
+  if(typeof manifest==='string'){ try{ manifest=JSON.parse(manifest); }catch(_){ throw new Error('invalid image manifest'); } }
+  if(!Array.isArray(manifest)) throw new Error('image manifest required');
+  return manifest;
 }
-
-router.get('/api/gm/smartfit/r2/health', async (req,res)=>{
-  try{ ok(res,{ r2:await r2.health() }); }
+router.get('/api/gm/smartfit/r2/health', async (_req,res)=>{
+  try{ ok(res,{ r2:await r2.health(), direct_upload:true }); }
   catch(e){ fail(res,503,'r2 unavailable',{ detail:String(e.message||e) }); }
 });
-
-router.post('/api/gm/smartfit/image/upload', smartfitImageUpload.array('images', r2.CURRENT_UI_IMAGE_LIMIT), async (req,res)=>{
+router.post('/api/gm/smartfit/image/prepare', express.json({limit:'128kb'}), async (req,res)=>{
+  const pool=db(req);
+  try{
+    const b=req.body||{};
+    const type=r2.normalizeType(b.resource_type || b.type || b.mode);
+    const id=r2.normalizeId(b.resource_id || b.id || b.space_id || b.template_id);
+    const member=s(b.member_id || b.memberId || '');
+    if(!member) return fail(res,401,'login required');
+    await assertImageOwner(pool,type,id,member);
+    const manifest=parseImageManifest(b.manifest);
+    const requestId=crypto.randomUUID().replace(/-/g,'');
+    const prepared=r2.prepareDirectUpload({type,id,plan:manifest,requestId,expiresSeconds:600});
+    console.log('[SMARTFIT_IMAGE_PREPARE] DONE',{resource_type:type,resource_id:id,request_id:requestId,upload_count:prepared.uploads.length});
+    ok(res,{resource_type:type,resource_id:id,...prepared,current_limit:r2.CURRENT_UI_IMAGE_LIMIT,reserved_limit:r2.RESERVED_IMAGES_PER_ID});
+  }catch(e){
+    console.error('[SMARTFIT_IMAGE_PREPARE] FAIL',String(e&&e.message||e));
+    fail(res,400,'image prepare failed',{detail:String(e.message||e)});
+  }
+});
+router.post('/api/gm/smartfit/image/commit', express.json({limit:'128kb'}), async (req,res)=>{
   const pool=db(req);
   const startedAt=Date.now();
   try{
-    console.log('[SMARTFIT_IMAGE_SYNC] START', {
-      resource_type:s(req.body.resource_type || req.body.type || req.body.mode),
-      resource_id:s(req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id),
-      member_id:s(req.body.member_id || req.body.memberId || ''),
-      file_count:Array.isArray(req.files) ? req.files.length : 0,
-      manifest:s(req.body.manifest || '').slice(0,500)
-    });
-    const type=r2.normalizeType(req.body.resource_type || req.body.type || req.body.mode);
-    const rawResourceId=req.body.resource_id || req.body.id || req.body.space_id || req.body.template_id;
-    if(rawResourceId===undefined || rawResourceId===null || String(rawResourceId).trim()===''){
-      console.error('[SMARTFIT_INTERNAL_ID_MISSING_V023]', {
-        resource_type:type,
-        member_id:s(req.body.member_id || req.body.memberId || ''),
-        file_count:Array.isArray(req.files) ? req.files.length : 0
-      });
-      return fail(res,500,'smartfit internal error',{ code:'SMARTFIT_INTERNAL_ID_MISSING', detail:'resource_id was not returned from the basic information save response' });
-    }
-    const id=r2.normalizeId(rawResourceId);
-    const member=s(req.body.member_id || req.body.memberId || '');
+    const b=req.body||{};
+    const type=r2.normalizeType(b.resource_type || b.type || b.mode);
+    const id=r2.normalizeId(b.resource_id || b.id || b.space_id || b.template_id);
+    const member=s(b.member_id || b.memberId || '');
     if(!member) return fail(res,401,'login required');
     const ownerRow=await assertImageOwner(pool,type,id,member);
-    const oldCount=imageCount(ownerRow.image_count);
-    const files=Array.isArray(req.files) ? req.files : [];
-
-    let manifest;
-    if(s(req.body.manifest)){
-      try{ manifest=JSON.parse(req.body.manifest); }
-      catch(_){ return fail(res,400,'invalid image manifest'); }
-    }else{
-      // 이전 호출부 호환: 전달된 새 파일 전체를 최종 01~N으로 저장한다.
-      manifest=files.map((_file,fileIndex)=>({ type:'new', file_index:fileIndex }));
-    }
-    if(!Array.isArray(manifest)) return fail(res,400,'image manifest required');
-    if(manifest.length>r2.CURRENT_UI_IMAGE_LIMIT) return fail(res,400,`현재는 최대 ${r2.CURRENT_UI_IMAGE_LIMIT}장까지 등록할 수 있습니다.`);
-
-    const converted=[];
-    for(let idx=0; idx<files.length; idx++){
-      const original=await toWebpUnder(files[idx].buffer,{ width:1600, height:1600, maxBytes:300*1024 });
-      const small=await toWebpUnder(files[idx].buffer,{ width:480, height:480, maxBytes:100*1024, qualities:[78,70,62,54,46,40] });
-      converted.push({ image:original, small, original_name:s(files[idx].originalname) });
-    }
-
-    const requestId=crypto.randomUUID().replace(/-/g,'');
-    const result=await r2.applyImagePlan({ type, id, oldCount, plan:manifest, newFiles:converted, requestId });
-
-    // R2 최종 상태가 완성된 뒤에만 DB image_count를 변경한다.
+    const manifest=parseImageManifest(b.manifest);
+    const requestId=s(b.request_id || b.requestId).replace(/[^a-zA-Z0-9_-]/g,'');
+    if(!requestId) return fail(res,400,'request_id required');
+    const result=await r2.applyPreparedImagePlan({type,id,oldCount:imageCount(ownerRow.image_count),plan:manifest,requestId});
     if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2',[result.image_count,id]);
     else await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[result.image_count,id]);
-
-    console.log('[SMARTFIT_IMAGE_SYNC] DONE', { resource_type:type, resource_id:id, image_count:result.image_count, ms:Date.now()-startedAt });
-    ok(res,{ resource_type:type, resource_id:id, image_count:result.image_count, images:result.images, operations:result.operations, reserved_limit:r2.RESERVED_IMAGES_PER_ID, current_limit:r2.CURRENT_UI_IMAGE_LIMIT });
+    console.log('[SMARTFIT_IMAGE_COMMIT] DONE',{resource_type:type,resource_id:id,image_count:result.image_count,ms:Date.now()-startedAt});
+    ok(res,{resource_type:type,resource_id:id,image_count:result.image_count,images:result.images,operations:result.operations});
   }catch(e){
-    console.error('[SMARTFIT_IMAGE_SYNC] FAIL', {
-      message:String(e && e.message || e),
-      stack:String(e && e.stack || '').slice(0,1500),
-      ms:Date.now()-startedAt
-    });
-    fail(res,400,'image upload failed',{ detail:String(e.message||e), restore_error:e && e.restore_error ? e.restore_error : undefined });
+    console.error('[SMARTFIT_IMAGE_COMMIT] FAIL',{message:String(e&&e.message||e),restore_error:e&&e.restore_error,ms:Date.now()-startedAt});
+    fail(res,400,'image commit failed',{detail:String(e.message||e),restore_error:e&&e.restore_error});
   }
 });
 
@@ -303,7 +236,6 @@ router.post('/api/gm/smartfit/image/delete', async (req,res)=>{
   }catch(e){ fail(res,400,'image delete failed',{ detail:String(e.message||e) }); }
 });
 
-router.get('/api/gm/smartfit/health', (req,res)=>ok(res,{ service:'smartfit', route:req.path }));
 
 router.get('/api/gm/smartfit/category/list', async (req,res)=>{
   try{
@@ -342,7 +274,7 @@ router.get('/api/gm/smartfit/space/list', async (req,res)=>{
 /* GM_SMARTFIT_SAVE_FLOW_V034
  * 기본정보 저장 단계에서는 image_count를 변경하지 않는다.
  * 신규 레코드는 image_count=0으로 생성하고, 수정은 기존 값을 유지한다.
- * 이미지 선택/변경은 기본정보 저장 성공 후 /image/upload에서 R2 동기화가 모두 완료된 뒤에만 image_count를 갱신한다.
+ * 이미지 선택/변경은 기본정보 저장 성공 후 prepare → 사용자기기 R2 직접 PUT → commit이 완료된 뒤에만 image_count를 갱신한다.
  */
 router.post('/api/gm/smartfit/space/save', async (req,res)=>{
   console.log('[SMARTFIT_SAVE_DB] SPACE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), mode:s((req.body||{}).mode), title:s((req.body||{}).space_title_source || (req.body||{}).space_title || (req.body||{}).space_name) });
@@ -521,6 +453,22 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
       LIMIT ${lim}`, params);
     ok(res,{ items:r.rows, count:r.rowCount, template_id:templateId, limit });
   }catch(e){ fail(res,500,'item list failed',{ detail:String(e.message||e) }); }
+});
+
+/* Compatibility aliases: old/new clients may use REST-style paths. */
+router.get('/api/gm/smartfit/template/:template_id/detail', (req,res)=>{
+  const qs=new URLSearchParams();
+  qs.set('template_id',String(req.params.template_id||''));
+  if(req.query.member_id) qs.set('member_id',String(req.query.member_id));
+  res.redirect(307,`/api/gm/smartfit/template/detail?${qs.toString()}`);
+});
+router.get('/api/gm/smartfit/template/:template_id/items', (req,res)=>{
+  const qs=new URLSearchParams();
+  qs.set('template_id',String(req.params.template_id||''));
+  if(req.query.member_id) qs.set('member_id',String(req.query.member_id));
+  if(req.query.q) qs.set('q',String(req.query.q));
+  if(req.query.limit) qs.set('limit',String(req.query.limit));
+  res.redirect(307,`/api/gm/smartfit/item/list?${qs.toString()}`);
 });
 
 router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{

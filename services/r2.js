@@ -1,4 +1,5 @@
 'use strict';
+const crypto = require('crypto');
 
 /* GM_R2_STORAGE_RULE_V002
  * SmartFit Cloudflare R2 공통 저장 규칙
@@ -42,6 +43,7 @@ const {
   CopyObjectCommand,
   DeleteObjectsCommand,
   HeadBucketCommand,
+  HeadObjectCommand,
 } = require('@aws-sdk/client-s3');
 
 const MAX_RESOURCE_ID = 100000000000;
@@ -321,6 +323,153 @@ async function applyImagePlan({ type, id, oldCount, plan, newFiles, requestId })
   }
 }
 
+
+function awsEncode(value) {
+  return encodeURIComponent(String(value)).replace(/[!'()*]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
+}
+function hmac(key, value, encoding) {
+  return crypto.createHmac('sha256', key).update(value, 'utf8').digest(encoding);
+}
+function sha256(value) {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+}
+function presignedPutUrl(key, expiresSeconds = 600) {
+  const c = config();
+  const endpoint = new URL(c.endpoint);
+  // R2 S3 presigned URLs use virtual-hosted style: <bucket>.<account>.r2.cloudflarestorage.com/<key>.
+  // This keeps the signed host/path identical to Cloudflare's documented S3 endpoint behavior.
+  const signedHost = `${c.bucket}.${endpoint.host}`;
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const scope = `${dateStamp}/auto/s3/aws4_request`;
+  const canonicalUri = '/' + String(key).split('/').map(awsEncode).join('/');
+  const params = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': `${c.accessKeyId}/${scope}`,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': String(Math.max(60, Math.min(3600, Number(expiresSeconds) || 600))),
+    'X-Amz-SignedHeaders': 'host',
+  };
+  const canonicalQuery = Object.keys(params).sort().map(k => `${awsEncode(k)}=${awsEncode(params[k])}`).join('&');
+  const canonicalHeaders = `host:${signedHost}\n`;
+  const canonicalRequest = ['PUT', canonicalUri, canonicalQuery, canonicalHeaders, 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256(canonicalRequest)].join('\n');
+  const kDate = hmac(Buffer.from('AWS4' + c.secretAccessKey, 'utf8'), dateStamp);
+  const kRegion = hmac(kDate, 'auto');
+  const kService = hmac(kRegion, 's3');
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = hmac(kSigning, stringToSign, 'hex');
+  return `${endpoint.protocol}//${signedHost}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+}
+
+async function headObject(key) {
+  const c = config();
+  const out = await client().send(new HeadObjectCommand({ Bucket: c.bucket, Key: key }));
+  return {
+    key,
+    content_length: Number(out.ContentLength || 0),
+    content_type: String(out.ContentType || ''),
+    etag: String(out.ETag || '').replace(/\"/g, ''),
+  };
+}
+
+function prepareDirectUpload({ type, id, plan, requestId, expiresSeconds = 600 }) {
+  normalizeType(type); normalizeId(id);
+  const normalizedPlan = normalizeImagePlan(plan, CURRENT_UI_IMAGE_LIMIT);
+  const uploads = [];
+  for (const item of normalizedPlan) {
+    if (item.type !== 'new') continue;
+    for (const size of ['image', 'small']) {
+      const key = tempKey(requestId, 'stage', size, item.finalSlot);
+      uploads.push({
+        final_slot: item.finalSlot,
+        file_index: item.fileIndex,
+        size,
+        key,
+        put_url: presignedPutUrl(key, expiresSeconds),
+        content_type: 'image/webp',
+      });
+    }
+  }
+  return { request_id: requestId, expires_in: expiresSeconds, plan: normalizedPlan, uploads };
+}
+
+async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
+  const resourceType = normalizeType(type);
+  const resourceId = normalizeId(id);
+  const previousCount = Math.max(0, Math.min(RESERVED_IMAGES_PER_ID, Number(oldCount) || 0));
+  const normalizedPlan = normalizeImagePlan(plan, CURRENT_UI_IMAGE_LIMIT);
+  const tempKeys = [];
+  let backupReady = false;
+  try {
+    // Direct-uploaded new files must already exist in stage and meet device-side limits.
+    for (const item of normalizedPlan) {
+      if (item.type !== 'new') continue;
+      const imageMeta = await headObject(tempKey(requestId, 'stage', 'image', item.finalSlot));
+      const smallMeta = await headObject(tempKey(requestId, 'stage', 'small', item.finalSlot));
+      if (imageMeta.content_length < 1 || imageMeta.content_length > 320 * 1024) throw new Error(`이미지 ${item.finalSlot} 원본용 파일은 300KB 이하여야 합니다.`);
+      if (smallMeta.content_length < 1 || smallMeta.content_length > 120 * 1024) throw new Error(`이미지 ${item.finalSlot} 목록용 파일은 100KB 이하여야 합니다.`);
+      if (imageMeta.content_type && !/^image\/webp/i.test(imageMeta.content_type)) throw new Error(`이미지 ${item.finalSlot} 원본용 파일이 WebP가 아닙니다.`);
+      if (smallMeta.content_type && !/^image\/webp/i.test(smallMeta.content_type)) throw new Error(`이미지 ${item.finalSlot} 목록용 파일이 WebP가 아닙니다.`);
+      tempKeys.push(imageMeta.key, smallMeta.key);
+    }
+
+    for (let slot = 1; slot <= previousCount; slot += 1) {
+      for (const size of ['image', 'small']) {
+        const backup = tempKey(requestId, 'backup', size, slot);
+        await copyObject(keyFor(resourceType, resourceId, slot, size), backup);
+        tempKeys.push(backup);
+      }
+    }
+    backupReady = true;
+
+    // Existing items are copied into their final-order stage slots. New items are already there.
+    for (const item of normalizedPlan) {
+      if (item.type !== 'existing') continue;
+      for (const size of ['image', 'small']) {
+        const stage = tempKey(requestId, 'stage', size, item.finalSlot);
+        await copyObject(keyFor(resourceType, resourceId, item.sourceSlot, size), stage, 'private, max-age=0, no-store');
+        tempKeys.push(stage);
+      }
+    }
+
+    for (let slot = 1; slot <= normalizedPlan.length; slot += 1) {
+      for (const size of ['image', 'small']) {
+        await copyObject(tempKey(requestId, 'stage', size, slot), keyFor(resourceType, resourceId, slot, size));
+      }
+    }
+    const stale = [];
+    for (let slot = normalizedPlan.length + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) {
+      stale.push(keyFor(resourceType, resourceId, slot, 'image'), keyFor(resourceType, resourceId, slot, 'small'));
+    }
+    await deleteKeys(stale);
+    return {
+      image_count: normalizedPlan.length,
+      images: imageFiles(resourceType, resourceId, normalizedPlan.length),
+      operations: normalizedPlan.map(item => ({
+        final_slot: item.finalSlot,
+        action: item.type === 'existing' ? (item.sourceSlot === item.finalSlot ? 'keep' : 'copy') : 'direct_upload',
+        source_slot: item.type === 'existing' ? item.sourceSlot : null,
+      })),
+    };
+  } catch (error) {
+    if (backupReady) {
+      try {
+        for (let slot = 1; slot <= previousCount; slot += 1) {
+          for (const size of ['image', 'small']) await copyObject(tempKey(requestId, 'backup', size, slot), keyFor(resourceType, resourceId, slot, size));
+        }
+        const removeNew = [];
+        for (let slot = previousCount + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) removeNew.push(keyFor(resourceType, resourceId, slot, 'image'), keyFor(resourceType, resourceId, slot, 'small'));
+        await deleteKeys(removeNew);
+      } catch (restoreError) { error.restore_error = String(restoreError && restoreError.message || restoreError); }
+    }
+    throw error;
+  } finally {
+    try { await deleteKeys(tempKeys); } catch (_) {}
+  }
+}
+
 async function health() {
   const c = config();
   await client().send(new HeadBucketCommand({ Bucket: c.bucket }));
@@ -365,4 +514,8 @@ module.exports = {
   applyImagePlan,
   health,
   imageFiles,
+  presignedPutUrl,
+  headObject,
+  prepareDirectUpload,
+  applyPreparedImagePlan,
 };
