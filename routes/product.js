@@ -515,7 +515,7 @@ function pickOptionValue(p){
   );
 }
 function pickDeliveryText(p){
-  return firstNonEmpty(p, ['delivery_eta_text','deliveryEtaText','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
+  return firstNonEmpty(p, ['delivery_eta_text','deliveryEtaText','deliveryRangeText','delivery_range_text','deliveryDateText','delivery_date_text','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
 }
 function pickDeliveryType(p){
   return cleanText(firstNonEmpty(p, ['delivery_type','deliveryType','searchDeliveryType','shipping_type','shippingType','shipLabel','shippingLabel','delivery_badge','deliveryBadge','shipping_badge','shippingBadge']));
@@ -970,7 +970,7 @@ function normalizeOptionJson(p, id){
     const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.delivery_type || r.shipType || p.shippingLabel || p.deliveryType || p.delivery_type || '');
     const img = normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.colorImage || r.image || r.thumbnail || r.thumb || '');
     const sold = !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || r.sale_status || '')));
-    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || p.deliveryDateText || p.arrivalText || ''),img,sold,cleanText(r.source || '')]);
+    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryRangeText || r.delivery_range_text || r.deliveryDateText || r.delivery_date_text || r.arrivalText || r.etaText || p.delivery_eta_text || p.deliveryEtaText || p.deliveryRangeText || p.delivery_range_text || p.deliveryDateText || p.delivery_date_text || p.arrivalText || p.deliveryText || p.shippingText || p.etaText || ''),img,sold,cleanText(r.source || '')]);
   }));
 
   // 검색결과 payload에는 옵션배열이 없지만 현재 리스트 행 자체가 대표 판매옵션이다.
@@ -1653,8 +1653,8 @@ async function upsertProduct(pool, raw, parent={}){
       normal_price=COALESCE(EXCLUDED.normal_price, gm_product.normal_price),
       discount_price=EXCLUDED.discount_price,
       delivery_fee=EXCLUDED.delivery_fee,
-      delivery_eta_text=EXCLUDED.delivery_eta_text,
-      delivery_type=EXCLUDED.delivery_type,
+      delivery_eta_text=COALESCE(NULLIF(EXCLUDED.delivery_eta_text,''), gm_product.delivery_eta_text),
+      delivery_type=COALESCE(NULLIF(EXCLUDED.delivery_type,''), gm_product.delivery_type),
       jeju_delivery_yn=CASE WHEN $68::boolean THEN EXCLUDED.jeju_delivery_yn ELSE gm_product.jeju_delivery_yn END,
       jeju_extra_delivery_fee=CASE WHEN $68::boolean THEN EXCLUDED.jeju_extra_delivery_fee ELSE gm_product.jeju_extra_delivery_fee END,
       island_delivery_yn=CASE WHEN $69::boolean THEN EXCLUDED.island_delivery_yn ELSE gm_product.island_delivery_yn END,
@@ -1732,7 +1732,7 @@ async function upsertProduct(pool, raw, parent={}){
     remoteDelivery.island_provided
   ];
 
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, delivery_eta_text:pickDeliveryText(p), delivery_type:pickDeliveryType(p) }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);
