@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V039_R2_ENV_DIAG';
+const VERSION = 'GM_SMARTFIT_SERVER_V041_WEBP_SIGN_MATCH';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -199,7 +199,10 @@ router.post('/api/gm/smartfit/image/prepare', express.json({limit:'128kb'}), asy
     const manifest=parseImageManifest(b.manifest);
     const requestId=crypto.randomUUID().replace(/-/g,'');
     const prepared=r2.prepareDirectUpload({type,id,plan:manifest,requestId,expiresSeconds:600});
-    console.log('[SMARTFIT_IMAGE_PREPARE] DONE',{resource_type:type,resource_id:id,request_id:requestId,upload_count:prepared.uploads.length});
+    console.log('[SMARTFIT_IMAGE_PREPARE] DONE',{resource_type:type,resource_id:id,request_id:requestId,upload_count:prepared.uploads.length,uploads:prepared.uploads.map(function(x){
+      try{ const u=new URL(x.put_url); return {slot:x.final_slot,size:x.size,content_type:x.content_type,signed_headers:u.searchParams.get('X-Amz-SignedHeaders')||'',host:u.host,key:x.key}; }
+      catch(_){ return {slot:x.final_slot,size:x.size,content_type:x.content_type,key:x.key}; }
+    })});
     ok(res,{resource_type:type,resource_id:id,...prepared,current_limit:r2.CURRENT_UI_IMAGE_LIMIT,reserved_limit:r2.RESERVED_IMAGES_PER_ID});
   }catch(e){
     console.error('[SMARTFIT_IMAGE_PREPARE] FAIL',String(e&&e.message||e));
