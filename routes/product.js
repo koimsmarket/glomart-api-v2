@@ -1271,7 +1271,8 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           normal_price=COALESCE(EXCLUDED.normal_price, gm_product_option.normal_price),
           discount_price=EXCLUDED.discount_price,
           delivery_fee=EXCLUDED.delivery_fee,
-          delivery_eta_text=COALESCE(NULLIF(EXCLUDED.delivery_eta_text,''), gm_product_option.delivery_eta_text),
+          -- 옵션도 동일 정책: 유효 term만 갱신하고 빈 검색값은 기존값 유지
+          delivery_eta_text=COALESCE(NULLIF(BTRIM(EXCLUDED.delivery_eta_text),''), gm_product_option.delivery_eta_text),
           delivery_type=EXCLUDED.delivery_type,
           soldout_yn=EXCLUDED.soldout_yn,
           sale_status=EXCLUDED.sale_status,
@@ -1778,7 +1779,9 @@ async function upsertProduct(pool, raw, parent={}){
       normal_price=COALESCE(EXCLUDED.normal_price, gm_product.normal_price),
       discount_price=EXCLUDED.discount_price,
       delivery_fee=EXCLUDED.delivery_fee,
-      delivery_eta_text=COALESCE(NULLIF(EXCLUDED.delivery_eta_text,''), gm_product.delivery_eta_text),
+      -- 배송 term은 유효한 신규값(예: 3/8, 8/8)만 교체한다.
+      -- 검색결과의 NULL/빈값/파싱실패는 기존 상세 수집값을 유지한다.
+      delivery_eta_text=COALESCE(NULLIF(BTRIM(EXCLUDED.delivery_eta_text),''), gm_product.delivery_eta_text),
       delivery_type=COALESCE(NULLIF(EXCLUDED.delivery_type,''), gm_product.delivery_type),
       jeju_delivery_yn=CASE WHEN $68::boolean THEN EXCLUDED.jeju_delivery_yn ELSE gm_product.jeju_delivery_yn END,
       jeju_extra_delivery_fee=CASE WHEN $68::boolean THEN EXCLUDED.jeju_extra_delivery_fee ELSE gm_product.jeju_extra_delivery_fee END,
