@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V041_WEBP_SIGN_MATCH';
+const VERSION = 'GM_SMARTFIT_SERVER_V042_PUBLIC_IMAGE_READ';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -12,7 +12,7 @@ function r2EnvStatus(){
     secret: !!String(process.env.R2_SECRET_ACCESS_KEY || '').trim(),
     bucket: !!String(process.env.R2_BUCKET_NAME || '').trim(),
     endpoint: !!String(process.env.R2_ENDPOINT || '').trim(),
-    publicBase: !!String(process.env.R2_PUBLIC_BASE_URL || process.env.R2_PUBLIC_BASE || process.env.GM_R2_PUBLIC_BASE || '').trim()
+    publicBase: !!String((r2.config && r2.config().publicBase) || '').trim()
   };
 }
 console.log('[GM_SMARTFIT_ROUTE] loaded', VERSION);
@@ -155,7 +155,10 @@ function addImageUrls(row, type){
   const count=imageCount(row.image_count);
   const id=type==='space' ? i(row.space_id,0) : i(row.template_id,0);
   let images=[];
-  try{ if(id>0) images=r2.imageFiles(type,id,count); }catch(_){ images=[]; }
+  try{
+    const versionToken=s(row.updated_at || row.created_at || count || 0);
+    if(id>0) images=r2.imageFiles(type,id,count,versionToken);
+  }catch(_){ images=[]; }
   return Object.assign({}, row, { image_count:count, image_files:images });
 }
 

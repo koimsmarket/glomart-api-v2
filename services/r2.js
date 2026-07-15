@@ -49,6 +49,7 @@ const {
 const MAX_RESOURCE_ID = 100000000000;
 const RESERVED_IMAGES_PER_ID = 10;
 const CURRENT_UI_IMAGE_LIMIT = 5;
+const DEFAULT_PUBLIC_BASE_URL = 'https://pub-3af62418e8ea486eaa4809c2c62a9304.r2.dev';
 
 function clean(v) {
   return String(v == null ? '' : v).trim();
@@ -63,6 +64,15 @@ function requiredEnv(name, fallbackNames = []) {
   throw new Error(`missing environment variable: ${name}`);
 }
 
+function resolvePublicBase() {
+  const raw = clean(process.env.R2_PUBLIC_BASE_URL || process.env.R2_PUBLIC_BASE || process.env.GM_R2_PUBLIC_BASE);
+  // S3 API endpoint is upload/auth-only and cannot be used as a public image URL.
+  if (!raw || /\.r2\.cloudflarestorage\.com(?:\/|$)/i.test(raw)) {
+    return clean(process.env.R2_PUBLIC_FALLBACK_URL) || DEFAULT_PUBLIC_BASE_URL;
+  }
+  return raw.replace(/\/$/, '');
+}
+
 function config() {
   return {
     accountId: requiredEnv('R2_ACCOUNT_ID'),
@@ -70,7 +80,7 @@ function config() {
     secretAccessKey: requiredEnv('R2_SECRET_ACCESS_KEY'),
     bucket: requiredEnv('R2_BUCKET_NAME'),
     endpoint: clean(process.env.R2_ENDPOINT) || `https://${requiredEnv('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com`,
-    publicBase: clean(process.env.R2_PUBLIC_BASE_URL || process.env.R2_PUBLIC_BASE || process.env.GM_R2_PUBLIC_BASE),
+    publicBase: resolvePublicBase(),
   };
 }
 
@@ -143,9 +153,12 @@ function keyFor(type, id, imageNo, size = 'image') {
   return `${root}/${folderParts(id).join('/')}/${file}`;
 }
 
-function publicUrl(key) {
+function publicUrl(key, versionToken) {
   const base = config().publicBase;
-  return base ? `${base.replace(/\/$/, '')}/${key}` : '';
+  if (!base) return '';
+  const url = `${base.replace(/\/$/, '')}/${key}`;
+  const token = clean(versionToken);
+  return token ? `${url}?v=${encodeURIComponent(token)}` : url;
 }
 
 async function putWebp(key, body, cacheControl = 'public, max-age=31536000, immutable') {
@@ -485,7 +498,7 @@ async function health() {
   return { ok: true, bucket: c.bucket, endpoint: c.endpoint, public_base_configured: !!c.publicBase };
 }
 
-function imageFiles(type, id, count) {
+function imageFiles(type, id, count, versionToken) {
   const safeCount = Math.max(0, Math.min(RESERVED_IMAGES_PER_ID, Number(count) || 0));
   const files = [];
   for (let imageNo = 1; imageNo <= safeCount; imageNo += 1) {
@@ -495,8 +508,8 @@ function imageFiles(type, id, count) {
       image_no: imageNo,
       path: imageKey,
       small_path: smallKey,
-      url: publicUrl(imageKey),
-      small_url: publicUrl(smallKey),
+      url: publicUrl(imageKey, versionToken),
+      small_url: publicUrl(smallKey, versionToken),
     });
   }
   return files;
