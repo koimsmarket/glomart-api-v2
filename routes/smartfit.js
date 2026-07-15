@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V042_PUBLIC_IMAGE_READ';
+const VERSION = 'GM_SMARTFIT_SERVER_V052_SPACE_REP_SMALL_ONLY';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),

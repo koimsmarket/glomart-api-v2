@@ -397,23 +397,54 @@ async function headObject(key) {
 }
 
 function prepareDirectUpload({ type, id, plan, requestId, expiresSeconds = 600 }) {
-  normalizeType(type); normalizeId(id);
+  const resourceType = normalizeType(type);
+  normalizeId(id);
   const normalizedPlan = normalizeImagePlan(plan, CURRENT_UI_IMAGE_LIMIT);
   const uploads = [];
+
   for (const item of normalizedPlan) {
     if (item.type !== 'new') continue;
-    for (const size of ['image', 'small']) {
-      const key = tempKey(requestId, 'stage', size, item.finalSlot);
+    const imageKey = tempKey(requestId, 'stage', 'image', item.finalSlot);
+    uploads.push({
+      final_slot: item.finalSlot,
+      file_index: item.fileIndex,
+      size: 'image',
+      key: imageKey,
+      put_url: presignedPutUrl(imageKey, expiresSeconds),
+      content_type: 'image/webp',
+    });
+
+    // Template keeps the previous per-image small-file behavior.
+    if (resourceType === 'template') {
+      const smallKey = tempKey(requestId, 'stage', 'small', item.finalSlot);
       uploads.push({
         final_slot: item.finalSlot,
         file_index: item.fileIndex,
-        size,
-        key,
-        put_url: presignedPutUrl(key, expiresSeconds),
+        size: 'small',
+        key: smallKey,
+        put_url: presignedPutUrl(smallKey, expiresSeconds),
         content_type: 'image/webp',
       });
     }
   }
+
+  // Space owns exactly one list thumbnail: the final representative image at slot 01.
+  // The client creates this 160px/20KB WebP even when the representative is an existing image.
+  if (resourceType === 'space' && normalizedPlan.length > 0) {
+    const representative = normalizedPlan[0];
+    const smallKey = tempKey(requestId, 'stage', 'small', 1);
+    uploads.push({
+      final_slot: 1,
+      file_index: representative.type === 'new' ? representative.fileIndex : -1,
+      source_slot: representative.type === 'existing' ? representative.sourceSlot : null,
+      role: 'representative_small',
+      size: 'small',
+      key: smallKey,
+      put_url: presignedPutUrl(smallKey, expiresSeconds),
+      content_type: 'image/webp',
+    });
+  }
+
   return { request_id: requestId, expires_in: expiresSeconds, plan: normalizedPlan, uploads };
 }
 
@@ -424,51 +455,86 @@ async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
   const normalizedPlan = normalizeImagePlan(plan, CURRENT_UI_IMAGE_LIMIT);
   const tempKeys = [];
   let backupReady = false;
+
+  const sizesForExisting = resourceType === 'space' ? ['image'] : ['image', 'small'];
+  const sizesForFinal = resourceType === 'space' ? ['image'] : ['image', 'small'];
+
   try {
-    // Direct-uploaded new files must already exist in stage and meet device-side limits.
+    // New detail images must exist. Template also keeps a small for every image.
     for (const item of normalizedPlan) {
       if (item.type !== 'new') continue;
       const imageMeta = await headObject(tempKey(requestId, 'stage', 'image', item.finalSlot));
-      const smallMeta = await headObject(tempKey(requestId, 'stage', 'small', item.finalSlot));
       if (imageMeta.content_length < 1 || imageMeta.content_length > 320 * 1024) throw new Error(`이미지 ${item.finalSlot} 원본용 파일은 300KB 이하여야 합니다.`);
-      if (smallMeta.content_length < 1 || smallMeta.content_length > 120 * 1024) throw new Error(`이미지 ${item.finalSlot} 목록용 파일은 100KB 이하여야 합니다.`);
       if (imageMeta.content_type && !/^image\/webp/i.test(imageMeta.content_type)) throw new Error(`이미지 ${item.finalSlot} 원본용 파일이 WebP가 아닙니다.`);
-      if (smallMeta.content_type && !/^image\/webp/i.test(smallMeta.content_type)) throw new Error(`이미지 ${item.finalSlot} 목록용 파일이 WebP가 아닙니다.`);
-      tempKeys.push(imageMeta.key, smallMeta.key);
+      tempKeys.push(imageMeta.key);
+
+      if (resourceType === 'template') {
+        const smallMeta = await headObject(tempKey(requestId, 'stage', 'small', item.finalSlot));
+        if (smallMeta.content_length < 1 || smallMeta.content_length > 120 * 1024) throw new Error(`이미지 ${item.finalSlot} 목록용 파일은 100KB 이하여야 합니다.`);
+        if (smallMeta.content_type && !/^image\/webp/i.test(smallMeta.content_type)) throw new Error(`이미지 ${item.finalSlot} 목록용 파일이 WebP가 아닙니다.`);
+        tempKeys.push(smallMeta.key);
+      }
     }
 
+    // Space requires one and only one representative list thumbnail.
+    if (resourceType === 'space' && normalizedPlan.length > 0) {
+      const smallMeta = await headObject(tempKey(requestId, 'stage', 'small', 1));
+      if (smallMeta.content_length < 1 || smallMeta.content_length > 24 * 1024) throw new Error('공간 목록용 대표사진은 20KB 이하여야 합니다.');
+      if (smallMeta.content_type && !/^image\/webp/i.test(smallMeta.content_type)) throw new Error('공간 목록용 대표사진이 WebP가 아닙니다.');
+      tempKeys.push(smallMeta.key);
+    }
+
+    // Backup the current state. Space backs up detail images plus its single ss..._01 thumbnail.
     for (let slot = 1; slot <= previousCount; slot += 1) {
-      for (const size of ['image', 'small']) {
+      for (const size of sizesForExisting) {
         const backup = tempKey(requestId, 'backup', size, slot);
         await copyObject(keyFor(resourceType, resourceId, slot, size), backup);
         tempKeys.push(backup);
       }
     }
+    if (resourceType === 'space' && previousCount > 0) {
+      const backupSmall = tempKey(requestId, 'backup', 'small', 1);
+      await copyObject(keyFor(resourceType, resourceId, 1, 'small'), backupSmall);
+      tempKeys.push(backupSmall);
+    }
     backupReady = true;
 
-    // Existing items are copied into their final-order stage slots. New items are already there.
+    // Existing images are copied into their new final-order stage slots.
     for (const item of normalizedPlan) {
       if (item.type !== 'existing') continue;
-      for (const size of ['image', 'small']) {
+      for (const size of sizesForExisting) {
         const stage = tempKey(requestId, 'stage', size, item.finalSlot);
         await copyObject(keyFor(resourceType, resourceId, item.sourceSlot, size), stage, 'private, max-age=0, no-store');
         tempKeys.push(stage);
       }
     }
 
+    // Place final detail images. Template places every small; Space places only representative small 01.
     for (let slot = 1; slot <= normalizedPlan.length; slot += 1) {
-      for (const size of ['image', 'small']) {
+      for (const size of sizesForFinal) {
         await copyObject(tempKey(requestId, 'stage', size, slot), keyFor(resourceType, resourceId, slot, size));
       }
     }
+    if (resourceType === 'space' && normalizedPlan.length > 0) {
+      await copyObject(tempKey(requestId, 'stage', 'small', 1), keyFor(resourceType, resourceId, 1, 'small'));
+    }
+
+    // Remove stale detail images. Space also removes all list thumbnails except ss..._01.
     const stale = [];
     for (let slot = normalizedPlan.length + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) {
-      stale.push(keyFor(resourceType, resourceId, slot, 'image'), keyFor(resourceType, resourceId, slot, 'small'));
+      stale.push(keyFor(resourceType, resourceId, slot, 'image'));
+      if (resourceType === 'template') stale.push(keyFor(resourceType, resourceId, slot, 'small'));
+    }
+    if (resourceType === 'space') {
+      for (let slot = 2; slot <= RESERVED_IMAGES_PER_ID; slot += 1) stale.push(keyFor(resourceType, resourceId, slot, 'small'));
+      if (normalizedPlan.length === 0) stale.push(keyFor(resourceType, resourceId, 1, 'small'));
     }
     await deleteKeys(stale);
+
     return {
       image_count: normalizedPlan.length,
       images: imageFiles(resourceType, resourceId, normalizedPlan.length),
+      list_thumbnail_count: resourceType === 'space' && normalizedPlan.length > 0 ? 1 : undefined,
       operations: normalizedPlan.map(item => ({
         final_slot: item.finalSlot,
         action: item.type === 'existing' ? (item.sourceSlot === item.finalSlot ? 'keep' : 'copy') : 'direct_upload',
@@ -479,10 +545,20 @@ async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
     if (backupReady) {
       try {
         for (let slot = 1; slot <= previousCount; slot += 1) {
-          for (const size of ['image', 'small']) await copyObject(tempKey(requestId, 'backup', size, slot), keyFor(resourceType, resourceId, slot, size));
+          for (const size of sizesForExisting) await copyObject(tempKey(requestId, 'backup', size, slot), keyFor(resourceType, resourceId, slot, size));
+        }
+        if (resourceType === 'space' && previousCount > 0) {
+          await copyObject(tempKey(requestId, 'backup', 'small', 1), keyFor(resourceType, resourceId, 1, 'small'));
         }
         const removeNew = [];
-        for (let slot = previousCount + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) removeNew.push(keyFor(resourceType, resourceId, slot, 'image'), keyFor(resourceType, resourceId, slot, 'small'));
+        for (let slot = previousCount + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) {
+          removeNew.push(keyFor(resourceType, resourceId, slot, 'image'));
+          if (resourceType === 'template') removeNew.push(keyFor(resourceType, resourceId, slot, 'small'));
+        }
+        if (resourceType === 'space') {
+          for (let slot = 2; slot <= RESERVED_IMAGES_PER_ID; slot += 1) removeNew.push(keyFor(resourceType, resourceId, slot, 'small'));
+          if (previousCount === 0) removeNew.push(keyFor(resourceType, resourceId, 1, 'small'));
+        }
         await deleteKeys(removeNew);
       } catch (restoreError) { error.restore_error = String(restoreError && restoreError.message || restoreError); }
     }
@@ -499,17 +575,19 @@ async function health() {
 }
 
 function imageFiles(type, id, count, versionToken) {
+  const resourceType = normalizeType(type);
   const safeCount = Math.max(0, Math.min(RESERVED_IMAGES_PER_ID, Number(count) || 0));
   const files = [];
   for (let imageNo = 1; imageNo <= safeCount; imageNo += 1) {
-    const imageKey = keyFor(type, id, imageNo, 'image');
-    const smallKey = keyFor(type, id, imageNo, 'small');
+    const imageKey = keyFor(resourceType, id, imageNo, 'image');
+    const hasSmall = resourceType === 'template' || imageNo === 1;
+    const smallKey = hasSmall ? keyFor(resourceType, id, imageNo, 'small') : '';
     files.push({
       image_no: imageNo,
       path: imageKey,
       small_path: smallKey,
       url: publicUrl(imageKey, versionToken),
-      small_url: publicUrl(smallKey, versionToken),
+      small_url: smallKey ? publicUrl(smallKey, versionToken) : '',
     });
   }
   return files;
