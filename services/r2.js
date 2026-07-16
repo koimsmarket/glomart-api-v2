@@ -531,6 +531,29 @@ async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
   }
 }
 
+async function health() {
+  const c = config();
+  await client().send(new HeadBucketCommand({ Bucket: c.bucket }));
+  return { ok: true, bucket: c.bucket, endpoint: c.endpoint, public_base_configured: !!c.publicBase };
+}
+
+function imageFiles(type, id, count) {
+  const safeCount = Math.max(0, Math.min(RESERVED_IMAGES_PER_ID, Number(count) || 0));
+  const files = [];
+  for (let imageNo = 1; imageNo <= safeCount; imageNo += 1) {
+    const imageKey = keyFor(type, id, imageNo, 'image');
+    const smallKey = keyFor(type, id, imageNo, 'small');
+    files.push({
+      image_no: imageNo,
+      path: imageKey,
+      small_path: smallKey,
+      url: publicUrl(imageKey),
+      small_url: publicUrl(smallKey),
+    });
+  }
+  return files;
+}
+
 module.exports = {
   MAX_RESOURCE_ID,
   RESERVED_IMAGES_PER_ID,
