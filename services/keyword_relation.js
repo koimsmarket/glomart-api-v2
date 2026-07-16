@@ -147,8 +147,30 @@ async function ensureTranslateTable(pool){
   for(const l of LANGS){ try{await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS keyword_${l} TEXT`);}catch(_e){} }
 }
 function pickTranslations(p){
-  p=p||{}; const root=p.translations||p.keywordTranslations||p.keyword_translations||p.mainKeywordTranslations||p.main_keyword_translations||{}; const out={};
-  for(const l of LANGS){ out[l]=cleanText(root[l]||root['keyword_'+l]||p['keyword_'+l]||''); }
+  p=p||{};
+  // 모바일 payload는 mainKeywordTranslations를 최상위에도 보내고,
+  // keywordTranslations.mainKeywordTranslations 안에도 한 번 더 감싸서 보낸다.
+  // 기존 코드는 keywordTranslations 객체를 먼저 선택해 실제 언어값을 놓쳤다.
+  const roots=[
+    p.translations,
+    p.mainKeywordTranslations,
+    p.main_keyword_translations,
+    p.keywordTranslations&&p.keywordTranslations.mainKeywordTranslations,
+    p.keywordTranslations&&p.keywordTranslations.main_keyword_translations,
+    p.keyword_translations&&p.keyword_translations.mainKeywordTranslations,
+    p.keyword_translations&&p.keyword_translations.main_keyword_translations,
+    p.keywordTranslations,
+    p.keyword_translations
+  ].filter(v=>v&&typeof v==='object');
+  const out={};
+  for(const l of LANGS){
+    let value='';
+    for(const root of roots){
+      value=cleanText(root[l]||root['keyword_'+l]||'');
+      if(value) break;
+    }
+    out[l]=value||cleanText(p['keyword_'+l]||'');
+  }
   return out;
 }
 async function saveKeywordTranslate(pool,payload){
@@ -157,6 +179,14 @@ async function saveKeywordTranslate(pool,payload){
   const input=cleanText(p.input_keyword||p.inputKeyword||p.keyword||main); const lang=normalizeLang(p.gm_lang||p.lang||'ko');
   if(!main) return {mainKeyword:'',saved:0};
   const tr=pickTranslations(p); tr.ko=tr.ko||main; if(lang!=='ko'&&input) tr[lang]=tr[lang]||input;
+  const translatedCount=LANGS.filter(l=>!!tr[l]).length;
+  const missingLangs=LANGS.filter(l=>!tr[l]);
+  console.log('[GM_KEYWORD_TRANSLATE_PAYLOAD]', {
+    input_keyword:input,
+    main_keyword_ko:main,
+    translated_count:translatedCount,
+    missing_langs:missingLangs
+  });
   // 횡렬 구조에서는 keyword_ko도 LANGS의 ko 항목에서 한 번만 생성한다.
   // 별도 keyword_ko 선언과 LANGS 반복을 함께 사용하면 INSERT 컬럼이 중복된다.
   const cols=['lang','input_keyword','main_keyword_ko','hit_count','updated_at','created_at','translate_complete']
