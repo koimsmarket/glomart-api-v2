@@ -344,16 +344,17 @@ function presignedPutUrl(key, expiresSeconds = 600) {
   const dateStamp = amzDate.slice(0, 8);
   const scope = `${dateStamp}/auto/s3/aws4_request`;
   const canonicalUri = '/' + String(key).split('/').map(awsEncode).join('/');
+  const signedHeaders = 'content-type;host';
   const params = {
     'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
     'X-Amz-Credential': `${c.accessKeyId}/${scope}`,
     'X-Amz-Date': amzDate,
     'X-Amz-Expires': String(Math.max(60, Math.min(3600, Number(expiresSeconds) || 600))),
-    'X-Amz-SignedHeaders': 'host',
+    'X-Amz-SignedHeaders': signedHeaders,
   };
   const canonicalQuery = Object.keys(params).sort().map(k => `${awsEncode(k)}=${awsEncode(params[k])}`).join('&');
-  const canonicalHeaders = `host:${signedHost}\n`;
-  const canonicalRequest = ['PUT', canonicalUri, canonicalQuery, canonicalHeaders, 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const canonicalHeaders = `content-type:image/webp\nhost:${signedHost}\n`;
+  const canonicalRequest = ['PUT', canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, 'UNSIGNED-PAYLOAD'].join('\n');
   const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256(canonicalRequest)].join('\n');
   const kDate = hmac(Buffer.from('AWS4' + c.secretAccessKey, 'utf8'), dateStamp);
   const kRegion = hmac(kDate, 'auto');
@@ -389,6 +390,7 @@ function prepareDirectUpload({ type, id, plan, requestId, expiresSeconds = 600 }
         key,
         put_url: presignedPutUrl(key, expiresSeconds),
         content_type: 'image/webp',
+        signed_headers: 'content-type;host',
       });
     }
   }
@@ -479,7 +481,7 @@ async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
     timings.delete_stale_ms = Date.now() - phaseAt;
     timings.total_ms = Date.now() - totalStartedAt;
 
-    console.log('[SMARTFIT_IMAGE_COMMIT_TIMING_V044]', {
+    console.log('[SMARTFIT_IMAGE_COMMIT_TIMING_V046]', {
       resource_type: resourceType,
       resource_id: resourceId,
       previous_count: previousCount,
@@ -519,7 +521,7 @@ async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
     // Temp cleanup does not affect the committed result, so do not block the user response.
     if (tempKeys.length) {
       void deleteKeys(tempKeys).catch(error => {
-        console.warn('[SMARTFIT_IMAGE_TEMP_CLEANUP_ERROR_V044]', {
+        console.warn('[SMARTFIT_IMAGE_TEMP_CLEANUP_ERROR_V046]', {
           resource_type: resourceType,
           resource_id: resourceId,
           request_id: requestId,
