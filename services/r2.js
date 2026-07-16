@@ -349,18 +349,27 @@ function presignedPutUrl(key, expiresSeconds = 600) {
     'X-Amz-Credential': `${c.accessKeyId}/${scope}`,
     'X-Amz-Date': amzDate,
     'X-Amz-Expires': String(Math.max(60, Math.min(3600, Number(expiresSeconds) || 600))),
-    'X-Amz-SignedHeaders': 'host',
+    'X-Amz-SignedHeaders': 'content-type;host',
   };
   const canonicalQuery = Object.keys(params).sort().map(k => `${awsEncode(k)}=${awsEncode(params[k])}`).join('&');
-  const canonicalHeaders = `host:${signedHost}\n`;
-  const canonicalRequest = ['PUT', canonicalUri, canonicalQuery, canonicalHeaders, 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  const canonicalHeaders = `content-type:image/webp\nhost:${signedHost}\n`;
+  const canonicalRequest = ['PUT', canonicalUri, canonicalQuery, canonicalHeaders, 'content-type;host', 'UNSIGNED-PAYLOAD'].join('\n');
   const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256(canonicalRequest)].join('\n');
   const kDate = hmac(Buffer.from('AWS4' + c.secretAccessKey, 'utf8'), dateStamp);
   const kRegion = hmac(kDate, 'auto');
   const kService = hmac(kRegion, 's3');
   const kSigning = hmac(kService, 'aws4_request');
   const signature = hmac(kSigning, stringToSign, 'hex');
-  return `${endpoint.protocol}//${signedHost}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+  const url = `${endpoint.protocol}//${signedHost}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+  console.log('[SMARTFIT_R2_SIGN_V041]', {
+    host: signedHost,
+    key,
+    content_type: 'image/webp',
+    signed_headers: 'content-type;host',
+    expires: params['X-Amz-Expires'],
+    credential_scope: scope
+  });
+  return url;
 }
 
 async function headObject(key) {
