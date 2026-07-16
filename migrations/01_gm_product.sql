@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS gm_product (
   detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   seasonal_text TEXT,
   mall_sale_price INTEGER NOT NULL DEFAULT 0,
+  mall_discount_price INTEGER,
   final_supply_price INTEGER,
   normal_price INTEGER,
   discount_price INTEGER,
@@ -166,3 +167,5 @@ UPDATE gm_product SET jeju_extra_delivery_fee = 0 WHERE jeju_delivery_yn = 'F';
 UPDATE gm_product SET island_extra_delivery_fee = NULL WHERE island_delivery_yn = 'N';
 UPDATE gm_product SET island_extra_delivery_fee = 0 WHERE island_delivery_yn = 'F';
 
+
+ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS mall_discount_price INTEGER;

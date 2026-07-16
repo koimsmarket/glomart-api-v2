@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS gm_product_option (
   option_sort_no INTEGER NOT NULL DEFAULT 0,
 
   mall_sale_price INTEGER NOT NULL DEFAULT 0,
+  mall_discount_price INTEGER,
   final_supply_price INTEGER,
   normal_price INTEGER,
   discount_price INTEGER NOT NULL DEFAULT 0,
@@ -42,3 +43,5 @@ CREATE TABLE IF NOT EXISTS gm_product_option (
 CREATE INDEX IF NOT EXISTS idx_gm_product_option_product ON gm_product_option(mall_code, product_id);
 CREATE INDEX IF NOT EXISTS idx_gm_product_option_active ON gm_product_option(mall_code, product_id, active_yn);
 CREATE INDEX IF NOT EXISTS idx_gm_product_option_vendor ON gm_product_option(vendor_item_id);
+
+ALTER TABLE gm_product_option ADD COLUMN IF NOT EXISTS mall_discount_price INTEGER;
