@@ -404,6 +404,68 @@ function prepareDirectUpload({ type, id, plan, requestId, expiresSeconds = 600 }
   return { request_id: requestId, expires_in: expiresSeconds, plan: normalizedPlan, uploads };
 }
 
+
+async function objectExists(key) {
+  try {
+    await headObject(key);
+    return true;
+  } catch (error) {
+    const message = String(error && (error.name || error.Code || error.code || error.message) || '');
+    const status = Number(error && error.$metadata && error.$metadata.httpStatusCode);
+    if (/NoSuchKey|NotFound|specified key does not exist|404/i.test(message) || status === 404) return false;
+    throw error;
+  }
+}
+
+/*
+ * GM_SMARTFIT_TEMPLATE_PAIR_HEAL_V050
+ * Template도 Space와 완전히 동일한 image/small 쌍 구조를 사용한다.
+ * 과거 Template 저장본 중 ts 파일이 일부 없는 데이터만 커밋 전에 1회 보정한다.
+ * 보정 후 applyPreparedImagePlan 본체는 Space/Template 공통 로직만 실행한다.
+ */
+async function ensureExistingImagePairs(resourceType, resourceId, previousCount) {
+  if (resourceType !== 'template' || previousCount < 1) return;
+
+  for (let slot = 1; slot <= previousCount; slot += 1) {
+    const imageKey = keyFor(resourceType, resourceId, slot, 'image');
+    const smallKey = keyFor(resourceType, resourceId, slot, 'small');
+    const [hasImage, hasSmall] = await Promise.all([
+      objectExists(imageKey),
+      objectExists(smallKey),
+    ]);
+
+    if (hasImage && hasSmall) continue;
+
+    if (hasImage && !hasSmall) {
+      await copyObject(imageKey, smallKey);
+      console.log('[SMARTFIT_TEMPLATE_PAIR_HEAL_V050]', {
+        resource_type: resourceType,
+        resource_id: resourceId,
+        slot,
+        action: 'image_to_small',
+        source_key: imageKey,
+        target_key: smallKey,
+      });
+      continue;
+    }
+
+    if (!hasImage && hasSmall) {
+      await copyObject(smallKey, imageKey);
+      console.log('[SMARTFIT_TEMPLATE_PAIR_HEAL_V050]', {
+        resource_type: resourceType,
+        resource_id: resourceId,
+        slot,
+        action: 'small_to_image',
+        source_key: smallKey,
+        target_key: imageKey,
+      });
+      continue;
+    }
+
+    throw new Error(`기존 템플릿 이미지 ${slot}번의 원본과 소형 파일이 모두 없습니다.`);
+  }
+}
+
 async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
   const resourceType = normalizeType(type);
   const resourceId = normalizeId(id);
@@ -412,6 +474,9 @@ async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
   const tempKeys = [];
   let backupReady = false;
   try {
+    // 과거 Template의 누락된 small 파일을 먼저 보정한다.
+    // 이후부터는 Space와 완전히 동일한 공통 커밋 알고리즘을 실행한다.
+    await ensureExistingImagePairs(resourceType, resourceId, previousCount);
     // Direct-uploaded new files must already exist in stage and meet device-side limits.
     for (const item of normalizedPlan) {
       if (item.type !== 'new') continue;
@@ -525,6 +590,8 @@ module.exports = {
   imageFiles,
   presignedPutUrl,
   headObject,
+  objectExists,
+  ensureExistingImagePairs,
   prepareDirectUpload,
   applyPreparedImagePlan,
 };
