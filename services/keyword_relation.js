@@ -157,10 +157,23 @@ async function saveKeywordTranslate(pool,payload){
   const input=cleanText(p.input_keyword||p.inputKeyword||p.keyword||main); const lang=normalizeLang(p.gm_lang||p.lang||'ko');
   if(!main) return {mainKeyword:'',saved:0};
   const tr=pickTranslations(p); tr.ko=tr.ko||main; if(lang!=='ko'&&input) tr[lang]=tr[lang]||input;
-  const cols=['lang','input_keyword','main_keyword_ko','keyword_ko','hit_count','updated_at','created_at','translate_complete'].concat(LANGS.map(l=>'keyword_'+l));
-  const vals=['all',main,main,main,1,new Date().toISOString().slice(0,10),new Date().toISOString().slice(0,10),LANGS.every(l=>!!tr[l])?'T':'F'].concat(LANGS.map(l=>tr[l]||''));
-  const upd=['main_keyword_ko=EXCLUDED.main_keyword_ko','keyword_ko=EXCLUDED.keyword_ko','hit_count=gm_keyword_translate.hit_count+1','updated_at=CURRENT_DATE'];
-  for(const l of LANGS) upd.push(`keyword_${l}=CASE WHEN EXCLUDED.keyword_${l}='' THEN gm_keyword_translate.keyword_${l} ELSE EXCLUDED.keyword_${l} END`);
+  // 횡렬 구조에서는 keyword_ko도 LANGS의 ko 항목에서 한 번만 생성한다.
+  // 별도 keyword_ko 선언과 LANGS 반복을 함께 사용하면 INSERT 컬럼이 중복된다.
+  const cols=['lang','input_keyword','main_keyword_ko','hit_count','updated_at','created_at','translate_complete']
+    .concat(LANGS.map(l=>'keyword_'+l));
+  const complete=LANGS.every(l=>!!tr[l])?'T':'F';
+  const today=new Date().toISOString().slice(0,10);
+  const vals=['all',input,main,1,today,today,complete]
+    .concat(LANGS.map(l=>tr[l]||''));
+  const upd=[
+    'main_keyword_ko=EXCLUDED.main_keyword_ko',
+    'hit_count=gm_keyword_translate.hit_count+1',
+    'updated_at=CURRENT_DATE',
+    "translate_complete=CASE WHEN EXCLUDED.translate_complete='T' THEN 'T' ELSE gm_keyword_translate.translate_complete END"
+  ];
+  for(const l of LANGS){
+    upd.push(`keyword_${l}=CASE WHEN EXCLUDED.keyword_${l}='' THEN gm_keyword_translate.keyword_${l} ELSE EXCLUDED.keyword_${l} END`);
+  }
   await pool.query(`INSERT INTO gm_keyword_translate (${cols.join(',')}) VALUES (${vals.map((_,i)=>'$'+(i+1)).join(',')}) ON CONFLICT (lang,input_keyword) DO UPDATE SET ${upd.join(',')}`,vals);
   const relation=await saveRelations(pool,Object.assign({},p,{gm_lang:lang,keyword_ko:main}));
   return {mainKeyword:main,inputKeyword:input,lang,alias_saved:1,relation_saved:relation.saved,relation_existing:relation.updated,related_count:relation.received};
