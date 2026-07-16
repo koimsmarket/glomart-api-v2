@@ -408,10 +408,6 @@ function ids(b){
   return { productId, itemId, vendorItemId, mallCode, pi, uid, source_url:urlText };
 }
 
-async function ensureMallDiscountPriceColumns(pool){
-  await pool.query(`ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS mall_discount_price INTEGER`);
-}
-
 function pickFinalSupplyPrice(p, mallSalePrice){
   const v = firstNonEmpty(p, ['final_supply_price','finalSupplyPrice','supply_price','supplyPrice','purchase_price','purchasePrice','cost_price','costPrice']);
   return v ? parseMoney(v, 0) : null;
@@ -421,12 +417,17 @@ function pickProductName(p){
   return bestProductName(p);
 }
 function pickPrice(p){
-  // mall_sale_price는 Collector가 확정한 Glomart 실제 판매가다.
-  // raw/original/new-user 가격을 서버에서 재탐색하지 않는다.
+  // mall_sale_price는 몰 원가/원판매가만 저장한다.
+  // collector가 화면 표시용으로 price/priceText/gm_price에 우리 판매가를 넣기 때문에
+  // raw/mall 계열을 먼저 보고, 없을 때만 과거 payload 호환 필드를 사용한다.
   return parseMoney(firstNonEmpty(p, [
     'mall_sale_price','mallSalePrice','mall_sale_price_text','mallSalePriceText',
-    'sell_price','sellPrice','sell_price_text','sellPriceText',
-    'calculatedPrice','calculatedPriceText','finalDisplayPriceText','displayPriceText','priceText','price'
+    'raw_price','rawPrice','raw_price_text','rawPriceText',
+    'basePrice','base_price','basePriceText','base_price_text',
+    'rawCoupangPrice','rawCoupangOptionPrice','rawOptionPrice','coupangPrice',
+    'aliRawPriceText','aliBaseRawPriceText','aliBaseRawPrice',
+    'priceMain','displayPrice','display_price','sale_price','salePrice',
+    'final_price','finalPrice','ali_price','aliPrice','min_price','minPrice','price_text','priceText','price'
   ]), 0);
 }
 function pickNormalPrice(p){
@@ -449,11 +450,6 @@ function pickNormalPrice(p){
 function pickDiscountPrice(p){
   const v = firstNonEmpty(p, ['discount_price','discountPrice','coupon_price','couponPrice','instant_discount','instantDiscount']);
   return v ? parseMoney(v, 0) : null;
-}
-function pickMallDiscountPrice(p){
-  const v = firstNonEmpty(p, ['mall_discount_price','mallDiscountPrice','mall_discount_price_text','mallDiscountPriceText']);
-  const n = v ? parseMoney(v, 0) : 0;
-  return n > 0 ? n : null;
 }
 function pickDeliveryFee(p){
   const v = firstNonEmpty(p, ['delivery_fee','deliveryFee','shipping_fee','shippingFee','gm_shipping_fee','gmShippingFee','deliveryFeeText','shippingFeeText','searchShippingFeeText','searchDeliveryFeeText','delivery_fee_text','shipping_fee_text']);
@@ -1064,7 +1060,7 @@ function normalizeOptionJson(p, id){
     addJsonRows(o.option_json); addJsonRows(o.optionJson); addJsonRows(o.detail_json); addJsonRows(o.detailJson);
   });
 
-  const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','mall_discount_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source'];
+  const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source'];
   const rows=[]; const seen=new Set();
   const pushRow = (row)=>{
     const sig = cleanText(row[0]) || (cleanText(row[4]) + '|' + cleanText(row[3]) + '|' + cleanText(row[2]));
@@ -1081,12 +1077,7 @@ function normalizeOptionJson(p, id){
       const uid=uid0 || (id.mallCode && pi0 ? id.mallCode + '_' + pi0 : pi0);
       const name0=cleanText(r[4] || r[5] || p.optionName || p.product_name || p.productName || '기본옵션');
       if(!uid && !name0) return;
-      const hasMallDiscount = r.length >= 14;
-      pushRow([uid,productId0,itemId0,vendorItemId0,name0,
-        parseMoney(r[5],0), hasMallDiscount ? (parseMoney(r[6],0)||null) : null,
-        parseMoney(r[hasMallDiscount?7:6],0), cleanText(r[hasMallDiscount?8:7]||''),
-        parseMoney(r[hasMallDiscount?9:8],0), cleanText(r[hasMallDiscount?10:9]||''),
-        normalizeUrl(r[hasMallDiscount?11:10]||''), !!r[hasMallDiscount?12:11], cleanText(r[hasMallDiscount?13:12]||'')]);
+      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
       return;
     }
     if(!r || typeof r !== 'object') return;
@@ -1097,15 +1088,14 @@ function normalizeOptionJson(p, id){
     const uid = cleanText(r.uid || r.option_uid || (id.mallCode && pi ? id.mallCode + '_' + pi : pi));
     const name = cleanText(r.fullOptionName || r.displayOptionName || r.selectedOptionText || r.optionText || r.optionName || r.option_name || r.name || r.value || r.title || r.label || '');
     if(!uid && !name) return;
-    const mallPrice = pickOptPrice(r, ['mall_sale_price','mallSalePrice','mall_sale_price_text','mallSalePriceText','sell_price','sellPrice','sell_price_text','sellPriceText','calculatedPrice','calculatedPriceText','optionPrice','optionPriceText','priceText','price']);
-    const mallDiscountPrice = pickOptPrice(r, ['mall_discount_price','mallDiscountPrice','mall_discount_price_text','mallDiscountPriceText']);
+    const mallPrice = pickOptPrice(r, ['mall_sale_price','mallSalePrice','mall_price','mallPrice','raw_price','rawPrice','rawCoupangOptionPrice','rawOptionPrice','rawOptionPriceText','coupangPrice','aliRawPrice','aliRawPriceText','basePrice','basePriceText','salePrice','sale_price']);
     const normalPrice = pickOptPrice(r, ['normal_price','normalPrice','final_supply_price','finalSupplyPrice','sell_price','sellPrice','calculatedPrice','gm_price','gmPrice','optionPrice','optionPriceText','price','priceText','finalPriceText']);
     const feeText = cleanText(r.delivery_fee_text || r.deliveryFeeText || r.optionShippingFeeText || r.shippingFeeText || r.baseShippingFeeText || r.deliveryFee || p.deliveryFeeText || p.shippingFeeText || '');
     const fee = r.delivery_fee !== undefined ? parseMoney(r.delivery_fee, 0) : parseMoney(feeText, 0);
     const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.delivery_type || r.shipType || p.shippingLabel || p.deliveryType || p.delivery_type || '');
     const img = normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.colorImage || r.image || r.thumbnail || r.thumb || '');
     const sold = !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || r.sale_status || '')));
-    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,mallDiscountPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryRangeText || r.delivery_range_text || r.deliveryDateText || r.delivery_date_text || r.arrivalText || r.etaText || p.delivery_eta_text || p.deliveryEtaText || p.deliveryRangeText || p.delivery_range_text || p.deliveryDateText || p.delivery_date_text || p.arrivalText || p.deliveryText || p.shippingText || p.etaText || ''),img,sold,cleanText(r.source || '')]);
+    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryRangeText || r.delivery_range_text || r.deliveryDateText || r.delivery_date_text || r.arrivalText || r.etaText || p.delivery_eta_text || p.deliveryEtaText || p.deliveryRangeText || p.delivery_range_text || p.deliveryDateText || p.delivery_date_text || p.arrivalText || p.deliveryText || p.shippingText || p.etaText || ''),img,sold,cleanText(r.source || '')]);
   }));
 
   // 검색결과 payload에는 옵션배열이 없지만 현재 리스트 행 자체가 대표 판매옵션이다.
@@ -1115,7 +1105,7 @@ function normalizeOptionJson(p, id){
     const uid = cleanText(id.mallCode && id.pi ? id.mallCode + '_' + id.pi : id.pi);
     rows.push([
       uid, id.productId, id.itemId || '', id.vendorItemId || id.productId, name,
-      pickPrice(p), pickMallDiscountPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryText(p),
+      pickPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryText(p),
       normalizeUrl(p.option_image_url || p.optionImageUrl || p.thumb_origin_url || p.thumbOriginUrl || p.thumbnail || p.image || ''),
       /품절|sold\s*out/i.test(cleanText(p.soldout_yn || p.soldoutYn || p.soldout || p.sale_status || '')),
       'search-row'
@@ -1172,7 +1162,7 @@ function optionRowsFromOptionJson(optionJson, id, p){
     const pi = [productId, itemId, vendorItemId].filter(Boolean).join('_') || cleanText(r[0] || id.pi || '');
     if(!productId || !pi) return;
     const name = cleanText(r[4] || p.option_name || p.optionName || p.product_name || p.productName || '기본옵션');
-    const soldoutYn = normalizeSoldoutYn(r[12]);
+    const soldoutYn = normalizeSoldoutYn(r[11]);
     out.push({
       mall_code: cleanText(id.mallCode || p.mall_code || p.mallCode || '').toUpperCase(),
       product_id: productId,
@@ -1180,16 +1170,15 @@ function optionRowsFromOptionJson(optionJson, id, p){
       vendor_item_id: vendorItemId,
       pi_ii_vi: pi,
       option_name: name,
-      option_image_url: normalizeUrl(r[11] || ''),
+      option_image_url: normalizeUrl(r[10] || ''),
       option_sort_no: idx + 1,
       mall_sale_price: parseMoney(r[5], 0),
-      mall_discount_price: parseMoney(r[6], 0) || null,
       final_supply_price: null,
-      normal_price: parseMoney(r[7], 0),
+      normal_price: parseMoney(r[6], 0),
       discount_price: 0,
-      delivery_fee: parseMoney(r[9], 0),
-      delivery_eta_text: normalizeDeliveryTerm(r[10] || '', p),
-      delivery_type: cleanText(r[8] || ''),
+      delivery_fee: parseMoney(r[8], 0),
+      delivery_eta_text: normalizeDeliveryTerm(r[9] || '', p),
+      delivery_type: cleanText(r[7] || ''),
       soldout_yn: soldoutYn,
       sale_status: soldoutYn === 'Y' ? 'soldout' : 'active',
       active_yn: 'Y',
@@ -1213,7 +1202,6 @@ async function ensureProductOptionTable(pool){
       option_image_url TEXT,
       option_sort_no INTEGER NOT NULL DEFAULT 0,
       mall_sale_price INTEGER NOT NULL DEFAULT 0,
-      mall_discount_price INTEGER,
       final_supply_price INTEGER,
       normal_price INTEGER,
       discount_price INTEGER NOT NULL DEFAULT 0,
@@ -1233,7 +1221,6 @@ async function ensureProductOptionTable(pool){
       PRIMARY KEY (mall_code, pi_ii_vi)
     )
   `);
-  await pool.query(`ALTER TABLE gm_product_option ADD COLUMN IF NOT EXISTS mall_discount_price INTEGER`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_product ON gm_product_option(mall_code, product_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_active ON gm_product_option(mall_code, product_id, active_yn)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_vendor ON gm_product_option(vendor_item_id)`);
@@ -1264,13 +1251,13 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         INSERT INTO gm_product_option (
           mall_code, product_id, item_id, vendor_item_id, pi_ii_vi,
           option_name, option_image_url, option_sort_no,
-          mall_sale_price, mall_discount_price, final_supply_price, normal_price, discount_price,
+          mall_sale_price, final_supply_price, normal_price, discount_price,
           delivery_fee, delivery_eta_text, delivery_type,
           soldout_yn, sale_status, active_yn,
           buyable_qty, min_order_qty, max_order_qty,
           sales_qty, last_seen_at, created_at, updated_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,0,now(),now(),now()
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
         )
         ON CONFLICT (mall_code, pi_ii_vi) DO UPDATE SET
           product_id=EXCLUDED.product_id,
@@ -1280,7 +1267,6 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           option_image_url=COALESCE(NULLIF(EXCLUDED.option_image_url,''), gm_product_option.option_image_url),
           option_sort_no=EXCLUDED.option_sort_no,
           mall_sale_price=EXCLUDED.mall_sale_price,
-          mall_discount_price=EXCLUDED.mall_discount_price,
           final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product_option.final_supply_price),
           normal_price=COALESCE(EXCLUDED.normal_price, gm_product_option.normal_price),
           discount_price=EXCLUDED.discount_price,
@@ -1300,7 +1286,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       `, [
         opt.mall_code, opt.product_id, opt.item_id, opt.vendor_item_id, opt.pi_ii_vi,
         opt.option_name, opt.option_image_url, opt.option_sort_no,
-        opt.mall_sale_price, opt.mall_discount_price, opt.final_supply_price, opt.normal_price, opt.discount_price,
+        opt.mall_sale_price, opt.final_supply_price, opt.normal_price, opt.discount_price,
         opt.delivery_fee, opt.delivery_eta_text, opt.delivery_type,
         opt.soldout_yn, opt.sale_status, opt.active_yn,
         opt.buyable_qty, opt.min_order_qty, opt.max_order_qty
@@ -1407,22 +1393,33 @@ async function resolveSearchCategoryOnce(pool, keyword, requestToken){
     const requestKey = token + '::' + keywordKey;
     const cached = __gmSearchCategoryByRequest.get(requestKey);
     if(cached && cached.expires_at > now){
-      if(cached.promise) return { value:await cached.promise, cache_hit:true, reason:'request_pending_reuse' };
+      if(cached.promise){
+        const pendingValue = cleanText(await cached.promise);
+        if(!pendingValue) __gmSearchCategoryByRequest.delete(requestKey);
+        return { value:pendingValue, cache_hit:true, reason:pendingValue ? 'request_pending_reuse' : 'request_pending_empty_no_cache' };
+      }
       return { value:cached.value, cache_hit:true, reason:'request_value_reuse' };
     }
 
     const promise = (async()=>{
       try{
-        const matched = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
-        return matched || cleanText(keyword);
+        // cp_selected_code에는 실제 카테고리 코드만 허용한다.
+        // 조회 실패/미매칭 시 검색어 원문을 대입하지 않고 빈값으로 반환한다.
+        return cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
       }catch(e){
         console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), request_id:token, error:compactError(e) });
-        return cleanText(keyword);
+        return '';
       }
     })();
 
     __gmSearchCategoryByRequest.set(requestKey, { promise, expires_at:now + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
-    const value = await promise;
+    const value = cleanText(await promise);
+    if(!value){
+      // 빈값은 캐시하지 않는다. 다음 chunk/후속 요청에서 다시 판정할 수 있게 한다.
+      __gmSearchCategoryByRequest.delete(requestKey);
+      return { value:'', cache_hit:false, reason:'request_empty_no_cache' };
+    }
+
     const expiresAt = Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS;
     __gmSearchCategoryByRequest.set(requestKey, { value, expires_at:expiresAt });
     __gmLatestSearchCategoryByKeyword.set(keywordKey, { value, request_token:token, expires_at:expiresAt });
@@ -1437,13 +1434,15 @@ async function resolveSearchCategoryOnce(pool, keyword, requestToken){
 
   // 선행 CPKR 요청을 찾지 못한 독립 요청은 해당 keyword로 1회 판정한다.
   try{
-    const matched = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
-    const value = matched || cleanText(keyword);
-    __gmLatestSearchCategoryByKeyword.set(keywordKey, { value, request_token:'', expires_at:Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
-    return { value, cache_hit:false, reason:'keyword_resolved_without_request' };
+    const value = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
+    if(value){
+      __gmLatestSearchCategoryByKeyword.set(keywordKey, { value, request_token:'', expires_at:Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
+      return { value, cache_hit:false, reason:'keyword_resolved_without_request' };
+    }
+    return { value:'', cache_hit:false, reason:'keyword_empty_no_cache' };
   }catch(e){
     console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), request_id:'', error:compactError(e) });
-    return { value:cleanText(keyword), cache_hit:false, reason:'keyword_error_fallback' };
+    return { value:'', cache_hit:false, reason:'keyword_error_no_fallback' };
   }
 }
 
@@ -1704,7 +1703,6 @@ async function upsertProduct(pool, raw, parent={}){
   await ensureProductCpColumns(pool);
   await ensureProductLightJsonColumns(pool);
   await ensureProductRemoteDeliverySchema(pool);
-  await ensureMallDiscountPriceColumns(pool);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
   const detailJsonRaw = normalizeDetailJson(p);
@@ -1724,7 +1722,7 @@ async function upsertProduct(pool, raw, parent={}){
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
     'mall_category','mall_category_json','cp_selected_code','cp_fix_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
     'product_name','mall_product_name','option_count','option_json','thumb_json','detail_json','seasonal_text',
-    'mall_sale_price','mall_discount_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type',
+    'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type',
     'jeju_delivery_yn','jeju_extra_delivery_fee','island_delivery_yn','island_extra_delivery_fee','tax_type','overseas_direct_yn',
     'review_count','mall_sales_count','certification_no_1','certification_no_2',
     'supplier_id','supplier_name','business_number','online_sales_number','ceo_name','supplier_mobile','supplier_phone','supplier_email','supplier_address',
@@ -1736,7 +1734,16 @@ async function upsertProduct(pool, raw, parent={}){
   // V022: productColumns와 placeholder 순서를 1:1로 고정한다.
   // soldout_yn=$54, hit_count=1, sale_status=$55 순서가 반드시 유지되어야 한다.
   const valuesSql = [
-    '$1','$2','$3','$4','$5','$6','$7','$8','$9','$10::jsonb','$11','$12','$13','$14','$15','$16','$17','$18','$19','$20','$21','$22::jsonb','$23::jsonb','$24::jsonb','$25','$26','$27','$28','$29','$30','$31','$32','$33','$34','$35','$36','$37','$38','$39','$40','$41','$42','$43','$44','$45','$46','$47','$48','$49','$50','$51','$52','$53','$54','$55','1','$56','$57','$58','$59','$60','$61','$62','$63','$64','$65','$66','$67','$68','now()','now()','now()'
+    '$1','$2','$3','$4','$5','$6','$7','$8',
+    '$9','$10::jsonb','$11','$12','$13','$14','$15','$16',
+    '$17','$18','$19','$20','$21','$22::jsonb','$23::jsonb','$24::jsonb',
+    '$25','$26','$27','$28','$29','$30','$31','$32',
+    '$33','$34','$35','$36','$37','$38','$39','$40',
+    '$41','$42','$43','$44','$45','$46','$47','$48',
+    '$49','$50','$51','$52','$53','$54','1','$55',
+    '$56','$57','$58','$59','$60','$61','$62','$63',
+    '$64','$65','$66','$67',
+    'now()','now()','now()'
   ];
   const sql = `
     INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
@@ -1781,7 +1788,6 @@ async function upsertProduct(pool, raw, parent={}){
         ELSE gm_product.detail_json END,
       seasonal_text=COALESCE(NULLIF(EXCLUDED.seasonal_text,''), gm_product.seasonal_text),
       mall_sale_price=EXCLUDED.mall_sale_price,
-      mall_discount_price=EXCLUDED.mall_discount_price,
       final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product.final_supply_price),
       normal_price=COALESCE(EXCLUDED.normal_price, gm_product.normal_price),
       discount_price=EXCLUDED.discount_price,
@@ -1790,10 +1796,10 @@ async function upsertProduct(pool, raw, parent={}){
       -- 검색결과의 NULL/빈값/파싱실패는 기존 상세 수집값을 유지한다.
       delivery_eta_text=COALESCE(NULLIF(BTRIM(EXCLUDED.delivery_eta_text),''), gm_product.delivery_eta_text),
       delivery_type=COALESCE(NULLIF(EXCLUDED.delivery_type,''), gm_product.delivery_type),
-      jeju_delivery_yn=CASE WHEN $69::boolean THEN EXCLUDED.jeju_delivery_yn ELSE gm_product.jeju_delivery_yn END,
-      jeju_extra_delivery_fee=CASE WHEN $69::boolean THEN EXCLUDED.jeju_extra_delivery_fee ELSE gm_product.jeju_extra_delivery_fee END,
-      island_delivery_yn=CASE WHEN $70::boolean THEN EXCLUDED.island_delivery_yn ELSE gm_product.island_delivery_yn END,
-      island_extra_delivery_fee=CASE WHEN $70::boolean THEN EXCLUDED.island_extra_delivery_fee ELSE gm_product.island_extra_delivery_fee END,
+      jeju_delivery_yn=CASE WHEN $68::boolean THEN EXCLUDED.jeju_delivery_yn ELSE gm_product.jeju_delivery_yn END,
+      jeju_extra_delivery_fee=CASE WHEN $68::boolean THEN EXCLUDED.jeju_extra_delivery_fee ELSE gm_product.jeju_extra_delivery_fee END,
+      island_delivery_yn=CASE WHEN $69::boolean THEN EXCLUDED.island_delivery_yn ELSE gm_product.island_delivery_yn END,
+      island_extra_delivery_fee=CASE WHEN $69::boolean THEN EXCLUDED.island_extra_delivery_fee ELSE gm_product.island_extra_delivery_fee END,
       tax_type=COALESCE(NULLIF(EXCLUDED.tax_type,''), gm_product.tax_type),
       review_count=EXCLUDED.review_count,
       mall_sales_count=EXCLUDED.mall_sales_count,
@@ -1840,7 +1846,7 @@ async function upsertProduct(pool, raw, parent={}){
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     productOptionLinkJson ? safeJsonString(productOptionLinkJson) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
-    mallSalePrice, pickMallDiscountPrice(p), finalSupplyPrice, normalPrice, pickDiscountPrice(p),
+    mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryTerm(p), pickDeliveryType(p),
     remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
     remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
