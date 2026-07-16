@@ -104,12 +104,14 @@ module.exports = function installSearchLogService(deps){
       if(mall==='ALKR'||mall==='ALI') counts.alkr=resultCount;
       if(mall==='GMKR') counts.gmkr=resultCount;
       if(mall==='SMARTFIT') counts.smartfit=resultCount;
-      const dbInsert=old?toInt(old.db_insert_count,0)+toInt(p.db_insert_count||p.dbInsertCount,0):toInt(p.db_insert_count||p.dbInsertCount,0);
+      const dbInsert=old?toInt(old.db_insert_count,0):toInt(p.db_insert_count||p.dbInsertCount,0);
       const queueSend=old?toInt(old.queue_send_count,0)+toInt(p.queue_send_count||p.queueSendCount,0):toInt(p.queue_send_count||p.queueSendCount,0);
       const memberId=cleanText(p.member_id||p.memberId||(old&&old.member_id)||'');
       const guestKey=cleanText(p.guest_key||p.guestKey||(old&&old.guest_key)||'');
       const dev=deviceType(p.device_type||p.deviceType||(old&&old.device_type)||'PHONE');
-      let identity=old?null:await latestIdentity(memberId,guestKey,normalized);
+      const memberArrivedLate=!!(old && !cleanText(old.member_id||'') && memberId);
+      const guestArrivedLate=!!(old && !cleanText(old.guest_key||'') && guestKey);
+      let identity=(!old || memberArrivedLate || guestArrivedLate)?await latestIdentity(memberId,guestKey,normalized):null;
       if(identity) identity=await linkMobileGuest(memberId,guestKey,dev,identity);
       const row={keyword_original:original,keyword_normalized:normalized,keyword_canonical:canonical,lang_code:uiLang,country_code:cleanText(p.country_code||p.countryCode||(old&&old.country_code)||''),member_country_code:cleanText(p.member_country_code||p.memberCountryCode||(old&&old.member_country_code)||''),category_no:categoryNo,category_code:categoryCode,category_name:categoryName,cache_used:cacheFlag(p.cache_used||p.cacheUsed||(old&&old.cache_used)),gmkr_result_count:counts.gmkr,cpkr_result_count:counts.cpkr,alkr_result_count:counts.alkr,smartfit_result_count:counts.smartfit,db_insert_count:dbInsert,queue_send_count:queueSend};
       let saved;
@@ -128,11 +130,18 @@ module.exports = function installSearchLogService(deps){
           VALUES ($1,now(),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,now(),now()) RETURNING *`,
           [eventId,original,normalized,canonical,uiLang,uiLang,keywordLang,row.country_code,row.member_country_code,categoryCode,categoryNo,categoryName,counts.gmkr,counts.cpkr,counts.alkr,counts.smartfit,dbInsert,queueSend,row.cache_used,cleanText(p.cache_key||p.cacheKey||''),cleanText(p.search_source||p.searchSource||'search'),memberId,guestKey,dev,cleanText(p.client_app||p.clientApp||'GLOMART_MOBILE'),memberId?identity.id_search+1:0,memberId?identity.id_keyword+1:0,identity.id_detail,(!memberId&&guestKey)?identity.guest_search+1:identity.guest_search,(!memberId&&guestKey)?identity.guest_keyword+1:identity.guest_keyword,identity.guest_detail,identity.merged_search,identity.merged_keyword,identity.merged_detail]);
       }else{
-        saved=await dbQuery(`UPDATE gm_search_log SET keyword_original=$2,keyword_normalized=$3,keyword_canonical=$4,lang_code=$5,ui_lang_code=$5,keyword_lang_code=$6,country_code=$7,member_country_code=$8,category_code=$9,category_no=$10,category_name=$11,gmkr_result_count=$12,cpkr_result_count=$13,alkr_result_count=$14,smartfit_result_count=$15,db_insert_count=$16,queue_send_count=$17,cache_used=$18,member_id=$19,guest_key=$20,device_type=$21,updated_at=now() WHERE search_event_id=$1 RETURNING *`,[eventId,original,normalized,canonical,uiLang,keywordLang,row.country_code,row.member_country_code,categoryCode,categoryNo,categoryName,counts.gmkr,counts.cpkr,counts.alkr,counts.smartfit,dbInsert,queueSend,row.cache_used,memberId,guestKey,dev]);
+        const lateIdSearch=memberArrivedLate&&identity?identity.id_search+1:toInt(old.id_search_count,0);
+        const lateIdKeyword=memberArrivedLate&&identity?identity.id_keyword+1:toInt(old.id_keyword_count,0);
+        const lateGuestSearch=guestArrivedLate&&!memberId&&identity?identity.guest_search+1:toInt(old.guest_search_count,0);
+        const lateGuestKeyword=guestArrivedLate&&!memberId&&identity?identity.guest_keyword+1:toInt(old.guest_keyword_count,0);
+        const lateMergedSearch=(memberArrivedLate||guestArrivedLate)&&identity?identity.merged_search:toInt(old.merged_search_count,0);
+        const lateMergedKeyword=(memberArrivedLate||guestArrivedLate)&&identity?identity.merged_keyword:toInt(old.merged_keyword_count,0);
+        const lateMergedDetail=(memberArrivedLate||guestArrivedLate)&&identity?identity.merged_detail:toInt(old.merged_detail_count,0);
+        saved=await dbQuery(`UPDATE gm_search_log SET keyword_original=$2,keyword_normalized=$3,keyword_canonical=$4,lang_code=$5,ui_lang_code=$5,keyword_lang_code=$6,country_code=$7,member_country_code=$8,category_code=$9,category_no=$10,category_name=$11,gmkr_result_count=$12,cpkr_result_count=$13,alkr_result_count=$14,smartfit_result_count=$15,db_insert_count=$16,queue_send_count=$17,cache_used=$18,member_id=$19,guest_key=$20,device_type=$21,id_search_count=$22,id_keyword_count=$23,guest_search_count=$24,guest_keyword_count=$25,merged_search_count=$26,merged_keyword_count=$27,merged_detail_count=$28,updated_at=now() WHERE search_event_id=$1 RETURNING *`,[eventId,original,normalized,canonical,uiLang,keywordLang,row.country_code,row.member_country_code,categoryCode,categoryNo,categoryName,counts.gmkr,counts.cpkr,counts.alkr,counts.smartfit,dbInsert,queueSend,row.cache_used,memberId,guestKey,dev,lateIdSearch,lateIdKeyword,lateGuestSearch,lateGuestKeyword,lateMergedSearch,lateMergedKeyword,lateMergedDetail]);
       }
       const nowRow=saved.rows[0];
       const oldTotal=old?Number(old.gmkr_result_count||0)+Number(old.cpkr_result_count||0)+Number(old.alkr_result_count||0)+Number(old.smartfit_result_count||0):0;
-      await updateLegacyStats(nowRow,!old,{result:totalResult(nowRow)-oldTotal,db:toInt(p.db_insert_count||p.dbInsertCount,0),queue:toInt(p.queue_send_count||p.queueSendCount,0)});
+      await updateLegacyStats(nowRow,!old,{result:totalResult(nowRow)-oldTotal,db:0,queue:toInt(p.queue_send_count||p.queueSendCount,0)});
       let relationResult=null;
       try{ relationResult=await keywordRelationService.saveRelations(pool,{gm_lang:keywordLang||uiLang||'ko',keyword_ko:cleanText(p.keyword_ko||p.keywordKo||canonical||normalized||original),relatedKeywords:p.related_keywords||p.relatedKeywords||[]}); }catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_ERROR]',String(e&&e.message||e)); }
       ok(res,{action:'search.log',inserted:!old,updated:!!old,search_id:nowRow.search_id,search_event_id:eventId,keyword_relation:relationResult});
