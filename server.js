@@ -1,6 +1,7 @@
 const express = require('express');
 const keywordRelationService = require('./services/keyword_relation');
 const installSearchLogService = require('./services/search_log');
+const createEventService = require('./services/event_service');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -1672,6 +1673,7 @@ try{
 }catch(e){
   console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
 }
+const eventService = createEventService({ pool, tableExists, cleanText, currentYyyymm, currentYyyy });
 installSearchLogService({
   app,
   pool,
@@ -1686,12 +1688,13 @@ installSearchLogService({
   incrementCategoryPeriodCounter,
   currentYyyymm,
   currentYyyy,
-  keywordRelationService
+  keywordRelationService,
+  eventService
 });
 
 app.use(require('./routes/health'));
 app.use(require('./routes/event'));
-console.log('[GM_EVENT_ROUTE_V001] routes/event registered');
+console.log('[EVENT_ROUTE_V005] routes/event registered');
 app.use(require('./routes/search_keyword'));
 console.log('[GM_SEARCH_KEYWORD_ROUTE_V002] routes/search_keyword registered');
 app.use(require('./routes/product'));

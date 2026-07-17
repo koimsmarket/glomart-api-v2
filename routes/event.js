@@ -1,48 +1,40 @@
-// GM_EVENT_ROUTE_V001
+// GM_EVENT_ROUTE_V001_SEARCH_FIRST
 'use strict';
 
 const express = require('express');
 const router = express.Router();
 
-function text(v){
-  return v === undefined || v === null ? '' : String(v).trim();
-}
+function clean(v){ return v == null ? '' : String(v).trim(); }
+function eventType(body){ return clean(body && (body.event_type || body.eventType || body.type)).toUpperCase(); }
 
-function fail(res, status, message, extra){
-  return res.status(status).json(Object.assign({ ok:false, error:message }, extra || {}));
-}
-
-/*
- * Unified event entry point.
- * Phase 1: external product search only.
- * Existing /api/gm/search/log remains as a compatibility endpoint, but both
- * paths execute the exact same search handler registered by services/search_log.js.
- * This prevents two separate counter implementations from running.
- */
-router.post(['/api/gm/event', '/api/event'], async (req, res) => {
-  const body = req.body || {};
-  const eventType = text(body.event_type || body.eventType || body.type).toUpperCase();
-
-  if (!eventType) {
-    return fail(res, 400, 'event_type is required');
-  }
+router.post('/api/gm/event', async (req, res) => {
+  const type = eventType(req.body || {});
+  if (!type) return res.status(400).json({ ok:false, error:'event_type is required' });
 
   const handlers = req.app.locals.gmEventHandlers || {};
-  const handler = handlers[eventType];
-
+  const handler = handlers[type];
   if (!handler) {
-    return fail(res, 400, 'unsupported event_type', {
-      event_type: eventType,
-      supported: Object.keys(handlers).sort()
+    return res.status(400).json({
+      ok:false,
+      error:'unsupported event_type',
+      event_type:type,
+      supported:Object.keys(handlers).sort()
     });
   }
-
-  req.body = Object.assign({}, body, {
-    event_type: eventType,
-    event_source: text(body.event_source || body.eventSource || 'GM_EVENT')
-  });
-
   return handler(req, res);
+});
+
+// Deprecated compatibility endpoint. No product counter is updated here.
+// Existing mobile callers can remain temporarily without causing duplicate counts.
+router.post(['/api/gm/product/event','/api/product/event'], (req, res) => {
+  res.json({
+    ok:true,
+    deprecated:true,
+    skipped:true,
+    action:'product.event.disabled',
+    event_type:eventType(req.body || {}),
+    message:'Product event counters are disabled and will be migrated into /api/gm/event.'
+  });
 });
 
 module.exports = router;

@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V043_ROUTE_RESTORE';
+const VERSION = 'GM_SMARTFIT_SERVER_V044_ITEM_LIST_COMPAT_V067';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -504,8 +504,8 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     if(q){ params.push('%'+q+'%'); const p='$'+params.length; where.push(`(i.product_uid ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p} OR COALESCE(p.mall_product_name,'') ILIKE ${p})`); }
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT
-        i.item_id, i.template_id, i.item_role, i.mall_code, i.product_id, i.product_uid, i.qty, i.sort_no,
-        p.product_name, p.mall_product_name,
+        i.item_id, i.template_id, i.item_role, i.mall_code, COALESCE(p.product_id,'') AS product_id, i.product_uid, i.qty, i.sort_no,
+        p.product_name, p.mall_product_name, p.option_name, p.option_value,
         p.mall_sale_price AS sale_price, p.final_supply_price,
         p.product_url, p.thumb_origin_url AS thumb_url,
         p.delivery_type, p.delivery_fee, p.delivery_eta_text, p.soldout_yn,
@@ -518,9 +518,16 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
 
     let items=r.rows;
     if(member && collected){
-      const d=(await pool.query(`SELECT * FROM gm_smartfit_collection_item_delta
-        WHERE member_id=$1 AND template_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'
-        ORDER BY sort_no, delta_id`,[member,templateId])).rows;
+      let d=[];
+      try{
+        d=(await pool.query(`SELECT * FROM gm_smartfit_collection_item_delta
+          WHERE member_id=$1 AND template_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'
+          ORDER BY sort_no, delta_id`,[member,templateId])).rows;
+      }catch(deltaError){
+        // Migration may be deployed one step later than the route. Base template items must still render.
+        if(deltaError && deltaError.code==='42P01') console.warn('[SMARTFIT_DELTA_TABLE_PENDING]',{template_id:templateId,member_id:member});
+        else throw deltaError;
+      }
       const bySource=new Map(); const adds=[];
       d.forEach(x=>{ if(x.source_item_id) bySource.set(String(x.source_item_id),x); else if(x.action_type==='ADD') adds.push(x); });
       items=items.reduce((out,row)=>{
@@ -535,12 +542,20 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
         const puids=adds.map(x=>x.product_uid).filter(Boolean);
         const productMap=new Map();
         if(puids.length){ const pr=await pool.query(`SELECT * FROM gm_product WHERE product_uid=ANY($1::text[])`,[puids]); pr.rows.forEach(x=>productMap.set(String(x.product_uid),x)); }
-        adds.forEach(x=>{ const p=productMap.get(String(x.product_uid))||{}; items.push({item_id:'D'+x.delta_id,template_id:templateId,item_role:'ETC',mall_code:x.mall_code,product_id:x.product_id,product_uid:x.product_uid,qty:x.qty,sort_no:x.sort_no,product_name:p.product_name,mall_product_name:p.mall_product_name,sale_price:p.mall_sale_price,final_supply_price:p.final_supply_price,product_url:p.product_url,thumb_url:p.thumb_origin_url,delivery_type:p.delivery_type,delivery_fee:p.delivery_fee,delivery_eta_text:p.delivery_eta_text,soldout_yn:p.soldout_yn,personal_delta_yn:'T'}); });
+        adds.forEach(x=>{ const p=productMap.get(String(x.product_uid))||{}; items.push({item_id:'D'+x.delta_id,template_id:templateId,item_role:'ETC',mall_code:x.mall_code,product_id:x.product_id,product_uid:x.product_uid,qty:x.qty,sort_no:x.sort_no,product_name:p.product_name,mall_product_name:p.mall_product_name,option_name:p.option_name,option_value:p.option_value,sale_price:p.mall_sale_price,final_supply_price:p.final_supply_price,product_url:p.product_url,thumb_url:p.thumb_origin_url,delivery_type:p.delivery_type,delivery_fee:p.delivery_fee,delivery_eta_text:p.delivery_eta_text,soldout_yn:p.soldout_yn,personal_delta_yn:'T'}); });
       }
       items.sort((a,b)=>(i(a.sort_no,0)-i(b.sort_no,0)) || String(a.item_id).localeCompare(String(b.item_id)));
     }
     ok(res,{ items, count:items.length, template_id:templateId, limit, access:{owner,collected,public:publicReadable} });
-  }catch(e){ fail(res,500,'item list failed',{ detail:String(e.message||e) }); }
+  }catch(e){
+    console.error('[SMARTFIT_ITEM_LIST_ERROR_V067]',{
+      template_id:i(req.query.template_id || req.query.templateId,0),
+      member_id:s(req.query.member_id || req.query.memberId || ''),
+      code:e && e.code,
+      detail:String(e && (e.stack || e.message) || e)
+    });
+    fail(res,500,'item list failed',{ detail:String(e.message||e), code:s(e&&e.code) });
+  }
 });
 
 router.get('/api/gm/smartfit/template/:template_id/detail', (req,res)=>{

@@ -6,7 +6,7 @@ module.exports = function installSearchLogService(deps){
     app,pool,dbQuery,tableExists,cleanText,toInt,ok,fail,
     normalizeKeywordForStat,findCategoryKeywordMatch,
     incrementCategoryPeriodCounter,currentYyyymm,currentYyyy,
-    keywordRelationService
+    keywordRelationService,eventService
   } = deps;
 
   function b(v){
@@ -68,7 +68,7 @@ module.exports = function installSearchLogService(deps){
     }
   }
 
-  const handleSearchEvent = async (req,res)=>{
+  const handleSearchLog = async (req,res)=>{
     try{
       if(!(await tableExists('gm_search_log'))) return fail(res,500,'gm_search_log table not found');
       const p=req.body||{};
@@ -142,18 +142,16 @@ module.exports = function installSearchLogService(deps){
       const nowRow=saved.rows[0];
       const oldTotal=old?Number(old.gmkr_result_count||0)+Number(old.cpkr_result_count||0)+Number(old.alkr_result_count||0)+Number(old.smartfit_result_count||0):0;
       await updateLegacyStats(nowRow,!old,{result:totalResult(nowRow)-oldTotal,db:0,queue:toInt(p.queue_send_count||p.queueSendCount,0)});
+      if(!old && eventService && typeof eventService.applySearch==='function'){
+        await eventService.applySearch(nowRow);
+      }
       let relationResult=null;
       try{ relationResult=await keywordRelationService.saveRelations(pool,{gm_lang:keywordLang||uiLang||'ko',keyword_ko:cleanText(p.keyword_ko||p.keywordKo||canonical||normalized||original),relatedKeywords:p.related_keywords||p.relatedKeywords||[]}); }catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_ERROR]',String(e&&e.message||e)); }
       ok(res,{action:'search.log',inserted:!old,updated:!!old,search_id:nowRow.search_id,search_event_id:eventId,keyword_relation:relationResult});
     }catch(e){ fail(res,500,'search log failed',{detail:String(e&&e.message||e)}); }
   };
 
-  app.locals.gmEventHandlers = app.locals.gmEventHandlers || {};
-  app.locals.gmEventHandlers.SEARCH = handleSearchEvent;
-  app.locals.gmEventHandlers.SEARCH_COMPLETE = handleSearchEvent;
-  app.post('/api/gm/search/log', handleSearchEvent);
-
-  app.post('/api/gm/search/log/detail', async (req,res)=>{
+  const handleSearchDetail = async (req,res)=>{
     try{
       const p=req.body||{};
       const eventId=cleanText(p.search_event_id||p.searchEventId||p.request_id||p.requestId||'');
@@ -162,6 +160,14 @@ module.exports = function installSearchLogService(deps){
       if(!r.rows[0]) return fail(res,404,'search_event_id not found');
       ok(res,{action:'search.log.detail',...r.rows[0]});
     }catch(e){ fail(res,500,'search detail count failed',{detail:String(e&&e.message||e)}); }
+  };
+
+  app.post('/api/gm/search/log', handleSearchLog);
+  app.post('/api/gm/search/log/detail', handleSearchDetail);
+  app.locals.gmEventHandlers = Object.assign({}, app.locals.gmEventHandlers || {}, {
+    SEARCH: handleSearchLog,
+    SEARCH_COMPLETE: handleSearchLog,
+    SEARCH_DETAIL: handleSearchDetail
   });
 
   app.get('/api/gm/search/summary', async (req,res)=>{
