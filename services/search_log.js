@@ -1,4 +1,4 @@
-// GM_SEARCH_LOG_SERVICE_V001
+// GM_SEARCH_LOG_SERVICE_V006_NORMALIZED_STAT
 'use strict';
 
 module.exports = function installSearchLogService(deps){
@@ -54,17 +54,78 @@ module.exports = function installSearchLogService(deps){
     counts.merged_detail += counts.guest_detail;
     return counts;
   }
-  async function updateLegacyStats(row,isNew,deltas){
+  function statIdentity(row){
+    return [
+      cleanText(row.keyword_normalized),
+      cleanText(row.country_code),
+      cleanText(row.lang_code),
+      cleanText(row.category_no),
+      'ALL'
+    ].join('|');
+  }
+
+  async function updateLegacyStats(row,oldRow,deltas){
+    if(!(await tableExists('gm_search_keyword_stat'))) return;
     const mall='ALL';
-    if(await tableExists('gm_search_keyword_stat')){
-      if(isNew){
-        await dbQuery(`INSERT INTO gm_search_keyword_stat (keyword_original,keyword_normalized,keyword_canonical,country_code,lang_code,member_country_code,category_no,category_code,category_name,mall_code,search_count,cache_used_count,cache_miss_count,result_count_sum,db_insert_count_sum,queue_send_count_sum,first_search_at,last_search_at,updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,$15,now(),now(),now())
-          ON CONFLICT (keyword_normalized,country_code,lang_code,category_no,mall_code) DO UPDATE SET search_count=gm_search_keyword_stat.search_count+1,last_search_at=now(),updated_at=now()`,
-          [row.keyword_original,row.keyword_normalized,row.keyword_canonical,row.country_code,row.lang_code,row.member_country_code,row.category_no,row.category_code,row.category_name,mall,row.cache_used==='T'?1:0,row.cache_used==='T'?0:1,totalResult(row),row.db_insert_count,row.queue_send_count]);
-      }else if(deltas.result||deltas.db||deltas.queue){
-        await dbQuery(`UPDATE gm_search_keyword_stat SET result_count_sum=COALESCE(result_count_sum,0)+$1,db_insert_count_sum=COALESCE(db_insert_count_sum,0)+$2,queue_send_count_sum=COALESCE(queue_send_count_sum,0)+$3,last_search_at=now(),updated_at=now() WHERE keyword_normalized=$4 AND country_code=$5 AND lang_code=$6 AND category_no=$7 AND mall_code=$8`,[deltas.result,deltas.db,deltas.queue,row.keyword_normalized,row.country_code,row.lang_code,row.category_no,mall]);
-      }
+    const isNew=!oldRow;
+    const keyChanged=!!(oldRow && statIdentity(oldRow)!==statIdentity(row));
+
+    if(isNew){
+      await dbQuery(`INSERT INTO gm_search_keyword_stat (keyword_original,keyword_normalized,keyword_canonical,country_code,lang_code,member_country_code,category_no,category_code,category_name,mall_code,search_count,cache_used_count,cache_miss_count,result_count_sum,db_insert_count_sum,queue_send_count_sum,first_search_at,last_search_at,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,$15,now(),now(),now())
+        ON CONFLICT (keyword_normalized,country_code,lang_code,category_no,mall_code) DO UPDATE SET
+          keyword_original=EXCLUDED.keyword_original,
+          keyword_canonical=EXCLUDED.keyword_canonical,
+          member_country_code=EXCLUDED.member_country_code,
+          category_code=EXCLUDED.category_code,
+          category_name=EXCLUDED.category_name,
+          search_count=gm_search_keyword_stat.search_count+1,
+          cache_used_count=COALESCE(gm_search_keyword_stat.cache_used_count,0)+EXCLUDED.cache_used_count,
+          cache_miss_count=COALESCE(gm_search_keyword_stat.cache_miss_count,0)+EXCLUDED.cache_miss_count,
+          result_count_sum=COALESCE(gm_search_keyword_stat.result_count_sum,0)+EXCLUDED.result_count_sum,
+          db_insert_count_sum=COALESCE(gm_search_keyword_stat.db_insert_count_sum,0)+EXCLUDED.db_insert_count_sum,
+          queue_send_count_sum=COALESCE(gm_search_keyword_stat.queue_send_count_sum,0)+EXCLUDED.queue_send_count_sum,
+          last_search_at=now(),updated_at=now()`,
+        [row.keyword_original,row.keyword_normalized,row.keyword_canonical,row.country_code,row.lang_code,row.member_country_code,row.category_no,row.category_code,row.category_name,mall,row.cache_used==='T'?1:0,row.cache_used==='T'?0:1,totalResult(row),row.db_insert_count,row.queue_send_count]);
+      return;
+    }
+
+    if(keyChanged){
+      const oldTotal=totalResult(oldRow);
+      const oldCacheUsed=oldRow.cache_used==='T'?1:0;
+      const oldCacheMiss=oldRow.cache_used==='T'?0:1;
+      await dbQuery(`UPDATE gm_search_keyword_stat SET
+          search_count=GREATEST(0,COALESCE(search_count,0)-1),
+          cache_used_count=GREATEST(0,COALESCE(cache_used_count,0)-$1),
+          cache_miss_count=GREATEST(0,COALESCE(cache_miss_count,0)-$2),
+          result_count_sum=GREATEST(0,COALESCE(result_count_sum,0)-$3),
+          db_insert_count_sum=GREATEST(0,COALESCE(db_insert_count_sum,0)-$4),
+          queue_send_count_sum=GREATEST(0,COALESCE(queue_send_count_sum,0)-$5),
+          updated_at=now()
+        WHERE keyword_normalized=$6 AND country_code=$7 AND lang_code=$8 AND category_no=$9 AND mall_code=$10`,
+        [oldCacheUsed,oldCacheMiss,oldTotal,toInt(oldRow.db_insert_count,0),toInt(oldRow.queue_send_count,0),oldRow.keyword_normalized,oldRow.country_code,oldRow.lang_code,oldRow.category_no,mall]);
+
+      await dbQuery(`INSERT INTO gm_search_keyword_stat (keyword_original,keyword_normalized,keyword_canonical,country_code,lang_code,member_country_code,category_no,category_code,category_name,mall_code,search_count,cache_used_count,cache_miss_count,result_count_sum,db_insert_count_sum,queue_send_count_sum,first_search_at,last_search_at,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,$15,now(),now(),now())
+        ON CONFLICT (keyword_normalized,country_code,lang_code,category_no,mall_code) DO UPDATE SET
+          keyword_original=EXCLUDED.keyword_original,
+          keyword_canonical=EXCLUDED.keyword_canonical,
+          member_country_code=EXCLUDED.member_country_code,
+          category_code=EXCLUDED.category_code,
+          category_name=EXCLUDED.category_name,
+          search_count=gm_search_keyword_stat.search_count+1,
+          cache_used_count=COALESCE(gm_search_keyword_stat.cache_used_count,0)+EXCLUDED.cache_used_count,
+          cache_miss_count=COALESCE(gm_search_keyword_stat.cache_miss_count,0)+EXCLUDED.cache_miss_count,
+          result_count_sum=COALESCE(gm_search_keyword_stat.result_count_sum,0)+EXCLUDED.result_count_sum,
+          db_insert_count_sum=COALESCE(gm_search_keyword_stat.db_insert_count_sum,0)+EXCLUDED.db_insert_count_sum,
+          queue_send_count_sum=COALESCE(gm_search_keyword_stat.queue_send_count_sum,0)+EXCLUDED.queue_send_count_sum,
+          last_search_at=now(),updated_at=now()`,
+        [row.keyword_original,row.keyword_normalized,row.keyword_canonical,row.country_code,row.lang_code,row.member_country_code,row.category_no,row.category_code,row.category_name,mall,row.cache_used==='T'?1:0,row.cache_used==='T'?0:1,totalResult(row),row.db_insert_count,row.queue_send_count]);
+      return;
+    }
+
+    if(deltas.result||deltas.db||deltas.queue){
+      await dbQuery(`UPDATE gm_search_keyword_stat SET result_count_sum=COALESCE(result_count_sum,0)+$1,db_insert_count_sum=COALESCE(db_insert_count_sum,0)+$2,queue_send_count_sum=COALESCE(queue_send_count_sum,0)+$3,last_search_at=now(),updated_at=now() WHERE keyword_normalized=$4 AND country_code=$5 AND lang_code=$6 AND category_no=$7 AND mall_code=$8`,[deltas.result,deltas.db,deltas.queue,row.keyword_normalized,row.country_code,row.lang_code,row.category_no,mall]);
     }
   }
 
@@ -77,7 +138,9 @@ module.exports = function installSearchLogService(deps){
       const existing=await dbQuery(`SELECT * FROM gm_search_log WHERE search_event_id=$1 LIMIT 1`,[eventId]);
       const old=existing.rows[0]||null;
       const original=cleanText(p.keyword_original||p.keyword||p.origin||(old&&old.keyword_original)||'');
-      const normalized=normalizeKeywordForStat(p.keyword_normalized||p.normalizedKeyword||original||(old&&old.keyword_normalized)||'');
+      // 후속 CPKR/ALKR 갱신에 정제어가 없더라도 이미 확정된 정제어를 원문으로 되돌리지 않는다.
+      const explicitNormalized=cleanText(p.keyword_normalized||p.normalizedKeyword||'');
+      const normalized=normalizeKeywordForStat(explicitNormalized||(old&&old.keyword_normalized)||original);
       const uiLang=cleanText(p.ui_lang_code||p.uiLangCode||p.lang_code||p.langCode||(old&&old.ui_lang_code)||'');
       const keywordLang=cleanText(p.keyword_lang_code||p.keywordLangCode||(old&&old.keyword_lang_code)||uiLang);
       let canonical=cleanText(p.keyword_canonical||p.keywordCanonical||(old&&old.keyword_canonical)||'');
@@ -111,7 +174,8 @@ module.exports = function installSearchLogService(deps){
       const dev=deviceType(p.device_type||p.deviceType||(old&&old.device_type)||'PHONE');
       const memberArrivedLate=!!(old && !cleanText(old.member_id||'') && memberId);
       const guestArrivedLate=!!(old && !cleanText(old.guest_key||'') && guestKey);
-      let identity=(!old || memberArrivedLate || guestArrivedLate)?await latestIdentity(memberId,guestKey,normalized):null;
+      const keywordChanged=!!(old && normalizeKeywordForStat(old.keyword_normalized||old.keyword_original||'')!==normalized);
+      let identity=(!old || memberArrivedLate || guestArrivedLate || keywordChanged)?await latestIdentity(memberId,guestKey,normalized):null;
       if(identity) identity=await linkMobileGuest(memberId,guestKey,dev,identity);
       const row={keyword_original:original,keyword_normalized:normalized,keyword_canonical:canonical,lang_code:uiLang,country_code:cleanText(p.country_code||p.countryCode||(old&&old.country_code)||''),member_country_code:cleanText(p.member_country_code||p.memberCountryCode||(old&&old.member_country_code)||''),category_no:categoryNo,category_code:categoryCode,category_name:categoryName,cache_used:cacheFlag(p.cache_used||p.cacheUsed||(old&&old.cache_used)),gmkr_result_count:counts.gmkr,cpkr_result_count:counts.cpkr,alkr_result_count:counts.alkr,smartfit_result_count:counts.smartfit,db_insert_count:dbInsert,queue_send_count:queueSend};
       let saved;
@@ -131,9 +195,9 @@ module.exports = function installSearchLogService(deps){
           [eventId,original,normalized,canonical,uiLang,uiLang,keywordLang,row.country_code,row.member_country_code,categoryCode,categoryNo,categoryName,counts.gmkr,counts.cpkr,counts.alkr,counts.smartfit,dbInsert,queueSend,row.cache_used,cleanText(p.cache_key||p.cacheKey||''),cleanText(p.search_source||p.searchSource||'search'),memberId,guestKey,dev,cleanText(p.client_app||p.clientApp||'GLOMART_MOBILE'),memberId?identity.id_search+1:0,memberId?identity.id_keyword+1:0,identity.id_detail,(!memberId&&guestKey)?identity.guest_search+1:identity.guest_search,(!memberId&&guestKey)?identity.guest_keyword+1:identity.guest_keyword,identity.guest_detail,identity.merged_search,identity.merged_keyword,identity.merged_detail]);
       }else{
         const lateIdSearch=memberArrivedLate&&identity?identity.id_search+1:toInt(old.id_search_count,0);
-        const lateIdKeyword=memberArrivedLate&&identity?identity.id_keyword+1:toInt(old.id_keyword_count,0);
+        const lateIdKeyword=(memberArrivedLate||keywordChanged)&&memberId&&identity?identity.id_keyword+1:toInt(old.id_keyword_count,0);
         const lateGuestSearch=guestArrivedLate&&!memberId&&identity?identity.guest_search+1:toInt(old.guest_search_count,0);
-        const lateGuestKeyword=guestArrivedLate&&!memberId&&identity?identity.guest_keyword+1:toInt(old.guest_keyword_count,0);
+        const lateGuestKeyword=(guestArrivedLate||keywordChanged)&&!memberId&&guestKey&&identity?identity.guest_keyword+1:toInt(old.guest_keyword_count,0);
         const lateMergedSearch=(memberArrivedLate||guestArrivedLate)&&identity?identity.merged_search:toInt(old.merged_search_count,0);
         const lateMergedKeyword=(memberArrivedLate||guestArrivedLate)&&identity?identity.merged_keyword:toInt(old.merged_keyword_count,0);
         const lateMergedDetail=(memberArrivedLate||guestArrivedLate)&&identity?identity.merged_detail:toInt(old.merged_detail_count,0);
@@ -141,9 +205,9 @@ module.exports = function installSearchLogService(deps){
       }
       const nowRow=saved.rows[0];
       const oldTotal=old?Number(old.gmkr_result_count||0)+Number(old.cpkr_result_count||0)+Number(old.alkr_result_count||0)+Number(old.smartfit_result_count||0):0;
-      await updateLegacyStats(nowRow,!old,{result:totalResult(nowRow)-oldTotal,db:0,queue:toInt(p.queue_send_count||p.queueSendCount,0)});
-      if(!old && eventService && typeof eventService.applySearch==='function'){
-        await eventService.applySearch(nowRow);
+      await updateLegacyStats(nowRow,old,{result:totalResult(nowRow)-oldTotal,db:0,queue:toInt(p.queue_send_count||p.queueSendCount,0)});
+      if(eventService && typeof eventService.applySearch==='function'){
+        await eventService.applySearch(nowRow,old);
       }
       let relationResult=null;
       try{ relationResult=await keywordRelationService.saveRelations(pool,{gm_lang:keywordLang||uiLang||'ko',keyword_ko:cleanText(p.keyword_ko||p.keywordKo||canonical||normalized||original),relatedKeywords:p.related_keywords||p.relatedKeywords||[]}); }catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_ERROR]',String(e&&e.message||e)); }
