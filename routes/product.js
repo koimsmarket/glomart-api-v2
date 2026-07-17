@@ -2158,45 +2158,11 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
   }catch(e){ console.error('[GM_PRODUCT_UPSERT_ROUTE_ERROR]', compactError(e)); fail(res,500,'product upsert failed',{detail:String(e && e.message || e), error_detail:compactError(e)}); }
 });
 
-router.post('/api/gm/product/event', async (req,res)=>{
-  const pool=db(req), p=req.body||{};
-  if(!pool) return fail(res, 500, 'DB pool is not attached');
-  const id = ids(p);
-  const type = cleanText(p.type || p.event_type || p.eventType).toLowerCase();
-  const qty = Math.max(1, toInt(p.quantity || p.qty, 1));
-  if(!id.uid && (!id.mallCode || !id.pi)) return fail(res, 400, 'product_uid or mall_code+pi_ii_vi required');
-  const where = id.uid ? 'product_uid=$1' : 'mall_code=$1 AND pi_ii_vi=$2';
-  const vals = id.uid ? [id.uid] : [id.mallCode, id.pi];
-  let setSql = '';
-  if(type === 'detail' || type === 'view') setSql = "detail_view_count=COALESCE(detail_view_count,0)+1";
-  else if(type === 'cart') setSql = "cart_count=COALESCE(cart_count,0)+1, last_cart_at=now()";
-  else if(type === 'wish') setSql = "wish_count=COALESCE(wish_count,0)+1, last_wish_at=now()";
-  else if(type === 'order') setSql = "order_count=COALESCE(order_count,0)+1, order_qty_total=COALESCE(order_qty_total,0)+" + qty + ", last_order_at=now()";
-  else if(type === 'return') setSql = "return_count=COALESCE(return_count,0)+1, last_return_at=now()";
-  else if(type === 'exchange') setSql = "exchange_count=COALESCE(exchange_count,0)+1, last_exchange_at=now()";
-  else if(type === 'ad_view') setSql = "ad_view_count=COALESCE(ad_view_count,0)+1, last_ad_view_at=now()";
-  else if(type === 'ad_sale') setSql = "ad_order_count=COALESCE(ad_order_count,0)+1, ad_sales_qty=COALESCE(ad_sales_qty,0)+" + qty + ", last_ad_order_at=now()";
-  else return fail(res, 400, 'event type must be detail/view/cart/wish/order/return/exchange/ad_view/ad_sale');
-  try{
-    const r=await pool.query(`UPDATE gm_product SET ${setSql}, updated_at=now() WHERE ${where} RETURNING product_uid, mall_code, product_id, pi_ii_vi`, vals);
-    let option_updated = 0;
-    if(type === 'order'){
-      const mall = cleanText(id.mallCode || (r.rows[0] && r.rows[0].mall_code) || '').toUpperCase();
-      const pi = cleanText(id.pi || (r.rows[0] && r.rows[0].pi_ii_vi) || '');
-      if(mall && pi){
-        try{
-          const or = await pool.query(`
-            UPDATE gm_product_option
-            SET sales_qty=COALESCE(sales_qty,0)+$3, updated_at=now()
-            WHERE mall_code=$1 AND pi_ii_vi=$2
-          `, [mall, pi, qty]);
-          option_updated = or.rowCount || 0;
-        }catch(oe){ console.warn('[GM_PRODUCT_OPTION_EVENT_ORDER_WARN]', Object.assign({ mall_code:mall, pi_ii_vi:pi, qty }, compactError(oe))); }
-      }
-    }
-    ok(res,{action:'product.event', type, updated:r.rowCount, option_updated, item:r.rows[0] || null});
-  }catch(e){ fail(res,500,'product event failed',{detail:String(e && e.message || e)}); }
-});
+
+/* GM_EVENT_V001
+ * Legacy /api/gm/product/event handler removed.
+ * Product/search/order counters are centralized through routes/event.js.
+ */
 
 router.upsertProduct = upsertProduct;
 module.exports=router;

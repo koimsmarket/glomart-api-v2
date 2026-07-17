@@ -1690,7 +1690,8 @@ installSearchLogService({
 });
 
 app.use(require('./routes/health'));
-app.use(require('./routes/product_event'));
+app.use(require('./routes/event'));
+console.log('[GM_EVENT_ROUTE_V001] routes/event registered');
 app.use(require('./routes/search_keyword'));
 console.log('[GM_SEARCH_KEYWORD_ROUTE_V002] routes/search_keyword registered');
 app.use(require('./routes/product'));

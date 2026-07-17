@@ -272,7 +272,7 @@ router.get('/api/gm/smartfit/space/list', async (req,res)=>{
   try{
     const pool=db(req); const member=s(req.query.member_id || req.query.memberId || '');
     const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
-    const category=s(req.query.category_no || req.query.category_code || '');
+    const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
     const params=[]; const where=[`sp.is_active='T'`, `COALESCE(sp.is_deleted,'F')<>'T'`];
     if(category){ params.push(category); where.push(`sp.category_no=$${params.length}`); }
@@ -332,12 +332,6 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
   try{
     const pool=db(req);
     const q=s(req.query.q || req.query.keyword || '');
-    const searchType=s(req.query.search_type || req.query.searchType || 'title').toLowerCase();
-    const templateIdFilter=s(req.query.template_id || req.query.templateId || '');
-    const titleFilter=s(req.query.title || req.query.template_title || '');
-    const authorFilter=s(req.query.author || req.query.author_nickname || '');
-    const categoryFilter=s(req.query.category_filter || req.query.category_name || '');
-    const countryLang=s(req.query.country_lang || req.query.country || req.query.source_lang || '').toLowerCase();
     const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
     const member=s(req.query.member_id || req.query.memberId || '');
     const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
@@ -345,32 +339,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const spaceId=nullableId(req.query.space_id || req.query.spaceId);
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
     const params=[]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
-    if(q){
-      if(searchType==='id'){
-        const templateId=i(q,0);
-        if(templateId>0){ params.push(templateId); where.push(`t.template_id=$${params.length}`); }
-        else where.push('1=0');
-      }else if(searchType==='author'){
-        params.push('%'+q+'%');
-        where.push(`(COALESCE(t.author_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_name,'') ILIKE $${params.length})`);
-      }else if(searchType==='category'){
-        params.push('%'+q+'%');
-        where.push(`(COALESCE(t.category_no,'') ILIKE $${params.length} OR COALESCE(t.search_source,'') ILIKE $${params.length} OR COALESCE(t.search_ko,'') ILIKE $${params.length})`);
-      }else{
-        params.push('%'+q+'%');
-        where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length})`);
-      }
-    }
-    if(templateIdFilter){
-      const templateId=i(templateIdFilter,0);
-      if(templateId>0){ params.push(templateId); where.push(`t.template_id=$${params.length}`); }
-      else where.push('1=0');
-    }
-    if(titleFilter){ params.push('%'+titleFilter+'%'); where.push(`(COALESCE(t.template_title_source,'') ILIKE $${params.length} OR COALESCE(t.template_title_ko,'') ILIKE $${params.length})`); }
-    if(authorFilter){ params.push('%'+authorFilter+'%'); where.push(`(COALESCE(t.author_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_name,'') ILIKE $${params.length})`); }
-    const categoryText=categoryFilter || s(req.query.category || '');
-    if(categoryText){ params.push('%'+categoryText+'%'); where.push(`(COALESCE(t.category_no,'') ILIKE $${params.length} OR COALESCE(t.search_source,'') ILIKE $${params.length} OR COALESCE(t.search_ko,'') ILIKE $${params.length})`); }
-    if(countryLang && countryLang!=='all'){ params.push(countryLang); where.push(`LOWER(COALESCE(t.source_lang,'ko'))=$${params.length}`); }
+    if(q){ params.push('%'+q+'%'); where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length} OR t.search_source ILIKE $${params.length} OR t.search_ko ILIKE $${params.length})`); }
     if(category){ params.push(category); where.push(`t.category_no=$${params.length}`); }
     if(spaceId !== null){ params.push(spaceId); where.push(`t.space_id=$${params.length}`); }
     else if(root) where.push(`t.space_id IS NULL`);
@@ -408,6 +377,13 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
+      const collectedCount=i(old.collection_count,0);
+      if(collectedCount>0 && Array.isArray(b.items)){
+        const current=(await client.query("SELECT mall_code, product_uid, qty, sort_no FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[templateId])).rows;
+        const incoming=b.items.map((it,idx)=>({mall_code:s(it.mall_code||it.mallCode||''),product_uid:s(it.product_uid||it.productUid||''),qty:Math.max(1,i(it.qty,1)),sort_no:i(it.sort_no||it.sort_order,idx+1)})).filter(it=>it.product_uid);
+        const sig=a=>JSON.stringify(a.map(x=>[s(x.mall_code),s(x.product_uid),i(x.qty,1),i(x.sort_no,0)]));
+        if(sig(current)!==sig(incoming)) throw new Error('collected template items are locked; set private and create a new template');
+      }
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
@@ -451,6 +427,45 @@ router.get('/api/gm/smartfit/space/detail', async (req,res)=>{
   }catch(e){ console.error('[SMARTFIT_SPACE_DETAIL_ERROR_V043]', e && (e.stack || e.message || e)); fail(res,500,'space detail failed',{ detail:String(e.message||e) }); }
 });
 
+
+router.post('/api/gm/smartfit/collection/add', async (req,res)=>{
+  const client=await db(req).connect();
+  try{
+    const b=req.body||{};
+    const member=s(b.member_id || b.memberId || '');
+    const templateId=i(b.template_id || b.templateId,0);
+    if(!member) return fail(res,401,'login required');
+    if(!templateId) return fail(res,400,'template_id required');
+    await client.query('BEGIN');
+    const template=(await client.query("SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE",[templateId])).rows[0];
+    if(!template || template.is_active!=='T' || template.is_deleted==='T') throw new Error('template not found');
+    if(template.visibility!=='public' && template.creator_member_id!==member) throw new Error('private template cannot be collected');
+    if(template.search_visible!=='T' && template.creator_member_id!==member) throw new Error('template cannot be collected');
+    const r=await client.query(`INSERT INTO gm_smartfit_collection (member_id, template_id, collected_at, is_active, is_deleted)
+      VALUES ($1,$2,CURRENT_TIMESTAMP,'T','F')
+      ON CONFLICT (member_id, template_id) DO UPDATE SET is_active='T', is_deleted='F', deleted_at=NULL, deleted_by=NULL, collected_at=CURRENT_TIMESTAMP
+      RETURNING *`,[member,templateId]);
+    await client.query(`UPDATE gm_smartfit_template SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=$1 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE template_id=$1`,[templateId]);
+    await client.query('COMMIT');
+    ok(res,{collection:r.rows[0],template_id:templateId});
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'collection add failed',{detail:String(e.message||e)}); }
+  finally{client.release();}
+});
+
+router.post('/api/gm/smartfit/collection/remove', async (req,res)=>{
+  const client=await db(req).connect();
+  try{
+    const b=req.body||{}; const member=s(b.member_id||b.memberId||''); const templateId=i(b.template_id||b.templateId,0);
+    if(!member) return fail(res,401,'login required'); if(!templateId) return fail(res,400,'template_id required');
+    await client.query('BEGIN');
+    await client.query("UPDATE gm_smartfit_collection SET is_active='F', is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1 WHERE member_id=$1 AND template_id=$2",[member,templateId]);
+    await client.query("UPDATE gm_smartfit_collection_item_delta SET is_active='F', is_deleted='T', updated_at=CURRENT_TIMESTAMP WHERE member_id=$1 AND template_id=$2",[member,templateId]);
+    await client.query(`UPDATE gm_smartfit_template SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=$1 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE template_id=$1`,[templateId]);
+    await client.query('COMMIT'); ok(res,{template_id:templateId,removed:true});
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'collection remove failed',{detail:String(e.message||e)}); }
+  finally{client.release();}
+});
+
 router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
   try{
     const pool=db(req); const id=i(req.query.template_id || req.query.templateId,0);
@@ -471,20 +486,25 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     const member=s(req.query.member_id || req.query.memberId || '');
     const q=s(req.query.q || req.query.keyword || '');
     const limit=Math.min(120, Math.max(1, i(req.query.limit,120)));
-    if(!member) return fail(res,401,'login required');
     if(!templateId) return fail(res,400,'template_id required');
-    const owned=await pool.query("SELECT template_id FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[templateId,member]);
-    if(!owned.rowCount) return fail(res,404,'template not found');
+    const template=(await pool.query(`SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted
+      FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1`,[templateId])).rows[0];
+    if(!template || template.is_active!=='T' || template.is_deleted==='T') return fail(res,404,'template not found');
+    let collected=false;
+    if(member){
+      const cr=await pool.query("SELECT 1 FROM gm_smartfit_collection WHERE member_id=$1 AND template_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[member,templateId]);
+      collected=cr.rowCount>0;
+    }
+    const owner=!!member && template.creator_member_id===member;
+    const publicReadable=template.visibility==='public' && template.search_visible==='T';
+    if(!owner && !collected && !publicReadable) return fail(res,403,'template item access denied');
+
     const params=[templateId];
     const where=["i.template_id=$1", "i.is_active='T'", "COALESCE(i.is_deleted,'F')<>'T'"];
-    if(q){
-      params.push('%'+q+'%');
-      const p='$'+params.length;
-      where.push(`(i.product_uid ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p} OR COALESCE(p.mall_product_name,'') ILIKE ${p})`);
-    }
+    if(q){ params.push('%'+q+'%'); const p='$'+params.length; where.push(`(i.product_uid ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p} OR COALESCE(p.mall_product_name,'') ILIKE ${p})`); }
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT
-        i.item_id, i.template_id, i.item_role, i.mall_code, i.product_uid, i.qty, i.sort_no,
+        i.item_id, i.template_id, i.item_role, i.mall_code, i.product_id, i.product_uid, i.qty, i.sort_no,
         p.product_name, p.mall_product_name,
         p.mall_sale_price AS sale_price, p.final_supply_price,
         p.product_url, p.thumb_origin_url AS thumb_url,
@@ -495,11 +515,34 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
       WHERE ${where.join(' AND ')}
       ORDER BY i.sort_no, i.item_id
       LIMIT ${lim}`, params);
-    ok(res,{ items:r.rows, count:r.rowCount, template_id:templateId, limit });
+
+    let items=r.rows;
+    if(member && collected){
+      const d=(await pool.query(`SELECT * FROM gm_smartfit_collection_item_delta
+        WHERE member_id=$1 AND template_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'
+        ORDER BY sort_no, delta_id`,[member,templateId])).rows;
+      const bySource=new Map(); const adds=[];
+      d.forEach(x=>{ if(x.source_item_id) bySource.set(String(x.source_item_id),x); else if(x.action_type==='ADD') adds.push(x); });
+      items=items.reduce((out,row)=>{
+        const delta=bySource.get(String(row.item_id));
+        if(!delta){ out.push(row); return out; }
+        if(delta.action_type==='EXCLUDE') return out;
+        if(delta.action_type==='REPLACE') out.push(Object.assign({},row,{mall_code:delta.mall_code||row.mall_code,product_id:delta.product_id||row.product_id,product_uid:delta.product_uid||row.product_uid,qty:delta.qty||row.qty,sort_no:delta.sort_no||row.sort_no,personal_delta_yn:'T'}));
+        else out.push(row);
+        return out;
+      },[]);
+      if(adds.length){
+        const puids=adds.map(x=>x.product_uid).filter(Boolean);
+        const productMap=new Map();
+        if(puids.length){ const pr=await pool.query(`SELECT * FROM gm_product WHERE product_uid=ANY($1::text[])`,[puids]); pr.rows.forEach(x=>productMap.set(String(x.product_uid),x)); }
+        adds.forEach(x=>{ const p=productMap.get(String(x.product_uid))||{}; items.push({item_id:'D'+x.delta_id,template_id:templateId,item_role:'ETC',mall_code:x.mall_code,product_id:x.product_id,product_uid:x.product_uid,qty:x.qty,sort_no:x.sort_no,product_name:p.product_name,mall_product_name:p.mall_product_name,sale_price:p.mall_sale_price,final_supply_price:p.final_supply_price,product_url:p.product_url,thumb_url:p.thumb_origin_url,delivery_type:p.delivery_type,delivery_fee:p.delivery_fee,delivery_eta_text:p.delivery_eta_text,soldout_yn:p.soldout_yn,personal_delta_yn:'T'}); });
+      }
+      items.sort((a,b)=>(i(a.sort_no,0)-i(b.sort_no,0)) || String(a.item_id).localeCompare(String(b.item_id)));
+    }
+    ok(res,{ items, count:items.length, template_id:templateId, limit, access:{owner,collected,public:publicReadable} });
   }catch(e){ fail(res,500,'item list failed',{ detail:String(e.message||e) }); }
 });
 
-/* Compatibility aliases: old/new clients may use REST-style paths. */
 router.get('/api/gm/smartfit/template/:template_id/detail', (req,res)=>{
   const qs=new URLSearchParams();
   qs.set('template_id',String(req.params.template_id||''));
@@ -598,6 +641,7 @@ router.post('/api/gm/smartfit/template/trash', async (req,res)=>{
     if(!old) return fail(res,404,'template not found');
     if(!(await isOwnerOrAdmin(pool, member, old.creator_member_id))) return fail(res,403,'permission denied');
     const trash=boolFlag(b.trash_yn || b.trash || b.on,'T');
+    if(trash==='T' && i(old.collection_count,0)>0) return fail(res,409,'collected template cannot be deleted; change visibility to private');
     const r=await pool.query("UPDATE gm_smartfit_template SET is_deleted=$1, deleted_at=CASE WHEN $1='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1='T' THEN $2 ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE template_id=$3 RETURNING *",[trash,member,templateId]);
     ok(res,{ template:r.rows[0] });
   }catch(e){ fail(res,400,'template trash failed',{ detail:String(e.message||e) }); }
@@ -629,6 +673,8 @@ router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
     const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
     if(!old) throw new Error('template not found');
     if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
+    const cc=(await client.query("SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'",[templateId])).rows[0];
+    if(i(cc&&cc.n,0)>0) throw new Error('collected template cannot be deleted; change visibility to private');
     await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[templateId]);
     await client.query('DELETE FROM gm_smartfit_collection WHERE template_id=$1',[templateId]);
     await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1',[templateId]);
