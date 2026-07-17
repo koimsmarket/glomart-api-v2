@@ -557,9 +557,9 @@ function pickDeliveryText(p){
   return '';
 }
 
-// 배송일은 절대 날짜 문구를 장기 보관하지 않고 "최소일|최대일" term으로 저장한다.
-// 예: 7월 17일 ~ 7월 19일, 수집일 7월 14일 => 3|5
-// 기존 term(3/5)과 신규 term(3|5)을 모두 읽고, 저장은 3|5로 통일한다.
+// 배송일은 절대 날짜 문구를 장기 보관하지 않고 "최소일/최대일" term으로 저장한다.
+// 예: 7월 17일 ~ 7월 19일, 수집일 7월 14일 => 3/5
+// 이미 term(3/5)으로 들어온 값은 그대로 검증하여 사용한다.
 function deliveryBaseDate(p){
   p=p||{};
   const candidates=[
@@ -596,12 +596,12 @@ function validDeliveryTerm(min,max){
   if(!Number.isFinite(min)||!Number.isFinite(max)) return '';
   min=Math.max(0,Math.round(min)); max=Math.max(0,Math.round(max));
   if(min>max||max>365) return '';
-  return String(min)+'|'+String(max);
+  return String(min)+'/'+String(max);
 }
 function normalizeDeliveryTerm(raw,p){
   const text=cleanText(raw||'');
   if(!text) return '';
-  let m=text.match(/^\s*(\d{1,3})\s*[|/]\s*(\d{1,3})\s*(?:일)?\s*$/);
+  let m=text.match(/^\s*(\d{1,3})\s*\/\s*(\d{1,3})\s*(?:일)?\s*$/);
   if(m) return validDeliveryTerm(m[1],m[2]);
 
   const base=deliveryBaseDate(p);
