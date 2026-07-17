@@ -384,165 +384,69 @@ async function headObject(key) {
 }
 
 function prepareDirectUpload({ type, id, plan, requestId, expiresSeconds = 600 }) {
-  normalizeType(type); normalizeId(id);
-  const normalizedPlan = normalizeImagePlan(plan, CURRENT_UI_IMAGE_LIMIT);
+  const resourceType = normalizeType(type);
+  const resourceId = normalizeId(id);
+  const raw = Array.isArray(plan) ? plan : [];
+  const seen = new Set();
+  const changes = [];
+  for (const row of raw) {
+    const finalSlot = Number(row && (row.final_slot || row.finalSlot || row.slot));
+    if (!Number.isInteger(finalSlot) || finalSlot < 1 || finalSlot > CURRENT_UI_IMAGE_LIMIT) {
+      throw new Error('invalid final image slot');
+    }
+    if (seen.has(finalSlot)) throw new Error('duplicate final image slot');
+    seen.add(finalSlot);
+    changes.push({
+      finalSlot,
+      uploadSmall: !!(row && (row.upload_small || row.uploadSmall || row.cover_changed)),
+    });
+  }
+  changes.sort((a,b) => a.finalSlot - b.finalSlot);
+
   const uploads = [];
-  for (const item of normalizedPlan) {
-    if (item.type !== 'new') continue;
-    for (const size of ['image', 'small']) {
-      const key = tempKey(requestId, 'stage', size, item.finalSlot);
+  for (const item of changes) {
+    const imageKey = keyFor(resourceType, resourceId, item.finalSlot, 'image');
+    uploads.push({
+      final_slot: item.finalSlot,
+      size: 'image',
+      key: imageKey,
+      put_url: presignedPutUrl(imageKey, expiresSeconds),
+      content_type: 'image/webp',
+    });
+    if (item.uploadSmall) {
+      const smallKey = keyFor(resourceType, resourceId, 1, 'small');
       uploads.push({
-        final_slot: item.finalSlot,
-        file_index: item.fileIndex,
-        size,
-        key,
-        put_url: presignedPutUrl(key, expiresSeconds),
+        final_slot: 1,
+        source_slot: item.finalSlot,
+        size: 'small',
+        key: smallKey,
+        put_url: presignedPutUrl(smallKey, expiresSeconds),
         content_type: 'image/webp',
       });
     }
   }
-  return { request_id: requestId, expires_in: expiresSeconds, plan: normalizedPlan, uploads };
+  return { request_id: requestId, expires_in: expiresSeconds, plan: changes, uploads };
 }
 
 
-async function objectExists(key) {
-  try {
-    await headObject(key);
-    return true;
-  } catch (error) {
-    const message = String(error && (error.name || error.Code || error.code || error.message) || '');
-    const status = Number(error && error.$metadata && error.$metadata.httpStatusCode);
-    if (/NoSuchKey|NotFound|specified key does not exist|404/i.test(message) || status === 404) return false;
-    throw error;
-  }
-}
-
-/*
- * GM_SMARTFIT_TEMPLATE_PAIR_HEAL_V050
- * Template도 Space와 완전히 동일한 image/small 쌍 구조를 사용한다.
- * 과거 Template 저장본 중 ts 파일이 일부 없는 데이터만 커밋 전에 1회 보정한다.
- * 보정 후 applyPreparedImagePlan 본체는 Space/Template 공통 로직만 실행한다.
- */
-async function ensureExistingImagePairs(resourceType, resourceId, previousCount) {
-  if (resourceType !== 'template' || previousCount < 1) return;
-
-  for (let slot = 1; slot <= previousCount; slot += 1) {
-    const imageKey = keyFor(resourceType, resourceId, slot, 'image');
-    const smallKey = keyFor(resourceType, resourceId, slot, 'small');
-    const [hasImage, hasSmall] = await Promise.all([
-      objectExists(imageKey),
-      objectExists(smallKey),
-    ]);
-
-    if (hasImage && hasSmall) continue;
-
-    if (hasImage && !hasSmall) {
-      await copyObject(imageKey, smallKey);
-      console.log('[SMARTFIT_TEMPLATE_PAIR_HEAL_V050]', {
-        resource_type: resourceType,
-        resource_id: resourceId,
-        slot,
-        action: 'image_to_small',
-        source_key: imageKey,
-        target_key: smallKey,
-      });
-      continue;
-    }
-
-    if (!hasImage && hasSmall) {
-      await copyObject(smallKey, imageKey);
-      console.log('[SMARTFIT_TEMPLATE_PAIR_HEAL_V050]', {
-        resource_type: resourceType,
-        resource_id: resourceId,
-        slot,
-        action: 'small_to_image',
-        source_key: smallKey,
-        target_key: imageKey,
-      });
-      continue;
-    }
-
-    throw new Error(`기존 템플릿 이미지 ${slot}번의 원본과 소형 파일이 모두 없습니다.`);
-  }
-}
-
-async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId }) {
+async function applyPreparedImagePlan({ type, id, oldCount, plan, requestId, imageCount }) {
   const resourceType = normalizeType(type);
   const resourceId = normalizeId(id);
-  const previousCount = Math.max(0, Math.min(RESERVED_IMAGES_PER_ID, Number(oldCount) || 0));
-  const normalizedPlan = normalizeImagePlan(plan, CURRENT_UI_IMAGE_LIMIT);
-  const tempKeys = [];
-  let backupReady = false;
-  try {
-    // 과거 Template의 누락된 small 파일을 먼저 보정한다.
-    // 이후부터는 Space와 완전히 동일한 공통 커밋 알고리즘을 실행한다.
-    await ensureExistingImagePairs(resourceType, resourceId, previousCount);
-    // Direct-uploaded new files must already exist in stage and meet device-side limits.
-    for (const item of normalizedPlan) {
-      if (item.type !== 'new') continue;
-      const imageMeta = await headObject(tempKey(requestId, 'stage', 'image', item.finalSlot));
-      const smallMeta = await headObject(tempKey(requestId, 'stage', 'small', item.finalSlot));
-      if (imageMeta.content_length < 1 || imageMeta.content_length > 320 * 1024) throw new Error(`이미지 ${item.finalSlot} 원본용 파일은 300KB 이하여야 합니다.`);
-      if (smallMeta.content_length < 1 || smallMeta.content_length > 120 * 1024) throw new Error(`이미지 ${item.finalSlot} 목록용 파일은 100KB 이하여야 합니다.`);
-      if (imageMeta.content_type && !/^image\/webp/i.test(imageMeta.content_type)) throw new Error(`이미지 ${item.finalSlot} 원본용 파일이 WebP가 아닙니다.`);
-      if (smallMeta.content_type && !/^image\/webp/i.test(smallMeta.content_type)) throw new Error(`이미지 ${item.finalSlot} 목록용 파일이 WebP가 아닙니다.`);
-      tempKeys.push(imageMeta.key, smallMeta.key);
-    }
-
-    for (let slot = 1; slot <= previousCount; slot += 1) {
-      for (const size of ['image', 'small']) {
-        const backup = tempKey(requestId, 'backup', size, slot);
-        await copyObject(keyFor(resourceType, resourceId, slot, size), backup);
-        tempKeys.push(backup);
-      }
-    }
-    backupReady = true;
-
-    // Existing items are copied into their final-order stage slots. New items are already there.
-    for (const item of normalizedPlan) {
-      if (item.type !== 'existing') continue;
-      for (const size of ['image', 'small']) {
-        const stage = tempKey(requestId, 'stage', size, item.finalSlot);
-        await copyObject(keyFor(resourceType, resourceId, item.sourceSlot, size), stage, 'private, max-age=0, no-store');
-        tempKeys.push(stage);
-      }
-    }
-
-    for (let slot = 1; slot <= normalizedPlan.length; slot += 1) {
-      for (const size of ['image', 'small']) {
-        await copyObject(tempKey(requestId, 'stage', size, slot), keyFor(resourceType, resourceId, slot, size));
-      }
-    }
-    const stale = [];
-    for (let slot = normalizedPlan.length + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) {
-      stale.push(keyFor(resourceType, resourceId, slot, 'image'), keyFor(resourceType, resourceId, slot, 'small'));
-    }
-    await deleteKeys(stale);
-    return {
-      image_count: normalizedPlan.length,
-      images: imageFiles(resourceType, resourceId, normalizedPlan.length),
-      operations: normalizedPlan.map(item => ({
-        final_slot: item.finalSlot,
-        action: item.type === 'existing' ? (item.sourceSlot === item.finalSlot ? 'keep' : 'copy') : 'direct_upload',
-        source_slot: item.type === 'existing' ? item.sourceSlot : null,
-      })),
-    };
-  } catch (error) {
-    if (backupReady) {
-      try {
-        for (let slot = 1; slot <= previousCount; slot += 1) {
-          for (const size of ['image', 'small']) await copyObject(tempKey(requestId, 'backup', size, slot), keyFor(resourceType, resourceId, slot, size));
-        }
-        const removeNew = [];
-        for (let slot = previousCount + 1; slot <= RESERVED_IMAGES_PER_ID; slot += 1) removeNew.push(keyFor(resourceType, resourceId, slot, 'image'), keyFor(resourceType, resourceId, slot, 'small'));
-        await deleteKeys(removeNew);
-      } catch (restoreError) { error.restore_error = String(restoreError && restoreError.message || restoreError); }
-    }
-    throw error;
-  } finally {
-    try { await deleteKeys(tempKeys); } catch (_) {}
-  }
+  const finalCount = Math.max(0, Math.min(CURRENT_UI_IMAGE_LIMIT, Number(imageCount) || 0));
+  const raw = Array.isArray(plan) ? plan : [];
+  const operations = raw.map(row => ({
+    final_slot: Number(row.final_slot || row.finalSlot || row.slot),
+    action: 'direct_overwrite',
+    upload_small: !!(row.upload_small || row.uploadSmall || row.cover_changed),
+  }));
+  return {
+    image_count: finalCount,
+    images: imageFiles(resourceType, resourceId, finalCount),
+    operations,
+    request_id: requestId || '',
+  };
 }
+
 
 async function health() {
   const c = config();
@@ -590,8 +494,6 @@ module.exports = {
   imageFiles,
   presignedPutUrl,
   headObject,
-  objectExists,
-  ensureExistingImagePairs,
   prepareDirectUpload,
   applyPreparedImagePlan,
 };

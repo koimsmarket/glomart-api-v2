@@ -196,9 +196,9 @@ router.post('/api/gm/smartfit/image/prepare', express.json({limit:'128kb'}), asy
     const member=s(b.member_id || b.memberId || '');
     if(!member) return fail(res,401,'login required');
     await assertImageOwner(pool,type,id,member);
-    const manifest=parseImageManifest(b.manifest);
+    const changes=parseImageManifest(b.changes || b.manifest || []);
     const requestId=crypto.randomUUID().replace(/-/g,'');
-    const prepared=r2.prepareDirectUpload({type,id,plan:manifest,requestId,expiresSeconds:600});
+    const prepared=r2.prepareDirectUpload({type,id,plan:changes,requestId,expiresSeconds:600});
     console.log('[SMARTFIT_IMAGE_PREPARE] DONE',{resource_type:type,resource_id:id,request_id:requestId,upload_count:prepared.uploads.length});
     ok(res,{resource_type:type,resource_id:id,...prepared,current_limit:r2.CURRENT_UI_IMAGE_LIMIT,reserved_limit:r2.RESERVED_IMAGES_PER_ID});
   }catch(e){
@@ -216,13 +216,14 @@ router.post('/api/gm/smartfit/image/commit', express.json({limit:'128kb'}), asyn
     const member=s(b.member_id || b.memberId || '');
     if(!member) return fail(res,401,'login required');
     const ownerRow=await assertImageOwner(pool,type,id,member);
-    const manifest=parseImageManifest(b.manifest);
+    const changes=parseImageManifest(b.changes || b.manifest || []);
     const requestId=s(b.request_id || b.requestId).replace(/[^a-zA-Z0-9_-]/g,'');
     if(!requestId) return fail(res,400,'request_id required');
-    const result=await r2.applyPreparedImagePlan({type,id,oldCount:imageCount(ownerRow.image_count),plan:manifest,requestId});
+    const finalImageCount=Math.max(0,Math.min(r2.CURRENT_UI_IMAGE_LIMIT,Number(b.image_count)||0));
+    const result=await r2.applyPreparedImagePlan({type,id,oldCount:imageCount(ownerRow.image_count),plan:changes,requestId,imageCount:finalImageCount});
     if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2',[result.image_count,id]);
     else await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[result.image_count,id]);
-    console.log('[SMARTFIT_IMAGE_COMMIT] DONE',{resource_type:type,resource_id:id,image_count:result.image_count,ms:Date.now()-startedAt});
+    console.log('[SMARTFIT_IMAGE_FINALIZE_V057] DONE',{resource_type:type,resource_id:id,image_count:result.image_count,ms:Date.now()-startedAt});
     ok(res,{resource_type:type,resource_id:id,image_count:result.image_count,images:result.images,operations:result.operations});
   }catch(e){
     console.error('[SMARTFIT_IMAGE_COMMIT] FAIL',{message:String(e&&e.message||e),restore_error:e&&e.restore_error,ms:Date.now()-startedAt});
