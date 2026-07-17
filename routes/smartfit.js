@@ -272,7 +272,7 @@ router.get('/api/gm/smartfit/space/list', async (req,res)=>{
   try{
     const pool=db(req); const member=s(req.query.member_id || req.query.memberId || '');
     const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
-    const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
+    const category=s(req.query.category_no || req.query.category_code || '');
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
     const params=[]; const where=[`sp.is_active='T'`, `COALESCE(sp.is_deleted,'F')<>'T'`];
     if(category){ params.push(category); where.push(`sp.category_no=$${params.length}`); }
@@ -333,6 +333,11 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const pool=db(req);
     const q=s(req.query.q || req.query.keyword || '');
     const searchType=s(req.query.search_type || req.query.searchType || 'title').toLowerCase();
+    const templateIdFilter=s(req.query.template_id || req.query.templateId || '');
+    const titleFilter=s(req.query.title || req.query.template_title || '');
+    const authorFilter=s(req.query.author || req.query.author_nickname || '');
+    const categoryFilter=s(req.query.category_filter || req.query.category_name || '');
+    const countryLang=s(req.query.country_lang || req.query.country || req.query.source_lang || '').toLowerCase();
     const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
     const member=s(req.query.member_id || req.query.memberId || '');
     const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
@@ -356,6 +361,16 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
         where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length})`);
       }
     }
+    if(templateIdFilter){
+      const templateId=i(templateIdFilter,0);
+      if(templateId>0){ params.push(templateId); where.push(`t.template_id=$${params.length}`); }
+      else where.push('1=0');
+    }
+    if(titleFilter){ params.push('%'+titleFilter+'%'); where.push(`(COALESCE(t.template_title_source,'') ILIKE $${params.length} OR COALESCE(t.template_title_ko,'') ILIKE $${params.length})`); }
+    if(authorFilter){ params.push('%'+authorFilter+'%'); where.push(`(COALESCE(t.author_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_name,'') ILIKE $${params.length})`); }
+    const categoryText=categoryFilter || s(req.query.category || '');
+    if(categoryText){ params.push('%'+categoryText+'%'); where.push(`(COALESCE(t.category_no,'') ILIKE $${params.length} OR COALESCE(t.search_source,'') ILIKE $${params.length} OR COALESCE(t.search_ko,'') ILIKE $${params.length})`); }
+    if(countryLang && countryLang!=='all'){ params.push(countryLang); where.push(`LOWER(COALESCE(t.source_lang,'ko'))=$${params.length}`); }
     if(category){ params.push(category); where.push(`t.category_no=$${params.length}`); }
     if(spaceId !== null){ params.push(spaceId); where.push(`t.space_id=$${params.length}`); }
     else if(root) where.push(`t.space_id IS NULL`);
