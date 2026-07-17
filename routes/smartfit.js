@@ -332,6 +332,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
   try{
     const pool=db(req);
     const q=s(req.query.q || req.query.keyword || '');
+    const searchType=s(req.query.search_type || req.query.searchType || 'title').toLowerCase();
     const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
     const member=s(req.query.member_id || req.query.memberId || '');
     const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
@@ -339,7 +340,22 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const spaceId=nullableId(req.query.space_id || req.query.spaceId);
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
     const params=[]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
-    if(q){ params.push('%'+q+'%'); where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length} OR t.search_source ILIKE $${params.length} OR t.search_ko ILIKE $${params.length})`); }
+    if(q){
+      if(searchType==='id'){
+        const templateId=i(q,0);
+        if(templateId>0){ params.push(templateId); where.push(`t.template_id=$${params.length}`); }
+        else where.push('1=0');
+      }else if(searchType==='author'){
+        params.push('%'+q+'%');
+        where.push(`(COALESCE(t.author_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_nickname,'') ILIKE $${params.length} OR COALESCE(m.member_name,'') ILIKE $${params.length})`);
+      }else if(searchType==='category'){
+        params.push('%'+q+'%');
+        where.push(`(COALESCE(t.category_no,'') ILIKE $${params.length} OR COALESCE(t.search_source,'') ILIKE $${params.length} OR COALESCE(t.search_ko,'') ILIKE $${params.length})`);
+      }else{
+        params.push('%'+q+'%');
+        where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length})`);
+      }
+    }
     if(category){ params.push(category); where.push(`t.category_no=$${params.length}`); }
     if(spaceId !== null){ params.push(spaceId); where.push(`t.space_id=$${params.length}`); }
     else if(root) where.push(`t.space_id IS NULL`);
@@ -440,13 +456,10 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     const member=s(req.query.member_id || req.query.memberId || '');
     const q=s(req.query.q || req.query.keyword || '');
     const limit=Math.min(120, Math.max(1, i(req.query.limit,120)));
+    if(!member) return fail(res,401,'login required');
     if(!templateId) return fail(res,400,'template_id required');
-    const accessParams=[templateId];
-    let accessWhere="template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'";
-    if(member){ accessParams.push(member); accessWhere += " AND (creator_member_id=$2 OR (visibility='public' AND COALESCE(search_visible,'T')='T'))"; }
-    else { accessWhere += " AND visibility='public' AND COALESCE(search_visible,'T')='T'"; }
-    const accessible=await pool.query(`SELECT template_id FROM gm_smartfit_template WHERE ${accessWhere} LIMIT 1`,accessParams);
-    if(!accessible.rowCount) return fail(res,404,'template not found');
+    const owned=await pool.query("SELECT template_id FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[templateId,member]);
+    if(!owned.rowCount) return fail(res,404,'template not found');
     const params=[templateId];
     const where=["i.template_id=$1", "i.is_active='T'", "COALESCE(i.is_deleted,'F')<>'T'"];
     if(q){
