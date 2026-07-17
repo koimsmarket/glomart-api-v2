@@ -440,10 +440,13 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     const member=s(req.query.member_id || req.query.memberId || '');
     const q=s(req.query.q || req.query.keyword || '');
     const limit=Math.min(120, Math.max(1, i(req.query.limit,120)));
-    if(!member) return fail(res,401,'login required');
     if(!templateId) return fail(res,400,'template_id required');
-    const owned=await pool.query("SELECT template_id FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[templateId,member]);
-    if(!owned.rowCount) return fail(res,404,'template not found');
+    const accessParams=[templateId];
+    let accessWhere="template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'";
+    if(member){ accessParams.push(member); accessWhere += " AND (creator_member_id=$2 OR (visibility='public' AND COALESCE(search_visible,'T')='T'))"; }
+    else { accessWhere += " AND visibility='public' AND COALESCE(search_visible,'T')='T'"; }
+    const accessible=await pool.query(`SELECT template_id FROM gm_smartfit_template WHERE ${accessWhere} LIMIT 1`,accessParams);
+    if(!accessible.rowCount) return fail(res,404,'template not found');
     const params=[templateId];
     const where=["i.template_id=$1", "i.is_active='T'", "COALESCE(i.is_deleted,'F')<>'T'"];
     if(q){
