@@ -338,20 +338,55 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const root=s(req.query.root || '')==='1';
     const spaceId=nullableId(req.query.space_id || req.query.spaceId);
     const limit=Math.min(100, Math.max(1, i(req.query.limit,80)));
-    const params=[]; const where=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
-    if(q){ params.push('%'+q+'%'); where.push(`(t.template_title_source ILIKE $${params.length} OR t.template_title_ko ILIKE $${params.length} OR t.search_source ILIKE $${params.length} OR t.search_ko ILIKE $${params.length})`); }
-    if(category){ params.push(category); where.push(`t.category_no=$${params.length}`); }
+
+    const commonWhere=[`t.is_active='T'`, `COALESCE(t.is_deleted,'F')<>'T'`];
+    const commonParams=[];
+    if(q){ commonParams.push('%'+q+'%'); commonWhere.push(`(t.template_title_source ILIKE $${commonParams.length} OR t.template_title_ko ILIKE $${commonParams.length} OR t.search_source ILIKE $${commonParams.length} OR t.search_ko ILIKE $${commonParams.length})`); }
+    if(category){ commonParams.push(category); commonWhere.push(`t.category_no=$${commonParams.length}`); }
+
+    const selectSql=`SELECT t.*, sp.space_title_source, sp.space_title_ko, sp.author_nickname AS space_author_nickname,
+      m.member_name, m.member_nickname, m.member_nickname AS author_nickname`;
+    const joinSql=` FROM gm_smartfit_template t
+      LEFT JOIN gm_smartfit_space sp ON sp.space_id=t.space_id
+      LEFT JOIN gm_member m ON m.member_id=t.creator_member_id`;
+
+    if(mine && member){
+      const ownedParams=commonParams.slice();
+      const ownedWhere=commonWhere.slice();
+      ownedParams.push(member); ownedWhere.push(`t.creator_member_id=$${ownedParams.length}`);
+      if(spaceId !== null){ ownedParams.push(spaceId); ownedWhere.push(`t.space_id=$${ownedParams.length}`); }
+      else if(root) ownedWhere.push(`t.space_id IS NULL`);
+      ownedParams.push(limit);
+      const owned=(await pool.query(`${selectSql}, 'OWNED'::text AS list_type, NULL::timestamp AS collected_at${joinSql}
+        WHERE ${ownedWhere.join(' AND ')} ORDER BY t.ranking_score DESC, t.updated_at DESC LIMIT $${ownedParams.length}`,ownedParams)).rows;
+
+      const importedParams=commonParams.slice();
+      const importedWhere=commonWhere.slice();
+      importedParams.push(member);
+      importedWhere.push(`c.member_id=$${importedParams.length}`);
+      importedWhere.push(`c.is_active='T'`);
+      importedWhere.push(`COALESCE(c.is_deleted,'F')<>'T'`);
+      importedWhere.push(`t.creator_member_id<>$${importedParams.length}`);
+      importedParams.push(limit);
+      const imported=(await pool.query(`${selectSql}, 'IMPORTED'::text AS list_type, c.collected_at${joinSql}
+        INNER JOIN gm_smartfit_collection c ON c.template_id=t.template_id
+        WHERE ${importedWhere.join(' AND ')} ORDER BY c.collected_at DESC, t.updated_at DESC LIMIT $${importedParams.length}`,importedParams)).rows;
+
+      const mapRow=x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template');
+      const ownedItems=owned.map(mapRow), importedItems=imported.map(mapRow);
+      return ok(res,{ items:ownedItems.concat(importedItems), owned:ownedItems, imported:importedItems, count:ownedItems.length+importedItems.length, owned_count:ownedItems.length, imported_count:importedItems.length, limit });
+    }
+
+    const params=commonParams.slice();
+    const where=commonWhere.slice();
     if(spaceId !== null){ params.push(spaceId); where.push(`t.space_id=$${params.length}`); }
     else if(root) where.push(`t.space_id IS NULL`);
-    if(mine && member){ params.push(member); where.push(`t.creator_member_id=$${params.length}`); }
-    else { where.push(`t.visibility='public'`); where.push(`COALESCE(t.search_visible,'T')='T'`); }
-    params.push(limit); const lim='$'+params.length;
-    const r=await pool.query(`SELECT t.*, sp.space_title_source, sp.space_title_ko, sp.author_nickname AS space_author_nickname, m.member_name, m.member_nickname FROM gm_smartfit_template t
-      LEFT JOIN gm_smartfit_space sp ON sp.space_id=t.space_id
-      LEFT JOIN gm_member m ON m.member_id=t.creator_member_id
-      WHERE ${where.join(' AND ')} ORDER BY t.ranking_score DESC, t.updated_at DESC LIMIT ${lim}`, params);
+    where.push(`t.visibility='public'`); where.push(`COALESCE(t.search_visible,'T')='T'`);
+    params.push(limit);
+    const r=await pool.query(`${selectSql}, 'PUBLIC'::text AS list_type, NULL::timestamp AS collected_at${joinSql}
+      WHERE ${where.join(' AND ')} ORDER BY t.ranking_score DESC, t.updated_at DESC LIMIT $${params.length}`, params);
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template')), count:r.rowCount, limit });
-  }catch(e){ console.error('[SMARTFIT_TEMPLATE_LIST_ERROR_V043]', e && (e.stack || e.message || e)); fail(res,500,'template list failed',{ detail:String(e.message||e) }); }
+  }catch(e){ console.error('[SMARTFIT_TEMPLATE_LIST_ERROR_V070]', e && (e.stack || e.message || e)); fail(res,500,'template list failed',{ detail:String(e.message||e) }); }
 });
 
 router.post('/api/gm/smartfit/template/save', async (req,res)=>{
