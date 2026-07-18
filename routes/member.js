@@ -6,6 +6,11 @@ try { argon2 = require('argon2'); } catch (e) { argon2 = null; }
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=''){ return v===undefined||v===null ? d : String(v).trim(); }
 function yn(v){ return String(v || '').toUpperCase() === 'Y' || v === true ? 'Y' : 'N'; }
+function validDeviceLang(v){
+  const x=s(v);
+  if(!x || /^(und|unknown|null|undefined|false)$/i.test(x) || x.length>35) return '';
+  return /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(x) ? x : '';
+}
 function id(prefix){ return `${prefix}${Date.now()}${Math.random().toString(36).slice(2,8)}`; }
 function pick(b, names, d=''){
   for(const n of names){ if(b[n] !== undefined && b[n] !== null && String(b[n]).trim() !== '') return s(b[n]); }
@@ -67,6 +72,7 @@ function memberPayload(b){
     nationality: pick(b, ['nationality','citizenship']),
     language_code: pick(b, ['language_code','languageCode','lang'],'ko'),
     cs_language: pick(b, ['cs_language','csLanguage','language_code','languageCode','lang'],'ko'),
+    device_lang: validDeviceLang(pick(b, ['device_lang','deviceLang','device_language','deviceLanguage'])),
     recommender_id: pick(b, ['recommender_id','recommenderId','referrer_id']),
     member_grade: pick(b, ['member_grade','memberGrade']),
     member_status: pick(b, ['member_status','memberStatus'],'active'),
@@ -137,13 +143,13 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   try{
     await client.query('BEGIN');
     const sql=`INSERT INTO gm_member (
-      member_id,cafe24_member_id,member_name,member_name_en,email,phone,country_code,nationality,language_code,cs_language,
+      member_id,cafe24_member_id,member_name,member_name_en,email,phone,country_code,nationality,language_code,cs_language,device_lang,
       recommender_id,member_grade,member_status,refund_bank_name,refund_account_no,refund_account_holder,
       default_receiver_name,default_receiver_phone,default_receiver_mobile,default_zipcode,default_address1,default_address2,default_address_old,default_address_full,
       default_sido,default_sigungu,default_eup_myeon_dong,customs_clearance_code,delivery_memo,
       password_hash,password_algo,password_updated_at,password_migrated,last_sync_at,created_at,updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,NOW(),NOW(),NOW()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,NOW(),NOW(),NOW()
     ) ON CONFLICT (member_id) DO UPDATE SET
       cafe24_member_id=COALESCE(NULLIF(EXCLUDED.cafe24_member_id,''),gm_member.cafe24_member_id),
       member_name=COALESCE(NULLIF(EXCLUDED.member_name,''),gm_member.member_name),
@@ -154,6 +160,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       nationality=COALESCE(NULLIF(EXCLUDED.nationality,''),gm_member.nationality),
       language_code=COALESCE(NULLIF(EXCLUDED.language_code,''),gm_member.language_code),
       cs_language=COALESCE(NULLIF(EXCLUDED.cs_language,''),gm_member.cs_language),
+      device_lang=COALESCE(NULLIF(EXCLUDED.device_lang,''),gm_member.device_lang),
       recommender_id=COALESCE(NULLIF(EXCLUDED.recommender_id,''),gm_member.recommender_id),
       member_grade=COALESCE(NULLIF(EXCLUDED.member_grade,''),gm_member.member_grade),
       member_status=COALESCE(NULLIF(EXCLUDED.member_status,''),gm_member.member_status),
@@ -179,7 +186,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       password_migrated=CASE WHEN EXCLUDED.password_hash IS NOT NULL THEN 'Y' ELSE gm_member.password_migrated END,
       last_sync_at=NOW(),updated_at=NOW()
     RETURNING *`;
-    const vals=[p.member_id,p.cafe24_member_id,p.member_name,p.member_name_en,p.email,p.phone,p.country_code,p.nationality,p.language_code,p.cs_language,
+    const vals=[p.member_id,p.cafe24_member_id,p.member_name,p.member_name_en,p.email,p.phone,p.country_code,p.nationality,p.language_code,p.cs_language,p.device_lang||null,
       p.recommender_id,p.member_grade,p.member_status,p.refund_bank_name,p.refund_account_no,p.refund_account_holder,p.default_receiver_name,p.default_receiver_phone,p.default_receiver_mobile,
       p.default_zipcode,p.default_address1,p.default_address2,p.default_address_old,p.default_address_full,p.default_sido,p.default_sigungu,p.default_eup_myeon_dong,p.customs_clearance_code,p.delivery_memo,
       passwordMeta ? passwordMeta.password_hash : null,
@@ -199,6 +206,31 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
     res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address});
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 처리하지 못했습니다. 다시 시도해 주세요.'}); }
   finally{ client.release(); }
+});
+
+/*
+========================================================
+GM_MEMBER DEVICE LANGUAGE POLICY
+========================================================
+- device_lang stores the original Android BCP-47 tag (ko-KR, vi-VN, zh-TW...).
+- Join/modify/login may send it. Only a valid nonblank value updates the member row.
+- null/blank/und/invalid input must never erase the previous value.
+- Login-side synchronization is non-blocking; failure must not block login.
+- Message language priority: device_lang -> language_code(gm_lang) -> en.
+========================================================
+*/
+router.post(['/api/gm/member/device-language','/api/member/device-language'], async (req,res)=>{
+  const pool=db(req), b=req.body||{};
+  if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const memberId=pick(b,['member_id','memberId']);
+  const deviceLang=validDeviceLang(pick(b,['device_lang','deviceLang','device_language','deviceLanguage']));
+  if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
+  if(!deviceLang) return res.json({ok:true,skipped:true,reason:'유효한 휴대폰 언어가 없어 기존 값을 유지했습니다.'});
+  try{
+    const r=await pool.query(`UPDATE gm_member SET device_lang=$2,updated_at=NOW() WHERE member_id=$1 RETURNING member_id,device_lang`,[memberId,deviceLang]);
+    if(!r.rowCount) return res.status(404).json({ok:false,error:'회원 정보를 찾을 수 없습니다.'});
+    res.json({ok:true,member:r.rows[0]});
+  }catch(e){ console.error('[GM_MEMBER_DEVICE_LANG_ERROR]',{code:e&&e.code,message:e&&e.message}); res.status(500).json({ok:false,error:'휴대폰 언어를 저장하지 못했습니다.'}); }
 });
 
 function memberMeResponse(row, addressRows){
@@ -231,6 +263,7 @@ function memberMeResponse(row, addressRows){
     nationality: s(member && member.nationality),
     language_code: s(member && member.language_code, 'ko'),
     cs_language: s(member && member.cs_language, 'ko'),
+    device_lang: s(member && member.device_lang),
     member_grade: s(member && member.member_grade),
     member_grade_code: s(member && member.member_grade_code),
     member_status: s(member && member.member_status),
