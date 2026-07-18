@@ -1,4 +1,4 @@
-// EVENT_SERVICE_V006_NORMALIZED_STAT
+// EVENT_SERVICE_V008_SEARCH_AND_DETAIL
 'use strict';
 
 module.exports = function createEventService(deps){
@@ -92,5 +92,90 @@ module.exports = function createEventService(deps){
     }
   }
 
-  return { applySearch };
+
+  function detailIdentity(p){
+    p=p||{};
+    const mall=cleanText(p.mall_code||p.mallCode||'').toUpperCase();
+    const explicitUid=cleanText(p.product_uid||p.productUid||p.uid||'');
+    const key=cleanText(p.pi_ii_vi||p.piIiVi||p.pi||p.key||p.gm_key||'');
+    const productId=cleanText(p.product_id||p.productId||'');
+    const itemId=cleanText(p.item_id||p.itemId||'');
+    const vendorItemId=cleanText(p.vendor_item_id||p.vendorItemId||'');
+    const pi=key || [productId,itemId,vendorItemId].filter(Boolean).join('_');
+    const uid=explicitUid || (mall && pi ? `${mall}_${pi}` : '');
+    const candidates=[];
+    for(const value of [uid, mall&&key?`${mall}_${key}`:'', mall&&productId?`${mall}_${productId}`:'']){
+      if(value && !candidates.includes(value)) candidates.push(value);
+    }
+    return { mall, uid, pi, productId, itemId, vendorItemId, candidates };
+  }
+
+  async function applyDetail(payload){
+    const id=detailIdentity(payload);
+    if(!id.uid && !(id.mall && (id.pi || id.productId))){
+      return { updated:0, reason:'product_key_missing' };
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('BEGIN');
+      const r=await client.query(`
+        WITH target AS (
+          SELECT product_uid
+          FROM gm_product
+          WHERE
+            (cardinality($1::text[]) > 0 AND product_uid = ANY($1::text[]))
+            OR ($2 <> '' AND $3 <> '' AND mall_code=$2 AND pi_ii_vi=$3)
+            OR ($2 <> '' AND $4 <> '' AND mall_code=$2 AND product_id=$4
+                AND ($5='' OR item_id=$5)
+                AND ($6='' OR vendor_item_id=$6))
+          ORDER BY
+            CASE WHEN product_uid = ANY($1::text[]) THEN 0 ELSE 1 END,
+            updated_at DESC NULLS LAST
+          LIMIT 1
+          FOR UPDATE
+        )
+        UPDATE gm_product p
+        SET detail_view_count=COALESCE(p.detail_view_count,0)+1,
+            view_count=COALESCE(p.view_count,0)+1,
+            last_view_at=now(),
+            expire_at=GREATEST(COALESCE(p.expire_at,now()),now()+INTERVAL '90 days'),
+            updated_at=now()
+        FROM target t
+        WHERE p.product_uid=t.product_uid
+        RETURNING p.product_uid,p.mall_code,p.pi_ii_vi,p.product_id,p.item_id,p.vendor_item_id,
+                  p.detail_view_count,p.view_count,p.cp_fix_code,p.cp_selected_code,p.category_code
+      `,[id.candidates,id.mall,id.pi,id.productId,id.itemId,id.vendorItemId]);
+      const row=r.rows[0];
+      if(!row){
+        await client.query('ROLLBACK');
+        return { updated:0, reason:'product_not_found', identity:id };
+      }
+
+      const categoryCode=cleanText(row.cp_fix_code||row.cp_selected_code||row.category_code||'');
+      let categoryUpdated=0;
+      if(categoryCode && await tableExists('gm_category')){
+        const cr=await client.query(`
+          UPDATE gm_category
+          SET view_count=COALESCE(view_count,0)+1,last_view_at=now(),updated_at=now()
+          WHERE gm_code=$1 OR cp_code=$1
+        `,[categoryCode]);
+        categoryUpdated=cr.rowCount||0;
+      }
+      await client.query('COMMIT');
+      return {
+        updated:1,
+        category_updated:categoryUpdated,
+        product_uid:row.product_uid,
+        detail_view_count:Number(row.detail_view_count||0),
+        view_count:Number(row.view_count||0)
+      };
+    }catch(error){
+      try{ await client.query('ROLLBACK'); }catch(_rollbackError){}
+      throw error;
+    }finally{
+      client.release();
+    }
+  }
+
+  return { applySearch, applyDetail };
 };
