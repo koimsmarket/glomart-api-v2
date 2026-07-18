@@ -294,16 +294,27 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
   const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
 
   const givenAddressId=s(b.address_id || b.addressId || b.id || b.ma_idx);
+  const explicitNew = yn(b.new_address_yn || b.newAddressYn || b.direct_input_yn || b.directInputYn) === 'Y';
   const a=addressPayload(b, memberId);
+  if(!a.receiver_name || (!a.receiver_mobile && !a.receiver_phone) || !a.zipcode || !a.address1){
+    return res.status(400).json({ok:false,error:'receiver_name, phone/mobile, zipcode and address1 are required'});
+  }
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
   try{
     await client.query('BEGIN');
     let ar;
     let newAddressExisted=false;
 
-    if(givenAddressId){
+    // 회원당 기본 배송지는 1개만 허용되므로 새 기본값 저장 전에 기존 기본값을 먼저 해제한다.
+    if(a.is_default==='Y') {
+      await client.query(`UPDATE gm_member_address
+        SET is_default='N', updated_at=NOW()
+        WHERE member_id=$1 AND is_default='Y'
+          AND ($2::text='' OR address_id<>$2)`, [memberId, (givenAddressId&&!explicitNew)?givenAddressId:'']);
+    }
+
+    if(givenAddressId && !explicitNew){
       // 기존 배송지 수정: 존재하는 address_id만 UPDATE한다.
-      // 잘못된/오래된 address_id를 새 배송지로 INSERT하지 않는다.
       ar=await client.query(`UPDATE gm_member_address SET
         address_name=$3,receiver_name=$4,receiver_phone=$5,receiver_mobile=$6,zipcode=$7,address1=$8,address2=$9,address_old=$10,address_full=$11,
         sido=$12,sigungu=$13,eup_myeon_dong=$14,customs_clearance_code=$15,delivery_memo=$16,is_default=$17,updated_at=NOW()
@@ -312,15 +323,21 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
         [givenAddressId,memberId,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
       if(!ar.rowCount){
         await client.query('ROLLBACK');
-        return res.status(404).json({ok:false,error:'address_id not found; use a new-address request without address_id'});
+        return res.status(404).json({ok:false,error:'address_id not found; send new_address_yn=Y for a new address'});
       }
     }else{
+      // 직접입력 신규 배송지는 Cafe24 임시 address_id가 함께 와도 새 주소로 처리한다.
+      a.address_id = stableAddressId(Object.assign({}, b, {address_id:'',addressId:'',id:'',ma_idx:''}), memberId);
       // 새 배송지 추가: address_id가 없는 명시적 추가 요청에서만 INSERT한다.
       // 동일 주소가 이미 있으면 기존 행을 반환하고 UPDATE/UPSERT하지 않는다.
       const existing=await client.query(`SELECT * FROM gm_member_address WHERE address_id=$1 AND member_id=$2 LIMIT 1`, [a.address_id,memberId]);
       if(existing.rowCount){
         newAddressExisted=true;
-        ar=existing;
+        ar=await client.query(`UPDATE gm_member_address SET
+          address_name=$3,receiver_name=$4,receiver_phone=$5,receiver_mobile=$6,zipcode=$7,address1=$8,address2=$9,address_old=$10,address_full=$11,
+          sido=$12,sigungu=$13,eup_myeon_dong=$14,customs_clearance_code=$15,delivery_memo=$16,is_default=$17,last_used_at=NOW(),updated_at=NOW()
+          WHERE address_id=$1 AND member_id=$2 RETURNING *`,
+          [a.address_id,memberId,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
       }else{
         ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at,last_used_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW(),NULL)
@@ -330,13 +347,17 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
     }
 
     const saved=ar.rows[0];
-    if(saved.is_default==='Y') await client.query(`UPDATE gm_member_address SET is_default='N', updated_at=NOW() WHERE member_id=$1 AND address_id<>$2`, [memberId,saved.address_id]);
     if(saved.is_default==='Y'){
       await client.query(`UPDATE gm_member SET default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,default_zipcode=$5,default_address1=$6,default_address2=$7,default_address_old=$8,default_address_full=$9,default_sido=$10,default_sigungu=$11,default_eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,updated_at=NOW() WHERE member_id=$1`,
         [memberId,saved.receiver_name,saved.receiver_phone,saved.receiver_mobile,saved.zipcode,saved.address1,saved.address2,saved.address_old,saved.address_full,saved.sido,saved.sigungu,saved.eup_myeon_dong,saved.customs_clearance_code,saved.delivery_memo]);
     }
-    await client.query('COMMIT'); res.json({ok:true,address:saved,action:givenAddressId?'updated':(newAddressExisted?'existing':'created')});
-  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
+    await client.query('COMMIT'); res.json({ok:true,address:saved,action:(givenAddressId&&!explicitNew)?'updated':(newAddressExisted?'existing':'created')});
+  }catch(e){
+    await client.query('ROLLBACK').catch(()=>{});
+    console.error('[GM_MEMBER_ADDRESS_SAVE_ERROR]', {code:e&&e.code, constraint:e&&e.constraint, message:e&&e.message});
+    const duplicateDefault = e && (e.code==='23505' || String(e.constraint||'').indexOf('uq_gm_member_address_member_default')>=0);
+    res.status(500).json({ok:false,error:duplicateDefault?'기본 배송지 지정 중 충돌이 발생했습니다. 다시 시도해 주세요.':'배송지를 저장하지 못했습니다. 다시 시도해 주세요.'});
+  }
   finally{ client.release(); }
 });
 
@@ -350,17 +371,18 @@ router.post(['/api/gm/member/address/select','/api/member/address/select'], asyn
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
   try{
     await client.query('BEGIN');
-    const ar=await client.query(`UPDATE gm_member_address
-      SET is_default='Y', last_used_at=NOW(), updated_at=NOW()
-      WHERE member_id=$1 AND address_id=$2
-      RETURNING *`, [memberId,addressId]);
-    if(!ar.rowCount){
+    const exists=await client.query(`SELECT address_id FROM gm_member_address WHERE member_id=$1 AND address_id=$2 FOR UPDATE`, [memberId,addressId]);
+    if(!exists.rowCount){
       await client.query('ROLLBACK');
       return res.status(404).json({ok:false,error:'address_id not found'});
     }
     await client.query(`UPDATE gm_member_address
       SET is_default='N', updated_at=NOW()
       WHERE member_id=$1 AND address_id<>$2 AND is_default='Y'`, [memberId,addressId]);
+    const ar=await client.query(`UPDATE gm_member_address
+      SET is_default='Y', last_used_at=NOW(), updated_at=NOW()
+      WHERE member_id=$1 AND address_id=$2
+      RETURNING *`, [memberId,addressId]);
     const saved=ar.rows[0];
     await client.query(`UPDATE gm_member SET
       default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,
@@ -370,7 +392,11 @@ router.post(['/api/gm/member/address/select','/api/member/address/select'], asyn
       [memberId,saved.receiver_name,saved.receiver_phone,saved.receiver_mobile,saved.zipcode,saved.address1,saved.address2,saved.address_old,saved.address_full,saved.sido,saved.sigungu,saved.eup_myeon_dong,saved.customs_clearance_code,saved.delivery_memo]);
     await client.query('COMMIT');
     res.json({ok:true,address:saved,action:'selected'});
-  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
+  }catch(e){
+    await client.query('ROLLBACK').catch(()=>{});
+    console.error('[GM_MEMBER_ADDRESS_SELECT_ERROR]', {code:e&&e.code, constraint:e&&e.constraint, message:e&&e.message});
+    res.status(500).json({ok:false,error:'기본 배송지를 지정하지 못했습니다. 다시 시도해 주세요.'});
+  }
   finally{ client.release(); }
 });
 
