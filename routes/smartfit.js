@@ -540,7 +540,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT
         i.item_id, i.template_id, i.item_role, i.mall_code, COALESCE(p.product_id,'') AS product_id, i.product_uid, i.qty, i.sort_no,
-        p.product_name, p.mall_product_name, p.option_name, p.option_value,
+        p.product_name, p.mall_product_name, ''::text AS option_name, ''::text AS option_value,
         p.mall_sale_price AS sale_price, p.final_supply_price,
         p.product_url, p.thumb_origin_url AS thumb_url,
         p.delivery_type, p.delivery_fee, p.delivery_eta_text, p.soldout_yn,
