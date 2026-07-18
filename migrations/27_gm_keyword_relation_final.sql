@@ -1,10 +1,10 @@
--- 27_gm_keyword_relation_final.sql
--- 26번에서 확정 생성하므로 구형 컬럼을 다시 만들지 않는다.
-
-CREATE TABLE IF NOT EXISTS gm_keyword_relation (
-  gm_lang VARCHAR(10) NOT NULL,
-  keyword_ko TEXT NOT NULL,
-  related_keyword_ko TEXT NOT NULL,
-  CONSTRAINT gm_keyword_relation_pkey
-    PRIMARY KEY (gm_lang, keyword_ko, related_keyword_ko)
-);
+-- DEPRECATED / INTENTIONALLY NO-OP
+--
+-- The final three-column gm_keyword_relation schema is created directly by
+-- 26_gm_keyword_relation.sql.
+--
+-- This migration previously transformed/recreated the table and caused the
+-- relation table or its stored data to disappear during the schema change.
+-- Keep this file as a no-op only when the deployment process cannot delete an
+-- already tracked migration file. It must never DROP, ALTER, TRUNCATE, or
+-- recreate gm_keyword_relation.
