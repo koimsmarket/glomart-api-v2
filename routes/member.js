@@ -128,12 +128,12 @@ function addressPayload(b, memberId){
 }
 
 router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
-  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const p=memberPayload(b); if(!p.member_id) return res.status(400).json({ok:false,error:'member_id is required'});
+  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const p=memberPayload(b); if(!p.member_id) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
   let passwordMeta=null;
   try{ passwordMeta = await hashPasswordIfPresent(b); }
-  catch(e){ return res.status(400).json({ok:false,error:'password hash failed'}); }
-  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
+  catch(e){ return res.status(400).json({ok:false,error:'비밀번호 정보를 처리하지 못했습니다.'}); }
+  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
     const sql=`INSERT INTO gm_member (
@@ -197,7 +197,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
     const address=ar.rows[0] || null;
     await client.query('COMMIT');
     res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address});
-  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
+  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 처리하지 못했습니다. 다시 시도해 주세요.'}); }
   finally{ client.release(); }
 });
 
@@ -279,27 +279,27 @@ function memberMeResponse(row, addressRows){
 }
 
 router.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile'], async (req,res)=>{
-  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const memberId=s(req.query.member_id || req.query.memberId || req.query.id);
-  if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
   try{
     const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1',[memberId]);
     const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC',[memberId]);
     res.json(memberMeResponse(m.rows[0]||null, a.rows));
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
+  }catch(e){ console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 불러오지 못했습니다. 다시 시도해 주세요.'}); }
 });
 
 router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], async (req,res)=>{
-  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
 
   const givenAddressId=s(b.address_id || b.addressId || b.id || b.ma_idx);
   const explicitNew = yn(b.new_address_yn || b.newAddressYn || b.direct_input_yn || b.directInputYn) === 'Y';
   const a=addressPayload(b, memberId);
   if(!a.receiver_name || (!a.receiver_mobile && !a.receiver_phone) || !a.zipcode || !a.address1){
-    return res.status(400).json({ok:false,error:'receiver_name, phone/mobile, zipcode and address1 are required'});
+    return res.status(400).json({ok:false,error:'받는 사람, 전화번호, 우편번호, 기본 주소를 모두 입력해 주세요.'});
   }
-  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
+  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
     let ar;
@@ -323,7 +323,7 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
         [givenAddressId,memberId,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
       if(!ar.rowCount){
         await client.query('ROLLBACK');
-        return res.status(404).json({ok:false,error:'address_id not found; send new_address_yn=Y for a new address'});
+        return res.status(404).json({ok:false,error:'선택한 배송지를 찾을 수 없습니다. 신규 배송지는 새 배송지로 저장해 주세요.'});
       }
     }else{
       // 직접입력 신규 배송지는 Cafe24 임시 address_id가 함께 와도 새 주소로 처리한다.
@@ -364,17 +364,17 @@ router.post(['/api/gm/member/address/upsert','/api/member/address/upsert'], asyn
 
 // 기존 배송지 선택: INSERT/UPSERT 없이 선택한 address_id만 기본/최근 사용으로 갱신한다.
 router.post(['/api/gm/member/address/select','/api/member/address/select'], async (req,res)=>{
-  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const memberId=pick(b, ['member_id','memberId']);
   const addressId=pick(b, ['address_id','addressId','id','ma_idx']);
-  if(!memberId || !addressId) return res.status(400).json({ok:false,error:'member_id and address_id are required'});
-  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
+  if(!memberId || !addressId) return res.status(400).json({ok:false,error:'회원 정보와 배송지 정보가 필요합니다.'});
+  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
     const exists=await client.query(`SELECT address_id FROM gm_member_address WHERE member_id=$1 AND address_id=$2 FOR UPDATE`, [memberId,addressId]);
     if(!exists.rowCount){
       await client.query('ROLLBACK');
-      return res.status(404).json({ok:false,error:'address_id not found'});
+      return res.status(404).json({ok:false,error:'선택한 배송지를 찾을 수 없습니다.'});
     }
     await client.query(`UPDATE gm_member_address
       SET is_default='N', updated_at=NOW()
@@ -402,14 +402,14 @@ router.post(['/api/gm/member/address/select','/api/member/address/select'], asyn
 
 
 router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (req,res)=>{
-  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const memberId=pick(b, ['member_id','memberId']); if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
 
   // 주문서 진입·회원 자동 동기화에서는 주소록을 생성/삭제하지 않는다.
   // 주소록 전체 동기화는 관리 화면에서 명시적으로 address_sync_yn=Y를 보낸 경우에만 허용한다.
   const explicitSync = yn(b.address_sync_yn || b.sync_addresses_yn || b.explicit_sync_yn) === 'Y';
   if(!explicitSync){
-    return res.json({ok:true,skipped:true,reason:'explicit address_sync_yn=Y is required'});
+    return res.json({ok:true,skipped:true,reason:'배송지 전체 동기화 요청이 없어 처리를 건너뛰었습니다.'});
   }
   const input = Array.isArray(b.addresses) ? b.addresses : [];
   const currentRaw = b.current_address && typeof b.current_address === 'object' ? b.current_address : null;
@@ -425,9 +425,9 @@ router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (r
     seen.add(key);
     addresses.push(a);
   }
-  if(!addresses.length) return res.status(400).json({ok:false,error:'no valid addresses'});
+  if(!addresses.length) return res.status(400).json({ok:false,error:'저장할 수 있는 배송지 정보가 없습니다.'});
   const deleteMissing = yn(b.delete_missing) === 'Y' || b.delete_missing === true;
-  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'DB client connect failed'});
+  const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
     const keepIds=[]; const upserted=[];
@@ -453,22 +453,22 @@ router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (r
     }
     await client.query('COMMIT');
     res.json({ok:true,upserted_count:upserted.length,deleted_count:deleted.length,items:upserted,deleted});
-  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); res.status(500).json({ok:false,error:e.message}); }
+  }catch(e){ await client.query('ROLLBACK').catch(()=>{}); console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 처리하지 못했습니다. 다시 시도해 주세요.'}); }
   finally{ client.release(); }
 });
 
 router.get(['/api/gm/member/address/list','/api/member/address/list'], async (req,res)=>{
-  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
   try{
     const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC',[memberId]);
     res.json({ok:true,items:a.rows,default_address:a.rows.find(x=>x.is_default==='Y')||a.rows[0]||null});
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
+  }catch(e){ console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 불러오지 못했습니다. 다시 시도해 주세요.'}); }
 });
 
 router.get(['/api/gm/member/address/default','/api/member/address/default'], async (req,res)=>{
-  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'member_id is required'});
+  const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
   try{
     const a=await pool.query(`
       SELECT *
@@ -478,7 +478,7 @@ router.get(['/api/gm/member/address/default','/api/member/address/default'], asy
       LIMIT 1
     `,[memberId]);
     res.json({ok:true,address:a.rows[0]||null});
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
+  }catch(e){ console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 불러오지 못했습니다. 다시 시도해 주세요.'}); }
 });
 
 module.exports=router;
