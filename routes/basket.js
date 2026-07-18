@@ -57,17 +57,6 @@ async function ensureBasketSchema(pool){
   __basketSchemaReady=true;
 }
 
-async function touchProductCart(pool, row){
-  if(!row || !row.mall_code || !row.pi_ii_vi) return;
-  await pool.query(`
-    UPDATE gm_product
-    SET cart_count=COALESCE(cart_count,0)+1,
-        last_cart_at=NOW(),
-        expire_at=GREATEST(COALESCE(expire_at, NOW()), NOW() + INTERVAL '180 days'),
-        updated_at=NOW()
-    WHERE mall_code=$1 AND pi_ii_vi=$2
-  `, [row.mall_code, row.pi_ii_vi]).catch(()=>{});
-}
 async function upsertOne(pool,b){
   await ensureBasketSchema(pool);
   const p=rowPayload(b);
@@ -103,7 +92,7 @@ async function upsertOne(pool,b){
 
 router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await upsertOne(pool,req.body||{}); await touchProductCart(pool,row); res.json({ok:true,item:row}); }
+  try{ const row=await upsertOne(pool,req.body||{}); const es=req.app.locals.eventService; if(es&&typeof es.applyBasketAdd==='function') await es.applyBasketAdd(pool,row); res.json({ok:true,item:row}); }
   catch(e){
     try{ console.error('[GM_BASKET_ROUTE_ADD_ERROR]', e && e.message, req.body || {}); }catch(_e){}
     res.status(500).json({ok:false,error:e.message});
@@ -119,7 +108,7 @@ router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req
     for(const raw of items){
       try{
         const row=await upsertOne(pool,Object.assign({},raw,{member_id:b.member_id||raw.member_id,guest_key:''}));
-        if(!b.skip_cart_count) await touchProductCart(pool,row);
+        if(!b.skip_cart_count){ const es=req.app.locals.eventService; if(es&&typeof es.applyBasketAdd==='function') await es.applyBasketAdd(pool,row); }
         saved.push(row);
       }catch(itemErr){
         failed.push({ product_uid: raw && (raw.product_uid || raw.productUid || ''), error: itemErr.message });

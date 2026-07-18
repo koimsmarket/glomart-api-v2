@@ -310,6 +310,7 @@ async function replaceOrderItems(client, orderRow, inputItems){
   await client.query('DELETE FROM gm_order_item WHERE order_no=$1', [orderRow.order_no]);
   inputItems = mergeDuplicateItems(inputItems);
   let itemCount = 0;
+  const savedItems = [];
   for(const src of inputItems){
     const qty = Math.max(1, money(itemVal(src, ['quantity','qty'], 1), 1));
     const mallCode = clean(itemVal(src, ['mall_code','mallCode','source_mall','sourceMall'], '')).toUpperCase();
@@ -321,7 +322,7 @@ async function replaceOrderItems(client, orderRow, inputItems){
     const amount = money(itemVal(src, ['product_amount','amount','line_amount'], 0), 0) || (unit * qty);
     const sourceMall = sourceMallFrom(itemVal(src, ['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(src, ['source_uid','sourceUid'], ''), itemVal(src, ['product_url','source_url','url'], ''), mallCode);
     const sourceUid = sourceUidFrom(itemVal(src, ['source_uid','sourceUid','product_uid','uid'], ''), sourceMall, itemVal(src, ['source_key','sourceKey','key'], '')) || pi;
-    await client.query(`
+    const inserted = await client.query(`
       INSERT INTO gm_order_item (
         order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
         mall_sale_price, customer_order_price, final_supply_price, product_amount,
@@ -331,6 +332,7 @@ async function replaceOrderItems(client, orderRow, inputItems){
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25,$26,$27,$28
       )
+      RETURNING *
     `, [
       orderRow.order_no, pi, clean(itemVal(src, ['product_name','productName','name','title'], '')),
       clean(itemVal(src, ['option_name','optionName'], '')), clean(itemVal(src, ['option_value','optionValue','selected_option','selectedOption'], '')),
@@ -346,8 +348,9 @@ async function replaceOrderItems(client, orderRow, inputItems){
       nowKst(), orderRow.cafe24_order_no || null, sourceMall, sourceUid
     ]);
     itemCount++;
+    if(inserted.rows[0]) savedItems.push(inserted.rows[0]);
   }
-  return itemCount;
+  return { itemCount, items:savedItems };
 }
 router.post('/api/gm/order/create', async (req, res) => {
   const pool = db(req);
@@ -361,10 +364,14 @@ router.post('/api/gm/order/create', async (req, res) => {
     const orderRow = buildOrderRow(raw, inputItems);
     await client.query('BEGIN');
     const orderAction = await upsertOrder(client, orderRow);
-    const itemCount = await replaceOrderItems(client, orderRow, inputItems);
+    const itemResult = await replaceOrderItems(client, orderRow, inputItems);
+    const eventService = req.app.locals.eventService;
+    const eventResult = eventService && typeof eventService.applyOrderCreate === 'function'
+      ? await eventService.applyOrderCreate(client, orderRow, itemResult.items)
+      : { applied:false, reason:'event_service_missing' };
     await client.query('COMMIT');
-    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemCount, total:orderRow.total_payment_price }));
-    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemCount, total_payment_price:orderRow.total_payment_price });
+    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price, event:eventResult }));
+    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price, event:eventResult });
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
     console.error('[GM_ORDER_CREATE_ERROR]', String(e && e.message || e));
