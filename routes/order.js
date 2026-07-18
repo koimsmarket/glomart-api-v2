@@ -365,13 +365,13 @@ router.post('/api/gm/order/create', async (req, res) => {
     await client.query('BEGIN');
     const orderAction = await upsertOrder(client, orderRow);
     const itemResult = await replaceOrderItems(client, orderRow, inputItems);
-    const eventService = req.app.locals.eventService;
-    const eventResult = eventService && typeof eventService.applyOrderCreate === 'function'
-      ? await eventService.applyOrderCreate(client, orderRow, itemResult.items)
-      : { applied:false, reason:'event_service_missing' };
     await client.query('COMMIT');
-    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price, event:eventResult }));
-    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price, event:eventResult });
+    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price }));
+    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price });
+    const eventQueue=req.app.locals.eventQueue;
+    if(eventQueue&&typeof eventQueue.enqueueOrderCreate==='function'){
+      eventQueue.enqueueOrderCreate(orderRow.order_no).catch(eventErr=>console.error('[EVENT_ORDER_QUEUE_SKIP]', String(eventErr&&eventErr.message||eventErr)));
+    }
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
     console.error('[GM_ORDER_CREATE_ERROR]', String(e && e.message || e));

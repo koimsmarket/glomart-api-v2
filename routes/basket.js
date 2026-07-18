@@ -92,7 +92,7 @@ async function upsertOne(pool,b){
 
 router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  try{ const row=await upsertOne(pool,req.body||{}); const es=req.app.locals.eventService; if(es&&typeof es.applyBasketAdd==='function') await es.applyBasketAdd(pool,row); res.json({ok:true,item:row}); }
+  try{ const row=await upsertOne(pool,req.body||{}); res.json({ok:true,item:row}); const q=req.app.locals.eventQueue; if(q&&typeof q.enqueueBasketAdd==='function'){ q.enqueueBasketAdd(row).catch(eventErr=>console.error('[EVENT_BASKET_QUEUE_SKIP]', String(eventErr&&eventErr.message||eventErr))); } }
   catch(e){
     try{ console.error('[GM_BASKET_ROUTE_ADD_ERROR]', e && e.message, req.body || {}); }catch(_e){}
     res.status(500).json({ok:false,error:e.message});
@@ -108,7 +108,7 @@ router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req
     for(const raw of items){
       try{
         const row=await upsertOne(pool,Object.assign({},raw,{member_id:b.member_id||raw.member_id,guest_key:''}));
-        if(!b.skip_cart_count){ const es=req.app.locals.eventService; if(es&&typeof es.applyBasketAdd==='function') await es.applyBasketAdd(pool,row); }
+        if(!b.skip_cart_count){ const q=req.app.locals.eventQueue; if(q&&typeof q.enqueueBasketAdd==='function'){ q.enqueueBasketAdd(row).catch(eventErr=>console.error('[EVENT_BASKET_QUEUE_SKIP]', String(eventErr&&eventErr.message||eventErr))); } }
         saved.push(row);
       }catch(itemErr){
         failed.push({ product_uid: raw && (raw.product_uid || raw.productUid || ''), error: itemErr.message });
