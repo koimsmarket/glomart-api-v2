@@ -134,7 +134,7 @@ module.exports = function installSearchLogService(deps){
       if(!(await tableExists('gm_search_log'))) return fail(res,500,'gm_search_log table not found');
       const p=req.body||{};
       const eventId=cleanText(p.search_event_id||p.searchEventId||p.request_id||p.requestId||'');
-      if(!eventId) return fail(res,400,'search_event_id is required');
+      if(!eventId) return ok(res,{action:'search.log.skip',skipped:true,counted:false,reason:'search_event_id_missing'});
       const existing=await dbQuery(`SELECT * FROM gm_search_log WHERE search_event_id=$1 LIMIT 1`,[eventId]);
       const old=existing.rows[0]||null;
       const original=cleanText(p.keyword_original||p.keyword||p.origin||(old&&old.keyword_original)||'');

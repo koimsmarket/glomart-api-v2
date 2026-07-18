@@ -33,11 +33,21 @@ module.exports = function createEventQueue(pool){
     return enqueue('BASKET_ADD', basketEventKey(row), { row:safeJson(row) });
   }
 
+
+  async function enqueueDetailView(payload){
+    const row = safeJson(payload || {});
+    const uid = clean(row.product_uid || row.productUid || row.uid || row.key || row.gm_key || '');
+    const requestId = clean(row.search_event_id || row.searchEventId || row.request_id || row.requestId || '');
+    const token = requestId || clean(row.event_key || row.eventKey || row.ts || Date.now());
+    if(!uid) return { queued:false, reason:'product_key_missing' };
+    return enqueue('DETAIL_VIEW', `DETAIL_VIEW:${token}:${uid}`, row);
+  }
+
   async function enqueueOrderCreate(orderNo){
     const no = clean(orderNo);
     if(!no) return { queued:false, reason:'order_no_missing' };
     return enqueue('ORDER_CREATE', `ORDER_CREATE:${no}`, { order_no:no });
   }
 
-  return { enqueue, enqueueBasketAdd, enqueueOrderCreate };
+  return { enqueue, enqueueBasketAdd, enqueueDetailView, enqueueOrderCreate };
 };

@@ -50,6 +50,9 @@ async function processOne(pool, eventService, job){
     let result;
     if(type === 'BASKET_ADD'){
       result = await eventService.applyBasketAdd(client, payload.row || payload);
+    }else if(type === 'DETAIL_VIEW'){
+      result = await eventService.applyDetail(payload);
+      if(!result || !result.updated) throw new Error(`detail_not_ready:${result && result.reason || 'unknown'}`);
     }else if(type === 'ORDER_CREATE'){
       const loaded = await loadOrder(client, clean(payload.order_no));
       result = await eventService.applyOrderCreate(client, loaded.order, loaded.items);

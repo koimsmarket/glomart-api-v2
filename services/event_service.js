@@ -1,4 +1,4 @@
-// EVENT_SERVICE_V011_PERSISTENT_QUEUE
+// EVENT_SERVICE_V012_DETAIL_IDENTITY_QUEUE_SAFE
 'use strict';
 
 const networkEngine = require('./GM_NETWORK_INCENTIVE_ENGINE');
@@ -65,14 +65,18 @@ module.exports = function createEventService(deps){
     p=p||{};
     const mall=cleanText(p.mall_code||p.mallCode||'').toUpperCase();
     const explicitUid=cleanText(p.product_uid||p.productUid||p.uid||'');
-    const key=cleanText(p.pi_ii_vi||p.piIiVi||p.pi||p.key||p.gm_key||'');
+    const rawKey=cleanText(p.pi_ii_vi||p.piIiVi||p.pi||p.key||p.gm_key||'');
     const productId=cleanText(p.product_id||p.productId||'');
     const itemId=cleanText(p.item_id||p.itemId||'');
     const vendorItemId=cleanText(p.vendor_item_id||p.vendorItemId||'');
-    const pi=key||[productId,itemId,vendorItemId].filter(Boolean).join('_');
-    const uid=explicitUid||(mall&&pi?`${mall}_${pi}`:'');
+    const prefix=mall?`${mall}_`:'';
+    const keyIsUid=!!(prefix&&rawKey.toUpperCase().startsWith(prefix));
+    const keyUid=keyIsUid?rawKey:'';
+    const keyPi=keyIsUid?rawKey.slice(prefix.length):rawKey;
+    const pi=keyPi||[productId,itemId,vendorItemId].filter(Boolean).join('_');
+    const uid=explicitUid||keyUid||(mall&&pi?`${mall}_${pi}`:'');
     const candidates=[];
-    for(const value of [uid,mall&&key?`${mall}_${key}`:'',mall&&productId?`${mall}_${productId}`:'']) if(value&&!candidates.includes(value)) candidates.push(value);
+    for(const value of [explicitUid,keyUid,uid,mall&&keyPi?`${mall}_${keyPi}`:'',mall&&productId?`${mall}_${productId}`:'']) if(value&&!candidates.includes(value)) candidates.push(value);
     return {mall,uid,pi,productId,itemId,vendorItemId,candidates};
   }
   async function applyDetail(payload){

@@ -1,4 +1,4 @@
-// EVENT_ROUTE_V009_SERVER_OPERATIONAL
+// EVENT_ROUTE_V012_DETAIL_QUEUE_SAFE
 'use strict';
 
 const express = require('express');
@@ -45,9 +45,18 @@ router.post('/api/gm/event', async (req, res) => {
     try {
       const result = await service.applyDetail(body);
       if (!result || !result.updated) {
-        return res.status(404).json({ ok:false, error:'product not found', event_type:type, result:result || null });
+        const queue = req.app.locals.eventQueue;
+        let queued = { queued:false, reason:'event_queue_not_ready' };
+        if (queue && typeof queue.enqueueDetailView === 'function') {
+          try { queued = await queue.enqueueDetailView(body); }
+          catch (queueError) {
+            console.error('[EVENT_DETAIL_QUEUE_SKIP]', String(queueError && queueError.message || queueError));
+            queued = { queued:false, reason:'queue_error' };
+          }
+        }
+        return res.json({ ok:true, action:'event.detail.deferred', event_type:type, counted:false, result:result || null, queue:queued });
       }
-      return res.json({ ok:true, action:'event.detail', event_type:type, ...result });
+      return res.json({ ok:true, action:'event.detail', event_type:type, counted:true, ...result });
     } catch (error) {
       console.error('[EVENT_DETAIL_ERROR]', String(error && error.message || error));
       return res.status(500).json({ ok:false, error:'detail event failed', detail:String(error && error.message || error) });
