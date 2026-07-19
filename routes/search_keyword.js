@@ -9,20 +9,14 @@ const keywordRelation = require('../services/keyword_relation');
  * - Does not touch product.js, internal product search, or GM_SEARCH_CATEGORY_ENGINE.
  *
  * Priority:
- * 1) Original input exact match in gm_category / gm_keyword_translate using gm_lang.
- * 2) First Korean translation exact match in Korean columns.
- * 3) Fallback to the first translated keyword, then original input.
- *
- * WHY DUAL LOOKUP EXISTS:
- * gm_lang is a UI preference, not reliable proof of the language typed by the
- * user. mobile/product/gm_search.html may translate a native-language input
- * with Android device_lang before CPKR/ALKR open. The server must check both
- * the untouched original and that first Korean translation so existing
- * category/search-log knowledge can still produce the second-stage Server Lock.
+ * 1) gm_category name_[gm_lang] exact match -> name_ko
+ * 2) gm_keyword_translate keyword_[gm_lang] / input_keyword exact match -> main_keyword_ko or keyword_ko
+ * 3) fallback original keyword
+ *    - fallback means CPKR may search original first and gm_search can reuse Coupang correctedQuery for GMKR/ALKR.
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V019_ORIGINAL_TRANSLATED_DUAL_LOOKUP';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V018_RELATION_3COL_SIMPLE';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -128,9 +122,6 @@ async function matchKeywordTranslate(pool, input, lang){
 async function normalizeKeyword(pool, params){
   const p = params || {};
   const input = cleanText(p.keyword || p.q || p.inputKeyword || p.input_keyword || p.keyword_original || p.keywordOriginal || '');
-  const translated = cleanText(p.translated_keyword || p.translatedKeyword || p.first_search_keyword || p.firstSearchKeyword || '');
-  const deviceLang = cleanText(p.device_lang || p.deviceLang || '');
-  const translationSource = cleanText(p.translation_source || p.translationSource || 'INPUT');
   const lang = normalizeLang(p.lang || p.gm_lang || p.ui_lang_code || p.uiLangCode || p.keyword_lang_code || p.keywordLangCode || p.lang_code || 'ko');
 
   if(!input){
@@ -152,45 +143,22 @@ async function normalizeKeyword(pool, params){
   const candidates = [];
   const overrideKo = koOverride(input);
   if(overrideKo) candidates.push(buildCandidate('local_ko_override', overrideKo, input, {}, 80));
-
-  // First inspect the untouched input in the UI-language column.
   const c1 = await matchCategory(pool, input, lang); if(c1) candidates.push(c1);
   const c3 = await matchKeywordTranslate(pool, input, lang); if(c3) candidates.push(c3);
 
-  // Then inspect the first Korean translation in Korean columns.
-  // This must not replace keyword_original; it is only another lookup key.
-  if(translated && norm(translated) !== norm(input)){
-    const t1 = await matchCategory(pool, translated, 'ko');
-    if(t1){ t1.source='translated_gm_category'; t1.score=Number(t1.score||0)+20; candidates.push(t1); }
-    const t3 = await matchKeywordTranslate(pool, translated, 'ko');
-    if(t3){ t3.source='translated_gm_keyword_translate'; t3.score=Number(t3.score||0)+20; candidates.push(t3); }
-  }
-
-  const priority = {
-    gm_category:1,
-    translated_gm_category:2,
-    gm_keyword_translate:3,
-    translated_gm_keyword_translate:4,
-    local_ko_override:5,
-    fallback:9
-  };
+  const priority = { gm_category:1, gm_keyword_translate:2, local_ko_override:3, fallback:9 };
   candidates.sort((a,b)=> (priority[a.source] || 99) - (priority[b.source] || 99) || b.score - a.score);
 
-  const fallbackText = translated || input;
-  const best = candidates[0] || buildCandidate('fallback', fallbackText, fallbackText, {}, 0);
+  const best = candidates[0] || buildCandidate('fallback', input, input, {}, 0);
   const fallback = best.source === 'fallback';
-  const ko = fallback ? koOrEmpty(fallbackText) : koOrEmpty(best.search_keyword_ko || fallbackText);
-  const searchText = ko || fallbackText || input;
+  const ko = fallback ? koOrEmpty(input) : koOrEmpty(best.search_keyword_ko || input);
+  const searchText = ko || input;
 
   return {
     ok:true,
     route_version:VERSION,
     keyword_original: input,
     input_keyword: input,
-    translated_keyword: translated,
-    first_search_keyword: translated || input,
-    device_lang: deviceLang,
-    translation_source: translationSource,
     lang,
     matched: !fallback,
     source: best.source,
@@ -208,10 +176,6 @@ async function normalizeKeyword(pool, params){
     searchKeywordMeta: {
       inputKeyword: input,
       originalKeyword: input,
-      translatedKeyword: translated,
-      firstSearchKeyword: translated || input,
-      device_lang: deviceLang,
-      translation_source: translationSource,
       mainKeyword: searchText,
       normalizedKeyword: searchText,
       keywordKo: ko,
@@ -283,7 +247,7 @@ async function keywordLookupHandler(req,res){
   if(!input) return fail(res, 400, 'input_keyword required');
   try{
     await keywordRelation.ensureTranslateTable(pool);
-    const r = await safeQuery(pool, `SELECT lang,input_keyword,main_keyword_ko,keyword_ko,hit_count,updated_at
+    const r = await safeQuery(pool, `SELECT lang,input_keyword,main_keyword_ko,keyword_ko,device_lang,hit_count,updated_at
       FROM gm_keyword_translate
       WHERE input_keyword=$1 OR keyword_${lang}=$1 OR main_keyword_ko=$1 OR keyword_ko=$1
       ORDER BY CASE WHEN keyword_${lang}=$1 THEN 0 WHEN input_keyword=$1 THEN 1 ELSE 2 END, hit_count DESC, updated_at DESC NULLS LAST
@@ -305,7 +269,7 @@ async function existingKeywordHandler(req,res){
     const n = norm(keyword);
     const col = langColumn('keyword', lang);
     const sql = `
-      SELECT input_keyword, main_keyword_ko, keyword_ko, ${col} AS matched_value, hit_count, updated_at
+      SELECT input_keyword, main_keyword_ko, keyword_ko, device_lang, ${col} AS matched_value, hit_count, updated_at
       FROM gm_keyword_translate
       WHERE LOWER(REGEXP_REPLACE(COALESCE(main_keyword_ko::text,''), '[[:space:]"''“”‘’.,/\\|_\-()\[\]{}]+', '', 'g')) = $1
          OR LOWER(REGEXP_REPLACE(COALESCE(keyword_ko::text,''), '[[:space:]"''“”‘’.,/\\|_\-()\[\]{}]+', '', 'g')) = $1

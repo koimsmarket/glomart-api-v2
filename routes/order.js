@@ -9,7 +9,7 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_ORDER_ROUTE';
+const VERSION = 'GM_ORDER_ROUTE_V036_MONEY_FIRST_VALUE';
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function clean(v){
@@ -21,7 +21,16 @@ function clean(v){
 function money(v, def){
   if(def == null) def = 0;
   if(v === undefined || v === null || v === '') return def;
-  const n = Number(String(v).replace(/[^0-9.-]/g, ''));
+
+  if(typeof v === 'number'){
+    return Number.isFinite(v) ? Math.round(v) : def;
+  }
+
+  const text = String(v).trim();
+  const match = text.match(/-?\d[\d,]*(?:\.\d+)?/);
+  if(!match) return def;
+
+  const n = Number(match[0].replace(/,/g, ''));
   return Number.isFinite(n) ? Math.round(n) : def;
 }
 function pick(obj, keys, def){

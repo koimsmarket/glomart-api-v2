@@ -11,6 +11,15 @@ function validDeviceLang(v){
   if(!x || /^(und|unknown|null|undefined|false)$/i.test(x) || x.length>35) return '';
   return /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(x) ? x : '';
 }
+function validFcmToken(v){
+  const x=s(v);
+  if(!x || x.length<20 || x.length>4096 || /\s/.test(x)) return '';
+  return x;
+}
+function validDeviceType(v){
+  const x=s(v).toUpperCase();
+  return /^(PHONE|TABLET|ANDROID|IOS|WEB)$/.test(x) ? x : 'ANDROID';
+}
 function id(prefix){ return `${prefix}${Date.now()}${Math.random().toString(36).slice(2,8)}`; }
 function pick(b, names, d=''){
   for(const n of names){ if(b[n] !== undefined && b[n] !== null && String(b[n]).trim() !== '') return s(b[n]); }
@@ -232,6 +241,76 @@ router.post(['/api/gm/member/device-language','/api/member/device-language'], as
     res.json({ok:true,member:r.rows[0]});
   }catch(e){ console.error('[GM_MEMBER_DEVICE_LANG_ERROR]',{code:e&&e.code,message:e&&e.message}); res.status(500).json({ok:false,error:'휴대폰 언어를 저장하지 못했습니다.'}); }
 });
+
+/*
+========================================================
+GM_MEMBER MULTI-DEVICE FCM POLICY
+========================================================
+- One member may own multiple rows, one row per unique fcm_token.
+- fcm_token is the push delivery address; member_id alone cannot receive FCM.
+- Re-registration refreshes member/device/language/last_seen and restores ACTIVE.
+- Permanent FCM errors mark INVALID. Temporary errors never delete the token.
+- Logout does not delete the token/member link; push consent is controlled separately.
+========================================================
+*/
+router.post(['/api/gm/member/device/upsert','/api/member/device/upsert'], async (req,res)=>{
+  const pool=db(req), b=req.body||{};
+  if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const memberId=pick(b,['member_id','memberId']);
+  const fcmToken=validFcmToken(pick(b,['fcm_token','fcmToken','push_token','pushToken']));
+  const deviceLang=validDeviceLang(pick(b,['device_lang','deviceLang','device_language','deviceLanguage']));
+  const deviceType=validDeviceType(pick(b,['device_type','deviceType','platform'],'ANDROID'));
+  const pushEnabled=yn(b.push_enabled===undefined ? 'Y' : b.push_enabled);
+  if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
+  if(!fcmToken) return res.status(400).json({ok:false,error:'유효한 FCM 토큰이 필요합니다.'});
+  try{
+    const r=await pool.query(`INSERT INTO gm_member_device (
+      member_id,fcm_token,device_type,device_lang,push_enabled,token_status,
+      failure_count,last_seen_at,created_at,updated_at
+    ) VALUES ($1,$2,$3,$4,$5,'ACTIVE',0,NOW(),NOW(),NOW())
+    ON CONFLICT (fcm_token) DO UPDATE SET
+      member_id=EXCLUDED.member_id,
+      device_type=COALESCE(NULLIF(EXCLUDED.device_type,''),gm_member_device.device_type),
+      device_lang=COALESCE(NULLIF(EXCLUDED.device_lang,''),gm_member_device.device_lang),
+      push_enabled=EXCLUDED.push_enabled,
+      token_status='ACTIVE',
+      failure_count=0,
+      last_error_code='',
+      last_seen_at=NOW(),
+      updated_at=NOW()
+    RETURNING *`,[memberId,fcmToken,deviceType,deviceLang||null,pushEnabled]);
+    res.json({ok:true,device:r.rows[0]});
+  }catch(e){
+    console.error('[GM_MEMBER_DEVICE_UPSERT_ERROR]',{code:e&&e.code,message:e&&e.message});
+    res.status(500).json({ok:false,error:'푸시 기기 정보를 저장하지 못했습니다.'});
+  }
+});
+
+router.post(['/api/gm/member/device/push-result','/api/member/device/push-result'], async (req,res)=>{
+  const pool=db(req), b=req.body||{};
+  if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const fcmToken=validFcmToken(pick(b,['fcm_token','fcmToken','push_token','pushToken']));
+  const ok=yn(b.success_yn===undefined ? b.ok : b.success_yn)==='Y';
+  const permanent=yn(b.permanent_error_yn||b.permanentErrorYn)==='Y';
+  const errorCode=pick(b,['error_code','errorCode','code']);
+  if(!fcmToken) return res.status(400).json({ok:false,error:'유효한 FCM 토큰이 필요합니다.'});
+  try{
+    const r=await pool.query(`UPDATE gm_member_device SET
+      token_status=CASE WHEN $2::boolean THEN 'ACTIVE' WHEN $3::boolean THEN 'INVALID' ELSE token_status END,
+      failure_count=CASE WHEN $2::boolean THEN 0 ELSE failure_count+1 END,
+      last_success_at=CASE WHEN $2::boolean THEN NOW() ELSE last_success_at END,
+      last_failure_at=CASE WHEN $2::boolean THEN last_failure_at ELSE NOW() END,
+      last_error_code=CASE WHEN $2::boolean THEN '' ELSE $4 END,
+      updated_at=NOW()
+      WHERE fcm_token=$1
+      RETURNING *`,[fcmToken,ok,permanent,errorCode]);
+    res.json({ok:true,found:!!r.rowCount,device:r.rows[0]||null});
+  }catch(e){
+    console.error('[GM_MEMBER_PUSH_RESULT_ERROR]',{code:e&&e.code,message:e&&e.message});
+    res.status(500).json({ok:false,error:'푸시 결과를 저장하지 못했습니다.'});
+  }
+});
+
 
 function memberMeResponse(row, addressRows){
   const member = redactMember(row || null);

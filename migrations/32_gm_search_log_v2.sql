@@ -39,6 +39,7 @@ CREATE TABLE gm_search_log (
   member_id TEXT,
   guest_key TEXT,
   device_type TEXT NOT NULL DEFAULT 'PHONE' CHECK (device_type IN ('PHONE','TABLET','PC')),
+  device_lang TEXT NOT NULL DEFAULT '',
   client_app TEXT NOT NULL DEFAULT 'GLOMART_MOBILE',
 
   id_search_count INTEGER NOT NULL DEFAULT 0,

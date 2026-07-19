@@ -10,6 +10,7 @@ CREATE TABLE gm_keyword_translate (
   lang TEXT NOT NULL DEFAULT 'all',
   input_keyword TEXT NOT NULL,
   main_keyword_ko TEXT NOT NULL,
+  device_lang TEXT NOT NULL DEFAULT '',
 
   keyword_ko TEXT,
   keyword_en TEXT,

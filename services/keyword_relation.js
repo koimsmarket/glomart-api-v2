@@ -138,12 +138,14 @@ async function ensureTranslateTable(pool){
     input_keyword TEXT NOT NULL,
     main_keyword_ko TEXT NOT NULL,
     keyword_ko TEXT,
+    device_lang TEXT NOT NULL DEFAULT '',
     hit_count INTEGER NOT NULL DEFAULT 1,
     updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
     created_at DATE NOT NULL DEFAULT CURRENT_DATE,
     translate_complete CHAR(1) NOT NULL DEFAULT 'F',
     PRIMARY KEY (lang,input_keyword)
   )`);
+  try{await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS device_lang TEXT NOT NULL DEFAULT ''`);}catch(_e){}
   for(const l of LANGS){ try{await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS keyword_${l} TEXT`);}catch(_e){} }
 }
 function pickTranslations(p){
@@ -177,6 +179,9 @@ async function saveKeywordTranslate(pool,payload){
   await ensureTranslateTable(pool); const p=payload||{}; const meta=pickMeta(p);
   const main=cleanText(p.main_keyword_ko||p.mainKeywordKo||p.keyword_ko||p.keywordKo||meta.keyword_ko||p.keyword||'');
   const input=cleanText(p.input_keyword||p.inputKeyword||p.keyword||main); const lang=normalizeLang(p.gm_lang||p.lang||'ko');
+  // device_lang is the Android/browser BCP-47 tag captured at search time.
+  // Keep the original tag (vi-VN, zh-TW, en-US, etc.) and never replace an existing value with empty data.
+  const deviceLang=cleanText(p.device_lang||p.deviceLang||(p.searchKeywordMeta&&(p.searchKeywordMeta.device_lang||p.searchKeywordMeta.deviceLang))||'');
   if(!main) return {mainKeyword:'',saved:0};
   const tr=pickTranslations(p); tr.ko=tr.ko||main; if(lang!=='ko'&&input) tr[lang]=tr[lang]||input;
   const translatedCount=LANGS.filter(l=>!!tr[l]).length;
@@ -185,18 +190,20 @@ async function saveKeywordTranslate(pool,payload){
     input_keyword:input,
     main_keyword_ko:main,
     translated_count:translatedCount,
-    missing_langs:missingLangs
+    missing_langs:missingLangs,
+    device_lang:deviceLang
   });
   // 횡렬 구조에서는 keyword_ko도 LANGS의 ko 항목에서 한 번만 생성한다.
   // 별도 keyword_ko 선언과 LANGS 반복을 함께 사용하면 INSERT 컬럼이 중복된다.
-  const cols=['lang','input_keyword','main_keyword_ko','hit_count','updated_at','created_at','translate_complete']
+  const cols=['lang','input_keyword','main_keyword_ko','device_lang','hit_count','updated_at','created_at','translate_complete']
     .concat(LANGS.map(l=>'keyword_'+l));
   const complete=LANGS.every(l=>!!tr[l])?'T':'F';
   const today=new Date().toISOString().slice(0,10);
-  const vals=['all',input,main,1,today,today,complete]
+  const vals=['all',input,main,deviceLang,1,today,today,complete]
     .concat(LANGS.map(l=>tr[l]||''));
   const upd=[
     'main_keyword_ko=EXCLUDED.main_keyword_ko',
+    "device_lang=CASE WHEN EXCLUDED.device_lang='' THEN gm_keyword_translate.device_lang ELSE EXCLUDED.device_lang END",
     'hit_count=gm_keyword_translate.hit_count+1',
     'updated_at=CURRENT_DATE',
     "translate_complete=CASE WHEN EXCLUDED.translate_complete='T' THEN 'T' ELSE gm_keyword_translate.translate_complete END"
@@ -206,7 +213,7 @@ async function saveKeywordTranslate(pool,payload){
   }
   await pool.query(`INSERT INTO gm_keyword_translate (${cols.join(',')}) VALUES (${vals.map((_,i)=>'$'+(i+1)).join(',')}) ON CONFLICT (lang,input_keyword) DO UPDATE SET ${upd.join(',')}`,vals);
   const relation=await saveRelations(pool,Object.assign({},p,{gm_lang:lang,keyword_ko:main}));
-  return {mainKeyword:main,inputKeyword:input,lang,alias_saved:1,relation_saved:relation.saved,relation_existing:relation.updated,related_count:relation.received};
+  return {mainKeyword:main,inputKeyword:input,lang,device_lang:deviceLang,alias_saved:1,relation_saved:relation.saved,relation_existing:relation.updated,related_count:relation.received};
 }
 
 module.exports={LANGS,normalizeLang,pickMeta,ensureRelationTable,saveRelations,relationStatus,captureProductKeywordMeta,ensureTranslateTable,saveKeywordTranslate};
