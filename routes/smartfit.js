@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V044_ITEM_LIST_COMPAT_V067';
+const VERSION = 'GM_SMARTFIT_SERVER_V045_MESSAGE_ASSET_V068';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -765,6 +765,123 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
     const items=r.rows.map(row=>({ batch_id:batchId, template_id:row.template_id, creator_member_id:row.creator_member_id, category_no:row.category_no, template_title:s(row.template_title_source || row.template_title_ko), item_id:row.item_id, item_role:row.item_role, mall_code:row.mall_code, product_uid:row.product_uid, original_qty:i(row.qty,1), selected_qty:i(row.qty,1), is_selected:true, sort_no:row.sort_no }));
     ok(res,{ batch_id:batchId, template_ids:templateIds, items, count:items.length, member_id:member, note:'candidate payload only; basket/order tables are not modified' });
   }catch(e){ fail(res,500,'build cart failed',{ detail:String(e.message||e) }); }
+});
+
+
+/* SmartFit creator message V068
+ * Page load reads only precalculated relation assets.
+ * Exact recipient expansion runs only when the creator presses send.
+ */
+function smartfitImmediateMax(){
+  return Math.max(1, i(process.env.SMARTFIT_MESSAGE_IMMEDIATE_MAX || 500, 500));
+}
+async function assertTemplateCreator(pool, templateId, memberId){
+  const row=(await pool.query(`SELECT template_id,creator_member_id,template_title_source,template_title_ko,visibility,is_active,is_deleted
+    FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1`,[templateId])).rows[0];
+  if(!row) throw new Error('template not found');
+  if(!(await isOwnerOrAdmin(pool,memberId,row.creator_member_id))) throw new Error('permission denied');
+  return row;
+}
+function nextNightKstSql(){
+  return `CASE
+    WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::time < TIME '02:00'
+      THEN ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date + TIME '02:00') AT TIME ZONE 'Asia/Seoul'
+    ELSE (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date + 1) + TIME '02:00') AT TIME ZONE 'Asia/Seoul'
+  END`;
+}
+
+router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
+  try{
+    const pool=db(req); const templateId=i(req.query.template_id||req.query.templateId,0); const member=s(req.query.member_id||req.query.memberId);
+    if(!member) return fail(res,401,'login required');
+    if(!templateId) return fail(res,400,'template_id required');
+    const template=await assertTemplateCreator(pool,templateId,member);
+    const relation=(await pool.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[member])).rows[0]||{};
+    const sub=(await pool.query(`SELECT COUNT(*)::bigint AS total_count,
+      COUNT(*) FILTER (WHERE message_accept_yn='Y')::bigint AS accept_count,
+      COUNT(*) FILTER (WHERE message_accept_yn='N')::bigint AS reject_count
+      FROM gm_smartfit_subscribe WHERE creator_member_id=$1`,[member])).rows[0]||{};
+    const sent=(await pool.query(`SELECT COUNT(*)::bigint AS registered_count,
+      COUNT(*) FILTER (WHERE send_status IN ('SENT','READ'))::bigint AS sent_count,
+      COUNT(*) FILTER (WHERE send_status='READ' OR read_at IS NOT NULL)::bigint AS read_count,
+      COUNT(*) FILTER (WHERE send_status IN ('QUEUED','QUEUED_NIGHT','PROCESSING'))::bigint AS queued_count,
+      COUNT(*) FILTER (WHERE send_status='FAILED')::bigint AS failed_count,
+      COALESCE(MAX(serial_no),0)::int AS last_serial_no
+      FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0]||{};
+    const upTotal=Number(relation.up_total_count||0), downTotal=Number(relation.down_total_count||0), subscribers=Number(sub.accept_count||0);
+    ok(res,{template,relation:{
+      up_1_count:Number(relation.up_1_count||0),up_2_count:Number(relation.up_2_count||0),up_3_count:Number(relation.up_3_count||0),up_4_count:Number(relation.up_4_count||0),up_5_count:Number(relation.up_5_count||0),up_total_count:upTotal,
+      down_1_count:Number(relation.down_1_count||0),down_2_count:Number(relation.down_2_count||0),down_3_count:Number(relation.down_3_count||0),down_4_count:Number(relation.down_4_count||0),down_5_count:Number(relation.down_5_count||0),down_total_count:downTotal,
+      calculated_yn:s(relation.calculated_yn||'F'),message_accept_relation_depth:i(relation.message_accept_relation_depth,5)
+    },subscribe:{total_count:Number(sub.total_count||0),accept_count:subscribers,reject_count:Number(sub.reject_count||0)},delivery:{...sent,asset_total:upTotal+downTotal+subscribers,immediate_max:smartfitImmediateMax()}});
+  }catch(e){ fail(res,400,'template message summary failed',{detail:String(e.message||e)}); }
+});
+
+router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'}), async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{}; const templateId=i(b.template_id||b.templateId,0); const member=s(b.member_id||b.memberId); const message=s(b.message);
+    if(!member) return fail(res,401,'login required');
+    if(!templateId) return fail(res,400,'template_id required');
+    if(!message) return fail(res,400,'message required');
+    if(message.length>2000) return fail(res,400,'message too long');
+    const template=await assertTemplateCreator(client,templateId,member);
+    await client.query('BEGIN');
+    const serial=Number((await client.query(`SELECT COALESCE(MAX(serial_no),0)+1 AS serial_no FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0].serial_no||1);
+    /* Network is expanded only here. The recursive graph walks recommender edges in both directions,
+       keeps the nearest 1~5 depth, and applies each receiver's accepted depth. Subscribers are UNIONed. */
+    const candidates=await client.query(`WITH RECURSIVE network(member_id,relation_depth,path) AS (
+        SELECT $1::varchar,0,ARRAY[$1::varchar]
+        UNION ALL
+        SELECT edge.member_id,n.relation_depth+1,n.path||edge.member_id
+        FROM network n
+        CROSS JOIN LATERAL (
+          SELECT m.member_id FROM gm_member m WHERE m.recommender_id=n.member_id
+          UNION
+          SELECT m.recommender_id AS member_id FROM gm_member m WHERE m.member_id=n.member_id AND COALESCE(m.recommender_id,'')<>''
+        ) edge
+        WHERE n.relation_depth<5 AND NOT edge.member_id=ANY(n.path)
+      ), relation_targets AS (
+        SELECT member_id,MIN(relation_depth)::smallint AS relation_depth
+        FROM network WHERE relation_depth BETWEEN 1 AND 5 AND member_id<>$1
+        GROUP BY member_id
+      ), accepted_relations AS (
+        SELECT r.member_id,r.relation_depth
+        FROM relation_targets r
+        LEFT JOIN gm_member_relation_count c ON c.member_id=r.member_id
+        WHERE r.relation_depth<=COALESCE(c.message_accept_relation_depth,5)
+      ), subscribers AS (
+        SELECT s.member_id,NULL::smallint AS relation_depth
+        FROM gm_smartfit_subscribe s
+        WHERE s.creator_member_id=$1 AND s.message_accept_yn='Y' AND s.member_id<>$1
+      ), merged AS (
+        SELECT member_id,MIN(relation_depth) FILTER (WHERE relation_depth IS NOT NULL)::smallint AS relation_depth
+        FROM (SELECT * FROM accepted_relations UNION ALL SELECT * FROM subscribers) x
+        GROUP BY member_id
+      )
+      SELECT m.member_id,m.relation_depth,
+        COALESCE((SELECT d.device_lang FROM gm_member_device d WHERE d.member_id=m.member_id AND d.push_enabled='Y' AND d.token_status='ACTIVE' ORDER BY d.last_seen_at DESC LIMIT 1),gm.language_code,'') AS device_lang
+      FROM merged m LEFT JOIN gm_member gm ON gm.member_id=m.member_id
+      LEFT JOIN gm_smartfit_message_receiver old ON old.template_id=$2 AND old.receiver_member_id=m.member_id
+      WHERE old.message_no IS NULL`,[member,templateId]);
+    const immediateMax=smartfitImmediateMax(); const night=candidates.rowCount>immediateMax;
+    let inserted=0;
+    for(const row of candidates.rows){
+      const ir=await client.query(`INSERT INTO gm_smartfit_message_receiver(serial_no,template_id,receiver_member_id,device_lang,relation_depth,message,send_status)
+        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(template_id,receiver_member_id) DO NOTHING`,[serial,templateId,row.member_id,s(row.device_lang).slice(0,10),row.relation_depth,message,night?'QUEUED_NIGHT':'QUEUED']);
+      inserted+=ir.rowCount;
+    }
+    if(inserted>0){
+      const eventKey=`SMARTFIT_MESSAGE_SEND:${templateId}:${serial}`;
+      const nextSql=night?nextNightKstSql():'CURRENT_TIMESTAMP';
+      await client.query(`INSERT INTO gm_event_queue(event_type,event_key,payload,status,next_retry_at,created_at,updated_at)
+        VALUES('SMARTFIT_MESSAGE_SEND',$1,$2::jsonb,'PENDING',${nextSql},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+        ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko)})]);
+    }
+    await client.query('COMMIT');
+    ok(res,{template_id:templateId,serial_no:serial,new_receiver_count:inserted,night_queue:night,immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_e){} fail(res,400,'template message send failed',{detail:String(e.message||e)}); }
+  finally{client.release();}
 });
 
 module.exports = router;

@@ -41,6 +41,35 @@ async function loadOrder(client, orderNo){
   return { order:o.rows[0], items:i.rows };
 }
 
+
+async function processSmartfitMessageSend(client, payload){
+  const templateId=Number(payload.template_id||0); const serialNo=Number(payload.serial_no||0);
+  if(!templateId||!serialNo) throw new Error('smartfit_message_payload_invalid');
+  const template=(await client.query(`SELECT template_id,template_title_source,template_title_ko FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1`,[templateId])).rows[0];
+  if(!template) throw new Error(`smartfit_template_not_found:${templateId}`);
+  const rows=await client.query(`SELECT * FROM gm_smartfit_message_receiver
+    WHERE template_id=$1 AND serial_no=$2 AND send_status IN ('QUEUED','QUEUED_NIGHT')
+    ORDER BY message_no LIMIT 100 FOR UPDATE SKIP LOCKED`,[templateId,serialNo]);
+  let sent=0;
+  for(const row of rows.rows){
+    await client.query(`UPDATE gm_smartfit_message_receiver SET send_status='PROCESSING',failed_reason=NULL WHERE message_no=$1`,[row.message_no]);
+    const personalNo=`SFM${templateId}_${row.message_no}`.slice(0,32);
+    await client.query(`INSERT INTO gm_message_personal(message_no,member_id,message_type,title,message,move_type,move_value,priority,is_read,created_at)
+      VALUES($1,$2,'SMARTFIT_TEMPLATE',$3,$4,'SMARTFIT_TEMPLATE',$5,'NORMAL','N',CURRENT_TIMESTAMP)
+      ON CONFLICT(message_no) DO NOTHING`,[personalNo,row.receiver_member_id,String(template.template_title_source||template.template_title_ko||'SmartFit'),row.message,String(templateId)]);
+    await client.query(`UPDATE gm_smartfit_message_receiver SET send_status='SENT',sent_at=CURRENT_TIMESTAMP,failed_reason=NULL WHERE message_no=$1`,[row.message_no]);
+    sent++;
+  }
+  const remain=Number((await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_message_receiver WHERE template_id=$1 AND serial_no=$2 AND send_status IN ('QUEUED','QUEUED_NIGHT')`,[templateId,serialNo])).rows[0].n||0);
+  if(remain>0){
+    const batch=Number(payload.batch_no||1)+1;
+    await client.query(`INSERT INTO gm_event_queue(event_type,event_key,payload,status,next_retry_at,created_at,updated_at)
+      VALUES('SMARTFIT_MESSAGE_SEND',$1,$2::jsonb,'PENDING',CURRENT_TIMESTAMP+INTERVAL '2 seconds',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+      ON CONFLICT(event_key) DO NOTHING`,[`SMARTFIT_MESSAGE_SEND:${templateId}:${serialNo}:${batch}`,JSON.stringify({...payload,batch_no:batch})]);
+  }
+  return {template_id:templateId,serial_no:serialNo,sent,remain};
+}
+
 async function processOne(pool, eventService, job){
   const client = await pool.connect();
   try{
@@ -56,6 +85,8 @@ async function processOne(pool, eventService, job){
     }else if(type === 'ORDER_CREATE'){
       const loaded = await loadOrder(client, clean(payload.order_no));
       result = await eventService.applyOrderCreate(client, loaded.order, loaded.items);
+    }else if(type === 'SMARTFIT_MESSAGE_SEND'){
+      result = await processSmartfitMessageSend(client, payload);
     }else{
       throw new Error(`unsupported_event_type:${type}`);
     }
