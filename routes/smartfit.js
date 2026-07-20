@@ -773,7 +773,7 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
  * Exact recipient expansion runs only when the creator presses send.
  */
 function smartfitImmediateMax(){
-  return Math.max(1, i(process.env.SMARTFIT_MESSAGE_IMMEDIATE_MAX || 500, 500));
+  return Math.max(1, i(process.env.SMARTFIT_MESSAGE_IMMEDIATE_MAX || 10000, 10000));
 }
 async function assertTemplateCreator(pool, templateId, memberId){
   const row=(await pool.query(`SELECT template_id,creator_member_id,template_title_source,template_title_ko,visibility,is_active,is_deleted
@@ -931,7 +931,13 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
         COALESCE((SELECT d.device_lang FROM gm_member_device d WHERE d.member_id=m.member_id AND d.push_enabled='Y' AND d.token_status='ACTIVE' ORDER BY d.last_seen_at DESC LIMIT 1),gm.language_code,'') AS device_lang
       FROM merged m LEFT JOIN gm_member gm ON gm.member_id=m.member_id
       LEFT JOIN gm_smartfit_message_receiver old ON old.template_id=$2 AND old.receiver_member_id=m.member_id
-      WHERE old.message_no IS NULL`,[member,templateId]);
+      WHERE old.message_no IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM gm_smartfit_subscribe reject_state
+          WHERE reject_state.member_id=m.member_id
+            AND reject_state.creator_member_id=$1
+            AND reject_state.message_accept_yn='N'
+        )`,[member,templateId]);
     const immediateMax=smartfitImmediateMax(); const night=candidates.rowCount>immediateMax;
     let inserted=0;
     for(const row of candidates.rows){
@@ -947,7 +953,7 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
         ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko)})]);
     }
     await client.query('COMMIT');
-    ok(res,{template_id:templateId,serial_no:serial,new_receiver_count:inserted,night_queue:night,immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
+    ok(res,{template_id:templateId,serial_no:serial,candidate_count:candidates.rowCount,new_receiver_count:inserted,queued_count:inserted,night_queue:night,scheduled_mode:night?'NIGHT_KST_02':'IMMEDIATE',immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
   }catch(e){ try{await client.query('ROLLBACK');}catch(_e){} fail(res,400,'template message send failed',{detail:String(e.message||e)}); }
   finally{client.release();}
 });

@@ -320,11 +320,23 @@ async function getShareReceivers(pool, sender, maxChon){
       SELECT member_id, 1 AS chon_depth
       FROM gm_member
       WHERE recommender_id=$1 AND COALESCE(allow_message_share,'Y')='Y'
+        AND NOT EXISTS (
+          SELECT 1 FROM gm_smartfit_subscribe reject_state
+          WHERE reject_state.member_id=gm_member.member_id
+            AND reject_state.creator_member_id=$1
+            AND reject_state.message_accept_yn='N'
+        )
     UNION ALL
       SELECT m.member_id, d.chon_depth + 1
       FROM gm_member m
       JOIN downline d ON m.recommender_id=d.member_id
       WHERE d.chon_depth < $2 AND COALESCE(m.allow_message_share,'Y')='Y'
+        AND NOT EXISTS (
+          SELECT 1 FROM gm_smartfit_subscribe reject_state
+          WHERE reject_state.member_id=m.member_id
+            AND reject_state.creator_member_id=$1
+            AND reject_state.message_accept_yn='N'
+        )
     )
     SELECT member_id, chon_depth FROM downline WHERE member_id <> $1 ORDER BY chon_depth, member_id`;
   const r = await pool.query(q, [sender, depth]);
