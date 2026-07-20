@@ -3,6 +3,20 @@
 let started = false;
 
 function clean(v){ return v == null ? '' : String(v).trim(); }
+function messageLang(v){
+  const raw=clean(v).toLowerCase().replace(/_/g,'-');
+  if(raw==='zh-tw'||raw.startsWith('zh-hant')||raw.startsWith('zh-hk')||raw.startsWith('zh-mo')||raw==='tw') return 'tw';
+  if(raw==='zh-cn'||raw.startsWith('zh-hans')||raw==='cn'||raw==='zh') return 'zh';
+  const base=(raw||'en').split('-')[0];
+  const aliases={kr:'ko',jp:'ja',vn:'vi'};
+  const lang=aliases[base]||base;
+  return ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'].includes(lang)?lang:'en';
+}
+function localized(map,lang,fallback){
+  map=(map&&typeof map==='object'&&!Array.isArray(map))?map:{};
+  const l=messageLang(lang);
+  return clean(map[l]||map.en||map.ko||fallback);
+}
 
 async function claimOne(pool){
   const client = await pool.connect();
@@ -54,9 +68,10 @@ async function processSmartfitMessageSend(client, payload){
   for(const row of rows.rows){
     await client.query(`UPDATE gm_smartfit_message_receiver SET send_status='PROCESSING',failed_reason=NULL WHERE message_no=$1`,[row.message_no]);
     const personalNo=`SFM${templateId}_${row.message_no}`.slice(0,32);
+    const pushTitle=localized(payload.title_translations,row.device_lang,String(template.template_title_source||template.template_title_ko||'SmartFit'));
     await client.query(`INSERT INTO gm_message_personal(message_no,member_id,message_type,title,message,move_type,move_value,priority,is_read,created_at)
       VALUES($1,$2,'SMARTFIT_TEMPLATE',$3,$4,'SMARTFIT_TEMPLATE',$5,'NORMAL','N',CURRENT_TIMESTAMP)
-      ON CONFLICT(message_no) DO NOTHING`,[personalNo,row.receiver_member_id,String(template.template_title_source||template.template_title_ko||'SmartFit'),row.message,String(templateId)]);
+      ON CONFLICT(message_no) DO NOTHING`,[personalNo,row.receiver_member_id,pushTitle,row.message,String(templateId)]);
     await client.query(`UPDATE gm_smartfit_message_receiver SET send_status='SENT',sent_at=CURRENT_TIMESTAMP,failed_reason=NULL WHERE message_no=$1`,[row.message_no]);
     sent++;
   }
@@ -82,8 +97,6 @@ async function processOne(pool, eventService, job){
     }else if(type === 'DETAIL_VIEW'){
       result = await eventService.applyDetail(payload);
       if(!result || !result.updated) throw new Error(`detail_not_ready:${result && result.reason || 'unknown'}`);
-    }else if(type === 'MEMBER_JOIN'){
-      result = await eventService.applyMemberJoin(client, payload);
     }else if(type === 'ORDER_CREATE'){
       const loaded = await loadOrder(client, clean(payload.order_no));
       result = await eventService.applyOrderCreate(client, loaded.order, loaded.items);

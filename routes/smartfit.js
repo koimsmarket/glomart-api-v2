@@ -817,10 +817,37 @@ router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
   }catch(e){ fail(res,400,'template message summary failed',{detail:String(e.message||e)}); }
 });
 
-router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'}), async (req,res)=>{
+function smartfitMessageLang(v){
+  const raw=s(v).toLowerCase().replace(/_/g,'-');
+  if(!raw) return 'en';
+  if(raw==='zh-tw'||raw.startsWith('zh-hant')||raw.startsWith('zh-hk')||raw.startsWith('zh-mo')||raw==='tw') return 'tw';
+  if(raw==='zh-cn'||raw.startsWith('zh-hans')||raw==='cn'||raw==='zh') return 'zh';
+  const base=raw.split('-')[0];
+  const aliases={kr:'ko',jp:'ja',vn:'vi'};
+  const lang=aliases[base]||base;
+  return ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'].includes(lang)?lang:'en';
+}
+function smartfitTranslationMap(v){
+  if(!v||typeof v!=='object'||Array.isArray(v)) return {};
+  const out={};
+  for(const [k,val] of Object.entries(v)){
+    const lang=smartfitMessageLang(k); const text=s(val);
+    if(text) out[lang]=text;
+  }
+  return out;
+}
+function smartfitLocalized(map,lang,fallback){
+  const l=smartfitMessageLang(lang);
+  return s(map[l]||map.en||map.ko||fallback);
+}
+
+router.post('/api/gm/smartfit/template/message/send', express.json({limit:'256kb'}), async (req,res)=>{
   const pool=db(req); const client=await pool.connect();
   try{
     const b=req.body||{}; const templateId=i(b.template_id||b.templateId,0); const member=s(b.member_id||b.memberId); const message=s(b.message);
+    const sourceLang=smartfitMessageLang(b.source_lang||b.sourceLang||'ko');
+    const messageTranslations=smartfitTranslationMap(b.message_translations||b.messageTranslations);
+    const titleTranslations=smartfitTranslationMap(b.title_translations||b.titleTranslations);
     if(!member) return fail(res,401,'login required');
     if(!templateId) return fail(res,400,'template_id required');
     if(!message) return fail(res,400,'message required');
@@ -867,8 +894,10 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
     const immediateMax=smartfitImmediateMax(); const night=candidates.rowCount>immediateMax;
     let inserted=0;
     for(const row of candidates.rows){
+      const receiverLang=smartfitMessageLang(row.device_lang);
+      const localizedMessage=smartfitLocalized(messageTranslations,receiverLang,message);
       const ir=await client.query(`INSERT INTO gm_smartfit_message_receiver(serial_no,template_id,receiver_member_id,device_lang,relation_depth,message,send_status)
-        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(template_id,receiver_member_id) DO NOTHING`,[serial,templateId,row.member_id,s(row.device_lang).slice(0,10),row.relation_depth,message,night?'QUEUED_NIGHT':'QUEUED']);
+        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(template_id,receiver_member_id) DO NOTHING`,[serial,templateId,row.member_id,s(row.device_lang).slice(0,10),row.relation_depth,localizedMessage,night?'QUEUED_NIGHT':'QUEUED']);
       inserted+=ir.rowCount;
     }
     if(inserted>0){
@@ -876,7 +905,7 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
       const nextSql=night?nextNightKstSql():'CURRENT_TIMESTAMP';
       await client.query(`INSERT INTO gm_event_queue(event_type,event_key,payload,status,next_retry_at,created_at,updated_at)
         VALUES('SMARTFIT_MESSAGE_SEND',$1,$2::jsonb,'PENDING',${nextSql},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-        ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko)})]);
+        ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko),source_lang:sourceLang,title_translations:titleTranslations})]);
     }
     await client.query('COMMIT');
     ok(res,{template_id:templateId,serial_no:serial,new_receiver_count:inserted,night_queue:night,immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
