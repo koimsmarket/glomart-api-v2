@@ -9,7 +9,7 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_ORDER_ROUTE_V037_CAFE24_INTERNAL_CONFIRM';
+const VERSION = 'GM_ORDER_ROUTE_V038_MIXED_SHIPPING_BASKET_CLEAN';
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function clean(v){
@@ -423,9 +423,22 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
     const action=await upsertOrder(client,row);
     const itemCount=await replaceCafe24InternalItems(client,row,items);
     await client.query('UPDATE gm_order_item SET cafe24_order_no=$2, updated_at=$3 WHERE order_no=$1',[orderNo,cafeNo,nowKst()]);
+    /* 주문 확정 후 이번 주문에 포함된 외부상품만 gm_basket에서 삭제한다.
+       회원의 다른 장바구니 상품까지 지우지 않도록 order_item의 mall_code + pi_ii_vi로 정확히 제한한다. */
+    const basketCleanup=await client.query(`
+      DELETE FROM gm_basket b
+      USING gm_order_item oi
+      WHERE oi.order_no=$1
+        AND COALESCE(oi.source_mall,oi.mall_code,'') <> 'GMKR'
+        AND b.mall_code=oi.mall_code
+        AND b.pi_ii_vi=oi.pi_ii_vi
+        AND (($2<>'' AND b.member_id=$2) OR ($3<>'' AND b.guest_key=$3))
+      RETURNING b.mall_code,b.pi_ii_vi
+    `,[orderNo,clean(row.member_id),clean(row.guest_key)]);
+    const basketDeleted=basketCleanup.rowCount||0;
     await client.query('COMMIT');
-    console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({order_no:orderNo,cafe24_order_no:cafeNo,items:itemCount,action}));
-    ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,item_count:itemCount,order_action:action});
+    console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({order_no:orderNo,cafe24_order_no:cafeNo,items:itemCount,action,basket_deleted:basketDeleted}));
+    ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,item_count:itemCount,order_action:action,basket_deleted:basketDeleted});
     const eventQueue=req.app.locals.eventQueue;
     if(eventQueue&&typeof eventQueue.enqueueOrderCreate==='function')eventQueue.enqueueOrderCreate(orderNo).catch(()=>{});
   }catch(e){
