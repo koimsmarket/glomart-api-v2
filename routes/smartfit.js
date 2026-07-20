@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V045_MESSAGE_ASSET_V068';
+const VERSION = 'GM_SMARTFIT_SERVER_V046_LIKE_COUNTER_V069';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -617,6 +617,42 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
     const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id,'T']);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
+});
+
+
+/* GM_SMARTFIT_LIKE_COUNTER_V069
+ * 좋아요 회원별 관계 테이블/레코드는 만들지 않는다.
+ * 사용자 기기의 localStorage가 LIKE/UNLIKE 상태를 보관하고,
+ * 서버는 기존 SmartFit 대상의 누적 like_count 숫자만 원자적으로 증감한다.
+ * 이 라우트는 테이블 생성, ALTER TABLE, 좋아요 이력 INSERT를 수행하지 않는다.
+ */
+router.post('/api/gm/smartfit/like', async (req,res)=>{
+  try{
+    const pool=db(req); const b=req.body||{};
+    const type=s(b.target_type || b.targetType || '').toLowerCase();
+    const action=s(b.action || '').toUpperCase();
+    if(!['LIKE','UNLIKE'].includes(action)) return fail(res,400,'action must be LIKE or UNLIKE');
+
+    let table='', idColumn='', id=0;
+    if(type==='template'){
+      table='gm_smartfit_template'; idColumn='template_id'; id=i(b.template_id || b.templateId || b.target_id || b.targetId,0);
+    }else if(type==='space'){
+      table='gm_smartfit_space'; idColumn='space_id'; id=i(b.space_id || b.spaceId || b.target_id || b.targetId,0);
+    }else return fail(res,400,'target_type must be template or space');
+    if(!id) return fail(res,400,idColumn+' required');
+
+    const delta=action==='LIKE' ? 1 : -1;
+    const sql=`UPDATE ${table}
+      SET like_count=GREATEST(0,COALESCE(like_count,0)+$1), updated_at=CURRENT_TIMESTAMP
+      WHERE ${idColumn}=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'
+      RETURNING ${idColumn},like_count`;
+    const r=await pool.query(sql,[delta,id]);
+    if(!r.rowCount) return fail(res,404,type+' not found');
+    ok(res,{target_type:type,target_id:id,action,like_count:Number(r.rows[0].like_count||0)});
+  }catch(e){
+    console.error('[SMARTFIT_LIKE_COUNTER_ERROR_V069]',{detail:String(e&&e.message||e),code:s(e&&e.code)});
+    fail(res,500,'smartfit like failed',{detail:String(e&&e.message||e),code:s(e&&e.code)});
+  }
 });
 
 router.post('/api/gm/smartfit/space/favorite', async (req,res)=>{
