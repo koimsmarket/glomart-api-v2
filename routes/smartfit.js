@@ -801,7 +801,7 @@ router.get('/api/gm/smartfit/creator/message/preference', async (req,res)=>{
     if(!member) return fail(res,401,'login required');
     if(!creator) return fail(res,400,'creator_member_id required');
     const row=(await pool.query(`SELECT message_accept_yn FROM gm_smartfit_subscribe WHERE member_id=$1 AND creator_member_id=$2 LIMIT 1`,[member,creator])).rows[0];
-    ok(res,{member_id:member,creator_member_id:creator,message_receive_yn:row&&row.message_accept_yn==='N'?'N':'Y',reject_record_yn:row&&row.message_accept_yn==='N'?'Y':'N'});
+    ok(res,{member_id:member,creator_member_id:creator,message_receive_yn:row&&row.message_accept_yn==='N'?'N':'Y',message_accept_yn:row&&row.message_accept_yn==='N'?'N':'Y',reject_record_yn:row&&row.message_accept_yn==='N'?'Y':'N'});
   }catch(e){ fail(res,500,'message preference failed',{detail:String(e.message||e)}); }
 });
 
@@ -815,7 +815,7 @@ router.post('/api/gm/smartfit/creator/message/reject', async (req,res)=>{
       VALUES($1,$2,'N')
       ON CONFLICT(member_id,creator_member_id) DO UPDATE SET message_accept_yn='N'
       RETURNING member_id,creator_member_id,message_accept_yn`,[member,creator]);
-    ok(res,{item:r.rows[0],message_receive_yn:'N'});
+    ok(res,{item:r.rows[0],message_receive_yn:'N',message_accept_yn:'N'});
   }catch(e){ fail(res,500,'message reject failed',{detail:String(e.message||e)}); }
 });
 
@@ -825,7 +825,7 @@ router.post('/api/gm/smartfit/creator/message/allow', async (req,res)=>{
     if(!member) return fail(res,401,'login required');
     if(!creator) return fail(res,400,'creator_member_id required');
     const r=await pool.query(`DELETE FROM gm_smartfit_subscribe WHERE member_id=$1 AND creator_member_id=$2 AND message_accept_yn='N'`,[member,creator]);
-    ok(res,{deleted:r.rowCount,message_receive_yn:'Y'});
+    ok(res,{deleted:r.rowCount,message_receive_yn:'Y',message_accept_yn:'Y'});
   }catch(e){ fail(res,500,'message allow failed',{detail:String(e.message||e)}); }
 });
 
@@ -847,11 +847,19 @@ router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
           AND c.member_id<>$1
       )
       SELECT COUNT(*)::bigint AS total_count,
-        COUNT(*) FILTER (WHERE COALESCE(r.message_accept_yn,'Y')<>'N')::bigint AS accept_count,
-        COUNT(*) FILTER (WHERE r.message_accept_yn='N')::bigint AS reject_count
-      FROM collectors c
-      LEFT JOIN gm_smartfit_subscribe r
-        ON r.member_id=c.member_id AND r.creator_member_id=$1`,[member])).rows[0]||{};
+        COUNT(*) FILTER (WHERE NOT EXISTS (
+          SELECT 1 FROM gm_smartfit_subscribe r
+          WHERE r.member_id=c.member_id
+            AND r.creator_member_id=$1
+            AND r.message_accept_yn='N'
+        ))::bigint AS accept_count,
+        COUNT(*) FILTER (WHERE EXISTS (
+          SELECT 1 FROM gm_smartfit_subscribe r
+          WHERE r.member_id=c.member_id
+            AND r.creator_member_id=$1
+            AND r.message_accept_yn='N'
+        ))::bigint AS reject_count
+      FROM collectors c`,[member])).rows[0]||{};
     const sent=(await pool.query(`SELECT COUNT(*)::bigint AS registered_count,
       COUNT(*) FILTER (WHERE send_status IN ('SENT','READ'))::bigint AS sent_count,
       COUNT(*) FILTER (WHERE send_status='READ' OR read_at IS NOT NULL)::bigint AS read_count,
@@ -905,14 +913,15 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
         SELECT DISTINCT c.member_id,NULL::smallint AS relation_depth
         FROM gm_smartfit_collection c
         JOIN gm_smartfit_template ct ON ct.template_id=c.template_id
-        LEFT JOIN gm_smartfit_subscribe reject_state
-          ON reject_state.member_id=c.member_id
-         AND reject_state.creator_member_id=$1
-         AND reject_state.message_accept_yn='N'
         WHERE ct.creator_member_id=$1
           AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
           AND c.member_id<>$1
-          AND reject_state.member_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM gm_smartfit_subscribe reject_state
+            WHERE reject_state.member_id=c.member_id
+              AND reject_state.creator_member_id=$1
+              AND reject_state.message_accept_yn='N'
+          )
       ), merged AS (
         SELECT member_id,MIN(relation_depth) FILTER (WHERE relation_depth IS NOT NULL)::smallint AS relation_depth
         FROM (SELECT * FROM accepted_relations UNION ALL SELECT * FROM subscribers) x

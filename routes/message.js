@@ -338,14 +338,15 @@ async function getCreatorCollectors(pool, creator){
   const r = await pool.query(`SELECT DISTINCT c.member_id, 0 AS chon_depth
     FROM gm_smartfit_collection c
     JOIN gm_smartfit_template t ON t.template_id=c.template_id
-    LEFT JOIN gm_smartfit_subscribe reject_state
-      ON reject_state.member_id=c.member_id
-     AND reject_state.creator_member_id=t.creator_member_id
-     AND reject_state.message_accept_yn='N'
     WHERE t.creator_member_id=$1
       AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
       AND c.member_id<>$1
-      AND reject_state.member_id IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM gm_smartfit_subscribe reject_state
+        WHERE reject_state.member_id=c.member_id
+          AND reject_state.creator_member_id=$1
+          AND reject_state.message_accept_yn='N'
+      )
     ORDER BY c.member_id`, [creator]);
   return r.rows || [];
 }
@@ -515,20 +516,60 @@ router.post('/api/gm/message/share/action', async (req,res)=>{
 
 
 
-// Legacy space-subscription endpoints are intentionally disabled.
-// SmartFit subscription is template collection; creator message opt-out is handled by
-// /api/gm/smartfit/creator/message/reject and /allow.
+// SmartFit space subscription: visitor requests future template messages from a space.
 router.post('/api/gm/message/smartfit/space/subscribe', async (req,res)=>{
-  fail(res,410,'deprecated: collect a template to subscribe');
+  try{
+    const pool=db(req), b=req.body||{};
+    const spaceNo=s(b.space_no||b.spaceNo||b.space_id||b.spaceId);
+    const member=s(b.member_id||b.memberId);
+    if(!spaceNo||!member) return fail(res,400,'space_no and member_id required');
+    const r=await pool.query(`INSERT INTO gm_smartfit_space_subscriber(space_no,member_id,subscribed_at,unsubscribed_at,active_yn)
+      VALUES($1,$2,CURRENT_TIMESTAMP,NULL,'Y')
+      ON CONFLICT(space_no,member_id) DO UPDATE SET subscribed_at=CURRENT_TIMESTAMP, unsubscribed_at=NULL, active_yn='Y'
+      RETURNING *`,[spaceNo,member]);
+    ok(res,{ item:r.rows[0] });
+  }catch(e){ fail(res,500,'space subscribe failed',{ detail:String(e.message||e) }); }
 });
+
 router.post('/api/gm/message/smartfit/space/unsubscribe', async (req,res)=>{
-  fail(res,410,'deprecated: creator message rejection is separate from template collection');
+  try{
+    const pool=db(req), b=req.body||{};
+    const spaceNo=s(b.space_no||b.spaceNo||b.space_id||b.spaceId);
+    const member=s(b.member_id||b.memberId);
+    if(!spaceNo||!member) return fail(res,400,'space_no and member_id required');
+    const r=await pool.query(`UPDATE gm_smartfit_space_subscriber
+      SET active_yn='N', unsubscribed_at=CURRENT_TIMESTAMP
+      WHERE space_no=$1 AND member_id=$2 RETURNING *`,[spaceNo,member]);
+    ok(res,{ updated:r.rowCount, item:r.rows[0]||null });
+  }catch(e){ fail(res,500,'space unsubscribe failed',{ detail:String(e.message||e) }); }
 });
+
 router.get('/api/gm/message/smartfit/space/subscribers', async (req,res)=>{
-  fail(res,410,'deprecated: subscribers are template collectors');
+  try{
+    const pool=db(req);
+    const spaceNo=s(req.query.space_no||req.query.spaceNo||req.query.space_id||req.query.spaceId);
+    if(!spaceNo) return fail(res,400,'space_no required');
+    const limit=Math.min(1000,Math.max(1,Number(req.query.limit||200)));
+    const r=await pool.query(`SELECT space_no, member_id, subscribed_at
+      FROM gm_smartfit_space_subscriber
+      WHERE space_no=$1 AND active_yn='Y'
+      ORDER BY subscribed_at DESC LIMIT $2`,[spaceNo,limit]);
+    const c=await pool.query(`SELECT COUNT(*)::int AS cnt FROM gm_smartfit_space_subscriber WHERE space_no=$1 AND active_yn='Y'`,[spaceNo]);
+    ok(res,{ space_no:spaceNo, count:c.rows[0]?.cnt||0, items:r.rows });
+  }catch(e){ fail(res,500,'space subscribers failed',{ detail:String(e.message||e) }); }
 });
+
 router.get('/api/gm/message/smartfit/space/my-subscriptions', async (req,res)=>{
-  fail(res,410,'deprecated: use SmartFit collection list');
+  try{
+    const pool=db(req);
+    const member=s(req.query.member_id||req.query.memberId);
+    if(!member) return fail(res,400,'member_id required');
+    const r=await pool.query(`SELECT space_no, member_id, subscribed_at
+      FROM gm_smartfit_space_subscriber
+      WHERE member_id=$1 AND active_yn='Y'
+      ORDER BY subscribed_at DESC`,[member]);
+    ok(res,{ items:r.rows });
+  }catch(e){ fail(res,500,'my space subscriptions failed',{ detail:String(e.message||e) }); }
 });
 
 router.post('/api/gm/message/cleanup', async (req,res)=>{
