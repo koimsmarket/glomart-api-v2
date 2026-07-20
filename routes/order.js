@@ -394,6 +394,15 @@ async function replaceCafe24InternalItems(client, orderRow, inputItems){
   return itemCount;
 }
 
+
+function isCafe24InternalItem(item){
+  const mall=clean(item && (item.source_mall || item.sourceMall || item.mall_code || item.mallCode)).toUpperCase();
+  return mall === 'GMKR';
+}
+function hasCafe24InternalItems(items){
+  return Array.isArray(items) && items.some(isCafe24InternalItem);
+}
+
 router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
   const pool=db(req);
   if(!pool)return fail(res,500,'DB pool is not attached');
@@ -440,7 +449,9 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
     console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({order_no:orderNo,cafe24_order_no:cafeNo,items:itemCount,action,basket_deleted:basketDeleted}));
     ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,item_count:itemCount,order_action:action,basket_deleted:basketDeleted});
     const eventQueue=req.app.locals.eventQueue;
-    if(eventQueue&&typeof eventQueue.enqueueOrderCreate==='function')eventQueue.enqueueOrderCreate(orderNo).catch(()=>{});
+    if(eventQueue&&typeof eventQueue.enqueueOrderCompleted==='function'){
+      eventQueue.enqueueOrderCompleted(orderNo).catch(eventErr=>console.error('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]',String(eventErr&&eventErr.message||eventErr)));
+    }
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
     console.error('[GM_CAFE24_ORDER_CONFIRM_ERROR]',String(e&&e.message||e));
@@ -464,9 +475,12 @@ router.post('/api/gm/order/create', async (req, res) => {
     await client.query('COMMIT');
     console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price }));
     ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price });
+    /* 외부상품 전용 주문은 이 시점에 최종 상품 구성이 확정된다.
+       카페24 내부상품이 포함된 혼합 주문은 cafe24-confirm에서 내부상품이 합쳐진 뒤
+       ORDER_COMPLETED를 등록해야 부분 매출이 먼저 집계되는 것을 막을 수 있다. */
     const eventQueue=req.app.locals.eventQueue;
-    if(eventQueue&&typeof eventQueue.enqueueOrderCreate==='function'){
-      eventQueue.enqueueOrderCreate(orderRow.order_no).catch(eventErr=>console.error('[EVENT_ORDER_QUEUE_SKIP]', String(eventErr&&eventErr.message||eventErr)));
+    if(!hasCafe24InternalItems(inputItems) && eventQueue && typeof eventQueue.enqueueOrderCompleted==='function'){
+      eventQueue.enqueueOrderCompleted(orderRow.order_no).catch(eventErr=>console.error('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]', String(eventErr&&eventErr.message||eventErr)));
     }
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});

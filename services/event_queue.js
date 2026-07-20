@@ -59,5 +59,11 @@ module.exports = function createEventQueue(pool){
     return enqueue('ORDER_CREATE', `ORDER_CREATE:${no}`, { order_no:no });
   }
 
-  return { enqueue, enqueueBasketAdd, enqueueDetailView, enqueueMemberJoin, enqueueOrderCreate };
+  async function enqueueOrderCompleted(orderNo){
+    const no = clean(orderNo);
+    if(!no) return { queued:false, reason:'order_no_missing' };
+    return enqueue('ORDER_COMPLETED', `ORDER_COMPLETED:${no}`, { order_no:no });
+  }
+
+  return { enqueue, enqueueBasketAdd, enqueueDetailView, enqueueMemberJoin, enqueueOrderCreate, enqueueOrderCompleted };
 };

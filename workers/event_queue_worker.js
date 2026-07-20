@@ -84,7 +84,7 @@ async function processOne(pool, eventService, job){
       if(!result || !result.updated) throw new Error(`detail_not_ready:${result && result.reason || 'unknown'}`);
     }else if(type === 'MEMBER_JOIN'){
       result = await eventService.applyMemberJoin(client, payload);
-    }else if(type === 'ORDER_CREATE'){
+    }else if(type === 'ORDER_CREATE' || type === 'ORDER_COMPLETED'){
       const loaded = await loadOrder(client, clean(payload.order_no));
       result = await eventService.applyOrderCreate(client, loaded.order, loaded.items);
     }else if(type === 'SMARTFIT_MESSAGE_SEND'){
