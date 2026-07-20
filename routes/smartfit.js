@@ -790,6 +790,45 @@ function nextNightKstSql(){
   END`;
 }
 
+
+/* Creator-level message preference.
+ * No row means receive. An N row blocks every message from that creator.
+ * Re-allowing removes the reject row; template collection/subscription is untouched.
+ */
+router.get('/api/gm/smartfit/creator/message/preference', async (req,res)=>{
+  try{
+    const pool=db(req); const member=s(req.query.member_id||req.query.memberId); const creator=s(req.query.creator_member_id||req.query.creatorMemberId);
+    if(!member) return fail(res,401,'login required');
+    if(!creator) return fail(res,400,'creator_member_id required');
+    const row=(await pool.query(`SELECT message_accept_yn FROM gm_smartfit_subscribe WHERE member_id=$1 AND creator_member_id=$2 LIMIT 1`,[member,creator])).rows[0];
+    ok(res,{member_id:member,creator_member_id:creator,message_receive_yn:row&&row.message_accept_yn==='N'?'N':'Y',reject_record_yn:row&&row.message_accept_yn==='N'?'Y':'N'});
+  }catch(e){ fail(res,500,'message preference failed',{detail:String(e.message||e)}); }
+});
+
+router.post('/api/gm/smartfit/creator/message/reject', async (req,res)=>{
+  try{
+    const pool=db(req),b=req.body||{}; const member=s(b.member_id||b.memberId); const creator=s(b.creator_member_id||b.creatorMemberId);
+    if(!member) return fail(res,401,'login required');
+    if(!creator) return fail(res,400,'creator_member_id required');
+    if(member===creator) return fail(res,400,'self creator is not allowed');
+    const r=await pool.query(`INSERT INTO gm_smartfit_subscribe(member_id,creator_member_id,message_accept_yn)
+      VALUES($1,$2,'N')
+      ON CONFLICT(member_id,creator_member_id) DO UPDATE SET message_accept_yn='N'
+      RETURNING member_id,creator_member_id,message_accept_yn`,[member,creator]);
+    ok(res,{item:r.rows[0],message_receive_yn:'N'});
+  }catch(e){ fail(res,500,'message reject failed',{detail:String(e.message||e)}); }
+});
+
+router.post('/api/gm/smartfit/creator/message/allow', async (req,res)=>{
+  try{
+    const pool=db(req),b=req.body||{}; const member=s(b.member_id||b.memberId); const creator=s(b.creator_member_id||b.creatorMemberId);
+    if(!member) return fail(res,401,'login required');
+    if(!creator) return fail(res,400,'creator_member_id required');
+    const r=await pool.query(`DELETE FROM gm_smartfit_subscribe WHERE member_id=$1 AND creator_member_id=$2 AND message_accept_yn='N'`,[member,creator]);
+    ok(res,{deleted:r.rowCount,message_receive_yn:'Y'});
+  }catch(e){ fail(res,500,'message allow failed',{detail:String(e.message||e)}); }
+});
+
 router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
   try{
     const pool=db(req); const templateId=i(req.query.template_id||req.query.templateId,0); const member=s(req.query.member_id||req.query.memberId);
@@ -797,10 +836,22 @@ router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
     if(!templateId) return fail(res,400,'template_id required');
     const template=await assertTemplateCreator(pool,templateId,member);
     const relation=(await pool.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[member])).rows[0]||{};
-    const sub=(await pool.query(`SELECT COUNT(*)::bigint AS total_count,
-      COUNT(*) FILTER (WHERE message_accept_yn='Y')::bigint AS accept_count,
-      COUNT(*) FILTER (WHERE message_accept_yn='N')::bigint AS reject_count
-      FROM gm_smartfit_subscribe WHERE creator_member_id=$1`,[member])).rows[0]||{};
+    /* Template collectors are subscribers. gm_smartfit_subscribe stores only
+       creator-level message rejection/compatibility state; no row means receive. */
+    const sub=(await pool.query(`WITH collectors AS (
+        SELECT DISTINCT c.member_id
+        FROM gm_smartfit_collection c
+        JOIN gm_smartfit_template t ON t.template_id=c.template_id
+        WHERE t.creator_member_id=$1
+          AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
+          AND c.member_id<>$1
+      )
+      SELECT COUNT(*)::bigint AS total_count,
+        COUNT(*) FILTER (WHERE COALESCE(r.message_accept_yn,'Y')<>'N')::bigint AS accept_count,
+        COUNT(*) FILTER (WHERE r.message_accept_yn='N')::bigint AS reject_count
+      FROM collectors c
+      LEFT JOIN gm_smartfit_subscribe r
+        ON r.member_id=c.member_id AND r.creator_member_id=$1`,[member])).rows[0]||{};
     const sent=(await pool.query(`SELECT COUNT(*)::bigint AS registered_count,
       COUNT(*) FILTER (WHERE send_status IN ('SENT','READ'))::bigint AS sent_count,
       COUNT(*) FILTER (WHERE send_status='READ' OR read_at IS NOT NULL)::bigint AS read_count,
@@ -817,37 +868,10 @@ router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
   }catch(e){ fail(res,400,'template message summary failed',{detail:String(e.message||e)}); }
 });
 
-function smartfitMessageLang(v){
-  const raw=s(v).toLowerCase().replace(/_/g,'-');
-  if(!raw) return 'en';
-  if(raw==='zh-tw'||raw.startsWith('zh-hant')||raw.startsWith('zh-hk')||raw.startsWith('zh-mo')||raw==='tw') return 'tw';
-  if(raw==='zh-cn'||raw.startsWith('zh-hans')||raw==='cn'||raw==='zh') return 'zh';
-  const base=raw.split('-')[0];
-  const aliases={kr:'ko',jp:'ja',vn:'vi'};
-  const lang=aliases[base]||base;
-  return ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'].includes(lang)?lang:'en';
-}
-function smartfitTranslationMap(v){
-  if(!v||typeof v!=='object'||Array.isArray(v)) return {};
-  const out={};
-  for(const [k,val] of Object.entries(v)){
-    const lang=smartfitMessageLang(k); const text=s(val);
-    if(text) out[lang]=text;
-  }
-  return out;
-}
-function smartfitLocalized(map,lang,fallback){
-  const l=smartfitMessageLang(lang);
-  return s(map[l]||map.en||map.ko||fallback);
-}
-
-router.post('/api/gm/smartfit/template/message/send', express.json({limit:'256kb'}), async (req,res)=>{
+router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'}), async (req,res)=>{
   const pool=db(req); const client=await pool.connect();
   try{
     const b=req.body||{}; const templateId=i(b.template_id||b.templateId,0); const member=s(b.member_id||b.memberId); const message=s(b.message);
-    const sourceLang=smartfitMessageLang(b.source_lang||b.sourceLang||'ko');
-    const messageTranslations=smartfitTranslationMap(b.message_translations||b.messageTranslations);
-    const titleTranslations=smartfitTranslationMap(b.title_translations||b.titleTranslations);
     if(!member) return fail(res,401,'login required');
     if(!templateId) return fail(res,400,'template_id required');
     if(!message) return fail(res,400,'message required');
@@ -878,9 +902,17 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'256kb
         LEFT JOIN gm_member_relation_count c ON c.member_id=r.member_id
         WHERE r.relation_depth<=COALESCE(c.message_accept_relation_depth,5)
       ), subscribers AS (
-        SELECT s.member_id,NULL::smallint AS relation_depth
-        FROM gm_smartfit_subscribe s
-        WHERE s.creator_member_id=$1 AND s.message_accept_yn='Y' AND s.member_id<>$1
+        SELECT DISTINCT c.member_id,NULL::smallint AS relation_depth
+        FROM gm_smartfit_collection c
+        JOIN gm_smartfit_template ct ON ct.template_id=c.template_id
+        LEFT JOIN gm_smartfit_subscribe reject_state
+          ON reject_state.member_id=c.member_id
+         AND reject_state.creator_member_id=$1
+         AND reject_state.message_accept_yn='N'
+        WHERE ct.creator_member_id=$1
+          AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
+          AND c.member_id<>$1
+          AND reject_state.member_id IS NULL
       ), merged AS (
         SELECT member_id,MIN(relation_depth) FILTER (WHERE relation_depth IS NOT NULL)::smallint AS relation_depth
         FROM (SELECT * FROM accepted_relations UNION ALL SELECT * FROM subscribers) x
@@ -894,10 +926,8 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'256kb
     const immediateMax=smartfitImmediateMax(); const night=candidates.rowCount>immediateMax;
     let inserted=0;
     for(const row of candidates.rows){
-      const receiverLang=smartfitMessageLang(row.device_lang);
-      const localizedMessage=smartfitLocalized(messageTranslations,receiverLang,message);
       const ir=await client.query(`INSERT INTO gm_smartfit_message_receiver(serial_no,template_id,receiver_member_id,device_lang,relation_depth,message,send_status)
-        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(template_id,receiver_member_id) DO NOTHING`,[serial,templateId,row.member_id,s(row.device_lang).slice(0,10),row.relation_depth,localizedMessage,night?'QUEUED_NIGHT':'QUEUED']);
+        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(template_id,receiver_member_id) DO NOTHING`,[serial,templateId,row.member_id,s(row.device_lang).slice(0,10),row.relation_depth,message,night?'QUEUED_NIGHT':'QUEUED']);
       inserted+=ir.rowCount;
     }
     if(inserted>0){
@@ -905,7 +935,7 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'256kb
       const nextSql=night?nextNightKstSql():'CURRENT_TIMESTAMP';
       await client.query(`INSERT INTO gm_event_queue(event_type,event_key,payload,status,next_retry_at,created_at,updated_at)
         VALUES('SMARTFIT_MESSAGE_SEND',$1,$2::jsonb,'PENDING',${nextSql},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-        ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko),source_lang:sourceLang,title_translations:titleTranslations})]);
+        ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko)})]);
     }
     await client.query('COMMIT');
     ok(res,{template_id:templateId,serial_no:serial,new_receiver_count:inserted,night_queue:night,immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
