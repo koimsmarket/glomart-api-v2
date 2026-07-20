@@ -53,17 +53,16 @@ module.exports = function createEventQueue(pool){
     });
   }
 
-  async function enqueueOrderCreate(orderNo){
+  async function enqueueOrderCompleted(orderNo, extra){
     const no = clean(orderNo);
     if(!no) return { queued:false, reason:'order_no_missing' };
-    return enqueue('ORDER_CREATE', `ORDER_CREATE:${no}`, { order_no:no });
+    return enqueue('ORDER_COMPLETED', `ORDER_COMPLETED:${no}`, Object.assign({ order_no:no }, safeJson(extra || {})));
   }
 
-  async function enqueueOrderCompleted(orderNo){
-    const no = clean(orderNo);
-    if(!no) return { queued:false, reason:'order_no_missing' };
-    return enqueue('ORDER_COMPLETED', `ORDER_COMPLETED:${no}`, { order_no:no });
+  // 이전 호출부 호환. 신규 코드는 enqueueOrderCompleted만 사용한다.
+  async function enqueueOrderCreate(orderNo, extra){
+    return enqueueOrderCompleted(orderNo, extra);
   }
 
-  return { enqueue, enqueueBasketAdd, enqueueDetailView, enqueueMemberJoin, enqueueOrderCreate, enqueueOrderCompleted };
+  return { enqueue, enqueueBasketAdd, enqueueDetailView, enqueueMemberJoin, enqueueOrderCompleted, enqueueOrderCreate };
 };

@@ -84,9 +84,15 @@ async function processOne(pool, eventService, job){
       if(!result || !result.updated) throw new Error(`detail_not_ready:${result && result.reason || 'unknown'}`);
     }else if(type === 'MEMBER_JOIN'){
       result = await eventService.applyMemberJoin(client, payload);
-    }else if(type === 'ORDER_CREATE' || type === 'ORDER_COMPLETED'){
+    }else if(type === 'ORDER_COMPLETED' || type === 'ORDER_CREATE'){
       const loaded = await loadOrder(client, clean(payload.order_no));
-      result = await eventService.applyOrderCreate(client, loaded.order, loaded.items);
+      const orderStatus = clean(loaded.order.order_status).toLowerCase();
+      const cancelStatus = clean(loaded.order.cancel_status).toLowerCase();
+      if(orderStatus === 'cancelled' || cancelStatus === 'completed'){
+        result = { skipped:true, reason:'order_cancelled_before_aggregate', order_no:clean(payload.order_no) };
+      }else{
+        result = await eventService.applyOrderCreate(client, loaded.order, loaded.items);
+      }
     }else if(type === 'SMARTFIT_MESSAGE_SEND'){
       result = await processSmartfitMessageSend(client, payload);
     }else if(type === 'SMARTFIT_SUBSCRIBE' || type === 'SMARTFIT_UNSUBSCRIBE'){
