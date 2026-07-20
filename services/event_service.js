@@ -198,6 +198,66 @@ module.exports = function createEventService(deps){
     }
     return {updated:upstream.length,upstream};
   }
+  async function applyMemberJoin(client,payload){
+    const memberId=cleanText(payload && (payload.member_id||payload.memberId));
+    if(!memberId) throw new Error('member_id_missing');
+
+    const memberRow=(await client.query(
+      `SELECT member_id,recommender_id FROM gm_member WHERE member_id=$1 LIMIT 1`,
+      [memberId]
+    )).rows[0];
+    if(!memberRow) throw new Error(`member_not_found:${memberId}`);
+
+    let ancestorId=cleanText(memberRow.recommender_id || (payload && payload.recommender_id));
+    const ancestors=[];
+    const seen=new Set([memberId]);
+    for(let depth=1; depth<=5 && ancestorId; depth++){
+      if(seen.has(ancestorId)) throw new Error(`member_relation_cycle:${memberId}:${ancestorId}`);
+      seen.add(ancestorId);
+      const row=(await client.query(
+        `SELECT member_id,recommender_id FROM gm_member WHERE member_id=$1 LIMIT 1`,
+        [ancestorId]
+      )).rows[0];
+      if(!row) break;
+      ancestors.push({member_id:cleanText(row.member_id),depth});
+      ancestorId=cleanText(row.recommender_id);
+    }
+
+    const up=[0,0,0,0,0];
+    for(const a of ancestors) up[a.depth-1]=1;
+    await client.query(
+      `INSERT INTO gm_member_relation_count (
+         member_id,up_1_count,up_2_count,up_3_count,up_4_count,up_5_count,up_total_count,
+         down_1_count,down_2_count,down_3_count,down_4_count,down_5_count,down_total_count,
+         calculated_yn
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,0,0,0,0,0,0,'T')
+       ON CONFLICT (member_id) DO UPDATE SET
+         up_1_count=EXCLUDED.up_1_count,
+         up_2_count=EXCLUDED.up_2_count,
+         up_3_count=EXCLUDED.up_3_count,
+         up_4_count=EXCLUDED.up_4_count,
+         up_5_count=EXCLUDED.up_5_count,
+         up_total_count=EXCLUDED.up_total_count,
+         calculated_yn='T'`,
+      [memberId,up[0],up[1],up[2],up[3],up[4],ancestors.length]
+    );
+
+    for(const a of ancestors){
+      const col=`down_${a.depth}_count`;
+      await client.query(
+        `INSERT INTO gm_member_relation_count (
+           member_id,${col},down_total_count,calculated_yn
+         ) VALUES ($1,1,1,'F')
+         ON CONFLICT (member_id) DO UPDATE SET
+           ${col}=gm_member_relation_count.${col}+1,
+           down_total_count=gm_member_relation_count.down_total_count+1`,
+        [a.member_id]
+      );
+    }
+
+    return {applied:true,member_id:memberId,upline_count:ancestors.length,ancestors};
+  }
+
   async function applyOrderCreate(client,order,items){
     let accepted=0,totalSales=0,totalQty=0;
     for(const item of items||[]){
@@ -213,5 +273,5 @@ module.exports = function createEventService(deps){
     return {applied:accepted>0,accepted_items:accepted,sales_qty:totalQty,sales_amount:totalSales,network_updated:network.updated||0};
   }
 
-  return { applySearch, applyDetail, applyBasketAdd, applyOrderCreate };
+  return { applySearch, applyDetail, applyBasketAdd, applyMemberJoin, applyOrderCreate };
 };

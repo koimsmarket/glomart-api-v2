@@ -80,9 +80,9 @@ function memberPayload(b){
     country_code: pick(b, ['country_code','countryCode','country']),
     nationality: pick(b, ['nationality','citizenship']),
     language_code: pick(b, ['language_code','languageCode','lang'],'ko'),
-    cs_language: pick(b, ['cs_language','csLanguage','language_code','languageCode','lang'],'ko'),
+    cs_language: pick(b, ['cs_language','csLanguage','cs_lang','csLang','language_code','languageCode','lang'],'ko'),
     device_lang: validDeviceLang(pick(b, ['device_lang','deviceLang','device_language','deviceLanguage'])),
-    recommender_id: pick(b, ['recommender_id','recommenderId','referrer_id']),
+    recommender_id: pick(b, ['recommender_id','recommenderId','referrer_id','reco_id','recoId']),
     member_grade: pick(b, ['member_grade','memberGrade']),
     member_status: pick(b, ['member_status','memberStatus'],'active'),
     refund_bank_name: pick(b, ['refund_bank_name','refundBankName','bank_name']),
@@ -151,6 +151,8 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
+    const existing=(await client.query(`SELECT member_id,recommender_id FROM gm_member WHERE member_id=$1 FOR UPDATE`,[p.member_id])).rows[0] || null;
+    const isNewMember=!existing;
     const sql=`INSERT INTO gm_member (
       member_id,cafe24_member_id,member_name,member_name_en,email,phone,country_code,nationality,language_code,cs_language,device_lang,
       recommender_id,member_grade,member_status,refund_bank_name,refund_account_no,refund_account_holder,
@@ -170,7 +172,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       language_code=COALESCE(NULLIF(EXCLUDED.language_code,''),gm_member.language_code),
       cs_language=COALESCE(NULLIF(EXCLUDED.cs_language,''),gm_member.cs_language),
       device_lang=COALESCE(NULLIF(EXCLUDED.device_lang,''),gm_member.device_lang),
-      recommender_id=COALESCE(NULLIF(EXCLUDED.recommender_id,''),gm_member.recommender_id),
+      recommender_id=gm_member.recommender_id,
       member_grade=COALESCE(NULLIF(EXCLUDED.member_grade,''),gm_member.member_grade),
       member_status=COALESCE(NULLIF(EXCLUDED.member_status,''),gm_member.member_status),
       refund_bank_name=COALESCE(NULLIF(EXCLUDED.refund_bank_name,''),gm_member.refund_bank_name),
@@ -203,6 +205,10 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       passwordMeta ? passwordMeta.password_updated_at : null,
       passwordMeta ? passwordMeta.password_migrated : 'N'];
     const mr=await client.query(sql, vals);
+    if(isNewMember){
+      await client.query(`INSERT INTO gm_member_relation_count (member_id,calculated_yn)
+        VALUES ($1,'F') ON CONFLICT (member_id) DO NOTHING`,[p.member_id]);
+    }
     // 회원 동기화는 gm_member만 갱신한다.
     // 주문서 진입/회원 동기화 과정에서 gm_member_address를 자동 INSERT/UPDATE하지 않는다.
     // 배송지 등록·수정은 전용 address/upsert API에서만 처리한다.
@@ -212,7 +218,12 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       LIMIT 1`, [p.member_id]);
     const address=ar.rows[0] || null;
     await client.query('COMMIT');
-    res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address});
+    res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address,is_new_member:isNewMember});
+    if(isNewMember && req.app.locals.eventQueue){
+      req.app.locals.eventQueue.enqueueMemberJoin(p.member_id, mr.rows[0] && mr.rows[0].recommender_id)
+        .then(x=>console.log('[MEMBER_JOIN_EVENT_QUEUE]',JSON.stringify({member_id:p.member_id,result:x})))
+        .catch(e=>console.error('[MEMBER_JOIN_EVENT_QUEUE_SKIP]',String(e&&e.message||e)));
+    }
   }catch(e){ await client.query('ROLLBACK').catch(()=>{}); console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 처리하지 못했습니다. 다시 시도해 주세요.'}); }
   finally{ client.release(); }
 });

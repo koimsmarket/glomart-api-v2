@@ -43,11 +43,21 @@ module.exports = function createEventQueue(pool){
     return enqueue('DETAIL_VIEW', `DETAIL_VIEW:${token}:${uid}`, row);
   }
 
+  async function enqueueMemberJoin(memberId, recommenderId){
+    const member = clean(memberId);
+    const recommender = clean(recommenderId);
+    if(!member) return { queued:false, reason:'member_id_missing' };
+    return enqueue('MEMBER_JOIN', `MEMBER_JOIN:${member}`, {
+      member_id:member,
+      recommender_id:recommender
+    });
+  }
+
   async function enqueueOrderCreate(orderNo){
     const no = clean(orderNo);
     if(!no) return { queued:false, reason:'order_no_missing' };
     return enqueue('ORDER_CREATE', `ORDER_CREATE:${no}`, { order_no:no });
   }
 
-  return { enqueue, enqueueBasketAdd, enqueueDetailView, enqueueOrderCreate };
+  return { enqueue, enqueueBasketAdd, enqueueDetailView, enqueueMemberJoin, enqueueOrderCreate };
 };

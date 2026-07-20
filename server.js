@@ -2,6 +2,8 @@ const express = require('express');
 const keywordRelationService = require('./services/keyword_relation');
 const installSearchLogService = require('./services/search_log');
 const createEventService = require('./services/event_service');
+const createEventQueue = require('./services/event_queue');
+const { startEventQueueWorker } = require('./workers/event_queue_worker');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -1675,6 +1677,9 @@ try{
 }
 const eventService = createEventService({ pool, tableExists, cleanText, currentYyyymm, currentYyyy });
 app.locals.eventService = eventService;
+const eventQueue = createEventQueue(pool);
+app.locals.eventQueue = eventQueue;
+startEventQueueWorker(pool, eventService, { intervalMs:2000 });
 installSearchLogService({
   app,
   pool,
