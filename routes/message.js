@@ -509,30 +509,53 @@ router.post('/api/gm/message/share/action', async (req,res)=>{
 
 // SmartFit space subscription: visitor requests future template messages from a space.
 router.post('/api/gm/message/smartfit/space/subscribe', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
   try{
-    const pool=db(req), b=req.body||{};
+    const b=req.body||{};
     const spaceNo=s(b.space_no||b.spaceNo||b.space_id||b.spaceId);
     const member=s(b.member_id||b.memberId);
     if(!spaceNo||!member) return fail(res,400,'space_no and member_id required');
-    const r=await pool.query(`INSERT INTO gm_smartfit_space_subscriber(space_no,member_id,subscribed_at,unsubscribed_at,active_yn)
+    await client.query('BEGIN');
+    const space=(await client.query(`SELECT space_id,COALESCE(NULLIF(owner_member_id,''),creator_member_id) AS creator_member_id
+      FROM gm_smartfit_space WHERE space_id=$1 AND COALESCE(is_deleted,'F')<>'T' LIMIT 1`,[spaceNo])).rows[0];
+    if(!space){ await client.query('ROLLBACK'); return fail(res,404,'space not found'); }
+    const r=await client.query(`INSERT INTO gm_smartfit_space_subscriber(space_no,member_id,subscribed_at,unsubscribed_at,active_yn)
       VALUES($1,$2,CURRENT_TIMESTAMP,NULL,'Y')
       ON CONFLICT(space_no,member_id) DO UPDATE SET subscribed_at=CURRENT_TIMESTAMP, unsubscribed_at=NULL, active_yn='Y'
       RETURNING *`,[spaceNo,member]);
-    ok(res,{ item:r.rows[0] });
-  }catch(e){ fail(res,500,'space subscribe failed',{ detail:String(e.message||e) }); }
+    const eventKey=`SMARTFIT_SUBSCRIBE:${spaceNo}:${member}:${Date.now()}`;
+    await client.query(`INSERT INTO gm_event_queue(event_type,event_key,payload,status,next_retry_at,created_at,updated_at)
+      VALUES('SMARTFIT_SUBSCRIBE',$1,$2::jsonb,'PENDING',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+      ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({space_no:spaceNo,member_id:member,creator_member_id:s(space.creator_member_id)})]);
+    await client.query('COMMIT');
+    ok(res,{ item:r.rows[0], creator_member_id:s(space.creator_member_id), event_queued:true });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_e){} fail(res,500,'space subscribe failed',{ detail:String(e.message||e) }); }
+  finally{client.release();}
 });
 
 router.post('/api/gm/message/smartfit/space/unsubscribe', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
   try{
-    const pool=db(req), b=req.body||{};
+    const b=req.body||{};
     const spaceNo=s(b.space_no||b.spaceNo||b.space_id||b.spaceId);
     const member=s(b.member_id||b.memberId);
     if(!spaceNo||!member) return fail(res,400,'space_no and member_id required');
-    const r=await pool.query(`UPDATE gm_smartfit_space_subscriber
+    await client.query('BEGIN');
+    const space=(await client.query(`SELECT space_id,COALESCE(NULLIF(owner_member_id,''),creator_member_id) AS creator_member_id
+      FROM gm_smartfit_space WHERE space_id=$1 LIMIT 1`,[spaceNo])).rows[0];
+    const r=await client.query(`UPDATE gm_smartfit_space_subscriber
       SET active_yn='N', unsubscribed_at=CURRENT_TIMESTAMP
       WHERE space_no=$1 AND member_id=$2 RETURNING *`,[spaceNo,member]);
-    ok(res,{ updated:r.rowCount, item:r.rows[0]||null });
-  }catch(e){ fail(res,500,'space unsubscribe failed',{ detail:String(e.message||e) }); }
+    if(space && s(space.creator_member_id)){
+      const eventKey=`SMARTFIT_UNSUBSCRIBE:${spaceNo}:${member}:${Date.now()}`;
+      await client.query(`INSERT INTO gm_event_queue(event_type,event_key,payload,status,next_retry_at,created_at,updated_at)
+        VALUES('SMARTFIT_UNSUBSCRIBE',$1,$2::jsonb,'PENDING',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+        ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({space_no:spaceNo,member_id:member,creator_member_id:s(space.creator_member_id)})]);
+    }
+    await client.query('COMMIT');
+    ok(res,{ updated:r.rowCount, item:r.rows[0]||null, creator_member_id:space?s(space.creator_member_id):'', event_queued:!!space });
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_e){} fail(res,500,'space unsubscribe failed',{ detail:String(e.message||e) }); }
+  finally{client.release();}
 });
 
 router.get('/api/gm/message/smartfit/space/subscribers', async (req,res)=>{
