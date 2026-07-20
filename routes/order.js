@@ -9,7 +9,7 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_ORDER_ROUTE_V036_MONEY_FIRST_VALUE';
+const VERSION = 'GM_ORDER_ROUTE_V037_CAFE24_INTERNAL_CONFIRM';
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function clean(v){
@@ -361,6 +361,80 @@ async function replaceOrderItems(client, orderRow, inputItems){
   }
   return { itemCount, items:savedItems };
 }
+
+async function replaceCafe24InternalItems(client, orderRow, inputItems){
+  await client.query("DELETE FROM gm_order_item WHERE order_no=$1 AND (source_mall='GMKR' OR mall_code='GMKR')", [orderRow.order_no]);
+  let itemCount=0;
+  for(const src of inputItems || []){
+    const key=clean(itemVal(src,['cafe24_item_key','source_uid','pi_ii_vi','key'],'') || ('ITEM_'+itemCount));
+    const sourceUid=key.indexOf('GMKR_')===0?key:('GMKR_'+key);
+    const qty=Math.max(1,money(itemVal(src,['quantity','qty'],1),1));
+    const line=money(itemVal(src,['product_amount','amount','line_amount','customer_order_price'],0),0);
+    const unit=money(itemVal(src,['customer_order_price','sale_price','price'],0),0) || (qty?Math.round(line/qty):line);
+    await client.query(`
+      INSERT INTO gm_order_item (
+        order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
+        mall_sale_price, customer_order_price, final_supply_price, product_amount,
+        delivery_type, delivery_fee, extra_area_delivery_fee, mall_code, supplier_id, supplier_name,
+        product_url, thumb_file_name, hs_code, origin_country, carrier_name, tracking_number,
+        item_order_status, item_shipping_status, created_at, updated_at, cafe24_order_no, source_mall, source_uid
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,
+        'CAFE24',0,0,'GMKR','','',$10,$11,'','','','',
+        'READY_TO_ORDER','pending',$12,$12,$13,'GMKR',$14
+      )
+    `,[
+      orderRow.order_no,key,clean(itemVal(src,['product_name','name','title'],'')),
+      clean(itemVal(src,['option_name'],'')),clean(itemVal(src,['option_value','option_text'],'')),qty,
+      unit,unit,line||(unit*qty),normalizeUrl(itemVal(src,['product_url','url'],'')),
+      clean(itemVal(src,['thumb_file_name','image','thumb_url'],'')),nowKst(),orderRow.cafe24_order_no||null,sourceUid
+    ]);
+    itemCount++;
+  }
+  return itemCount;
+}
+
+router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
+  const pool=db(req);
+  if(!pool)return fail(res,500,'DB pool is not attached');
+  const raw=req.body||{};
+  const cafeNo=clean(raw.cafe24_order_no||raw.cafe24OrderNo||raw.order_id||raw.orderId);
+  const orderNo=clean(raw.order_no||raw.gm_order_no||cafeNo);
+  const items=Array.isArray(raw.internal_items)?raw.internal_items:normalizeItems(raw);
+  if(!cafeNo||!orderNo)return fail(res,400,'order_no/cafe24_order_no required');
+  if(!items.length)return fail(res,400,'internal_items required');
+  if(!clean(raw.member_id)&&!clean(raw.guest_key))return fail(res,400,'member_id or guest_key required');
+  const client=await pool.connect().catch(()=>null);
+  if(!client)return fail(res,500,'DB client connect failed');
+  try{
+    await client.query('BEGIN');
+    const existing=await client.query('SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1',[orderNo]);
+    const input=Object.assign({},raw,{order_no:orderNo,cafe24_order_no:cafeNo,items:items,order_status:raw.order_status||'ordered',payment_status:raw.payment_status||'pending',shipping_status:raw.shipping_status||'pending'});
+    const row=buildOrderRow(input,items);
+    if(existing.rows[0]){
+      const ex=existing.rows[0];
+      if(!row.member_id)row.member_id=ex.member_id;
+      if(!row.guest_key)row.guest_key=ex.guest_key;
+      if(!row.total_product_price)row.total_product_price=money(ex.total_product_price,0);
+      if(!row.total_delivery_fee)row.total_delivery_fee=money(ex.total_delivery_fee,0);
+      if(!row.total_payment_price)row.total_payment_price=money(ex.total_payment_price,0);
+      if(!row.expected_payment_amount)row.expected_payment_amount=row.total_payment_price;
+    }
+    const action=await upsertOrder(client,row);
+    const itemCount=await replaceCafe24InternalItems(client,row,items);
+    await client.query('UPDATE gm_order_item SET cafe24_order_no=$2, updated_at=$3 WHERE order_no=$1',[orderNo,cafeNo,nowKst()]);
+    await client.query('COMMIT');
+    console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({order_no:orderNo,cafe24_order_no:cafeNo,items:itemCount,action}));
+    ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,item_count:itemCount,order_action:action});
+    const eventQueue=req.app.locals.eventQueue;
+    if(eventQueue&&typeof eventQueue.enqueueOrderCreate==='function')eventQueue.enqueueOrderCreate(orderNo).catch(()=>{});
+  }catch(e){
+    await client.query('ROLLBACK').catch(()=>{});
+    console.error('[GM_CAFE24_ORDER_CONFIRM_ERROR]',String(e&&e.message||e));
+    fail(res,500,'cafe24 order confirm failed',{detail:String(e&&e.message||e)});
+  }finally{client.release();}
+});
+
 router.post('/api/gm/order/create', async (req, res) => {
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
