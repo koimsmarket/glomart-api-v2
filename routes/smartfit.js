@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V046_LIKE_COUNTER_V069';
+const VERSION = 'GM_SMARTFIT_SERVER_V046_MESSAGE_SUMMARY_SAFE_V069';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -619,42 +619,6 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
 });
 
-
-/* GM_SMARTFIT_LIKE_COUNTER_V069
- * 좋아요 회원별 관계 테이블/레코드는 만들지 않는다.
- * 사용자 기기의 localStorage가 LIKE/UNLIKE 상태를 보관하고,
- * 서버는 기존 SmartFit 대상의 누적 like_count 숫자만 원자적으로 증감한다.
- * 이 라우트는 테이블 생성, ALTER TABLE, 좋아요 이력 INSERT를 수행하지 않는다.
- */
-router.post('/api/gm/smartfit/like', async (req,res)=>{
-  try{
-    const pool=db(req); const b=req.body||{};
-    const type=s(b.target_type || b.targetType || '').toLowerCase();
-    const action=s(b.action || '').toUpperCase();
-    if(!['LIKE','UNLIKE'].includes(action)) return fail(res,400,'action must be LIKE or UNLIKE');
-
-    let table='', idColumn='', id=0;
-    if(type==='template'){
-      table='gm_smartfit_template'; idColumn='template_id'; id=i(b.template_id || b.templateId || b.target_id || b.targetId,0);
-    }else if(type==='space'){
-      table='gm_smartfit_space'; idColumn='space_id'; id=i(b.space_id || b.spaceId || b.target_id || b.targetId,0);
-    }else return fail(res,400,'target_type must be template or space');
-    if(!id) return fail(res,400,idColumn+' required');
-
-    const delta=action==='LIKE' ? 1 : -1;
-    const sql=`UPDATE ${table}
-      SET like_count=GREATEST(0,COALESCE(like_count,0)+$1), updated_at=CURRENT_TIMESTAMP
-      WHERE ${idColumn}=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'
-      RETURNING ${idColumn},like_count`;
-    const r=await pool.query(sql,[delta,id]);
-    if(!r.rowCount) return fail(res,404,type+' not found');
-    ok(res,{target_type:type,target_id:id,action,like_count:Number(r.rows[0].like_count||0)});
-  }catch(e){
-    console.error('[SMARTFIT_LIKE_COUNTER_ERROR_V069]',{detail:String(e&&e.message||e),code:s(e&&e.code)});
-    fail(res,500,'smartfit like failed',{detail:String(e&&e.message||e),code:s(e&&e.code)});
-  }
-});
-
 router.post('/api/gm/smartfit/space/favorite', async (req,res)=>{
   try{
     const pool=db(req); const b=req.body||{}; const member=s(b.member_id || b.memberId || ''); const spaceId=i(b.space_id || b.spaceId,0);
@@ -866,50 +830,87 @@ router.post('/api/gm/smartfit/creator/message/allow', async (req,res)=>{
 });
 
 router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
+  const pool=db(req);
+  const templateId=i(req.query.template_id||req.query.templateId,0);
+  const member=s(req.query.member_id||req.query.memberId);
+  if(!member) return fail(res,401,'login required');
+  if(!templateId) return fail(res,400,'template_id required');
+
   try{
-    const pool=db(req); const templateId=i(req.query.template_id||req.query.templateId,0); const member=s(req.query.member_id||req.query.memberId);
-    if(!member) return fail(res,401,'login required');
-    if(!templateId) return fail(res,400,'template_id required');
     const template=await assertTemplateCreator(pool,templateId,member);
-    const relation=(await pool.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[member])).rows[0]||{};
-    /* Template collectors are subscribers. gm_smartfit_subscribe stores only
-       creator-level message rejection/compatibility state; no row means receive. */
-    const sub=(await pool.query(`WITH collectors AS (
-        SELECT DISTINCT c.member_id
-        FROM gm_smartfit_collection c
-        JOIN gm_smartfit_template t ON t.template_id=c.template_id
-        WHERE t.creator_member_id=$1
-          AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
-          AND c.member_id<>$1
-      )
-      SELECT COUNT(*)::bigint AS total_count,
-        COUNT(*) FILTER (WHERE NOT EXISTS (
-          SELECT 1 FROM gm_smartfit_subscribe r
-          WHERE r.member_id=c.member_id
-            AND r.creator_member_id=$1
-            AND r.message_accept_yn='N'
-        ))::bigint AS accept_count,
-        COUNT(*) FILTER (WHERE EXISTS (
-          SELECT 1 FROM gm_smartfit_subscribe r
-          WHERE r.member_id=c.member_id
-            AND r.creator_member_id=$1
-            AND r.message_accept_yn='N'
-        ))::bigint AS reject_count
-      FROM collectors c`,[member])).rows[0]||{};
-    const sent=(await pool.query(`SELECT COUNT(*)::bigint AS registered_count,
-      COUNT(*) FILTER (WHERE send_status IN ('SENT','READ'))::bigint AS sent_count,
-      COUNT(*) FILTER (WHERE send_status='READ' OR read_at IS NOT NULL)::bigint AS read_count,
-      COUNT(*) FILTER (WHERE send_status IN ('QUEUED','QUEUED_NIGHT','PROCESSING'))::bigint AS queued_count,
-      COUNT(*) FILTER (WHERE send_status='FAILED')::bigint AS failed_count,
-      COALESCE(MAX(serial_no),0)::int AS last_serial_no
-      FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0]||{};
-    const upTotal=Number(relation.up_total_count||0), downTotal=Number(relation.down_total_count||0), subscribers=Number(sub.accept_count||0);
-    ok(res,{template,relation:{
+    const warnings=[];
+    let relation={};
+    let sub={total_count:0,accept_count:0,reject_count:0};
+    let sent={registered_count:0,sent_count:0,read_count:0,queued_count:0,failed_count:0,last_serial_no:0};
+
+    /* These are summary assets only. A missing/pending optional asset must never
+       block the template edit screen or message composer. */
+    try{
+      relation=(await pool.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[member])).rows[0]||{};
+    }catch(assetError){
+      warnings.push('relation_asset_unavailable');
+      console.warn('[SMARTFIT_MESSAGE_SUMMARY_RELATION_SKIP]',{template_id:templateId,member_id:member,code:assetError&&assetError.code,detail:String(assetError&&assetError.message||assetError)});
+    }
+
+    try{
+      sub=(await pool.query(`WITH collectors AS (
+          SELECT DISTINCT c.member_id
+          FROM gm_smartfit_collection c
+          JOIN gm_smartfit_template t ON t.template_id=c.template_id
+          WHERE t.creator_member_id=$1
+            AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
+            AND c.member_id<>$1
+        )
+        SELECT COUNT(*)::bigint AS total_count,
+          COUNT(*) FILTER (WHERE NOT EXISTS (
+            SELECT 1 FROM gm_smartfit_subscribe r
+            WHERE r.member_id=c.member_id
+              AND r.creator_member_id=$1
+              AND r.message_accept_yn='N'
+          ))::bigint AS accept_count,
+          COUNT(*) FILTER (WHERE EXISTS (
+            SELECT 1 FROM gm_smartfit_subscribe r
+            WHERE r.member_id=c.member_id
+              AND r.creator_member_id=$1
+              AND r.message_accept_yn='N'
+          ))::bigint AS reject_count
+        FROM collectors c`,[member])).rows[0]||sub;
+    }catch(assetError){
+      warnings.push('subscriber_asset_unavailable');
+      console.warn('[SMARTFIT_MESSAGE_SUMMARY_SUBSCRIBER_SKIP]',{template_id:templateId,member_id:member,code:assetError&&assetError.code,detail:String(assetError&&assetError.message||assetError)});
+    }
+
+    try{
+      sent=(await pool.query(`SELECT COUNT(*)::bigint AS registered_count,
+        COUNT(*) FILTER (WHERE send_status IN ('SENT','READ'))::bigint AS sent_count,
+        COUNT(*) FILTER (WHERE send_status='READ' OR read_at IS NOT NULL)::bigint AS read_count,
+        COUNT(*) FILTER (WHERE send_status IN ('QUEUED','QUEUED_NIGHT','PROCESSING'))::bigint AS queued_count,
+        COUNT(*) FILTER (WHERE send_status='FAILED')::bigint AS failed_count,
+        COALESCE(MAX(serial_no),0)::int AS last_serial_no
+        FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0]||sent;
+    }catch(assetError){
+      warnings.push('delivery_asset_unavailable');
+      console.warn('[SMARTFIT_MESSAGE_SUMMARY_DELIVERY_SKIP]',{template_id:templateId,member_id:member,code:assetError&&assetError.code,detail:String(assetError&&assetError.message||assetError)});
+    }
+
+    const upTotal=Number(relation.up_total_count||0);
+    const downTotal=Number(relation.down_total_count||0);
+    const subscribers=Number(sub.accept_count||0);
+    return ok(res,{template,relation:{
       up_1_count:Number(relation.up_1_count||0),up_2_count:Number(relation.up_2_count||0),up_3_count:Number(relation.up_3_count||0),up_4_count:Number(relation.up_4_count||0),up_5_count:Number(relation.up_5_count||0),up_total_count:upTotal,
       down_1_count:Number(relation.down_1_count||0),down_2_count:Number(relation.down_2_count||0),down_3_count:Number(relation.down_3_count||0),down_4_count:Number(relation.down_4_count||0),down_5_count:Number(relation.down_5_count||0),down_total_count:downTotal,
       calculated_yn:s(relation.calculated_yn||'F'),message_accept_relation_depth:i(relation.message_accept_relation_depth,5)
-    },subscribe:{total_count:Number(sub.total_count||0),accept_count:subscribers,reject_count:Number(sub.reject_count||0)},delivery:{...sent,asset_total:upTotal+downTotal+subscribers,immediate_max:smartfitImmediateMax()}});
-  }catch(e){ fail(res,400,'template message summary failed',{detail:String(e.message||e)}); }
+    },subscribe:{total_count:Number(sub.total_count||0),accept_count:subscribers,reject_count:Number(sub.reject_count||0)},delivery:{
+      registered_count:Number(sent.registered_count||0),sent_count:Number(sent.sent_count||0),read_count:Number(sent.read_count||0),queued_count:Number(sent.queued_count||0),failed_count:Number(sent.failed_count||0),last_serial_no:Number(sent.last_serial_no||0),
+      asset_total:upTotal+downTotal+subscribers,immediate_max:smartfitImmediateMax()
+    },summary_degraded_yn:warnings.length?'Y':'N',warnings});
+  }catch(e){
+    const message=String(e&&e.message||e);
+    console.error('[SMARTFIT_MESSAGE_SUMMARY_FAIL]',{template_id:templateId,member_id:member,code:e&&e.code,detail:message});
+    if(message==='template not found') return fail(res,404,'template not found');
+    if(message==='permission denied') return fail(res,403,'permission denied');
+    return fail(res,500,'template message summary failed',{detail:message,code:s(e&&e.code)});
+  }
 });
 
 router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'}), async (req,res)=>{
