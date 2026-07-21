@@ -77,8 +77,36 @@ app.use((req, res, next) => {
 app.use(cors({ origin: true, credentials: false }));
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
-app.use(express.static('public'));
-app.use('/public', express.static(path.join(__dirname, 'public')));
+
+/* GM_ANDROID_APK_DOWNLOAD_V001
+ * Cloudtype의 실행 작업 디렉터리가 프로젝트 루트와 다르더라도
+ * __dirname 기준으로 public 폴더와 APK를 정확히 찾는다.
+ */
+const GM_PUBLIC_DIR = path.join(__dirname, 'public');
+const GM_ANDROID_APK_FILE = path.join(
+  GM_PUBLIC_DIR,
+  'download',
+  'android',
+  'glomart_v1.0.apk'
+);
+
+app.get('/download/android/glomart_v1.0.apk', (req, res) => {
+  if (!fs.existsSync(GM_ANDROID_APK_FILE)) {
+    console.error('[GM_ANDROID_APK_NOT_FOUND_V001]', GM_ANDROID_APK_FILE);
+    return res.status(404).send('Glomart APK file not found');
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="glomart_v1.0.apk"'
+  );
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return res.sendFile(GM_ANDROID_APK_FILE);
+});
+
+app.use(express.static(GM_PUBLIC_DIR));
+app.use('/public', express.static(GM_PUBLIC_DIR));
 
 /* GM_HEALTH_V004_DB_RUNTIME
  * Cloudtype / UptimeRobot 운영용 health endpoint.
