@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V026_TABLE_EXPANSION';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V027_EXPORT_EXISTING_TABLES_ONLY';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -992,30 +992,63 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
   try{
     const files=[];
     const errors=[];
+    const exported=[];
+
+    // 먼저 실제 public 스키마에 존재하는 테이블을 확정한다.
+    // 등록 목록에 아직 생성되지 않은 테이블이 있어도 전체 ZIP 생성을 중단하지 않는다.
+    const existingResult = await db.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema='public' AND table_type='BASE TABLE'
+    `);
+    const existing = new Set(existingResult.rows.map(r => r.table_name));
+
     for(const key of Object.keys(TABLES)){
       const spec = TABLES[key];
+      if(!existing.has(spec.table)){
+        errors.push({ key, table:spec.table, error:'TABLE_NOT_FOUND_SKIPPED' });
+        continue;
+      }
       try{
         let cols = await getColumns(db, spec.table);
-        if(!cols.length){ errors.push({key, table:spec.table, error:'no columns'}); continue; }
+        if(!cols.length){ errors.push({key, table:spec.table, error:'NO_COLUMNS_SKIPPED'}); continue; }
         if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
-        const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
-        files.push({ name: `${spec.table}.csv`, data: toCsv(r.rows, cols) });
+
+        // 등록된 정렬식이 현재 DB 컬럼과 맞지 않는 경우에도 다운로드는 계속한다.
+        let orderSql = '';
+        try{
+          const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
+          files.push({ name: `${spec.table}.csv`, data: toCsv(r.rows, cols) });
+          exported.push({ key, table:spec.table, rows:r.rows.length });
+          continue;
+        }catch(orderError){
+          errors.push({ key, table:spec.table, error:'ORDER_FALLBACK', detail:String(orderError && orderError.message || orderError) });
+        }
+
+        const fallback = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} LIMIT $1`, [limit]);
+        files.push({ name: `${spec.table}.csv`, data: toCsv(fallback.rows, cols) });
+        exported.push({ key, table:spec.table, rows:fallback.rows.length, order:'fallback' });
       }catch(e){
-        errors.push({ key, table:spec.table, error:String(e && e.message || e) });
+        errors.push({ key, table:spec.table, error:'EXPORT_FAILED_SKIPPED', detail:String(e && e.message || e) });
       }
     }
-    if(errors.length){
-      files.push({ name:'_export_errors.json', data: JSON.stringify({ ok:false, errors }, null, 2) });
-    }
+
+    files.push({
+      name:'_export_manifest.json',
+      data:JSON.stringify({ ok:true, version:VERSION, exported_count:exported.length, skipped_count:errors.length, limit, exported, skipped:errors }, null, 2)
+    });
+
     const zip = makeZip(files);
     const fname = `gm_all_tables_${Date.now()}.zip`;
-    res.setHeader('Content-Type','application/octet-stream');
+    console.log('[GM_BUILDER_EXPORT_ALL_DONE_V027]', JSON.stringify({ exported:exported.length, skipped:errors.length, bytes:zip.length }));
+    res.setHeader('Content-Type','application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     res.setHeader('Content-Length', String(zip.length));
     res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
     res.setHeader('X-Content-Type-Options','nosniff');
     res.end(zip);
   }catch(e){
+    console.error('[GM_BUILDER_EXPORT_ALL_FAIL_V027]', { detail:String(e && e.message || e) });
     fail(res, 500, 'export all failed', { detail:String(e && e.message || e) });
   }
 });

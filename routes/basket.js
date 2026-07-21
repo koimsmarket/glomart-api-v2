@@ -12,6 +12,30 @@ function enqueueAfterResponse(req, label, task){
   if(typeof setImmediate==='function') setImmediate(run);
   else setTimeout(run,0);
 }
+
+async function applyBasketCountDirect(req,row){
+  const service=req.app.locals.eventService;
+  if(!service || typeof service.applyBasketAdd!=='function') throw new Error('event_service_applyBasketAdd_missing');
+  return service.applyBasketAdd(db(req),row);
+}
+function basketCountAfterResponse(req,row){
+  enqueueAfterResponse(req,'[EVENT_BASKET_DIRECT_FAIL]',async()=>{
+    try{
+      const result=await applyBasketCountDirect(req,row);
+      console.log('[EVENT_BASKET_DIRECT_OK]',JSON.stringify({product_uid:row&&row.product_uid,updated:result&&result.updated,cart_count:result&&result.cart_count}));
+    }catch(directErr){
+      console.error('[EVENT_BASKET_DIRECT_FAIL]',String(directErr&&directErr.message||directErr));
+      const q=req.app.locals.eventQueue;
+      if(q&&typeof q.enqueueBasketAdd==='function'){
+        await q.enqueueBasketAdd(row);
+        console.log('[EVENT_BASKET_QUEUE_FALLBACK_OK]',JSON.stringify({product_uid:row&&row.product_uid}));
+        return;
+      }
+      console.error('[EVENT_BASKET_QUEUE_FALLBACK_SKIP]','event_queue_unavailable');
+    }
+  });
+}
+
 function s(v,d=null){ return v===undefined||v===null||v==='' ? d : String(v).trim(); }
 function n(v,d=0){ if(v===undefined||v===null||v==='') return d; const x=Number(String(v).replace(/[^0-9.-]/g,'')); return Number.isFinite(x)?x:d; }
 function splitProductUid(uid){
@@ -105,10 +129,7 @@ router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   try{
     const row=await upsertOne(pool,req.body||{});
     res.json({ok:true,item:row});
-    const q=req.app.locals.eventQueue;
-    if(q&&typeof q.enqueueBasketAdd==='function'){
-      enqueueAfterResponse(req,'[EVENT_BASKET_QUEUE_SKIP]',()=>q.enqueueBasketAdd(row));
-    }
+    if(!(req.body&&req.body.skip_cart_count)) basketCountAfterResponse(req,row);
   }
   catch(e){
     try{ console.error('[GM_BASKET_ROUTE_ADD_ERROR]', e && e.message, req.body || {}); }catch(_e){}
@@ -132,12 +153,7 @@ router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req
     }
     res.json({ok:failed.length===0,items:saved,failed});
     if(!b.skip_cart_count){
-      const q=req.app.locals.eventQueue;
-      if(q&&typeof q.enqueueBasketAdd==='function'){
-        for(const row of saved){
-          enqueueAfterResponse(req,'[EVENT_BASKET_QUEUE_SKIP]',()=>q.enqueueBasketAdd(row));
-        }
-      }
+      for(const row of saved) basketCountAfterResponse(req,row);
     }
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });

@@ -19,7 +19,45 @@ function enqueueAfterResponse(label, task){
   if(typeof setImmediate==='function') setImmediate(run);
   else setTimeout(run,0);
 }
-const VERSION = 'GM_ORDER_ROUTE_V039_EVENT_COMPLETED_SAFE';
+const VERSION = 'GM_ORDER_ROUTE_V040_DIRECT_FIRST_QUEUE_FALLBACK';
+
+async function applyOrderCompletedDirect(req,orderNo,meta){
+  const pool=db(req);
+  const service=req.app.locals.eventService;
+  if(!pool) throw new Error('DB pool is not attached');
+  if(!service || typeof service.applyOrderCreate!=='function') throw new Error('event_service_applyOrderCreate_missing');
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const order=(await client.query('SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1',[orderNo])).rows[0];
+    if(!order) throw new Error(`order_not_found:${orderNo}`);
+    const items=(await client.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC,pi_ii_vi ASC',[orderNo])).rows;
+    const result=await service.applyOrderCreate(client,order,items);
+    await client.query('COMMIT');
+    console.log('[EVENT_ORDER_COMPLETED_DIRECT_OK]',JSON.stringify({order_no:orderNo,source:meta&&meta.source,accepted_items:result&&result.accepted_items,sales_qty:result&&result.sales_qty,sales_amount:result&&result.sales_amount}));
+    return result;
+  }catch(error){
+    try{await client.query('ROLLBACK');}catch(_e){}
+    throw error;
+  }finally{client.release();}
+}
+function orderCompletedAfterResponse(req,orderNo,meta){
+  enqueueAfterResponse('[EVENT_ORDER_COMPLETED_DIRECT_FAIL]',async()=>{
+    try{
+      await applyOrderCompletedDirect(req,orderNo,meta);
+    }catch(directErr){
+      console.error('[EVENT_ORDER_COMPLETED_DIRECT_FAIL]',String(directErr&&directErr.message||directErr));
+      const q=req.app.locals.eventQueue;
+      if(q&&typeof q.enqueueOrderCompleted==='function'){
+        await q.enqueueOrderCompleted(orderNo,meta||{});
+        console.log('[EVENT_ORDER_COMPLETED_QUEUE_FALLBACK_OK]',JSON.stringify({order_no:orderNo,source:meta&&meta.source}));
+        return;
+      }
+      console.error('[EVENT_ORDER_COMPLETED_QUEUE_FALLBACK_SKIP]',JSON.stringify({order_no:orderNo,reason:'event_queue_unavailable'}));
+    }
+  });
+}
+
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function clean(v){
@@ -449,12 +487,7 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
     await client.query('COMMIT');
     console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({order_no:orderNo,cafe24_order_no:cafeNo,items:itemCount,action,basket_deleted:basketDeleted}));
     ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,item_count:itemCount,order_action:action,basket_deleted:basketDeleted});
-    const eventQueue=req.app.locals.eventQueue;
-    if(eventQueue&&typeof eventQueue.enqueueOrderCompleted==='function'){
-      enqueueAfterResponse('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]',()=>
-        eventQueue.enqueueOrderCompleted(orderNo,{ source:'cafe24-confirm', order_mode:clean(raw.order_mode||'internal').toLowerCase() })
-      );
-    }
+    orderCompletedAfterResponse(req,orderNo,{ source:'cafe24-confirm', order_mode:clean(raw.order_mode||'internal').toLowerCase() });
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
     console.error('[GM_CAFE24_ORDER_CONFIRM_ERROR]',String(e&&e.message||e));
@@ -479,13 +512,10 @@ router.post('/api/gm/order/create', async (req, res) => {
     console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price }));
     ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price });
     const orderMode=clean(raw.order_mode||raw.orderMode||'external').toLowerCase();
-    const eventQueue=req.app.locals.eventQueue;
     // 혼합 주문은 Cafe24 내부상품이 합쳐지기 전이므로 여기서 집계하지 않는다.
-    // 외부 전용 주문만 저장 완료 직후 ORDER_COMPLETED 큐에 등록한다.
-    if(orderMode!=='mixed'&&eventQueue&&typeof eventQueue.enqueueOrderCompleted==='function'){
-      enqueueAfterResponse('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]',()=>
-        eventQueue.enqueueOrderCompleted(orderRow.order_no,{ source:'order-create', order_mode:orderMode })
-      );
+    // 외부 전용 주문만 저장 완료 직후 직접 집계하고, 실패할 때만 큐로 넘긴다.
+    if(orderMode!=='mixed'){
+      orderCompletedAfterResponse(req,orderRow.order_no,{ source:'order-create', order_mode:orderMode });
     }else if(orderMode==='mixed'){
       console.log('[EVENT_ORDER_COMPLETED_DEFER]',JSON.stringify({order_no:orderRow.order_no,reason:'wait_cafe24_confirm'}));
     }
