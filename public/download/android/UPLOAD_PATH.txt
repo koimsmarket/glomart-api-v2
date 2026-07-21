@@ -1,0 +1,2 @@
+업로드 위치: glomart-api-v2/public/download/android/
+다운로드 URL: https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app/download/android/glomart_v1.0.apk

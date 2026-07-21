@@ -1,10 +1,9 @@
 {
-  "appName": "Glomart",
   "versionName": "1.0",
-  "versionCode": 1,
+  "versionCode": 10000,
   "minimumVersionCode": 1,
   "forceUpdate": false,
-  "apkFile": "glomart_v1.0.apk",
   "apkUrl": "https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app/download/android/glomart_v1.0.apk",
-  "updatedAt": "2026-07-21T00:00:00+09:00"
+  "fileName": "glomart_v1.0.apk",
+  "message": "Glomart v1.0"
 }
