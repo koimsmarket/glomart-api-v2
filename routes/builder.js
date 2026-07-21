@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V025_DELETE_SELECTED_FIX';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V026_TABLE_EXPANSION';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -314,6 +314,33 @@ const TABLES = {
     enums: { leaf_yn:['T','F','Y','N'], is_active:['T','F','Y','N'] },
     blocked: []
   },
+
+  category_dynamic: { table:'gm_category_dynamic', key:['id'], order:'updated_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  product_interest: { table:'gm_product_interest', keyAny:[['member_id','mall_code','pi_ii_vi'],['guest_key','mall_code','pi_ii_vi']], order:'last_visited_at DESC NULLS LAST, mall_code ASC, pi_ii_vi ASC', critical:['mall_code','pi_ii_vi'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  product_upsert_queue: { table:'gm_product_upsert_queue', key:['queue_id'], order:'created_at DESC NULLS LAST, queue_id DESC', critical:['queue_id'], numeric:['queue_id','retry_count'], defaults:{}, enums:{}, blocked:['queue_id','created_at'] },
+  sales_aggregate_event: { table:'gm_sales_aggregate_event', key:['id'], order:'created_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  member_ledger: { table:'gm_member_ledger', key:['ledger_id'], order:'created_at DESC NULLS LAST, ledger_id DESC', critical:['ledger_id'], numeric:['ledger_id'], defaults:{}, enums:{}, blocked:['ledger_id','created_at'] },
+  member_payment_info: { table:'gm_member_payment_info', key:['member_id'], order:'updated_at DESC NULLS LAST, member_id ASC', critical:['member_id'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  member_device: { table:'gm_member_device', key:['id'], order:'updated_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  member_relation_count: { table:'gm_member_relation_count', key:['member_id'], order:'member_id ASC', critical:['member_id'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  guest_member_link: { table:'gm_guest_member_link', key:['guest_key'], order:'updated_at DESC NULLS LAST, guest_key ASC', critical:['guest_key'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  network_incentive_rate: { table:'gm_network_incentive_rate', key:['step_no','effective_from'], order:'effective_from DESC, step_no ASC', critical:['step_no','effective_from'], numeric:['step_no'], defaults:{}, enums:{}, blocked:['created_at'] },
+  network_payment_snapshot: { table:'gm_network_payment_snapshot', key:['snapshot_id'], order:'created_at DESC NULLS LAST, snapshot_id DESC', critical:['snapshot_id'], numeric:['snapshot_id'], defaults:{}, enums:{}, blocked:['snapshot_id','created_at'] },
+  message_policy: { table:'gm_message_policy', key:['message_type'], order:'message_type ASC', critical:['message_type'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  message_personal: { table:'gm_message_personal', key:['id'], order:'created_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  message_broadcast: { table:'gm_message_broadcast', key:['id'], order:'created_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  message_broadcast_receive: { table:'gm_message_broadcast_receive', key:['broadcast_no','member_id'], order:'received_at DESC NULLS LAST, broadcast_no DESC', critical:['broadcast_no','member_id'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  message_share: { table:'gm_message_share', key:['id'], order:'created_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  message_share_receiver: { table:'gm_message_share_receiver', key:['id'], order:'created_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  message_counter_daily: { table:'gm_message_counter_daily', key:['counter_date','message_scope','message_type'], order:'counter_date DESC, message_scope ASC, message_type ASC', critical:['counter_date','message_scope','message_type'], numeric:[], defaults:{}, enums:{}, blocked:[] },
+  message_broadcast_job: { table:'gm_message_broadcast_job', key:['job_no'], order:'created_at DESC NULLS LAST, job_no DESC', critical:['job_no'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  order_message: { table:'gm_order_message', key:['message_id'], order:'sent_at DESC NULLS LAST, message_id DESC', critical:['message_id'], numeric:['message_id'], defaults:{}, enums:{}, blocked:['message_id','created_at'] },
+  event_queue: { table:'gm_event_queue', key:['id'], order:'created_at DESC NULLS LAST, id DESC', critical:['id'], numeric:['id','retry_count'], defaults:{}, enums:{}, blocked:['id','created_at'] },
+  smartfit_internal_sale: { table:'gm_smartfit_internal_sale', key:['sale_id'], order:'created_at DESC NULLS LAST, sale_id DESC', critical:['sale_id'], numeric:['sale_id'], defaults:{}, enums:{}, blocked:['sale_id','created_at'] },
+  smartfit_collection_item_delta: { table:'gm_smartfit_collection_item_delta', key:['delta_id'], order:'created_at DESC NULLS LAST, delta_id DESC', critical:['delta_id'], numeric:['delta_id'], defaults:{}, enums:{}, blocked:['delta_id','created_at'] },
+  smartfit_space_subscriber: { table:'gm_smartfit_space_subscriber', key:['space_no','member_id'], order:'subscribed_at DESC NULLS LAST, space_no DESC', critical:['space_no','member_id'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  smartfit_subscribe: { table:'gm_smartfit_subscribe', key:['member_id','creator_member_id'], order:'member_id ASC, creator_member_id ASC', critical:['member_id','creator_member_id'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  smartfit_message_receiver: { table:'gm_smartfit_message_receiver', key:['message_no'], order:'sent_at DESC NULLS LAST, message_no DESC', critical:['message_no'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
   dashboard_snapshot: {
     table: 'gm_dashboard_snapshot',
     key: ['snapshot_id'],

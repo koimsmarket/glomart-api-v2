@@ -188,6 +188,32 @@ const tables = {
   smartfit_collection:'SmartFit 컬렉션 gm_smartfit_collection',
   smartfit_category:'SmartFit 카테고리 gm_smartfit_category',
   search_log:'검색 로그 gm_search_log',
+  category_dynamic:'동적 카테고리 gm_category_dynamic',
+  product_interest:'상품 관심 gm_product_interest',
+  product_upsert_queue:'상품 저장 큐 gm_product_upsert_queue',
+  sales_aggregate_event:'판매 집계 이벤트 gm_sales_aggregate_event',
+  member_ledger:'회원 원장 gm_member_ledger',
+  member_payment_info:'회원 결제정보 gm_member_payment_info',
+  member_device:'회원 기기 gm_member_device',
+  member_relation_count:'회원 관계 집계 gm_member_relation_count',
+  guest_member_link:'비회원-회원 연결 gm_guest_member_link',
+  network_incentive_rate:'네트워크 인센티브율 gm_network_incentive_rate',
+  network_payment_snapshot:'네트워크 지급 스냅샷 gm_network_payment_snapshot',
+  message_policy:'메시지 정책 gm_message_policy',
+  message_personal:'개인 메시지 gm_message_personal',
+  message_broadcast:'단체 메시지 gm_message_broadcast',
+  message_broadcast_receive:'단체 메시지 수신 gm_message_broadcast_receive',
+  message_share:'공유 메시지 gm_message_share',
+  message_share_receiver:'공유 메시지 수신 gm_message_share_receiver',
+  message_counter_daily:'메시지 일별 카운터 gm_message_counter_daily',
+  message_broadcast_job:'단체 메시지 작업 gm_message_broadcast_job',
+  order_message:'주문 메시지 gm_order_message',
+  event_queue:'이벤트 큐 gm_event_queue',
+  smartfit_internal_sale:'SmartFit 내부판매 gm_smartfit_internal_sale',
+  smartfit_collection_item_delta:'SmartFit 컬렉션 변경 gm_smartfit_collection_item_delta',
+  smartfit_space_subscriber:'SmartFit 공간 구독자 gm_smartfit_space_subscriber',
+  smartfit_subscribe:'SmartFit 작성자 구독 gm_smartfit_subscribe',
+  smartfit_message_receiver:'SmartFit 메시지 수신 gm_smartfit_message_receiver',
   dashboard_snapshot:'대시보드 스냅샷 gm_dashboard_snapshot'
 };
 const tableNameMap = {
@@ -197,6 +223,11 @@ const tableNameMap = {
   gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
   gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_keyword_relation:'keyword_relation', gm_keyword_translate:'keyword_translate',
   gm_smartfit_space:'smartfit_space', gm_smartfit_template:'smartfit_template', gm_smartfit_item:'smartfit_item', gm_smartfit_collection:'smartfit_collection', gm_smartfit_category:'smartfit_category',
+  gm_category_dynamic:'category_dynamic', gm_product_interest:'product_interest', gm_product_upsert_queue:'product_upsert_queue', gm_sales_aggregate_event:'sales_aggregate_event',
+  gm_member_ledger:'member_ledger', gm_member_payment_info:'member_payment_info', gm_member_device:'member_device', gm_member_relation_count:'member_relation_count', gm_guest_member_link:'guest_member_link',
+  gm_network_incentive_rate:'network_incentive_rate', gm_network_payment_snapshot:'network_payment_snapshot',
+  gm_message_policy:'message_policy', gm_message_personal:'message_personal', gm_message_broadcast:'message_broadcast', gm_message_broadcast_receive:'message_broadcast_receive', gm_message_share:'message_share', gm_message_share_receiver:'message_share_receiver', gm_message_counter_daily:'message_counter_daily', gm_message_broadcast_job:'message_broadcast_job', gm_order_message:'order_message', gm_event_queue:'event_queue',
+  gm_smartfit_internal_sale:'smartfit_internal_sale', gm_smartfit_collection_item_delta:'smartfit_collection_item_delta', gm_smartfit_space_subscriber:'smartfit_space_subscriber', gm_smartfit_subscribe:'smartfit_subscribe', gm_smartfit_message_receiver:'smartfit_message_receiver',
   gm_search_log:'search_log', gm_dashboard_snapshot:'dashboard_snapshot'
 };
 function fill(){
@@ -311,6 +342,8 @@ async function send(apply){
 }
 function inferTableFromFileName(name){
   const n=String(name||'').toLowerCase();
+  const mappedNames=Object.keys(tableNameMap).sort((a,b)=>b.length-a.length);
+  for(const dbName of mappedNames){ if(n.indexOf(dbName.toLowerCase())>=0) return tableNameMap[dbName]; }
   const pairs=[
     ['gm_smartfit_collection','smartfit_collection'],['gm_smartfit_template','smartfit_template'],['gm_smartfit_category','smartfit_category'],['gm_smartfit_space','smartfit_space'],['gm_smartfit_item','smartfit_item'],
     ['gm_dashboard_snapshot','dashboard_snapshot'],['gm_keyword_relation','keyword_relation'],['gm_keyword_translate','keyword_translate'],['gm_search_log','search_log'],
