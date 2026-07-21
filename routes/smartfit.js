@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V046_MESSAGE_SUMMARY_SAFE_V069';
+const VERSION = 'GM_SMARTFIT_SERVER_V047_ITEM_SAVE_UNLOCK_V069';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -412,13 +412,8 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
-      const collectedCount=i(old.collection_count,0);
-      if(collectedCount>0 && Array.isArray(b.items)){
-        const current=(await client.query("SELECT mall_code, product_uid, qty, sort_no FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[templateId])).rows;
-        const incoming=b.items.map((it,idx)=>({mall_code:s(it.mall_code||it.mallCode||''),product_uid:s(it.product_uid||it.productUid||''),qty:Math.max(1,i(it.qty,1)),sort_no:i(it.sort_no||it.sort_order,idx+1)})).filter(it=>it.product_uid);
-        const sig=a=>JSON.stringify(a.map(x=>[s(x.mall_code),s(x.product_uid),i(x.qty,1),i(x.sort_no,0)]));
-        if(sig(current)!==sig(incoming)) throw new Error('collected template items are locked; set private and create a new template');
-      }
+      // V119: 작성자는 가져가기/좋아요/메시지 집계가 존재해도 원본 Template 상품을 수정할 수 있다.
+      // 기존 수집본은 개인 delta/참조 정책으로 보호하고, 원본 저장 자체를 collection_count로 차단하지 않는다.
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
