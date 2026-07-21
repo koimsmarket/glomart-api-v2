@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V027</title>
+<title>GM Safe Update Builder V028</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -26,7 +26,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V027</h1>
+<h1>GM Safe Update Builder V028</h1>
 <div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -323,7 +323,7 @@ async function downloadAll(){
     document.body.appendChild(a);
     a.click();
     setTimeout(()=>{ URL.revokeObjectURL(objectUrl); a.remove(); }, 1000);
-    log({ action:'export_all_zip.downloaded', bytes:blob.size, url, note:'ZIP 내부 _export_manifest.json에서 제외된 미생성 테이블 확인 가능' });
+    log({ action:'export_all_zip.downloaded', bytes:blob.size, url });
   }catch(e){
     log('전체 ZIP 다운로드 오류: '+(e&&e.message||e));
   }
