@@ -9,6 +9,16 @@
 
 const express = require('express');
 const router = express.Router();
+
+function enqueueAfterResponse(label, task){
+  const run=()=>{
+    Promise.resolve().then(task).catch((eventErr)=>{
+      console.error(label, String(eventErr&&eventErr.message||eventErr));
+    });
+  };
+  if(typeof setImmediate==='function') setImmediate(run);
+  else setTimeout(run,0);
+}
 const VERSION = 'GM_ORDER_ROUTE_V039_EVENT_COMPLETED_SAFE';
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -441,8 +451,9 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
     ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,item_count:itemCount,order_action:action,basket_deleted:basketDeleted});
     const eventQueue=req.app.locals.eventQueue;
     if(eventQueue&&typeof eventQueue.enqueueOrderCompleted==='function'){
-      eventQueue.enqueueOrderCompleted(orderNo,{ source:'cafe24-confirm', order_mode:clean(raw.order_mode||'internal').toLowerCase() })
-        .catch(eventErr=>console.error('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]',String(eventErr&&eventErr.message||eventErr)));
+      enqueueAfterResponse('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]',()=>
+        eventQueue.enqueueOrderCompleted(orderNo,{ source:'cafe24-confirm', order_mode:clean(raw.order_mode||'internal').toLowerCase() })
+      );
     }
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
@@ -472,8 +483,9 @@ router.post('/api/gm/order/create', async (req, res) => {
     // 혼합 주문은 Cafe24 내부상품이 합쳐지기 전이므로 여기서 집계하지 않는다.
     // 외부 전용 주문만 저장 완료 직후 ORDER_COMPLETED 큐에 등록한다.
     if(orderMode!=='mixed'&&eventQueue&&typeof eventQueue.enqueueOrderCompleted==='function'){
-      eventQueue.enqueueOrderCompleted(orderRow.order_no,{ source:'order-create', order_mode:orderMode })
-        .catch(eventErr=>console.error('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]',String(eventErr&&eventErr.message||eventErr)));
+      enqueueAfterResponse('[EVENT_ORDER_COMPLETED_QUEUE_SKIP]',()=>
+        eventQueue.enqueueOrderCompleted(orderRow.order_no,{ source:'order-create', order_mode:orderMode })
+      );
     }else if(orderMode==='mixed'){
       console.log('[EVENT_ORDER_COMPLETED_DEFER]',JSON.stringify({order_no:orderRow.order_no,reason:'wait_cafe24_confirm'}));
     }
