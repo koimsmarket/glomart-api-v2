@@ -143,8 +143,18 @@ function startEventQueueWorker(pool, eventService, options={}){
   started = true;
   const intervalMs = Math.max(1000, Number(options.intervalMs || 2000));
   let running = false;
+  let timer = null;
+  let stoppedForMissingTable = false;
+
+  const stopForMissingTable = ()=>{
+    if(stoppedForMissingTable) return;
+    stoppedForMissingTable = true;
+    if(timer){ clearInterval(timer); timer = null; }
+    console.error('[EVENT_QUEUE_DISABLED_TABLE_MISSING] gm_event_queue');
+  };
+
   const tick = async ()=>{
-    if(running) return;
+    if(running || stoppedForMissingTable) return;
     running = true;
     try{
       for(let i=0;i<20;i++){
@@ -153,14 +163,38 @@ function startEventQueueWorker(pool, eventService, options={}){
         await processOne(pool,eventService,job);
       }
     }catch(e){
-      // Missing migration or temporary DB errors must not stop the server.
+      // PostgreSQL 42P01 = undefined_table. Stop this worker until the server is restarted
+      // after the queue migration has actually been applied.
+      if(e && e.code === '42P01'){
+        stopForMissingTable();
+        return;
+      }
+      // Temporary DB errors must not stop the server or the worker permanently.
       console.error('[EVENT_QUEUE_WORKER_SKIP]', String(e && e.message || e));
     }finally{ running = false; }
   };
-  const timer = setInterval(tick, intervalMs);
-  if(timer.unref) timer.unref();
-  setTimeout(tick, 1000);
-  console.log('[EVENT_QUEUE_WORKER] started', JSON.stringify({ intervalMs }));
+
+  const boot = async ()=>{
+    try{
+      const r = await pool.query("SELECT to_regclass('public.gm_event_queue') AS queue_table");
+      if(!r.rows[0] || !r.rows[0].queue_table){
+        stopForMissingTable();
+        return;
+      }
+      timer = setInterval(tick, intervalMs);
+      if(timer.unref) timer.unref();
+      console.log('[EVENT_QUEUE_WORKER] started', JSON.stringify({ intervalMs }));
+      await tick();
+    }catch(e){
+      if(e && e.code === '42P01'){
+        stopForMissingTable();
+        return;
+      }
+      console.error('[EVENT_QUEUE_WORKER_BOOT_FAIL]', String(e && e.message || e));
+    }
+  };
+
+  setTimeout(boot, 1000);
 }
 
 module.exports = { startEventQueueWorker };
