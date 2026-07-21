@@ -142,6 +142,26 @@ function addressPayload(b, memberId){
   };
 }
 
+
+router.get(['/api/gm/member/recommender/check','/api/member/recommender/check'], async (req,res)=>{
+  const pool=db(req);
+  if(!pool) return res.status(500).json({ok:false,valid:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
+  const recommenderId=s(req.query.recommender_id || req.query.reco_id || req.query.id);
+  const memberId=s(req.query.member_id);
+  if(!recommenderId) return res.json({ok:true,valid:true,blank:true});
+  if(memberId && recommenderId===memberId){
+    return res.status(400).json({ok:false,valid:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'});
+  }
+  try{
+    const r=await pool.query(`SELECT member_id FROM gm_member WHERE member_id=$1 LIMIT 1`,[recommenderId]);
+    if(!r.rowCount) return res.status(404).json({ok:false,valid:false,error:'등록되지 않은 추천인 아이디입니다.'});
+    return res.json({ok:true,valid:true,recommender_id:r.rows[0].member_id});
+  }catch(e){
+    console.error('[GM_RECOMMENDER_CHECK_ERROR]',{code:e&&e.code,message:e&&e.message});
+    return res.status(500).json({ok:false,valid:false,error:'추천인 아이디를 확인하지 못했습니다.'});
+  }
+});
+
 router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const p=memberPayload(b); if(!p.member_id) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
@@ -151,16 +171,56 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
-    const existing=(await client.query(`SELECT member_id,recommender_id FROM gm_member WHERE member_id=$1 FOR UPDATE`,[p.member_id])).rows[0] || null;
+    const existing=(await client.query(`SELECT member_id,recommender_id,created_at,recommender_updated_at,relation_calculated_yn FROM gm_member WHERE member_id=$1 FOR UPDATE`,[p.member_id])).rows[0] || null;
     const isNewMember=!existing;
+    const requestedRecommender=s(p.recommender_id);
+    let attachRecommender=false;
+    if(requestedRecommender){
+      if(requestedRecommender===p.member_id){
+        await client.query('ROLLBACK');
+        return res.status(400).json({ok:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'});
+      }
+      const recommenderCheck=await client.query(`SELECT member_id FROM gm_member WHERE member_id=$1 LIMIT 1`,[requestedRecommender]);
+      if(!recommenderCheck.rowCount){
+        await client.query('ROLLBACK');
+        return res.status(400).json({ok:false,error:'등록되지 않은 추천인 아이디입니다.'});
+      }
+    }
+    if(!isNewMember && requestedRecommender && !s(existing.recommender_id)){
+      const ageCheck=await client.query(`SELECT (NOW() <= $1::timestamptz + INTERVAL '72 hours') AS allowed`,[existing.created_at]);
+      if(!(ageCheck.rows[0] && ageCheck.rows[0].allowed)){
+        await client.query('ROLLBACK');
+        return res.status(400).json({ok:false,error:'추천인은 가입 후 3일 이내에만 최초 등록할 수 있습니다.'});
+      }
+      const maxDown=Math.max(0,Number(process.env.GM_RECOMMENDER_ATTACH_MAX_DOWN || 20));
+      const downRow=(await client.query(`SELECT COALESCE(down_total_count,0)::bigint AS n FROM gm_member_relation_count WHERE member_id=$1`,[p.member_id])).rows[0] || {n:0};
+      if(Number(downRow.n||0)>maxDown){
+        await client.query('ROLLBACK');
+        return res.status(400).json({ok:false,error:`하위 전체 인원이 ${maxDown}명을 초과하여 추천인을 추가할 수 없습니다.`});
+      }
+      const cycle=await client.query(`WITH RECURSIVE down AS (
+        SELECT member_id FROM gm_member WHERE recommender_id=$1
+        UNION ALL
+        SELECT m.member_id FROM gm_member m JOIN down d ON m.recommender_id=d.member_id
+      ) SELECT 1 FROM down WHERE member_id=$2 LIMIT 1`,[p.member_id,requestedRecommender]);
+      if(cycle.rowCount){
+        await client.query('ROLLBACK');
+        return res.status(400).json({ok:false,error:'하위 회원은 추천인으로 등록할 수 없습니다.'});
+      }
+      attachRecommender=true;
+    }
+    if(!isNewMember && requestedRecommender && s(existing.recommender_id) && requestedRecommender!==s(existing.recommender_id)){
+      await client.query('ROLLBACK');
+      return res.status(400).json({ok:false,error:'추천인은 최초 등록 후 변경할 수 없습니다.'});
+    }
     const sql=`INSERT INTO gm_member (
       member_id,cafe24_member_id,member_name,member_name_en,email,phone,country_code,nationality,language_code,cs_language,device_lang,
       recommender_id,member_grade,member_status,refund_bank_name,refund_account_no,refund_account_holder,
       default_receiver_name,default_receiver_phone,default_receiver_mobile,default_zipcode,default_address1,default_address2,default_address_old,default_address_full,
       default_sido,default_sigungu,default_eup_myeon_dong,customs_clearance_code,delivery_memo,
-      password_hash,password_algo,password_updated_at,password_migrated,last_sync_at,created_at,updated_at
+      password_hash,password_algo,password_updated_at,password_migrated,recommender_updated_at,relation_calculated_yn,last_sync_at,created_at,updated_at
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,NOW(),NOW(),NOW()
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,NOW(),NOW(),NOW()
     ) ON CONFLICT (member_id) DO UPDATE SET
       cafe24_member_id=COALESCE(NULLIF(EXCLUDED.cafe24_member_id,''),gm_member.cafe24_member_id),
       member_name=COALESCE(NULLIF(EXCLUDED.member_name,''),gm_member.member_name),
@@ -172,7 +232,9 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       language_code=COALESCE(NULLIF(EXCLUDED.language_code,''),gm_member.language_code),
       cs_language=COALESCE(NULLIF(EXCLUDED.cs_language,''),gm_member.cs_language),
       device_lang=COALESCE(NULLIF(EXCLUDED.device_lang,''),gm_member.device_lang),
-      recommender_id=gm_member.recommender_id,
+      recommender_id=CASE WHEN COALESCE(gm_member.recommender_id,'')='' AND COALESCE(EXCLUDED.recommender_id,'')<>'' THEN EXCLUDED.recommender_id ELSE gm_member.recommender_id END,
+      recommender_updated_at=CASE WHEN COALESCE(gm_member.recommender_id,'')='' AND COALESCE(EXCLUDED.recommender_id,'')<>'' THEN NOW() ELSE gm_member.recommender_updated_at END,
+      relation_calculated_yn=CASE WHEN COALESCE(gm_member.recommender_id,'')='' AND COALESCE(EXCLUDED.recommender_id,'')<>'' THEN 'N' ELSE gm_member.relation_calculated_yn END,
       member_grade=COALESCE(NULLIF(EXCLUDED.member_grade,''),gm_member.member_grade),
       member_status=COALESCE(NULLIF(EXCLUDED.member_status,''),gm_member.member_status),
       refund_bank_name=COALESCE(NULLIF(EXCLUDED.refund_bank_name,''),gm_member.refund_bank_name),
@@ -203,7 +265,9 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       passwordMeta ? passwordMeta.password_hash : null,
       passwordMeta ? passwordMeta.password_algo : null,
       passwordMeta ? passwordMeta.password_updated_at : null,
-      passwordMeta ? passwordMeta.password_migrated : 'N'];
+      passwordMeta ? passwordMeta.password_migrated : 'N',
+      requestedRecommender ? new Date() : null,
+      requestedRecommender ? 'N' : 'Y'];
     const mr=await client.query(sql, vals);
     if(isNewMember){
       await client.query(`INSERT INTO gm_member_relation_count (member_id,calculated_yn)
@@ -218,7 +282,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       LIMIT 1`, [p.member_id]);
     const address=ar.rows[0] || null;
     await client.query('COMMIT');
-    res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address,is_new_member:isNewMember});
+    res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address,is_new_member:isNewMember,recommender_attach_pending:attachRecommender});
     if(isNewMember && req.app.locals.eventQueue){
       req.app.locals.eventQueue.enqueueMemberJoin(p.member_id, mr.rows[0] && mr.rows[0].recommender_id)
         .then(x=>console.log('[MEMBER_JOIN_EVENT_QUEUE]',JSON.stringify({member_id:p.member_id,result:x})))

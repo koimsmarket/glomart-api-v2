@@ -779,9 +779,9 @@ async function assertTemplateCreator(pool, templateId, memberId){
 }
 function nextNightKstSql(){
   return `CASE
-    WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::time < TIME '02:00'
-      THEN ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date + TIME '02:00') AT TIME ZONE 'Asia/Seoul'
-    ELSE (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date + 1) + TIME '02:00') AT TIME ZONE 'Asia/Seoul'
+    WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::time < TIME '02:15'
+      THEN ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date + TIME '02:15') AT TIME ZONE 'Asia/Seoul'
+    ELSE (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date + 1) + TIME '02:15') AT TIME ZONE 'Asia/Seoul'
   END`;
 }
 
@@ -985,7 +985,7 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
         ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko)})]);
     }
     await client.query('COMMIT');
-    ok(res,{template_id:templateId,serial_no:serial,candidate_count:candidates.rowCount,new_receiver_count:inserted,queued_count:inserted,night_queue:night,scheduled_mode:night?'NIGHT_KST_02':'IMMEDIATE',immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
+    ok(res,{template_id:templateId,serial_no:serial,candidate_count:candidates.rowCount,new_receiver_count:inserted,queued_count:inserted,night_queue:night,scheduled_mode:night?'NIGHT_KST_0215':'IMMEDIATE',immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
   }catch(e){ try{await client.query('ROLLBACK');}catch(_e){} fail(res,400,'template message send failed',{detail:String(e.message||e)}); }
   finally{client.release();}
 });

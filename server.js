@@ -4,6 +4,7 @@ const installSearchLogService = require('./services/search_log');
 const createEventService = require('./services/event_service');
 const createEventQueue = require('./services/event_queue');
 const { startEventQueueWorker } = require('./workers/event_queue_worker');
+const { startMemberRelationWorker } = require('./workers/member_relation_worker');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -1708,6 +1709,7 @@ app.locals.eventService = eventService;
 const eventQueue = createEventQueue(pool);
 app.locals.eventQueue = eventQueue;
 startEventQueueWorker(pool, eventService, { intervalMs:2000 });
+startMemberRelationWorker(pool, eventService);
 installSearchLogService({
   app,
   pool,

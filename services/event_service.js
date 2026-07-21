@@ -255,7 +255,71 @@ module.exports = function createEventService(deps){
       );
     }
 
+    await client.query(`UPDATE gm_member SET relation_calculated_yn='Y',updated_at=NOW() WHERE member_id=$1`,[memberId]);
     return {applied:true,member_id:memberId,upline_count:ancestors.length,ancestors};
+  }
+
+  async function applyMemberAttach(client,payload){
+    const memberId=cleanText(payload && (payload.member_id||payload.memberId));
+    if(!memberId) throw new Error('member_id_missing');
+    const member=(await client.query(`SELECT member_id,recommender_id,relation_calculated_yn FROM gm_member WHERE member_id=$1 FOR UPDATE`,[memberId])).rows[0];
+    if(!member) throw new Error(`member_not_found:${memberId}`);
+    if(cleanText(member.relation_calculated_yn)==='Y') return {skipped:true,reason:'already_calculated',member_id:memberId};
+    const recommenderId=cleanText(member.recommender_id);
+    if(!recommenderId) throw new Error(`recommender_missing:${memberId}`);
+
+    const rc=(await client.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 FOR UPDATE`,[memberId])).rows[0] || {};
+    const down=[1,Number(rc.down_1_count||0),Number(rc.down_2_count||0),Number(rc.down_3_count||0),Number(rc.down_4_count||0)];
+
+    const ancestors=[]; let current=recommenderId; const seen=new Set([memberId]);
+    for(let depth=1; depth<=5 && current; depth++){
+      if(seen.has(current)) throw new Error(`member_relation_cycle:${memberId}:${current}`);
+      seen.add(current);
+      const row=(await client.query(`SELECT member_id,recommender_id FROM gm_member WHERE member_id=$1 FOR UPDATE`,[current])).rows[0];
+      if(!row) break;
+      ancestors.push({member_id:cleanText(row.member_id),depth});
+      current=cleanText(row.recommender_id);
+    }
+
+    // 대상 회원과 기존 하위 4촌까지의 업라인 존재 카운트를 최신 추천인 체인으로 다시 계산한다.
+    const affected=await client.query(`WITH RECURSIVE tree AS (
+      SELECT member_id,0 AS depth FROM gm_member WHERE member_id=$1
+      UNION ALL
+      SELECT m.member_id,t.depth+1 FROM gm_member m JOIN tree t ON m.recommender_id=t.member_id WHERE t.depth<4
+    ) SELECT member_id,depth FROM tree ORDER BY depth DESC,member_id`,[memberId]);
+    for(const row of affected.rows){
+      const id=cleanText(row.member_id);
+      let upId=id; const ups=[0,0,0,0,0]; const localSeen=new Set([id]);
+      for(let depth=1; depth<=5; depth++){
+        const q=(await client.query(`SELECT recommender_id FROM gm_member WHERE member_id=$1 LIMIT 1`,[upId])).rows[0];
+        const next=cleanText(q&&q.recommender_id);
+        if(!next) break;
+        if(localSeen.has(next)) throw new Error(`member_relation_cycle:${id}:${next}`);
+        localSeen.add(next); ups[depth-1]=1; upId=next;
+      }
+      await client.query(`INSERT INTO gm_member_relation_count(member_id,up_1_count,up_2_count,up_3_count,up_4_count,up_5_count,up_total_count,calculated_yn)
+        VALUES($1,$2,$3,$4,$5,$6,$7,'T') ON CONFLICT(member_id) DO UPDATE SET
+        up_1_count=EXCLUDED.up_1_count,up_2_count=EXCLUDED.up_2_count,up_3_count=EXCLUDED.up_3_count,up_4_count=EXCLUDED.up_4_count,up_5_count=EXCLUDED.up_5_count,up_total_count=EXCLUDED.up_total_count,calculated_yn='T'`,
+        [id,ups[0],ups[1],ups[2],ups[3],ups[4],ups.reduce((a,b)=>a+b,0)]);
+    }
+
+    // 새 업라인 최대 5명의 하위 카운터에 대상 회원의 기존 하위 묶음을 촌수 이동해 더한다.
+    for(const a of ancestors){
+      const inc=[0,0,0,0,0];
+      for(let d=0; d<down.length; d++){ const target=a.depth+d; if(target<=5) inc[target-1]+=down[d]; }
+      const total=inc.reduce((x,y)=>x+y,0);
+      await client.query(`INSERT INTO gm_member_relation_count(member_id,down_1_count,down_2_count,down_3_count,down_4_count,down_5_count,down_total_count,calculated_yn)
+        VALUES($1,$2,$3,$4,$5,$6,$7,'T') ON CONFLICT(member_id) DO UPDATE SET
+        down_1_count=gm_member_relation_count.down_1_count+EXCLUDED.down_1_count,
+        down_2_count=gm_member_relation_count.down_2_count+EXCLUDED.down_2_count,
+        down_3_count=gm_member_relation_count.down_3_count+EXCLUDED.down_3_count,
+        down_4_count=gm_member_relation_count.down_4_count+EXCLUDED.down_4_count,
+        down_5_count=gm_member_relation_count.down_5_count+EXCLUDED.down_5_count,
+        down_total_count=gm_member_relation_count.down_total_count+EXCLUDED.down_total_count`,
+        [a.member_id,inc[0],inc[1],inc[2],inc[3],inc[4],total]);
+    }
+    await client.query(`UPDATE gm_member SET relation_calculated_yn='Y',updated_at=NOW() WHERE member_id=$1`,[memberId]);
+    return {applied:true,member_id:memberId,upline_count:ancestors.length,affected_member_count:affected.rowCount,down_snapshot:down};
   }
 
   async function applyOrderCreate(client,order,items){
@@ -273,5 +337,5 @@ module.exports = function createEventService(deps){
     return {applied:accepted>0,accepted_items:accepted,sales_qty:totalQty,sales_amount:totalSales,network_updated:network.updated||0};
   }
 
-  return { applySearch, applyDetail, applyBasketAdd, applyMemberJoin, applyOrderCreate };
+  return { applySearch, applyDetail, applyBasketAdd, applyMemberJoin, applyMemberAttach, applyOrderCreate };
 };

@@ -84,6 +84,8 @@ async function processOne(pool, eventService, job){
       if(!result || !result.updated) throw new Error(`detail_not_ready:${result && result.reason || 'unknown'}`);
     }else if(type === 'MEMBER_JOIN'){
       result = await eventService.applyMemberJoin(client, payload);
+    }else if(type === 'MEMBER_ATTACH'){
+      result = await eventService.applyMemberAttach(client, payload);
     }else if(type === 'ORDER_COMPLETED' || type === 'ORDER_CREATE'){
       const loaded = await loadOrder(client, clean(payload.order_no));
       const orderStatus = clean(loaded.order.order_status).toLowerCase();
@@ -140,21 +142,17 @@ async function processOne(pool, eventService, job){
 
 function startEventQueueWorker(pool, eventService, options={}){
   if(started) return;
-  started = true;
   const intervalMs = Math.max(1000, Number(options.intervalMs || 2000));
   let running = false;
   let timer = null;
-  let stoppedForMissingTable = false;
-
-  const stopForMissingTable = ()=>{
-    if(stoppedForMissingTable) return;
-    stoppedForMissingTable = true;
-    if(timer){ clearInterval(timer); timer = null; }
+  let disabled = false;
+  const stopMissing=()=>{
+    if(disabled) return; disabled=true;
+    if(timer){ clearInterval(timer); timer=null; }
     console.error('[EVENT_QUEUE_DISABLED_TABLE_MISSING] gm_event_queue');
   };
-
   const tick = async ()=>{
-    if(running || stoppedForMissingTable) return;
+    if(running || disabled) return;
     running = true;
     try{
       for(let i=0;i<20;i++){
@@ -163,38 +161,23 @@ function startEventQueueWorker(pool, eventService, options={}){
         await processOne(pool,eventService,job);
       }
     }catch(e){
-      // PostgreSQL 42P01 = undefined_table. Stop this worker until the server is restarted
-      // after the queue migration has actually been applied.
-      if(e && e.code === '42P01'){
-        stopForMissingTable();
-        return;
-      }
-      // Temporary DB errors must not stop the server or the worker permanently.
-      console.error('[EVENT_QUEUE_WORKER_SKIP]', String(e && e.message || e));
+      if(e && e.code==='42P01') stopMissing();
+      else console.error('[EVENT_QUEUE_WORKER_SKIP]', String(e && e.message || e));
     }finally{ running = false; }
   };
-
-  const boot = async ()=>{
+  (async()=>{
     try{
-      const r = await pool.query("SELECT to_regclass('public.gm_event_queue') AS queue_table");
-      if(!r.rows[0] || !r.rows[0].queue_table){
-        stopForMissingTable();
-        return;
-      }
-      timer = setInterval(tick, intervalMs);
-      if(timer.unref) timer.unref();
-      console.log('[EVENT_QUEUE_WORKER] started', JSON.stringify({ intervalMs }));
-      await tick();
+      const q=await pool.query(`SELECT to_regclass('public.gm_event_queue') AS table_name`);
+      if(!(q.rows[0]&&q.rows[0].table_name)){ stopMissing(); return; }
+      started=true;
+      timer=setInterval(tick,intervalMs); if(timer.unref) timer.unref();
+      setTimeout(tick,1000);
+      console.log('[EVENT_QUEUE_WORKER] started',JSON.stringify({intervalMs}));
     }catch(e){
-      if(e && e.code === '42P01'){
-        stopForMissingTable();
-        return;
-      }
-      console.error('[EVENT_QUEUE_WORKER_BOOT_FAIL]', String(e && e.message || e));
+      if(e&&e.code==='42P01') stopMissing();
+      else console.error('[EVENT_QUEUE_WORKER_START_FAIL]',String(e&&e.message||e));
     }
-  };
-
-  setTimeout(boot, 1000);
+  })();
 }
 
 module.exports = { startEventQueueWorker };
