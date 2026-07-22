@@ -59,6 +59,11 @@ function rowPayload(b){
   const key=itemKey(b);
   return {
     mall_code:key.mall_code,
+    source_mall:s(b.source_mall||b.sourceMall),
+    source_uid:s(b.source_uid||b.sourceUid),
+    internal_product_code:s(b.internal_product_code||b.internalProductCode),
+    cafe24_product_no:s(b.cafe24_product_no||b.cafe24ProductNo),
+    gm_internal_link:n(b.gm_internal_link||b.gmInternalLink,0)===1?1:0,
     member_id:s(b.member_id),
     guest_key:s(b.guest_key),
     pi_ii_vi:key.pi_ii_vi,
@@ -88,6 +93,11 @@ async function ensureBasketSchema(pool){
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS product_url TEXT NOT NULL DEFAULT ''`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS thumb_url TEXT NOT NULL DEFAULT ''`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS thumb_file_name TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS source_mall TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS source_uid TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS internal_product_code TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS cafe24_product_no TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS gm_internal_link INTEGER NOT NULL DEFAULT 0`);
   __basketSchemaReady=true;
 }
 
@@ -103,10 +113,15 @@ async function upsertOne(pool,b){
   if(!p.thumb_url) throw new Error('thumb_url is required');
   if(!p.amount || p.amount <= 0) throw new Error('amount is required');
   const sql=`INSERT INTO gm_basket (
-      mall_code,member_id,guest_key,pi_ii_vi,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
+      mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW())
     ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
       quantity=gm_basket.quantity + EXCLUDED.quantity,
+      source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''),gm_basket.source_mall),
+      source_uid=COALESCE(NULLIF(EXCLUDED.source_uid,''),gm_basket.source_uid),
+      internal_product_code=COALESCE(NULLIF(EXCLUDED.internal_product_code,''),gm_basket.internal_product_code),
+      cafe24_product_no=COALESCE(NULLIF(EXCLUDED.cafe24_product_no,''),gm_basket.cafe24_product_no),
+      gm_internal_link=GREATEST(gm_basket.gm_internal_link,EXCLUDED.gm_internal_link),
       product_name=EXCLUDED.product_name,
       option_name=EXCLUDED.option_name,
       option_value=EXCLUDED.option_value,
@@ -119,7 +134,7 @@ async function upsertOne(pool,b){
       thumb_file_name=EXCLUDED.thumb_file_name,
       updated_at=NOW()
     RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`;
-  const params=[p.mall_code,p.member_id,p.guest_key,p.pi_ii_vi,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
+  const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
   const r=await pool.query(sql,params);
   return r.rows[0];
 }
