@@ -412,8 +412,8 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
-      // V119: 작성자는 가져가기/좋아요/메시지 집계가 존재해도 원본 Template 상품을 수정할 수 있다.
-      // 기존 수집본은 개인 delta/참조 정책으로 보호하고, 원본 저장 자체를 collection_count로 차단하지 않는다.
+      const collected=(await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'`,[templateId])).rows[0];
+      if(i(collected&&collected.n,0)>0) throw new Error('다른 사용자가 가져간 템플릿은 수정할 수 없습니다.');
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
@@ -833,6 +833,7 @@ router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
 
   try{
     const template=await assertTemplateCreator(pool,templateId,member);
+    if(visibilityOf(template.visibility,'private')!=='public') return fail(res,403,'공개된 템플릿만 관계망 사용자에게 메시지를 발송할 수 있습니다.');
     const warnings=[];
     let relation={};
     let sub={total_count:0,accept_count:0,reject_count:0};
@@ -917,6 +918,7 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
     if(!message) return fail(res,400,'message required');
     if(message.length>2000) return fail(res,400,'message too long');
     const template=await assertTemplateCreator(client,templateId,member);
+    if(visibilityOf(template.visibility,'private')!=='public') return fail(res,403,'공개된 템플릿만 관계망 사용자에게 메시지를 발송할 수 있습니다.');
     await client.query('BEGIN');
     const serial=Number((await client.query(`SELECT COALESCE(MAX(serial_no),0)+1 AS serial_no FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0].serial_no||1);
     /* Network is expanded only here. The recursive graph walks recommender edges in both directions,
