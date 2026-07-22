@@ -143,32 +143,73 @@ function addressPayload(b, memberId){
 }
 
 
+async function canonicalMember(client, value){
+  const v=s(value); if(!v) return null;
+  const r=await client.query(`SELECT member_id,cafe24_member_id,recommender_id,created_at
+    FROM gm_member
+    WHERE LOWER(COALESCE(member_id,''))=LOWER($1)
+       OR LOWER(COALESCE(cafe24_member_id,''))=LOWER($1)
+    ORDER BY CASE WHEN LOWER(COALESCE(member_id,''))=LOWER($1) THEN 0 ELSE 1 END
+    LIMIT 1`,[v]);
+  return r.rows[0] || null;
+}
+async function storedDownTotal(client, memberId){
+  try{
+    const r=await client.query(`SELECT COALESCE(down_total_count,0)::bigint AS n
+      FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[memberId]);
+    return Number((r.rows[0]&&r.rows[0].n)||0);
+  }catch(e){ if(e&&e.code==='42P01') return 0; throw e; }
+}
+async function validateRecommenderAttach(client, memberId, recommenderId){
+  const requested=s(recommenderId), ownerInput=s(memberId);
+  if(!requested) return {ok:true,blank:true};
+  const candidate=await canonicalMember(client,requested);
+  if(!candidate) return {ok:false,error:'등록되지 않은 추천인입니다.'};
+  const canonical=s(candidate.member_id);
+  const owner=ownerInput ? await canonicalMember(client,ownerInput) : null;
+  const ownerCanonical=s((owner&&owner.member_id)||ownerInput);
+  if(ownerCanonical && canonical.toLowerCase()===ownerCanonical.toLowerCase()) return {ok:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'};
+  if(owner && s(owner.recommender_id)){
+    if(s(owner.recommender_id).toLowerCase()===canonical.toLowerCase()) return {ok:true,recommender_id:canonical,locked:true};
+    return {ok:false,error:'추천인은 최초 등록 후 변경할 수 없습니다.'};
+  }
+  if(ownerCanonical && s(candidate.recommender_id) && s(candidate.recommender_id).toLowerCase()===ownerCanonical.toLowerCase()){
+    return {ok:false,error:'상호 추천인은 등록할 수 없습니다.'};
+  }
+  if(owner){
+    const maxDown=Math.max(0,Number(process.env.GM_RECOMMENDER_ATTACH_MAX_DOWN || 100));
+    const downTotal=await storedDownTotal(client,owner.member_id);
+    if(downTotal>=maxDown) return {ok:false,error:`하위 관계망이 ${maxDown}명 이상인 경우에는 추천인을 추가할 수 없습니다.`,down_total_count:downTotal};
+    const cycle=await client.query(`WITH RECURSIVE down(member_id,path,depth) AS (
+      SELECT m.member_id,ARRAY[$1::text,m.member_id::text],1
+      FROM gm_member m WHERE LOWER(COALESCE(m.recommender_id,''))=LOWER($1)
+      UNION ALL
+      SELECT m.member_id,d.path||m.member_id::text,d.depth+1
+      FROM gm_member m JOIN down d ON LOWER(COALESCE(m.recommender_id,''))=LOWER(d.member_id)
+      WHERE d.depth<5 AND NOT (m.member_id::text=ANY(d.path))
+    ) SELECT 1 FROM down WHERE LOWER(member_id)=LOWER($2) LIMIT 1`,[owner.member_id,canonical]);
+    if(cycle.rowCount) return {ok:false,error:'하위 1~5촌 회원은 추천인으로 등록할 수 없습니다.'};
+  }
+  return {ok:true,recommender_id:canonical};
+}
+
+
 router.get(['/api/gm/member/recommender/check','/api/member/recommender/check'], async (req,res)=>{
   const pool=db(req);
   if(!pool) return res.status(500).json({ok:false,valid:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const recommenderId=s(req.query.recommender_id || req.query.reco_id || req.query.id);
   const memberId=s(req.query.member_id);
   if(!recommenderId) return res.json({ok:true,valid:true,blank:true});
-  if(memberId && recommenderId===memberId){
-    return res.status(400).json({ok:false,valid:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'});
-  }
   try{
-    const r=await pool.query(`SELECT member_id FROM gm_member
-      WHERE LOWER(COALESCE(member_id,''))=LOWER($1)
-         OR LOWER(COALESCE(cafe24_member_id,''))=LOWER($1)
-      ORDER BY CASE WHEN LOWER(COALESCE(member_id,''))=LOWER($1) THEN 0 ELSE 1 END
-      LIMIT 1`,[recommenderId]);
-    if(!r.rowCount) return res.status(404).json({ok:false,valid:false,error:'등록되지 않은 추천인입니다.'});
-    const canonical=s(r.rows[0].member_id);
-    if(memberId && canonical.toLowerCase()===memberId.toLowerCase()){
-      return res.status(400).json({ok:false,valid:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'});
-    }
-    return res.json({ok:true,valid:true,recommender_id:canonical});
+    const result=await validateRecommenderAttach(pool,memberId,recommenderId);
+    if(!result.ok) return res.status(400).json({ok:false,valid:false,error:result.error,down_total_count:result.down_total_count});
+    return res.json({ok:true,valid:true,recommender_id:result.recommender_id,locked:!!result.locked});
   }catch(e){
     console.error('[GM_RECOMMENDER_CHECK_ERROR]',{code:e&&e.code,message:e&&e.message});
     return res.status(500).json({ok:false,valid:false,error:'추천인 아이디를 확인하지 못했습니다.'});
   }
 });
+
 
 router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
@@ -179,25 +220,19 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
+    const existingLookup=await canonicalMember(client,p.member_id);
+    if(existingLookup) p.member_id=s(existingLookup.member_id);
     const existing=(await client.query(`SELECT member_id,recommender_id,created_at,recommender_updated_at,relation_calculated_yn FROM gm_member WHERE member_id=$1 FOR UPDATE`,[p.member_id])).rows[0] || null;
     const isNewMember=!existing;
     let requestedRecommender=s(p.recommender_id);
     let attachRecommender=false;
     if(requestedRecommender){
-      if(requestedRecommender===p.member_id){
+      const relationValidation=await validateRecommenderAttach(client,p.member_id,requestedRecommender);
+      if(!relationValidation.ok){
         await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'});
+        return res.status(400).json({ok:false,error:relationValidation.error,down_total_count:relationValidation.down_total_count});
       }
-      const recommenderCheck=await client.query(`SELECT member_id FROM gm_member
-        WHERE LOWER(COALESCE(member_id,''))=LOWER($1)
-           OR LOWER(COALESCE(cafe24_member_id,''))=LOWER($1)
-        ORDER BY CASE WHEN LOWER(COALESCE(member_id,''))=LOWER($1) THEN 0 ELSE 1 END
-        LIMIT 1`,[requestedRecommender]);
-      if(!recommenderCheck.rowCount){
-        await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:'등록되지 않은 추천인입니다.'});
-      }
-      requestedRecommender=s(recommenderCheck.rows[0].member_id);
+      requestedRecommender=s(relationValidation.recommender_id);
       p.recommender_id=requestedRecommender;
     }
     if(!isNewMember && requestedRecommender && !s(existing.recommender_id)){
@@ -209,23 +244,6 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
           await client.query('ROLLBACK');
           return res.status(400).json({ok:false,error:`추천인은 가입 후 ${windowDays}일 이내에만 최초 등록할 수 있습니다.`});
         }
-      }
-      const maxDown=Math.max(0,Number(process.env.GM_RECOMMENDER_ATTACH_MAX_DOWN || 100));
-      const downRow=(await client.query(`SELECT COALESCE(down_total_count,0)::bigint AS n FROM gm_member_relation_count WHERE member_id=$1`,[p.member_id])).rows[0] || {n:0};
-      if(Number(downRow.n||0)>=maxDown){
-        await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:`하위 관계망이 ${maxDown}명 이상인 경우에는 추천인을 추가할 수 없습니다.`});
-      }
-      const cycle=await client.query(`WITH RECURSIVE down(member_id,path,depth) AS (
-        SELECT member_id,ARRAY[$1::text,member_id::text],1 FROM gm_member WHERE LOWER(COALESCE(recommender_id,''))=LOWER($1)
-        UNION ALL
-        SELECT m.member_id,d.path||m.member_id::text,d.depth+1
-        FROM gm_member m JOIN down d ON LOWER(COALESCE(m.recommender_id,''))=LOWER(d.member_id)
-        WHERE d.depth<100 AND NOT (m.member_id::text=ANY(d.path))
-      ) SELECT 1 FROM down WHERE LOWER(member_id)=LOWER($2) LIMIT 1`,[p.member_id,requestedRecommender]);
-      if(cycle.rowCount){
-        await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:'하위 회원은 추천인으로 등록할 수 없습니다.'});
       }
       attachRecommender=true;
     }
