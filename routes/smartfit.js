@@ -412,8 +412,8 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
-      const collected=(await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'`,[templateId])).rows[0];
-      if(i(collected&&collected.n,0)>0) throw new Error('collected template cannot be modified');
+      const collectedCount=Number((await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'`,[templateId])).rows[0].n||0);
+      if(collectedCount>0) throw new Error('collected template cannot be modified');
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
@@ -426,20 +426,29 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         [spaceIdValue,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),0,links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
+    let savedItemCount=0;
     if(Array.isArray(b.items)){
       await client.query("UPDATE gm_smartfit_item SET is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2", [member, saved.template_id]);
-      let order=0;
-      for(const it of b.items){
-        const productUid=s(it.product_uid || it.productUid); if(!productUid) continue;
+      const merged=new Map();
+      for(const raw of b.items){
+        const productUid=s(raw.product_uid || raw.productUid); if(!productUid) continue;
+        const mallCode=s(raw.mall_code || raw.mallCode || 'CAFE24')||'CAFE24';
+        const key=mallCode+'|'+productUid;
+        const qty=Math.max(1,i(raw.qty||raw.quantity,1));
+        if(merged.has(key)) merged.get(key).qty=Math.min(999,merged.get(key).qty+qty);
+        else merged.set(key,{item_role:s(raw.item_role||raw.role||'ETC')||'ETC',mall_code:mallCode,product_uid:productUid,qty,sort_no:merged.size+1});
+      }
+      for(const it of merged.values()){
         await client.query(`INSERT INTO gm_smartfit_item (template_id,item_role,mall_code,product_uid,qty,sort_no,is_deleted,deleted_at,deleted_by)
           VALUES ($1,$2,$3,$4,$5,$6,'F',NULL,NULL)
           ON CONFLICT (template_id,mall_code,product_uid) DO UPDATE SET item_role=EXCLUDED.item_role, qty=EXCLUDED.qty, sort_no=EXCLUDED.sort_no, is_deleted='F', deleted_at=NULL, deleted_by=NULL, is_active='T', updated_at=CURRENT_TIMESTAMP`,
-          [saved.template_id,s(it.item_role || it.role || 'ETC'),s(it.mall_code || it.mallCode || ''),productUid,Math.max(1,i(it.qty,1)),i(it.sort_no || it.sort_order, ++order)]);
+          [saved.template_id,it.item_role,it.mall_code,it.product_uid,it.qty,it.sort_no]);
+        savedItemCount++;
       }
     }
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
-    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template') });
+    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), saved_item_count:savedItemCount });
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} console.error('[SMARTFIT_TEMPLATE_SAVE_ERROR_V043]', e && (e.stack || e.message || e)); fail(res,400,'template save failed',{ detail:String(e.message||e) }); }
   finally{ client.release(); }
 });
@@ -467,7 +476,7 @@ router.post('/api/gm/smartfit/collection/add', async (req,res)=>{
     if(!member) return fail(res,401,'login required');
     if(!templateId) return fail(res,400,'template_id required');
     await client.query('BEGIN');
-    const template=(await client.query("SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE",[templateId])).rows[0];
+    const template=(await client.query("SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted, content_json FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE",[templateId])).rows[0];
     if(!template || template.is_active!=='T' || template.is_deleted==='T') throw new Error('template not found');
     if(template.visibility!=='public' && template.creator_member_id!==member) throw new Error('private template cannot be collected');
     if(template.search_visible!=='T' && template.creator_member_id!==member) throw new Error('template cannot be collected');
@@ -505,7 +514,10 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
     const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id,member]);
     const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
     const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[id]);
-    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows });
+    const meta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
+    const metaMap=new Map(meta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
+    const mergedItems=items.rows.map(row=>Object.assign({},metaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
+    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:mergedItems });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
 });
 
@@ -517,7 +529,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     const q=s(req.query.q || req.query.keyword || '');
     const limit=Math.min(120, Math.max(1, i(req.query.limit,120)));
     if(!templateId) return fail(res,400,'template_id required');
-    const template=(await pool.query(`SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted
+    const template=(await pool.query(`SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted, content_json
       FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1`,[templateId])).rows[0];
     if(!template || template.is_active!=='T' || template.is_deleted==='T') return fail(res,404,'template not found');
     let collected=false;
@@ -547,6 +559,9 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
       LIMIT ${lim}`, params);
 
     let items=r.rows;
+    const itemMeta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
+    const itemMetaMap=new Map(itemMeta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
+    items=items.map(row=>Object.assign({},itemMetaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
     if(member && collected){
       let d=[];
       try{
@@ -833,7 +848,7 @@ router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
 
   try{
     const template=await assertTemplateCreator(pool,templateId,member);
-    if(template.visibility!=='public') return fail(res,409,'public template required for message');
+    if(visibilityOf(template.visibility||template.search_visible,'private')!=='public') return fail(res,409,'public template required for message');
     const warnings=[];
     let relation={};
     let sub={total_count:0,accept_count:0,reject_count:0};
@@ -918,7 +933,7 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
     if(!message) return fail(res,400,'message required');
     if(message.length>2000) return fail(res,400,'message too long');
     const template=await assertTemplateCreator(client,templateId,member);
-    if(template.visibility!=='public') return fail(res,409,'public template required for message');
+    if(visibilityOf(template.visibility||template.search_visible,'private')!=='public') return fail(res,409,'public template required for message');
     await client.query('BEGIN');
     const serial=Number((await client.query(`SELECT COALESCE(MAX(serial_no),0)+1 AS serial_no FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0].serial_no||1);
     /* Network is expanded only here. The recursive graph walks recommender edges in both directions,
