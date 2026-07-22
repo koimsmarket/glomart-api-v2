@@ -143,19 +143,79 @@ function addressPayload(b, memberId){
 }
 
 
+const RECOMMENDER_ATTACH_MAX_DOWN = Math.max(1, Number(process.env.GM_RECOMMENDER_ATTACH_MAX_DOWN || 100));
+
+async function validateRecommenderAttach(client, memberId, recommenderId, options={}){
+  const member=s(memberId), candidate=s(recommenderId);
+  if(!candidate) return {ok:true,blank:true};
+  if(member && member===candidate) return {ok:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'};
+
+  const target=await client.query(`SELECT member_id,recommender_id FROM gm_member WHERE member_id=$1 LIMIT 1`,[candidate]);
+  if(!target.rowCount) return {ok:false,error:'등록되지 않은 추천인 아이디입니다.'};
+  if(!member) return {ok:true,recommender_id:candidate};
+
+  const owner=(await client.query(`SELECT member_id,recommender_id FROM gm_member WHERE member_id=$1 LIMIT 1`,[member])).rows[0] || null;
+  if(!owner) return {ok:true,recommender_id:candidate,is_new_member:true};
+
+  if(options.requireBlank!==false && s(owner.recommender_id)){
+    if(s(owner.recommender_id)===candidate) return {ok:true,recommender_id:candidate,locked:true};
+    return {ok:false,error:'추천인은 등록 후 수정 불가합니다.'};
+  }
+
+  if(options.checkDownLimit!==false){
+    const downCount=await client.query(`WITH RECURSIVE down AS (
+      SELECT m.member_id,ARRAY[$1::text,m.member_id]::text[] AS path
+        FROM gm_member m WHERE m.recommender_id=$1
+      UNION ALL
+      SELECT m.member_id,d.path||m.member_id
+        FROM gm_member m JOIN down d ON m.recommender_id=d.member_id
+       WHERE NOT (m.member_id=ANY(d.path))
+    ) SELECT COUNT(*)::int AS n FROM (SELECT member_id FROM down LIMIT $2) x`,[member,RECOMMENDER_ATTACH_MAX_DOWN]);
+    const n=Number(downCount.rows[0]&&downCount.rows[0].n||0);
+    if(n>=RECOMMENDER_ATTACH_MAX_DOWN){
+      return {ok:false,error:`하위 관계망이 ${RECOMMENDER_ATTACH_MAX_DOWN}명 이상인 경우에는 추천인을 추가할 수 없습니다.`,down_total_count:n};
+    }
+  }
+
+  const relation=await client.query(`WITH RECURSIVE
+    member_down AS (
+      SELECT m.member_id,ARRAY[$1::text,m.member_id]::text[] AS path
+        FROM gm_member m WHERE m.recommender_id=$1
+      UNION ALL
+      SELECT m.member_id,md.path||m.member_id
+        FROM gm_member m JOIN member_down md ON m.recommender_id=md.member_id
+       WHERE NOT (m.member_id=ANY(md.path))
+    ),
+    candidate_up AS (
+      SELECT m.member_id,m.recommender_id,ARRAY[m.member_id]::text[] AS path
+        FROM gm_member m WHERE m.member_id=$2
+      UNION ALL
+      SELECT m.member_id,m.recommender_id,cu.path||m.member_id
+        FROM gm_member m JOIN candidate_up cu ON m.member_id=cu.recommender_id
+       WHERE NOT (m.member_id=ANY(cu.path))
+    )
+    SELECT relation_type FROM (
+      SELECT 'MEMBER_DOWN' AS relation_type FROM member_down WHERE member_id=$2
+      UNION ALL
+      SELECT 'CANDIDATE_UP' FROM candidate_up WHERE member_id=$1
+    ) q LIMIT 1`,[member,candidate]);
+  if(relation.rowCount){
+    return {ok:false,error:'본인의 하위 관계망에 포함된 회원은 추천인으로 등록할 수 없습니다.',relation_type:relation.rows[0].relation_type};
+  }
+  return {ok:true,recommender_id:candidate};
+}
+
+
 router.get(['/api/gm/member/recommender/check','/api/member/recommender/check'], async (req,res)=>{
   const pool=db(req);
   if(!pool) return res.status(500).json({ok:false,valid:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const recommenderId=s(req.query.recommender_id || req.query.reco_id || req.query.id);
   const memberId=s(req.query.member_id);
   if(!recommenderId) return res.json({ok:true,valid:true,blank:true});
-  if(memberId && recommenderId===memberId){
-    return res.status(400).json({ok:false,valid:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'});
-  }
   try{
-    const r=await pool.query(`SELECT member_id FROM gm_member WHERE member_id=$1 LIMIT 1`,[recommenderId]);
-    if(!r.rowCount) return res.status(404).json({ok:false,valid:false,error:'등록되지 않은 추천인 아이디입니다.'});
-    return res.json({ok:true,valid:true,recommender_id:r.rows[0].member_id});
+    const result=await validateRecommenderAttach(pool,memberId,recommenderId,{requireBlank:true,checkDownLimit:true});
+    if(!result.ok) return res.status(400).json({ok:false,valid:false,error:result.error,code:result.relation_type||undefined,down_total_count:result.down_total_count});
+    return res.json({ok:true,valid:true,recommender_id:result.recommender_id,locked:!!result.locked});
   }catch(e){
     console.error('[GM_RECOMMENDER_CHECK_ERROR]',{code:e&&e.code,message:e&&e.message});
     return res.status(500).json({ok:false,valid:false,error:'추천인 아이디를 확인하지 못했습니다.'});
@@ -176,36 +236,17 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
     const requestedRecommender=s(p.recommender_id);
     let attachRecommender=false;
     if(requestedRecommender){
-      if(requestedRecommender===p.member_id){
+      const relationValidation=await validateRecommenderAttach(client,p.member_id,requestedRecommender,{requireBlank:!isNewMember,checkDownLimit:!isNewMember});
+      if(!relationValidation.ok){
         await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:'본인 아이디는 추천인으로 등록할 수 없습니다.'});
-      }
-      const recommenderCheck=await client.query(`SELECT member_id FROM gm_member WHERE member_id=$1 LIMIT 1`,[requestedRecommender]);
-      if(!recommenderCheck.rowCount){
-        await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:'등록되지 않은 추천인 아이디입니다.'});
+        return res.status(400).json({ok:false,error:relationValidation.error,code:relationValidation.relation_type||undefined,down_total_count:relationValidation.down_total_count});
       }
     }
     if(!isNewMember && requestedRecommender && !s(existing.recommender_id)){
-      const ageCheck=await client.query(`SELECT (NOW() <= $1::timestamptz + INTERVAL '72 hours') AS allowed`,[existing.created_at]);
+      const ageCheck=await client.query(`SELECT (NOW() <= $1::timestamptz + INTERVAL '7 days') AS allowed`,[existing.created_at]);
       if(!(ageCheck.rows[0] && ageCheck.rows[0].allowed)){
         await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:'추천인은 가입 후 3일 이내에만 최초 등록할 수 있습니다.'});
-      }
-      const maxDown=Math.max(0,Number(process.env.GM_RECOMMENDER_ATTACH_MAX_DOWN || 20));
-      const downRow=(await client.query(`SELECT COALESCE(down_total_count,0)::bigint AS n FROM gm_member_relation_count WHERE member_id=$1`,[p.member_id])).rows[0] || {n:0};
-      if(Number(downRow.n||0)>maxDown){
-        await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:`하위 전체 인원이 ${maxDown}명을 초과하여 추천인을 추가할 수 없습니다.`});
-      }
-      const cycle=await client.query(`WITH RECURSIVE down AS (
-        SELECT member_id FROM gm_member WHERE recommender_id=$1
-        UNION ALL
-        SELECT m.member_id FROM gm_member m JOIN down d ON m.recommender_id=d.member_id
-      ) SELECT 1 FROM down WHERE member_id=$2 LIMIT 1`,[p.member_id,requestedRecommender]);
-      if(cycle.rowCount){
-        await client.query('ROLLBACK');
-        return res.status(400).json({ok:false,error:'하위 회원은 추천인으로 등록할 수 없습니다.'});
+        return res.status(400).json({ok:false,error:'추천인은 가입 후 7일 이내에만 최초 등록할 수 있습니다.'});
       }
       attachRecommender=true;
     }
