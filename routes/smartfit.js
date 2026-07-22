@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V072_ITEM_SAVE_BASE_COLUMNS';
+const VERSION = 'GM_SMARTFIT_SERVER_V073_TEMPLATE_SAVE_DIAG_COMPAT';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -321,6 +321,7 @@ router.post('/api/gm/smartfit/space/save', async (req,res)=>{
         [member,sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),0,links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] SPACE_DONE', { space_id:saved && saved.space_id, image_count:imageCount(saved && saved.image_count) });
     ok(res,{ space:addImageUrls(Object.assign({},saved,{ title:coalesceSpaceTitle(saved), author:displayAuthor(saved) }),'space') });
@@ -405,18 +406,35 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     const spaceIdValue=nullableId(b.space_id || b.spaceId);
     const searchSource=s(b.search_source || b.search || '');
     const keywordCount=searchSource ? searchSource.split(',').map(x=>s(x)).filter(Boolean).slice(0,10).length : 0;
+    console.log('[SMARTFIT_SAVE_V133] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0 });
     await client.query('BEGIN');
+    console.log('[SMARTFIT_SAVE_V133] STEP1_BEGIN');
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
-      const collectedCount=Number((await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'`,[templateId])).rows[0].n||0);
+      console.log('[SMARTFIT_SAVE_V133] STEP2_COLLECTION_CHECK', { template_id:templateId });
+      let collectedCount=0;
+      try{
+        const cr=await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'`,[templateId]);
+        collectedCount=Number((cr.rows[0]||{}).n||0);
+      }catch(collectionErr){
+        if(collectionErr && collectionErr.code==='42703'){
+          const cr=await client.query('SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1',[templateId]);
+          collectedCount=Number((cr.rows[0]||{}).n||0);
+          console.warn('[SMARTFIT_SAVE_V133] COLLECTION_COLUMN_FALLBACK', { template_id:templateId, code:collectionErr.code, detail:collectionErr.message });
+        }else if(collectionErr && collectionErr.code==='42P01'){
+          collectedCount=0;
+          console.warn('[SMARTFIT_SAVE_V133] COLLECTION_TABLE_MISSING_SKIP', { template_id:templateId, code:collectionErr.code, detail:collectionErr.message });
+        }else{ throw collectionErr; }
+      }
       if(collectedCount>0) throw new Error('collected template cannot be modified');
+      console.log('[SMARTFIT_SAVE_V133] STEP3_TEMPLATE_UPDATE', { template_id:templateId, collected_count:collectedCount });
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
-        visibility=$18, search_visible=$19, is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
+        visibility=$18, search_visible=$19, is_deleted='F', updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
         [spaceIdValue,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(old.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
       saved=r.rows[0];
     }else{
@@ -463,8 +481,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
        * deleted_at / deleted_by / 신규 basket 컬럼 및 별도 UNIQUE 인덱스에 의존하지 않는다.
        * 수정 저장은 현재 화면의 전체 상품 목록으로 완전 교체한다.
        */
+      console.log('[SMARTFIT_SAVE_V133] STEP4_DELETE_ITEMS', { template_id:saved.template_id });
       await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
 
+      console.log('[SMARTFIT_SAVE_V133] STEP5_INSERT_ITEMS', { template_id:saved.template_id, count:normalizedItemCount });
       for(const it of merged.values()){
         await client.query(`INSERT INTO gm_smartfit_item
           (template_id,item_role,mall_code,product_uid,qty,sort_no)
@@ -483,10 +503,30 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         saved:savedItemCount
       });
     }
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
     ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount });
-  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} console.error('[SMARTFIT_TEMPLATE_SAVE_ERROR_V072]', e && (e.stack || e.message || e)); fail(res,400,'template save failed',{ detail:String(e.message||e) }); }
+  }catch(e){
+    try{await client.query('ROLLBACK');}catch(_){}
+    console.error('[SMARTFIT_SAVE_V133][ERROR]', {
+      message:String((e&&e.message)||e||''),
+      detail:String((e&&e.detail)||''),
+      code:String((e&&e.code)||''),
+      constraint:String((e&&e.constraint)||''),
+      table:String((e&&e.table)||''),
+      column:String((e&&e.column)||''),
+      stack:String((e&&e.stack)||'')
+    });
+    fail(res,400,'template save failed',{
+      detail:String((e&&e.message)||e||''),
+      db_detail:String((e&&e.detail)||''),
+      code:String((e&&e.code)||''),
+      constraint:String((e&&e.constraint)||''),
+      table:String((e&&e.table)||''),
+      column:String((e&&e.column)||'')
+    });
+  }
   finally{ client.release(); }
 });
 
@@ -522,6 +562,7 @@ router.post('/api/gm/smartfit/collection/add', async (req,res)=>{
       ON CONFLICT (member_id, template_id) DO UPDATE SET is_active='T', is_deleted='F', deleted_at=NULL, deleted_by=NULL, collected_at=CURRENT_TIMESTAMP
       RETURNING *`,[member,templateId]);
     await client.query(`UPDATE gm_smartfit_template SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=$1 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE template_id=$1`,[templateId]);
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     ok(res,{collection:r.rows[0],template_id:templateId});
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'collection add failed',{detail:String(e.message||e)}); }
@@ -537,6 +578,7 @@ router.post('/api/gm/smartfit/collection/remove', async (req,res)=>{
     await client.query("UPDATE gm_smartfit_collection SET is_active='F', is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1 WHERE member_id=$1 AND template_id=$2",[member,templateId]);
     await client.query("UPDATE gm_smartfit_collection_item_delta SET is_active='F', is_deleted='T', updated_at=CURRENT_TIMESTAMP WHERE member_id=$1 AND template_id=$2",[member,templateId]);
     await client.query(`UPDATE gm_smartfit_template SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=$1 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE template_id=$1`,[templateId]);
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT'); ok(res,{template_id:templateId,removed:true});
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'collection remove failed',{detail:String(e.message||e)}); }
   finally{client.release();}
@@ -706,6 +748,7 @@ router.post('/api/gm/smartfit/template/move', async (req,res)=>{
     if(templates.rowCount !== ids.length) throw new Error('template not found');
     for(const t of templates.rows){ if(!(await isOwnerOrAdmin(client, member, t.creator_member_id))) throw new Error('permission denied'); }
     const r=await client.query('UPDATE gm_smartfit_template SET space_id=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id = ANY($2::bigint[]) RETURNING *',[spaceId,ids]);
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template')), count:r.rowCount, space_id:spaceId });
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'template move failed',{ detail:String(e.message||e) }); }
@@ -724,6 +767,7 @@ router.post('/api/gm/smartfit/space/trash', async (req,res)=>{
     const trash=boolFlag(b.trash_yn || b.trash || b.on,'T');
     const r=await client.query("UPDATE gm_smartfit_space SET is_deleted=$1, deleted_at=CASE WHEN $1='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1='T' THEN $2 ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE space_id=$3 RETURNING *",[trash,member,spaceId]);
     if(trash==='T') await client.query('UPDATE gm_smartfit_template SET space_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$1',[spaceId]);
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     ok(res,{ space:r.rows[0], detached_templates:trash==='T' });
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'space trash failed',{ detail:String(e.message||e) }); }
@@ -755,6 +799,7 @@ router.post('/api/gm/smartfit/space/delete', async (req,res)=>{
     if(!(await isOwnerOrAdmin(client, member, old.owner_member_id || old.creator_member_id))) throw new Error('permission denied');
     await client.query('UPDATE gm_smartfit_template SET space_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$1',[spaceId]);
     await client.query('DELETE FROM gm_smartfit_space WHERE space_id=$1',[spaceId]);
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     ok(res,{ deleted:true, space_id:spaceId, detached_templates:true });
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'space delete failed',{ detail:String(e.message||e) }); }
@@ -775,6 +820,7 @@ router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
     await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[templateId]);
     await client.query('DELETE FROM gm_smartfit_collection WHERE template_id=$1',[templateId]);
     await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1',[templateId]);
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     ok(res,{ deleted:true, template_id:templateId });
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'template delete failed',{ detail:String(e.message||e) }); }
@@ -1038,6 +1084,7 @@ router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'
         VALUES('SMARTFIT_MESSAGE_SEND',$1,$2::jsonb,'PENDING',${nextSql},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
         ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko)})]);
     }
+    console.log('[SMARTFIT_SAVE_V133] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     ok(res,{template_id:templateId,serial_no:serial,candidate_count:candidates.rowCount,new_receiver_count:inserted,queued_count:inserted,night_queue:night,scheduled_mode:night?'NIGHT_KST_0215':'IMMEDIATE',immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
   }catch(e){ try{await client.query('ROLLBACK');}catch(_e){} fail(res,400,'template message send failed',{detail:String(e.message||e)}); }

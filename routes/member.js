@@ -224,6 +224,20 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
     if(existingLookup) p.member_id=s(existingLookup.member_id);
     const existing=(await client.query(`SELECT member_id,recommender_id,created_at,recommender_updated_at,relation_calculated_yn FROM gm_member WHERE member_id=$1 FOR UPDATE`,[p.member_id])).rows[0] || null;
     const isNewMember=!existing;
+
+    // 회원수정 이메일 중복검사는 현재 회원 본인을 제외한다.
+    // 기존 이메일 그대로 저장하는 경우에는 충돌로 판단하지 않는다.
+    const syncMode=s(req.body&&req.body.sync_mode).toLowerCase();
+    if(syncMode==='modify' && p.email){
+      const emailOwner=await client.query(`SELECT member_id FROM gm_member
+        WHERE LOWER(COALESCE(email,''))=LOWER($1)
+          AND LOWER(COALESCE(member_id,''))<>LOWER($2)
+        LIMIT 1`,[p.email,p.member_id]);
+      if(emailOwner.rows[0]){
+        await client.query('ROLLBACK');
+        return res.status(409).json({ok:false,error:'다른 회원이 사용 중인 이메일입니다.'});
+      }
+    }
     let requestedRecommender=s(p.recommender_id);
     let attachRecommender=false;
     if(requestedRecommender){
