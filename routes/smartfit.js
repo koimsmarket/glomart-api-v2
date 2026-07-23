@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V075_PRODUCT_ID_SCHEMA_GUARD_IMPORT_CLEAR';
+const VERSION = 'GM_SMARTFIT_SERVER_V076_VALID_COLLECTION_LOCK';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -424,34 +424,29 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
-      console.log('[SMARTFIT_SAVE_V136] STEP2_COLLECTION_CHECK', { template_id:templateId });
+      console.log('[SMARTFIT_SAVE_V139] STEP2_COLLECTION_CHECK', { template_id:templateId });
       let collectedCount=0;
       /*
-       * PostgreSQL에서는 트랜잭션 안에서 컬럼 없음(42703)이 한 번 발생하면
-       * 해당 트랜잭션이 aborted 상태가 되어 catch 안의 재조회도 25P02로 실패한다.
-       * 그래서 실패하는 SQL을 먼저 실행하지 않고, information_schema로 실제 컬럼을
-       * 확인한 뒤 운영 DB 구조에 맞는 단 하나의 SELECT만 실행한다.
+       * gm_smartfit_collection은 실제 퍼가기 이력이다.
+       * 저장 과정에서는 이 이력을 삭제/비활성화하지 않는다.
+       * 레코드가 1건이라도 있으면 이미 다른 사용자가 퍼간 원본이므로 수정은 절대 허용하지 않는다.
        */
       const collectionTable=(await client.query("SELECT to_regclass('public.gm_smartfit_collection') AS name")).rows[0];
       if(collectionTable && collectionTable.name){
         const cols=(await client.query(`SELECT column_name FROM information_schema.columns
           WHERE table_schema='public' AND table_name='gm_smartfit_collection'
             AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
-        const hasActive=cols.indexOf('is_active')>=0;
-        const hasDeleted=cols.indexOf('is_deleted')>=0;
         let sql='SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1';
-        if(hasActive) sql += " AND is_active='T'";
-        if(hasDeleted) sql += " AND COALESCE(is_deleted,'F')<>'T'";
+        if(cols.indexOf('is_active')>=0) sql += " AND is_active='T'";
+        if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(is_deleted,'F')<>'T'";
         const cr=await client.query(sql,[templateId]);
         collectedCount=Number((cr.rows[0]||{}).n||0);
-        console.log('[SMARTFIT_SAVE_V136] COLLECTION_CHECK_DONE',{
+        console.log('[SMARTFIT_SAVE_V139] COLLECTION_CHECK_DONE',{
           template_id:templateId,
-          has_is_active:hasActive,
-          has_is_deleted:hasDeleted,
           collected_count:collectedCount
         });
       }else{
-        console.warn('[SMARTFIT_SAVE_V136] COLLECTION_TABLE_MISSING_SKIP',{template_id:templateId});
+        console.warn('[SMARTFIT_SAVE_V139] COLLECTION_TABLE_MISSING_SKIP',{template_id:templateId});
       }
       if(collectedCount>0) throw new Error('collected template cannot be modified');
       console.log('[SMARTFIT_SAVE_V136] STEP3_TEMPLATE_UPDATE', { template_id:templateId, collected_count:collectedCount });
@@ -590,8 +585,15 @@ router.post('/api/gm/smartfit/collection/add', async (req,res)=>{
     await client.query('BEGIN');
     const template=(await client.query("SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted, content_json FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE",[templateId])).rows[0];
     if(!template || template.is_active!=='T' || template.is_deleted==='T') throw new Error('template not found');
-    if(template.visibility!=='public' && template.creator_member_id!==member) throw new Error('private template cannot be collected');
-    if(template.search_visible!=='T' && template.creator_member_id!==member) throw new Error('template cannot be collected');
+    if(template.creator_member_id===member) throw new Error('own template cannot be collected');
+    if(template.visibility!=='public') throw new Error('private template cannot be collected');
+    if(template.search_visible!=='T') throw new Error('template cannot be collected');
+    const itemCols=(await client.query(`SELECT column_name FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='gm_smartfit_item' AND column_name IN ('is_deleted')`)).rows.map(x=>x.column_name);
+    let itemCountSql='SELECT COUNT(*)::int AS n FROM gm_smartfit_item WHERE template_id=$1';
+    if(itemCols.indexOf('is_deleted')>=0) itemCountSql += " AND COALESCE(is_deleted,'F')<>'T'";
+    const sourceItemCount=Number((((await client.query(itemCountSql,[templateId])).rows[0])||{}).n||0);
+    if(sourceItemCount<=0) throw new Error('template has no products');
     const r=await client.query(`INSERT INTO gm_smartfit_collection (member_id, template_id, collected_at, is_active, is_deleted)
       VALUES ($1,$2,CURRENT_TIMESTAMP,'T','F')
       ON CONFLICT (member_id, template_id) DO UPDATE SET is_active='T', is_deleted='F', deleted_at=NULL, deleted_by=NULL, collected_at=CURRENT_TIMESTAMP
