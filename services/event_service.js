@@ -1,4 +1,4 @@
-// EVENT_SERVICE_V013_MEMBER_ATTACH_SNAPSHOT_SAFE
+// EVENT_SERVICE_V014_MEMBER_ATTACH_RELATION_TIME_SAFE
 'use strict';
 
 const networkEngine = require('./GM_NETWORK_INCENTIVE_ENGINE');
@@ -275,7 +275,7 @@ module.exports = function createEventService(deps){
      * 2) 실제 gm_member.recommender_id 트리를 직접 조회한다.
      * 3) 다만 추천인 연결 후 새로 가입한 하위 회원은 applyMemberJoin()이 새 업라인에 이미 반영한다.
      *    야간 attach 작업에서 그 회원까지 다시 더하면 이중 카운트가 되므로,
-     *    owner.recommender_updated_at 이하에 생성된 기존 하위 회원만 '이동 대상 스냅샷'으로 포함한다.
+     *    owner.recommender_updated_at 이전에 현재 추천인 관계가 이미 성립한 하위 회원만 '이동 대상 스냅샷'으로 포함한다.
      * 4) 스냅샷 안에 기존 하위 4단계가 한 명이라도 있으면 정책 위반 데이터이므로 카운터를 적용하지 않는다.
      * 5) 현재 전체 하위 회원의 up 카운터 재계산은 별도 작업이며, 이는 값을 덮어쓰는 방식이라 이중 증가가 없다.
      */
@@ -285,13 +285,13 @@ module.exports = function createEventService(deps){
       SELECT m.member_id,1 AS depth,ARRAY[$1::text,m.member_id::text] AS path
       FROM gm_member m
       WHERE LOWER(COALESCE(m.recommender_id,''))=LOWER($1)
-        AND m.created_at <= $2
+        AND COALESCE(m.recommender_updated_at,m.created_at) <= $2
       UNION ALL
       SELECT m.member_id,t.depth+1,t.path||m.member_id::text
       FROM gm_member m
       JOIN tree t ON LOWER(COALESCE(m.recommender_id,''))=LOWER(t.member_id)
       WHERE t.depth<4
-        AND m.created_at <= $2
+        AND COALESCE(m.recommender_updated_at,m.created_at) <= $2
         AND NOT (m.member_id::text=ANY(t.path))
     )
     SELECT depth,COUNT(*)::bigint AS cnt
