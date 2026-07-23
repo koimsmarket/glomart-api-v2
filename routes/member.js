@@ -8,12 +8,12 @@ GLOMART MEMBER SERVER POLICY: LOGIN / JOIN / MODIFY / RECOMMENDER
    fields. Invalid or blank device_lang must never erase the previous value.
 3. Modify email duplicate checking excludes the current member.
 4. Recommender is immutable after first successful registration.
-5. A member who already has ANY descendant within levels 1 through 5 may not add
-   a recommender later, even when the total downline count is only one.
-   Reason: a candidate can be located at level 6 or deeper; checking only the
-   selected candidate against levels 1-5 can miss the future cycle boundary.
-   Therefore, once a 1-5 level downline exists, late recommender attachment is
-   prohibited entirely. This replaces the former '100 downlines' threshold.
+5. Late recommender attachment allows any number of existing descendants in
+   levels 1 through 3. If even one descendant exists at level 4 or 5, attachment
+   is blocked. This bounded policy keeps verification load predictable while
+   preventing a deeper level-6-or-below candidate from escaping the five-level
+   cycle inspection range. Both the former '100 descendants' threshold and the
+   temporary 'any level 1-5 descendant blocks' rule are discarded.
 6. Direct self, mutual recommendation, and candidate-within-downline cycle checks
    remain as independent defenses.
 7. Member synchronization must not auto-create/update gm_member_address. Address

@@ -1,4 +1,4 @@
-// EVENT_SERVICE_V012_DETAIL_IDENTITY_QUEUE_SAFE
+// EVENT_SERVICE_V013_MEMBER_ATTACH_SNAPSHOT_SAFE
 'use strict';
 
 const networkEngine = require('./GM_NETWORK_INCENTIVE_ENGINE');
@@ -262,14 +262,51 @@ module.exports = function createEventService(deps){
   async function applyMemberAttach(client,payload){
     const memberId=cleanText(payload && (payload.member_id||payload.memberId));
     if(!memberId) throw new Error('member_id_missing');
-    const member=(await client.query(`SELECT member_id,recommender_id,relation_calculated_yn FROM gm_member WHERE member_id=$1 FOR UPDATE`,[memberId])).rows[0];
+    const member=(await client.query(`SELECT member_id,recommender_id,relation_calculated_yn,recommender_updated_at FROM gm_member WHERE member_id=$1 FOR UPDATE`,[memberId])).rows[0];
     if(!member) throw new Error(`member_not_found:${memberId}`);
     if(cleanText(member.relation_calculated_yn)==='Y') return {skipped:true,reason:'already_calculated',member_id:memberId};
     const recommenderId=cleanText(member.recommender_id);
     if(!recommenderId) throw new Error(`recommender_missing:${memberId}`);
 
-    const rc=(await client.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 FOR UPDATE`,[memberId])).rows[0] || {};
-    const down=[1,Number(rc.down_1_count||0),Number(rc.down_2_count||0),Number(rc.down_3_count||0),Number(rc.down_4_count||0)];
+    /*
+     * 사후 추천인 연결 카운터의 기준 시점 정책
+     * -----------------------------------------
+     * 1) gm_member_relation_count 저장값은 이벤트 지연/과거 누락 가능성이 있어 계산 원본으로 쓰지 않는다.
+     * 2) 실제 gm_member.recommender_id 트리를 직접 조회한다.
+     * 3) 다만 추천인 연결 후 새로 가입한 하위 회원은 applyMemberJoin()이 새 업라인에 이미 반영한다.
+     *    야간 attach 작업에서 그 회원까지 다시 더하면 이중 카운트가 되므로,
+     *    owner.recommender_updated_at 이하에 생성된 기존 하위 회원만 '이동 대상 스냅샷'으로 포함한다.
+     * 4) 스냅샷 안에 기존 하위 4단계가 한 명이라도 있으면 정책 위반 데이터이므로 카운터를 적용하지 않는다.
+     * 5) 현재 전체 하위 회원의 up 카운터 재계산은 별도 작업이며, 이는 값을 덮어쓰는 방식이라 이중 증가가 없다.
+     */
+    const attachBoundary=member.recommender_updated_at;
+    if(!attachBoundary) throw new Error(`recommender_updated_at_missing:${memberId}`);
+    const actualDownResult=await client.query(`WITH RECURSIVE tree AS (
+      SELECT m.member_id,1 AS depth,ARRAY[$1::text,m.member_id::text] AS path
+      FROM gm_member m
+      WHERE LOWER(COALESCE(m.recommender_id,''))=LOWER($1)
+        AND m.created_at <= $2
+      UNION ALL
+      SELECT m.member_id,t.depth+1,t.path||m.member_id::text
+      FROM gm_member m
+      JOIN tree t ON LOWER(COALESCE(m.recommender_id,''))=LOWER(t.member_id)
+      WHERE t.depth<4
+        AND m.created_at <= $2
+        AND NOT (m.member_id::text=ANY(t.path))
+    )
+    SELECT depth,COUNT(*)::bigint AS cnt
+    FROM tree
+    GROUP BY depth
+    ORDER BY depth`,[memberId,attachBoundary]);
+    const actualDown=[0,0,0,0];
+    for(const row of actualDownResult.rows){
+      const depth=Number(row.depth||0);
+      if(depth>=1&&depth<=4) actualDown[depth-1]=Number(row.cnt||0);
+    }
+    if(actualDown[3]>0){
+      throw new Error(`late_recommender_blocked_depth_4:${memberId}:${actualDown[3]}`);
+    }
+    const down=[1,actualDown[0],actualDown[1],actualDown[2],actualDown[3]];
 
     const ancestors=[]; let current=recommenderId; const seen=new Set([memberId]);
     for(let depth=1; depth<=5 && current; depth++){
@@ -283,10 +320,19 @@ module.exports = function createEventService(deps){
 
     // 대상 회원과 기존 하위 4촌까지의 업라인 존재 카운트를 최신 추천인 체인으로 다시 계산한다.
     const affected=await client.query(`WITH RECURSIVE tree AS (
-      SELECT member_id,0 AS depth FROM gm_member WHERE member_id=$1
+      SELECT member_id,0 AS depth,ARRAY[member_id::text] AS path
+      FROM gm_member
+      WHERE member_id=$1
       UNION ALL
-      SELECT m.member_id,t.depth+1 FROM gm_member m JOIN tree t ON m.recommender_id=t.member_id WHERE t.depth<4
-    ) SELECT member_id,depth FROM tree ORDER BY depth DESC,member_id`,[memberId]);
+      SELECT m.member_id,t.depth+1,t.path||m.member_id::text
+      FROM gm_member m
+      JOIN tree t ON LOWER(COALESCE(m.recommender_id,''))=LOWER(t.member_id)
+      WHERE t.depth<4
+        AND NOT (m.member_id::text=ANY(t.path))
+    )
+    SELECT member_id,depth
+    FROM tree
+    ORDER BY depth DESC,member_id`,[memberId]);
     for(const row of affected.rows){
       const id=cleanText(row.member_id);
       let upId=id; const ups=[0,0,0,0,0]; const localSeen=new Set([id]);
@@ -319,7 +365,15 @@ module.exports = function createEventService(deps){
         [a.member_id,inc[0],inc[1],inc[2],inc[3],inc[4],total]);
     }
     await client.query(`UPDATE gm_member SET relation_calculated_yn='Y',updated_at=NOW() WHERE member_id=$1`,[memberId]);
-    return {applied:true,member_id:memberId,upline_count:ancestors.length,affected_member_count:affected.rowCount,down_snapshot:down};
+    return {
+      applied:true,
+      member_id:memberId,
+      upline_count:ancestors.length,
+      affected_member_count:affected.rowCount,
+      down_snapshot:down,
+      down_source:'gm_member_actual_tree_at_attach_boundary',
+      attach_boundary:attachBoundary
+    };
   }
 
   async function applyOrderCreate(client,order,items){
