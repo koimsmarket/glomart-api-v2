@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V074_ITEM_PRODUCT_ID_DELETE_MODE_ERROR_DETAIL';
+const VERSION = 'GM_SMARTFIT_SERVER_V075_PRODUCT_ID_SCHEMA_GUARD_IMPORT_CLEAR';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -405,16 +405,26 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     const spaceIdValue=nullableId(b.space_id || b.spaceId);
     const searchSource=s(b.search_source || b.search || '');
     const keywordCount=searchSource ? searchSource.split(',').map(x=>s(x)).filter(Boolean).slice(0,10).length : 0;
-    console.log('[SMARTFIT_SAVE_V135] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0 });
+    /*
+     * 운영 DB별 마이그레이션 차이를 흡수한다.
+     * product_id 컬럼이 없는 DB에서도 기존 기본 컬럼으로 상품 저장이 가능해야 한다.
+     * 컬럼 검사는 트랜잭션 시작 전에 실행하여 저장 트랜잭션을 오염시키지 않는다.
+     */
+    const productIdColumnCheck=await client.query(`SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='gm_smartfit_item' AND column_name='product_id'
+    ) AS ok`);
+    const hasProductId=!!((productIdColumnCheck.rows[0]||{}).ok);
+    console.log('[SMARTFIT_SAVE_V136] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0, has_product_id:hasProductId });
     await client.query('BEGIN');
-    console.log('[SMARTFIT_SAVE_V135] STEP1_BEGIN');
+    console.log('[SMARTFIT_SAVE_V136] STEP1_BEGIN');
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
-      console.log('[SMARTFIT_SAVE_V135] STEP2_COLLECTION_CHECK', { template_id:templateId });
+      console.log('[SMARTFIT_SAVE_V136] STEP2_COLLECTION_CHECK', { template_id:templateId });
       let collectedCount=0;
       /*
        * PostgreSQL에서는 트랜잭션 안에서 컬럼 없음(42703)이 한 번 발생하면
@@ -434,17 +444,17 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         if(hasDeleted) sql += " AND COALESCE(is_deleted,'F')<>'T'";
         const cr=await client.query(sql,[templateId]);
         collectedCount=Number((cr.rows[0]||{}).n||0);
-        console.log('[SMARTFIT_SAVE_V135] COLLECTION_CHECK_DONE',{
+        console.log('[SMARTFIT_SAVE_V136] COLLECTION_CHECK_DONE',{
           template_id:templateId,
           has_is_active:hasActive,
           has_is_deleted:hasDeleted,
           collected_count:collectedCount
         });
       }else{
-        console.warn('[SMARTFIT_SAVE_V135] COLLECTION_TABLE_MISSING_SKIP',{template_id:templateId});
+        console.warn('[SMARTFIT_SAVE_V136] COLLECTION_TABLE_MISSING_SKIP',{template_id:templateId});
       }
       if(collectedCount>0) throw new Error('collected template cannot be modified');
-      console.log('[SMARTFIT_SAVE_V135] STEP3_TEMPLATE_UPDATE', { template_id:templateId, collected_count:collectedCount });
+      console.log('[SMARTFIT_SAVE_V136] STEP3_TEMPLATE_UPDATE', { template_id:templateId, collected_count:collectedCount });
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
@@ -499,15 +509,22 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
        * deleted_at / deleted_by / 신규 basket 컬럼 및 별도 UNIQUE 인덱스에 의존하지 않는다.
        * 수정 저장은 현재 화면의 전체 상품 목록으로 완전 교체한다.
        */
-      console.log('[SMARTFIT_SAVE_V135] STEP4_DELETE_ITEMS', { template_id:saved.template_id });
+      console.log('[SMARTFIT_SAVE_V136] STEP4_DELETE_ITEMS', { template_id:saved.template_id });
       await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
 
-      console.log('[SMARTFIT_SAVE_V135] STEP5_INSERT_ITEMS', { template_id:saved.template_id, count:normalizedItemCount });
+      console.log('[SMARTFIT_SAVE_V136] STEP5_INSERT_ITEMS', { template_id:saved.template_id, count:normalizedItemCount, has_product_id:hasProductId });
       for(const it of merged.values()){
-        await client.query(`INSERT INTO gm_smartfit_item
-          (template_id,item_role,mall_code,product_id,product_uid,qty,sort_no)
-          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [saved.template_id,it.item_role,it.mall_code,it.product_id||'',it.product_uid,it.qty,it.sort_no]);
+        if(hasProductId){
+          await client.query(`INSERT INTO gm_smartfit_item
+            (template_id,item_role,mall_code,product_id,product_uid,qty,sort_no)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+            [saved.template_id,it.item_role,it.mall_code,it.product_id||'',it.product_uid,it.qty,it.sort_no]);
+        }else{
+          await client.query(`INSERT INTO gm_smartfit_item
+            (template_id,item_role,mall_code,product_uid,qty,sort_no)
+            VALUES ($1,$2,$3,$4,$5,$6)`,
+            [saved.template_id,it.item_role,it.mall_code,it.product_uid,it.qty,it.sort_no]);
+        }
         savedItemCount++;
       }
 
@@ -521,13 +538,13 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         saved:savedItemCount
       });
     }
-    console.log('[SMARTFIT_SAVE_V135] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
+    console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
     ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount });
   }catch(e){
     try{await client.query('ROLLBACK');}catch(_){}
-    console.error('[SMARTFIT_SAVE_V135][ERROR]', {
+    console.error('[SMARTFIT_SAVE_V136][ERROR]', {
       message:String((e&&e.message)||e||''),
       detail:String((e&&e.detail)||''),
       code:String((e&&e.code)||''),
