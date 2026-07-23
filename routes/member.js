@@ -1,3 +1,26 @@
+/*
+===============================================================================
+GLOMART MEMBER SERVER POLICY: LOGIN / JOIN / MODIFY / RECOMMENDER
+===============================================================================
+1. Cafe24 is the login/session authority. This route stores and enriches Glomart
+   member data but must not be treated as the sole source of login truth.
+2. Join/modify upsert must preserve existing nonblank values when a client omits
+   fields. Invalid or blank device_lang must never erase the previous value.
+3. Modify email duplicate checking excludes the current member.
+4. Recommender is immutable after first successful registration.
+5. A member who already has ANY descendant within levels 1 through 5 may not add
+   a recommender later, even when the total downline count is only one.
+   Reason: a candidate can be located at level 6 or deeper; checking only the
+   selected candidate against levels 1-5 can miss the future cycle boundary.
+   Therefore, once a 1-5 level downline exists, late recommender attachment is
+   prohibited entirely. This replaces the former '100 downlines' threshold.
+6. Direct self, mutual recommendation, and candidate-within-downline cycle checks
+   remain as independent defenses.
+7. Member synchronization must not auto-create/update gm_member_address. Address
+   writes belong only to the dedicated address API.
+===============================================================================
+*/
+
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
@@ -153,13 +176,6 @@ async function canonicalMember(client, value){
     LIMIT 1`,[v]);
   return r.rows[0] || null;
 }
-async function storedDownTotal(client, memberId){
-  try{
-    const r=await client.query(`SELECT COALESCE(down_total_count,0)::bigint AS n
-      FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[memberId]);
-    return Number((r.rows[0]&&r.rows[0].n)||0);
-  }catch(e){ if(e&&e.code==='42P01') return 0; throw e; }
-}
 async function validateRecommenderAttach(client, memberId, recommenderId){
   const requested=s(recommenderId), ownerInput=s(memberId);
   if(!requested) return {ok:true,blank:true};
@@ -177,9 +193,39 @@ async function validateRecommenderAttach(client, memberId, recommenderId){
     return {ok:false,error:'상호 추천인은 등록할 수 없습니다.'};
   }
   if(owner){
-    const maxDown=Math.max(0,Number(process.env.GM_RECOMMENDER_ATTACH_MAX_DOWN || 100));
-    const downTotal=await storedDownTotal(client,owner.member_id);
-    if(downTotal>=maxDown) return {ok:false,error:`하위 관계망이 ${maxDown}명 이상인 경우에는 추천인을 추가할 수 없습니다.`,down_total_count:downTotal};
+    // Late recommender attachment depth policy:
+    // - Existing downline levels 1-3 are allowed regardless of member count.
+    //   The recursive check is bounded and this range is acceptable for server load.
+    // - If even one member already exists at level 4 or 5, block late attachment.
+    //   Once level 4 exists, a deeper level-6-or-below candidate may exist outside the
+    //   five-level candidate-cycle inspection range, so changing the owner's recommender
+    //   can no longer be treated as safely verifiable.
+    // - The old '100 total descendants' rule and the V028 'any level 1-5 member blocks'
+    //   rule are both intentionally discarded.
+    const deepDownline=await client.query(`WITH RECURSIVE down(member_id,path,depth) AS (
+      SELECT m.member_id,ARRAY[$1::text,m.member_id::text],1
+      FROM gm_member m
+      WHERE LOWER(COALESCE(m.recommender_id,''))=LOWER($1)
+      UNION ALL
+      SELECT m.member_id,d.path||m.member_id::text,d.depth+1
+      FROM gm_member m
+      JOIN down d ON LOWER(COALESCE(m.recommender_id,''))=LOWER(d.member_id)
+      WHERE d.depth<5 AND NOT (m.member_id::text=ANY(d.path))
+    ) SELECT member_id,depth FROM down
+      WHERE depth>=4
+      ORDER BY depth
+      LIMIT 1`,[owner.member_id]);
+    if(deepDownline.rowCount){
+      return {
+        ok:false,
+        error:'하위 4촌 이상 관계망이 이미 있어 추천인을 추가할 수 없습니다.',
+        downline_exists:true,
+        downline_depth:Number(deepDownline.rows[0]&&deepDownline.rows[0].depth||0)
+      };
+    }
+
+    // Independent cycle defense: keep this even though the no-downline rule above
+    // normally rejects first. It protects legacy/inconsistent data and future policy edits.
     const cycle=await client.query(`WITH RECURSIVE down(member_id,path,depth) AS (
       SELECT m.member_id,ARRAY[$1::text,m.member_id::text],1
       FROM gm_member m WHERE LOWER(COALESCE(m.recommender_id,''))=LOWER($1)
@@ -202,7 +248,7 @@ router.get(['/api/gm/member/recommender/check','/api/member/recommender/check'],
   if(!recommenderId) return res.json({ok:true,valid:true,blank:true});
   try{
     const result=await validateRecommenderAttach(pool,memberId,recommenderId);
-    if(!result.ok) return res.status(400).json({ok:false,valid:false,error:result.error,down_total_count:result.down_total_count});
+    if(!result.ok) return res.status(400).json({ok:false,valid:false,error:result.error,downline_exists:!!result.downline_exists,downline_depth:result.downline_depth||0});
     return res.json({ok:true,valid:true,recommender_id:result.recommender_id,locked:!!result.locked});
   }catch(e){
     console.error('[GM_RECOMMENDER_CHECK_ERROR]',{code:e&&e.code,message:e&&e.message});
