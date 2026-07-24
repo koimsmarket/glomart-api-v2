@@ -1233,90 +1233,11 @@ app.post('/api/gm/supplier/upsert', async (req,res)=>{
 // Do not add a duplicate /api/gm/product/upsert route here.
 
 
-app.post('/api/gm/basket/add', async (req,res)=>{
-  try{
-    const b = req.body || {};
-    const own = owner(b);
-    const p = basketPayload(b);
-    if(!p.mall_code || !p.pi_ii_vi) return fail(res, 400, 'mall_code/pi_ii_vi required', { body_keys:Object.keys(b) });
-    if(!p.product_name) p.product_name = '외부상품';
-
-    console.log('[GM_BASKET_ADD_REQUEST]', {
-      member_id:p.member_id, guest_key:p.guest_key, mall_code:p.mall_code, pi_ii_vi:p.pi_ii_vi,
-      product_uid:p.mall_code + '_' + p.pi_ii_vi,
-      has_product_url:!!p.product_url, has_thumb_url:!!p.thumb_url,
-      product_name:p.product_name, amount:p.amount, quantity:p.quantity
-    });
-
-    const r = await dbQuery(`
-      INSERT INTO gm_basket (
-        mall_code, member_id, guest_key, pi_ii_vi, product_name, option_name, option_value,
-        quantity, amount, amount_type, delivery_type, delivery_fee,
-        product_url, thumb_url, thumb_file_name, added_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now())
-      ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, '')))
-      DO UPDATE SET
-        quantity = gm_basket.quantity + EXCLUDED.quantity,
-        product_name=EXCLUDED.product_name,
-        option_name=EXCLUDED.option_name,
-        option_value=EXCLUDED.option_value,
-        amount=EXCLUDED.amount,
-        amount_type=EXCLUDED.amount_type,
-        delivery_type=EXCLUDED.delivery_type,
-        delivery_fee=EXCLUDED.delivery_fee,
-        product_url=EXCLUDED.product_url,
-        thumb_url=EXCLUDED.thumb_url,
-        thumb_file_name=EXCLUDED.thumb_file_name,
-        updated_at=now()
-      RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid
-    `, [
-      p.mall_code, p.member_id, p.guest_key, p.pi_ii_vi, p.product_name,
-      p.option_name, p.option_value, p.quantity, p.amount, p.amount_type,
-      p.delivery_type, p.delivery_fee, p.product_url, p.thumb_url, p.thumb_file_name
-    ]);
-    console.log('[GM_BASKET_ADD_OK]', { product_uid:r.rows[0] && r.rows[0].product_uid, member_id:p.member_id });
-    ok(res, { item:r.rows[0] });
-  }catch(e){
-    console.error('[GM_BASKET_ADD_ERROR]', String(e && e.message || e), req.body || {});
-    fail(res, 500, 'basket add failed', { detail:String(e && e.message || e) });
-  }
-});
-
-app.get('/api/gm/basket/list', async (req,res)=>{
-  try{
-    const memberId = cleanText(req.query.member_id);
-    const guestKey = cleanText(req.query.guest_key);
-    if(!memberId && !guestKey) return fail(res, 400, 'member_id or guest_key required');
-    const r = memberId
-      ? await dbQuery(basketSelectSql('WHERE member_id=$1 ORDER BY added_at DESC'), [memberId])
-      : await dbQuery(basketSelectSql('WHERE guest_key=$1 ORDER BY added_at DESC'), [guestKey]);
-    console.log('[GM_BASKET_LIST_OK]', { member_id:memberId, guest_key:guestKey, count:r.rows.length });
-    ok(res, { items:r.rows });
-  }catch(e){
-    console.error('[GM_BASKET_LIST_ERROR]', String(e && e.message || e));
-    fail(res, 500, 'basket list failed', { detail:String(e && e.message || e) });
-  }
-});
-
-app.delete('/api/gm/basket/item', async (req,res)=>{
-  try{
-    const b = req.body || {};
-    const own = owner(b);
-    const uids = Array.isArray(b.product_uids) ? b.product_uids.map(cleanText).filter(Boolean) : [];
-    const key = basketKey(b);
-    let deleted=[];
-    if(uids.length){
-      const r = await dbQuery(`DELETE FROM gm_basket WHERE ${own.col}=$1 AND (mall_code || '_' || pi_ii_vi) = ANY($2::text[]) RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`, [own.val, uids]);
-      deleted = deleted.concat(r.rows.map(x=>x.product_uid));
-    }else{
-      if(!key.pi_ii_vi) return fail(res, 400, 'pi_ii_vi/product_uid required');
-      const r = await dbQuery(`DELETE FROM gm_basket WHERE ${own.col}=$1 AND mall_code=$2 AND pi_ii_vi=$3 RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`, [own.val, key.mall_code, key.pi_ii_vi]);
-      deleted = deleted.concat(r.rows.map(x=>x.product_uid));
-    }
-    ok(res, { deleted });
-  }catch(e){ fail(res, 500, 'basket delete failed', { detail:String(e && e.message || e) }); }
-});
-
+/* GM_BASKET_ROUTE_SINGLE_OWNER_V035
+ * /api/gm/basket/add, /api/gm/basket/list, /api/gm/basket/item are owned only by routes/basket.js.
+ * Do not restore duplicate inline routes here. Express would execute the first registered route and bypass
+ * the common first-INSERT cart counter used by SmartFit, external detail, and the basket page.
+ */
 
 /* GM_ADMIN_ORDER_QUEUE_V003
  * 관리자 주문처리용 Queue API.

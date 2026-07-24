@@ -13,26 +13,68 @@ function enqueueAfterResponse(req, label, task){
   else setTimeout(run,0);
 }
 
-async function applyBasketCountDirect(req,row){
+async function applyBasketCountDirect(req,client,row){
   const service=req.app.locals.eventService;
   if(!service || typeof service.applyBasketAdd!=='function') throw new Error('event_service_applyBasketAdd_missing');
-  return service.applyBasketAdd(db(req),row);
+  return service.applyBasketAdd(client,row);
 }
-function basketCountAfterResponse(req,row){
-  enqueueAfterResponse(req,'[EVENT_BASKET_DIRECT_FAIL]',async()=>{
+
+/*
+ * GM_BASKET_COUNTER_BATCH_V036
+ *
+ * 장바구니 카운터는 사용자 응답이 끝난 뒤 실행하되, 한 요청당 비동기 작업을 1개만 만든다.
+ * SmartFit bulk-upsert에서 신규 상품이 여러 개 생겨도 상품 수만큼 setImmediate/DB 연결을 만들지 않는다.
+ *
+ * 처리 원칙
+ * - 신규 INSERT 행만 대상이다.
+ * - DB 연결 1개 + 트랜잭션 1개에서 순차 처리한다.
+ * - product_not_found 등 준비되지 않은 행만 기존 이벤트 큐로 순차 전달한다.
+ * - SQL 오류가 발생하면 카운터 트랜잭션 전체를 롤백하고 대상 전체를 큐로 전달한다.
+ * - Map/Set/TTL 캐시 등 장기 메모리 저장은 사용하지 않는다.
+ */
+function basketCountsAfterResponse(req,rows){
+  const targets=(Array.isArray(rows)?rows:[rows]).filter(Boolean);
+  if(!targets.length) return;
+  enqueueAfterResponse(req,'[EVENT_BASKET_BATCH_FAIL]',async()=>{
+    const pool=db(req);
+    const retry=[];
+    let client=null;
     try{
-      const result=await applyBasketCountDirect(req,row);
-      if(!result || !result.updated) throw new Error(`basket_counter_not_ready:${result&&result.reason||'unknown'}`);
-      console.log('[EVENT_BASKET_DIRECT_OK]',JSON.stringify({product_uid:row&&row.product_uid,updated:result&&result.updated,cart_count:result&&result.cart_count}));
+      if(!pool || typeof pool.connect!=='function') throw new Error('basket_counter_db_pool_missing');
+      client=await pool.connect();
+      await client.query('BEGIN');
+      for(const row of targets){
+        const result=await applyBasketCountDirect(req,client,row);
+        if(result && result.updated){
+          console.log('[EVENT_BASKET_DIRECT_OK]',JSON.stringify({product_uid:row&&row.product_uid,updated:result.updated,cart_count:result.cart_count}));
+        }else{
+          retry.push(row);
+          console.warn('[EVENT_BASKET_DIRECT_DEFER]',JSON.stringify({product_uid:row&&row.product_uid,reason:result&&result.reason||'unknown'}));
+        }
+      }
+      await client.query('COMMIT');
     }catch(directErr){
-      console.error('[EVENT_BASKET_DIRECT_FAIL]',String(directErr&&directErr.message||directErr));
-      const q=req.app.locals.eventQueue;
-      if(q&&typeof q.enqueueBasketAdd==='function'){
+      if(client){ try{ await client.query('ROLLBACK'); }catch(_e){} }
+      retry.length=0;
+      retry.push(...targets);
+      console.error('[EVENT_BASKET_BATCH_FAIL]',String(directErr&&directErr.message||directErr));
+    }finally{
+      if(client) client.release();
+    }
+
+    if(!retry.length) return;
+    const q=req.app.locals.eventQueue;
+    if(!q || typeof q.enqueueBasketAdd!=='function'){
+      console.error('[EVENT_BASKET_QUEUE_FALLBACK_SKIP]','event_queue_unavailable');
+      return;
+    }
+    for(const row of retry){
+      try{
         await q.enqueueBasketAdd(row);
         console.log('[EVENT_BASKET_QUEUE_FALLBACK_OK]',JSON.stringify({product_uid:row&&row.product_uid}));
-        return;
+      }catch(queueErr){
+        console.error('[EVENT_BASKET_QUEUE_FALLBACK_FAIL]',JSON.stringify({product_uid:row&&row.product_uid,error:String(queueErr&&queueErr.message||queueErr)}));
       }
-      console.error('[EVENT_BASKET_QUEUE_FALLBACK_SKIP]','event_queue_unavailable');
     }
   });
 }
@@ -83,6 +125,28 @@ function rowPayload(b){
 }
 function selectSql(where){
   return `SELECT *, (mall_code || '_' || pi_ii_vi) AS product_uid FROM gm_basket ${where||''}`;
+}
+
+
+/**
+ * GM_HEADER_BASKET_COUNT_SERVER
+ *
+ * 회원 외부 장바구니의 확정 수량을 반환한다.
+ * - 행 개수가 아니라 quantity 합계다.
+ * - 이벤트별 +1/-1 추정값을 사용하지 않는다.
+ * - 모든 장바구니 변경 API는 기존 DB 작업이 끝난 뒤 이 값을 응답에 싣는다.
+ * - 비회원 외부 장바구니는 앱 localStorage가 원천이므로 서버에서 계산하지 않는다.
+ */
+async function memberExternalCount(pool, memberId){
+  const mid=s(memberId);
+  if(!mid) return 0;
+  const r=await pool.query(
+    `SELECT COALESCE(SUM(GREATEST(COALESCE(quantity,1),0)),0)::bigint AS external_count
+       FROM gm_basket
+      WHERE member_id=$1`,
+    [mid]
+  );
+  return Math.max(0,Number(r.rows[0]&&r.rows[0].external_count)||0);
 }
 
 let __basketSchemaReady=false;
@@ -147,8 +211,9 @@ router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   try{
     const row=await upsertOne(pool,req.body||{});
-    res.json({ok:true,item:row});
-    if(row.__gm_inserted && !(req.body&&req.body.skip_cart_count)) basketCountAfterResponse(req,row);
+    const external_count=await memberExternalCount(pool,row.member_id);
+    res.json({ok:true,item:row,external_count});
+    if(row.__gm_inserted && !(req.body&&req.body.skip_cart_count)) basketCountsAfterResponse(req,[row]);
   }
   catch(e){
     try{ console.error('[GM_BASKET_ROUTE_ADD_ERROR]', e && e.message, req.body || {}); }catch(_e){}
@@ -170,9 +235,11 @@ router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req
         failed.push({ product_uid: raw && (raw.product_uid || raw.productUid || ''), error: itemErr.message });
       }
     }
-    res.json({ok:failed.length===0,items:saved,failed});
+    const external_count=await memberExternalCount(pool,b.member_id);
+    res.json({ok:failed.length===0,items:saved,failed,external_count});
     if(!b.skip_cart_count){
-      for(const row of saved) if(row.__gm_inserted) basketCountAfterResponse(req,row);
+      const insertedRows=saved.filter(row=>row.__gm_inserted);
+      if(insertedRows.length) basketCountsAfterResponse(req,insertedRows);
     }
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
@@ -181,7 +248,7 @@ router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
   const pool=db(req), owner=ownerWhere(req.query||{});
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   if(!owner) return res.status(400).json({ok:false,error:'member_id is required'});
-  try{ const r=await pool.query(selectSql(`WHERE ${owner.col}=$1 ORDER BY added_at DESC`),[owner.val]); res.json({ok:true,items:r.rows}); }
+  try{ const r=await pool.query(selectSql(`WHERE ${owner.col}=$1 ORDER BY added_at DESC`),[owner.val]); const external_count=r.rows.reduce((sum,row)=>sum+Math.max(0,n(row.quantity,1)),0); res.json({ok:true,items:r.rows,external_count}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -189,7 +256,7 @@ router.post(['/api/basket/quantity','/api/gm/basket/update'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, owner=ownerWhere(b), key=itemKey(b), qty=Math.max(1,n(b.quantity,1));
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   if(!owner || !key.mall_code || !key.pi_ii_vi) return res.status(400).json({ok:false,error:'mall_code/pi_ii_vi and member_id/guest_key are required'});
-  try{ const r=await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE mall_code=$2 AND pi_ii_vi=$3 AND ${owner.col}=$4 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.mall_code,key.pi_ii_vi,owner.val]); res.json({ok:true,item:r.rows[0]||null}); }
+  try{ const r=await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE mall_code=$2 AND pi_ii_vi=$3 AND ${owner.col}=$4 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.mall_code,key.pi_ii_vi,owner.val]); const external_count=await memberExternalCount(pool,owner.val); res.json({ok:true,item:r.rows[0]||null,external_count}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -211,7 +278,8 @@ router.delete(['/api/basket/delete','/api/gm/basket/item'], async (req,res)=>{
       const r=await pool.query(`DELETE FROM gm_basket WHERE ${owner.col}=$1 AND mall_code=$2 AND pi_ii_vi=$3 RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`,[owner.val,k.mall_code,k.pi_ii_vi]);
       deleted=deleted.concat(r.rows.map(x=>x.product_uid));
     }
-    res.json({ok:true,deleted:Array.from(new Set(deleted))});
+    const external_count=await memberExternalCount(pool,owner.val);
+    res.json({ok:true,deleted:Array.from(new Set(deleted)),external_count});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
