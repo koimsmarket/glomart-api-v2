@@ -131,22 +131,25 @@ function selectSql(where){
 /**
  * GM_HEADER_BASKET_COUNT_SERVER
  *
- * 회원 외부 장바구니의 확정 수량을 반환한다.
- * - 행 개수가 아니라 quantity 합계다.
- * - 이벤트별 +1/-1 추정값을 사용하지 않는다.
- * - 모든 장바구니 변경 API는 기존 DB 작업이 끝난 뒤 이 값을 응답에 싣는다.
- * - 비회원 외부 장바구니는 앱 localStorage가 원천이므로 서버에서 계산하지 않는다.
+ * gm_basket은 외부 실상품 전용 테이블이다. Cafe24 주문 활성화용 더미상품은 이 테이블에 넣지 않는다.
+ * 카운터는 행 개수가 아니라 현재 소유자(member_id 또는 guest_key)의 quantity 합계를 반환한다.
+ * 이벤트별 +1/-1 추정값은 사용하지 않는다.
  */
-async function memberExternalCount(pool, memberId){
-  const mid=s(memberId);
-  if(!mid) return 0;
+async function ownerExternalCount(pool, owner){
+  if(!owner || !owner.col || !s(owner.val)) return 0;
   const r=await pool.query(
     `SELECT COALESCE(SUM(GREATEST(COALESCE(quantity,1),0)),0)::bigint AS external_count
        FROM gm_basket
-      WHERE member_id=$1`,
-    [mid]
+      WHERE ${owner.col}=$1`,
+    [owner.val]
   );
   return Math.max(0,Number(r.rows[0]&&r.rows[0].external_count)||0);
+}
+function rowOwner(row){
+  const member=s(row&&row.member_id), guest=s(row&&row.guest_key);
+  if(member) return {col:'member_id',val:member};
+  if(guest) return {col:'guest_key',val:guest};
+  return null;
 }
 
 let __basketSchemaReady=false;
@@ -211,7 +214,7 @@ router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   try{
     const row=await upsertOne(pool,req.body||{});
-    const external_count=await memberExternalCount(pool,row.member_id);
+    const external_count=await ownerExternalCount(pool,rowOwner(row));
     res.json({ok:true,item:row,external_count});
     if(row.__gm_inserted && !(req.body&&req.body.skip_cart_count)) basketCountsAfterResponse(req,[row]);
   }
@@ -235,7 +238,7 @@ router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req
         failed.push({ product_uid: raw && (raw.product_uid || raw.productUid || ''), error: itemErr.message });
       }
     }
-    const external_count=await memberExternalCount(pool,b.member_id);
+    const external_count=await ownerExternalCount(pool,{col:'member_id',val:s(b.member_id)});
     res.json({ok:failed.length===0,items:saved,failed,external_count});
     if(!b.skip_cart_count){
       const insertedRows=saved.filter(row=>row.__gm_inserted);
@@ -256,7 +259,7 @@ router.post(['/api/basket/quantity','/api/gm/basket/update'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, owner=ownerWhere(b), key=itemKey(b), qty=Math.max(1,n(b.quantity,1));
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   if(!owner || !key.mall_code || !key.pi_ii_vi) return res.status(400).json({ok:false,error:'mall_code/pi_ii_vi and member_id/guest_key are required'});
-  try{ const r=await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE mall_code=$2 AND pi_ii_vi=$3 AND ${owner.col}=$4 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.mall_code,key.pi_ii_vi,owner.val]); const external_count=await memberExternalCount(pool,owner.val); res.json({ok:true,item:r.rows[0]||null,external_count}); }
+  try{ const r=await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE mall_code=$2 AND pi_ii_vi=$3 AND ${owner.col}=$4 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.mall_code,key.pi_ii_vi,owner.val]); const external_count=await ownerExternalCount(pool,owner); res.json({ok:true,item:r.rows[0]||null,external_count}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -278,7 +281,7 @@ router.delete(['/api/basket/delete','/api/gm/basket/item'], async (req,res)=>{
       const r=await pool.query(`DELETE FROM gm_basket WHERE ${owner.col}=$1 AND mall_code=$2 AND pi_ii_vi=$3 RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`,[owner.val,k.mall_code,k.pi_ii_vi]);
       deleted=deleted.concat(r.rows.map(x=>x.product_uid));
     }
-    const external_count=await memberExternalCount(pool,owner.val);
+    const external_count=await ownerExternalCount(pool,owner);
     res.json({ok:true,deleted:Array.from(new Set(deleted)),external_count});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
