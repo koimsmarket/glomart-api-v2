@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V077_COLLECTION_LOCK_STATUS';
+const VERSION = 'GM_SMARTFIT_SERVER_V078_PRODUCT_ONLY_LOCK';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -437,6 +437,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     console.log('[SMARTFIT_SAVE_V136] STEP1_BEGIN');
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
+    let productLocked=false;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
@@ -465,7 +466,8 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       }else{
         console.warn('[SMARTFIT_SAVE_V139] COLLECTION_TABLE_MISSING_SKIP',{template_id:templateId});
       }
-      if(collectedCount>0) throw new Error('collected template cannot be modified');
+      productLocked=collectedCount>0;
+      console.log('[SMARTFIT_SAVE_V141] PRODUCT_LOCK_STATUS',{template_id:templateId,product_locked:productLocked,collected_count:collectedCount});
       console.log('[SMARTFIT_SAVE_V136] STEP3_TEMPLATE_UPDATE', { template_id:templateId, collected_count:collectedCount });
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
@@ -517,31 +519,59 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       });
 
       /*
-       * gm_smartfit_item의 기존 확정 컬럼만 사용한다.
-       * deleted_at / deleted_by / 신규 basket 컬럼 및 별도 UNIQUE 인덱스에 의존하지 않는다.
-       * 수정 저장은 현재 화면의 전체 상품 목록으로 완전 교체한다.
+       * 퍼가기 이후에는 상품 구성만 고정한다.
+       * 제목·설명·공간·카테고리·공개 여부 등 템플릿 일반정보는 계속 수정 가능하다.
        */
-      console.log('[SMARTFIT_SAVE_V136] STEP4_DELETE_ITEMS', { template_id:saved.template_id });
-      await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
+      if(productLocked){
+        const itemCols=(await client.query(`SELECT column_name FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='gm_smartfit_item'
+            AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
+        let existingSql=`SELECT item_role,mall_code,product_uid,qty,sort_no FROM gm_smartfit_item WHERE template_id=$1`;
+        if(itemCols.indexOf('is_active')>=0) existingSql += " AND is_active='T'";
+        if(itemCols.indexOf('is_deleted')>=0) existingSql += " AND COALESCE(is_deleted,'F')<>'T'";
+        existingSql += ' ORDER BY sort_no,item_id';
+        const existingRows=(await client.query(existingSql,[saved.template_id])).rows.map((row,idx)=>({
+          item_role:s(row.item_role||'ETC')||'ETC',
+          mall_code:s(row.mall_code||'CAFE24')||'CAFE24',
+          product_uid:s(row.product_uid),
+          qty:Math.max(1,i(row.qty,1)),
+          sort_no:i(row.sort_no,idx+1)
+        }));
+        const incomingRows=Array.from(merged.values()).map((row,idx)=>({
+          item_role:s(row.item_role||'ETC')||'ETC',
+          mall_code:s(row.mall_code||'CAFE24')||'CAFE24',
+          product_uid:s(row.product_uid),
+          qty:Math.max(1,i(row.qty,1)),
+          sort_no:i(row.sort_no,idx+1)
+        }));
+        const sameProducts=JSON.stringify(existingRows)===JSON.stringify(incomingRows);
+        console.log('[SMARTFIT_SAVE_V141] PRODUCT_COMPARE',{template_id:saved.template_id,existing:existingRows.length,incoming:incomingRows.length,same:sameProducts});
+        if(!sameProducts) throw new Error('collected template products cannot be modified');
+        savedItemCount=existingRows.length;
+        normalizedItemCount=existingRows.length;
+      }else{
+        console.log('[SMARTFIT_SAVE_V136] STEP4_DELETE_ITEMS', { template_id:saved.template_id });
+        await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
 
-      console.log('[SMARTFIT_SAVE_V136] STEP5_INSERT_ITEMS', { template_id:saved.template_id, count:normalizedItemCount, has_product_id:hasProductId });
-      for(const it of merged.values()){
-        if(hasProductId){
-          await client.query(`INSERT INTO gm_smartfit_item
-            (template_id,item_role,mall_code,product_id,product_uid,qty,sort_no)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [saved.template_id,it.item_role,it.mall_code,it.product_id||'',it.product_uid,it.qty,it.sort_no]);
-        }else{
-          await client.query(`INSERT INTO gm_smartfit_item
-            (template_id,item_role,mall_code,product_uid,qty,sort_no)
-            VALUES ($1,$2,$3,$4,$5,$6)`,
-            [saved.template_id,it.item_role,it.mall_code,it.product_uid,it.qty,it.sort_no]);
+        console.log('[SMARTFIT_SAVE_V136] STEP5_INSERT_ITEMS', { template_id:saved.template_id, count:normalizedItemCount, has_product_id:hasProductId });
+        for(const it of merged.values()){
+          if(hasProductId){
+            await client.query(`INSERT INTO gm_smartfit_item
+              (template_id,item_role,mall_code,product_id,product_uid,qty,sort_no)
+              VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+              [saved.template_id,it.item_role,it.mall_code,it.product_id||'',it.product_uid,it.qty,it.sort_no]);
+          }else{
+            await client.query(`INSERT INTO gm_smartfit_item
+              (template_id,item_role,mall_code,product_uid,qty,sort_no)
+              VALUES ($1,$2,$3,$4,$5,$6)`,
+              [saved.template_id,it.item_role,it.mall_code,it.product_uid,it.qty,it.sort_no]);
+          }
+          savedItemCount++;
         }
-        savedItemCount++;
-      }
 
-      if(savedItemCount!==normalizedItemCount){
-        throw new Error(`smartfit item save count mismatch: normalized=${normalizedItemCount}, saved=${savedItemCount}`);
+        if(savedItemCount!==normalizedItemCount){
+          throw new Error(`smartfit item save count mismatch: normalized=${normalizedItemCount}, saved=${savedItemCount}`);
+        }
       }
       console.log('[SMARTFIT_ITEM_SAVE_V072] DONE',{
         template_id:saved.template_id,
@@ -550,10 +580,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         saved:savedItemCount
       });
     }
-    console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount });
+    console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount, product_locked:productLocked });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
-    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount });
+    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount, product_locked:productLocked });
   }catch(e){
     try{await client.query('ROLLBACK');}catch(_){}
     console.error('[SMARTFIT_SAVE_V136][ERROR]', {
