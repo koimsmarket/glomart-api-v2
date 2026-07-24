@@ -1,4 +1,4 @@
-// EVENT_SERVICE_V014_MEMBER_ATTACH_RELATION_TIME_SAFE
+// EVENT_SERVICE_V016_COUNTER_LIGHTWEIGHT_NO_LEDGER
 'use strict';
 
 const networkEngine = require('./GM_NETWORK_INCENTIVE_ENGINE');
@@ -8,7 +8,7 @@ module.exports = function createEventService(deps){
   const LANGS = new Set(['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr']);
 
   function n0(v){ const n=Number(v); return Number.isFinite(n)?Math.round(n):0; }
-  function langColumn(v){ const value=cleanText(v||'').toLowerCase(); return LANGS.has(value)?`${value}_count`:'total_count'; }
+  function langColumn(v){ const value=cleanText(v||'').toLowerCase(); return LANGS.has(value)?`${value}_count`:''; }
   function categoryIdentity(row){ return [cleanText(row&&row.category_no),cleanText(row&&row.mall_code),cleanText(row&&(row.ui_lang_code||row.lang_code||row.country_code))].join('|'); }
   function productUid(row){
     const explicit=cleanText(row&&(row.product_uid||row.productUid||row.source_uid||row.sourceUid));
@@ -27,12 +27,18 @@ module.exports = function createEventService(deps){
     if(!row||!row.category_no||!(await tableExists(table))) return;
     const countCol=langColumn(row.ui_lang_code||row.lang_code||row.country_code);
     const params=[periodVal,cleanText(row.category_no),cleanText(row.category_code),cleanText(row.category_name),cleanText(row.mall_code||'')];
+    const langDec=countCol?`,${countCol}=GREATEST(0,COALESCE(${countCol},0)-1)`:'';
+    const langInc=countCol?`,${countCol}=COALESCE(${countCol},0)+1`:'';
     if(delta<0){
-      await client.query(`UPDATE ${table} SET total_count=GREATEST(0,COALESCE(total_count,0)-1),${countCol}=GREATEST(0,COALESCE(${countCol},0)-1),updated_at=now() WHERE ${periodCol}=$1 AND category_no=$2 AND COALESCE(mall_code,'')=COALESCE($5,'')`,params);
+      await client.query(`UPDATE ${table} SET total_count=GREATEST(0,COALESCE(total_count,0)-1)${langDec},updated_at=now() WHERE ${periodCol}=$1 AND category_no=$2 AND COALESCE(mall_code,'')=COALESCE($5,'')`,params);
       return;
     }
-    const updated=await client.query(`UPDATE ${table} SET category_code=$3,category_name=$4,mall_code=$5,total_count=COALESCE(total_count,0)+1,${countCol}=COALESCE(${countCol},0)+1,last_search_at=now(),updated_at=now() WHERE ${periodCol}=$1 AND category_no=$2 AND COALESCE(mall_code,'')=COALESCE($5,'')`,params);
-    if(!updated.rowCount) await client.query(`INSERT INTO ${table} (${periodCol},category_no,category_code,category_name,mall_code,total_count,${countCol},first_search_at,last_search_at,updated_at) VALUES ($1,$2,$3,$4,$5,1,1,now(),now(),now())`,params);
+    const updated=await client.query(`UPDATE ${table} SET category_code=$3,category_name=$4,mall_code=$5,total_count=COALESCE(total_count,0)+1${langInc},last_search_at=now(),updated_at=now() WHERE ${periodCol}=$1 AND category_no=$2 AND COALESCE(mall_code,'')=COALESCE($5,'')`,params);
+    if(!updated.rowCount){
+      const cols=countCol?`,${countCol}`:'';
+      const vals=countCol?',1':'';
+      await client.query(`INSERT INTO ${table} (${periodCol},category_no,category_code,category_name,mall_code,total_count${cols},first_search_at,last_search_at,updated_at) VALUES ($1,$2,$3,$4,$5,1${vals},now(),now(),now())`,params);
+    }
   }
   async function changeCategoryTotal(client,row,delta){
     if(!row||!row.category_no||!(await tableExists('gm_category'))) return;
@@ -61,6 +67,10 @@ module.exports = function createEventService(deps){
     finally{ client.release(); }
   }
 
+  // 조회·장바구니 카운터는 통계값이며 영구 이벤트 원장을 만들지 않는다.
+  // DB/서버 재시작 경계의 극소수 중복·누락은 허용하고, 서버 메모리 캐시도 사용하지 않는다.
+  // 장바구니는 gm_basket 최초 INSERT 여부를 호출부에서 판정해 전달한다.
+
   function detailIdentity(p){
     p=p||{};
     const mall=cleanText(p.mall_code||p.mallCode||'').toUpperCase();
@@ -79,44 +89,52 @@ module.exports = function createEventService(deps){
     for(const value of [explicitUid,keyUid,uid,mall&&keyPi?`${mall}_${keyPi}`:'',mall&&productId?`${mall}_${productId}`:'']) if(value&&!candidates.includes(value)) candidates.push(value);
     return {mall,uid,pi,productId,itemId,vendorItemId,candidates};
   }
-  async function applyDetail(payload){
+  async function applyDetail(clientOrPayload,maybePayload){
+    const externalClient=!!(clientOrPayload&&typeof clientOrPayload.query==='function');
+    const payload=externalClient?(maybePayload||{}):(clientOrPayload||{});
     const id=detailIdentity(payload);
     if(!id.uid&&!(id.mall&&(id.pi||id.productId))) return {updated:0,reason:'product_key_missing'};
-    const client=await pool.connect();
+    const client=externalClient?clientOrPayload:await pool.connect();
     try{
-      await client.query('BEGIN');
+      if(!externalClient) await client.query('BEGIN');
       const r=await client.query(`WITH target AS (SELECT product_uid FROM gm_product WHERE (cardinality($1::text[])>0 AND product_uid=ANY($1::text[])) OR ($2<>'' AND $3<>'' AND mall_code=$2 AND pi_ii_vi=$3) OR ($2<>'' AND $4<>'' AND mall_code=$2 AND product_id=$4 AND ($5='' OR item_id=$5) AND ($6='' OR vendor_item_id=$6)) ORDER BY CASE WHEN product_uid=ANY($1::text[]) THEN 0 ELSE 1 END,updated_at DESC NULLS LAST LIMIT 1 FOR UPDATE) UPDATE gm_product p SET detail_view_count=COALESCE(p.detail_view_count,0)+1,view_count=COALESCE(p.view_count,0)+1,last_view_at=now(),expire_at=GREATEST(COALESCE(p.expire_at,now()),now()+INTERVAL '90 days'),updated_at=now() FROM target t WHERE p.product_uid=t.product_uid RETURNING p.product_uid,p.detail_view_count,p.view_count,p.cp_fix_code,p.cp_selected_code,p.category_code`,[id.candidates,id.mall,id.pi,id.productId,id.itemId,id.vendorItemId]);
       const row=r.rows[0];
-      if(!row){ await client.query('ROLLBACK'); return {updated:0,reason:'product_not_found',identity:id}; }
+      if(!row){ if(!externalClient) await client.query('ROLLBACK'); return {updated:0,reason:'product_not_found',identity:id}; }
       const categoryCode=cleanText(row.cp_fix_code||row.cp_selected_code||row.category_code||'');
       let categoryUpdated=0;
       if(categoryCode&&await tableExists('gm_category')){
         const cr=await client.query(`UPDATE gm_category SET view_count=COALESCE(view_count,0)+1,last_view_at=now(),updated_at=now() WHERE gm_code=$1 OR cp_code=$1`,[categoryCode]);
         categoryUpdated=cr.rowCount||0;
       }
-      await client.query('COMMIT');
-      return {updated:1,category_updated:categoryUpdated,product_uid:row.product_uid,detail_view_count:Number(row.detail_view_count||0),view_count:Number(row.view_count||0)};
-    }catch(error){ try{await client.query('ROLLBACK');}catch(_e){} throw error; }
-    finally{ client.release(); }
+      if(!externalClient) await client.query('COMMIT');
+      return {updated:1,counted:true,category_updated:categoryUpdated,product_uid:row.product_uid,detail_view_count:Number(row.detail_view_count||0),view_count:Number(row.view_count||0)};
+    }catch(error){ if(!externalClient){try{await client.query('ROLLBACK');}catch(_e){}} throw error; }
+    finally{ if(!externalClient) client.release(); }
   }
 
   async function applyBasketAdd(clientOrPool,row){
     if(!row) return {updated:0,reason:'basket_row_missing'};
-    const q=clientOrPool||pool;
+    const externalClient=!!(clientOrPool&&typeof clientOrPool.release==='function');
+    const client=externalClient?clientOrPool:await pool.connect();
     const uid=productUid(row);
     const mall=cleanText(row.mall_code||row.mallCode).toUpperCase();
     const pi=cleanText(row.pi_ii_vi||row.piIiVi);
-    if(!uid&&!mall&&!pi) return {updated:0,reason:'product_key_missing'};
-    const r=await q.query(`UPDATE gm_product SET cart_count=COALESCE(cart_count,0)+1,last_cart_at=now(),expire_at=GREATEST(COALESCE(expire_at,now()),now()+INTERVAL '180 days'),updated_at=now() WHERE ($1<>'' AND product_uid=$1) OR ($2<>'' AND $3<>'' AND mall_code=$2 AND pi_ii_vi=$3) RETURNING product_uid,cart_count,cp_fix_code,cp_selected_code,category_code`,[uid,mall,pi]);
-    const p=r.rows[0];
-    if(!p) return {updated:0,reason:'product_not_found'};
-    const categoryCode=cleanText(p.cp_fix_code||p.cp_selected_code||p.category_code||'');
-    if(categoryCode&&await tableExists('gm_category')) await q.query(`UPDATE gm_category SET cart_count=COALESCE(cart_count,0)+1,updated_at=now() WHERE gm_code=$1 OR cp_code=$1`,[categoryCode]);
-    return {updated:1,product_uid:p.product_uid,cart_count:Number(p.cart_count||0)};
+    if(!uid&&!mall&&!pi){ if(!externalClient) client.release(); return {updated:0,reason:'product_key_missing'}; }
+    try{
+      if(!externalClient) await client.query('BEGIN');
+      const r=await client.query(`UPDATE gm_product SET cart_count=COALESCE(cart_count,0)+1,last_cart_at=now(),expire_at=GREATEST(COALESCE(expire_at,now()),now()+INTERVAL '180 days'),updated_at=now() WHERE ($1<>'' AND product_uid=$1) OR ($2<>'' AND $3<>'' AND mall_code=$2 AND pi_ii_vi=$3) RETURNING product_uid,cart_count,cp_fix_code,cp_selected_code,category_code`,[uid,mall,pi]);
+      const p=r.rows[0];
+      if(!p){ if(!externalClient) await client.query('ROLLBACK'); return {updated:0,reason:'product_not_found'}; }
+      const categoryCode=cleanText(p.cp_fix_code||p.cp_selected_code||p.category_code||'');
+      if(categoryCode&&await tableExists('gm_category')) await client.query(`UPDATE gm_category SET cart_count=COALESCE(cart_count,0)+1,updated_at=now() WHERE gm_code=$1 OR cp_code=$1`,[categoryCode]);
+      if(!externalClient) await client.query('COMMIT');
+      return {updated:1,counted:true,product_uid:p.product_uid,cart_count:Number(p.cart_count||0)};
+    }catch(error){ if(!externalClient){try{await client.query('ROLLBACK');}catch(_e){}} throw error; }
+    finally{ if(!externalClient) client.release(); }
   }
 
   async function reserveSalesEvent(client,order,item){
-    if(!(await tableExists('gm_sales_aggregate_event'))) return true;
+    if(!(await tableExists('gm_sales_aggregate_event'))) throw new Error('gm_sales_aggregate_event_table_missing');
     const uid=productUid(item);
     const key=cleanText(item.pi_ii_vi||item.source_uid||item.sourceUid||uid);
     const qty=Math.max(1,n0(item.quantity||1));

@@ -1,4 +1,4 @@
-// GM_SEARCH_LOG_SERVICE_V006_NORMALIZED_STAT
+// GM_SEARCH_LOG_SERVICE_V007_COUNTER_RETRY_IDEMPOTENT
 'use strict';
 
 module.exports = function installSearchLogService(deps){
@@ -208,7 +208,9 @@ module.exports = function installSearchLogService(deps){
       const oldTotal=old?Number(old.gmkr_result_count||0)+Number(old.cpkr_result_count||0)+Number(old.alkr_result_count||0)+Number(old.smartfit_result_count||0):0;
       await updateLegacyStats(nowRow,old,{result:totalResult(nowRow)-oldTotal,db:0,queue:toInt(p.queue_send_count||p.queueSendCount,0)});
       if(eventService && typeof eventService.applySearch==='function'){
-        await eventService.applySearch(nowRow,old);
+        const alreadyCounted=old && String(old.category_counted_yn||'N').toUpperCase()==='Y';
+        await eventService.applySearch(nowRow,alreadyCounted?old:null);
+        await dbQuery(`UPDATE gm_search_log SET category_counted_yn='Y',updated_at=now() WHERE search_event_id=$1`,[eventId]);
       }
       let relationResult=null;
       try{ relationResult=await keywordRelationService.saveRelations(pool,{gm_lang:keywordLang||uiLang||'ko',keyword_ko:cleanText(p.keyword_ko||p.keywordKo||canonical||normalized||original),relatedKeywords:p.related_keywords||p.relatedKeywords||[]}); }catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_ERROR]',String(e&&e.message||e)); }
@@ -221,9 +223,12 @@ module.exports = function installSearchLogService(deps){
       const p=req.body||{};
       const eventId=cleanText(p.search_event_id||p.searchEventId||p.request_id||p.requestId||'');
       if(!eventId) return fail(res,400,'search_event_id is required');
+      // 검색→상세 진입은 참고 통계다. 영구 중복방지 테이블이나 서버 메모리 캐시를 사용하지 않는다.
+      // 네트워크 재전송·서버 재시작 경계의 극소수 오차는 허용한다.
+      const detailEventId=cleanText(p.detail_event_id||p.detailEventId||p.counter_event_id||p.counterEventId||'');
       const r=await dbQuery(`UPDATE gm_search_log SET detail_enter_count=COALESCE(detail_enter_count,0)+1,detail_entry_no=nextval('gm_detail_entry_seq'),id_detail_count=CASE WHEN COALESCE(member_id,'')<>'' THEN COALESCE(id_detail_count,0)+1 ELSE id_detail_count END,guest_detail_count=CASE WHEN COALESCE(member_id,'')='' AND COALESCE(guest_key,'')<>'' THEN COALESCE(guest_detail_count,0)+1 ELSE guest_detail_count END,updated_at=now() WHERE search_event_id=$1 RETURNING search_id,detail_enter_count,detail_entry_no,id_detail_count,guest_detail_count,merged_detail_count`,[eventId]);
       if(!r.rows[0]) return fail(res,404,'search_event_id not found');
-      ok(res,{action:'search.log.detail',...r.rows[0]});
+      ok(res,{action:'search.log.detail',counted:true,detail_event_id:detailEventId||null,...r.rows[0]});
     }catch(e){ fail(res,500,'search detail count failed',{detail:String(e&&e.message||e)}); }
   };
 

@@ -22,6 +22,7 @@ function basketCountAfterResponse(req,row){
   enqueueAfterResponse(req,'[EVENT_BASKET_DIRECT_FAIL]',async()=>{
     try{
       const result=await applyBasketCountDirect(req,row);
+      if(!result || !result.updated) throw new Error(`basket_counter_not_ready:${result&&result.reason||'unknown'}`);
       console.log('[EVENT_BASKET_DIRECT_OK]',JSON.stringify({product_uid:row&&row.product_uid,updated:result&&result.updated,cart_count:result&&result.cart_count}));
     }catch(directErr){
       console.error('[EVENT_BASKET_DIRECT_FAIL]',String(directErr&&directErr.message||directErr));
@@ -133,10 +134,13 @@ async function upsertOne(pool,b){
       thumb_url=EXCLUDED.thumb_url,
       thumb_file_name=EXCLUDED.thumb_file_name,
       updated_at=NOW()
-    RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`;
+    RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid, (xmax = 0) AS __gm_inserted`;
   const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
   const r=await pool.query(sql,params);
-  return r.rows[0];
+  const row=r.rows[0];
+  const inserted=!!row.__gm_inserted;
+  try{Object.defineProperty(row,'__gm_inserted',{value:inserted,enumerable:false,writable:false});}catch(_e){row.__gm_inserted=inserted;}
+  return row;
 }
 
 router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
@@ -144,7 +148,7 @@ router.post(['/api/basket/add','/api/gm/basket/add'], async (req,res)=>{
   try{
     const row=await upsertOne(pool,req.body||{});
     res.json({ok:true,item:row});
-    if(!(req.body&&req.body.skip_cart_count)) basketCountAfterResponse(req,row);
+    if(row.__gm_inserted && !(req.body&&req.body.skip_cart_count)) basketCountAfterResponse(req,row);
   }
   catch(e){
     try{ console.error('[GM_BASKET_ROUTE_ADD_ERROR]', e && e.message, req.body || {}); }catch(_e){}
@@ -168,7 +172,7 @@ router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req
     }
     res.json({ok:failed.length===0,items:saved,failed});
     if(!b.skip_cart_count){
-      for(const row of saved) basketCountAfterResponse(req,row);
+      for(const row of saved) if(row.__gm_inserted) basketCountAfterResponse(req,row);
     }
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });

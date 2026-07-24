@@ -79,8 +79,9 @@ async function processOne(pool, eventService, job){
     let result;
     if(type === 'BASKET_ADD'){
       result = await eventService.applyBasketAdd(client, payload.row || payload);
+      if(!result || !result.updated) throw new Error(`basket_not_ready:${result && result.reason || 'unknown'}`);
     }else if(type === 'DETAIL_VIEW'){
-      result = await eventService.applyDetail(payload);
+      result = await eventService.applyDetail(client, payload);
       if(!result || !result.updated) throw new Error(`detail_not_ready:${result && result.reason || 'unknown'}`);
     }else if(type === 'MEMBER_JOIN'){
       result = await eventService.applyMemberJoin(client, payload);
