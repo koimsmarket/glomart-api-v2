@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V076_VALID_COLLECTION_LOCK';
+const VERSION = 'GM_SMARTFIT_SERVER_V077_COLLECTION_LOCK_STATUS';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -63,6 +63,23 @@ function boolFlag(v, def='F'){
   if(['F','N','NO','FALSE','0','OFF'].includes(x)) return 'F';
   return def;
 }
+
+async function getTemplateCollectionLock(client, templateId){
+  const id=i(templateId,0);
+  if(!id) return { collection_count:0, is_locked:false };
+  const table=(await client.query("SELECT to_regclass('public.gm_smartfit_collection') AS name")).rows[0];
+  if(!table || !table.name) return { collection_count:0, is_locked:false };
+  const cols=(await client.query(`SELECT column_name FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='gm_smartfit_collection'
+      AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
+  let sql='SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1';
+  if(cols.indexOf('is_active')>=0) sql += " AND is_active='T'";
+  if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(is_deleted,'F')<>'T'";
+  const r=await client.query(sql,[id]);
+  const count=Number((r.rows[0]||{}).n||0);
+  return { collection_count:count, is_locked:count>0 };
+}
+
 async function assertSpaceOwnerIfSet(client, member, spaceId){
   if(!spaceId) return null;
   const r=await client.query("SELECT * FROM gm_smartfit_space WHERE space_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[spaceId,'T']);
@@ -627,6 +644,9 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
     if(!id) return fail(res,400,'template_id required');
     const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id,member]);
     const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
+    const lock=await getTemplateCollectionLock(pool,id);
+    template.collection_count=lock.collection_count;
+    template.is_locked=lock.is_locked;
     const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[id]);
     const meta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
     const metaMap=new Map(meta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
@@ -738,6 +758,9 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
     if(!id) return fail(res,404,'template not found');
     const r=await pool.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,\'F\')<>\'T\'', [id,'T']);
     const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
+    const lock=await getTemplateCollectionLock(pool,id);
+    template.collection_count=lock.collection_count;
+    template.is_locked=lock.is_locked;
     const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id,'T']);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
