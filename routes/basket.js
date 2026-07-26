@@ -170,7 +170,19 @@ async function ensureBasketSchema(pool){
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS cart_item_key TEXT`);
   await pool.query(`UPDATE gm_basket SET cart_item_key=(mall_code || '_' || pi_ii_vi || '::DEFAULT') WHERE cart_item_key IS NULL OR BTRIM(cart_item_key)=''`);
   await pool.query(`ALTER TABLE gm_basket ALTER COLUMN cart_item_key SET NOT NULL`);
+  /*
+   * GM_BASKET_MULTI_OPTION_UNIQUE_FIX
+   *
+   * 과거 구조는 동일 소유자의 mall_code + pi_ii_vi를 한 행으로 강제했다.
+   * 현재 구조는 cart_item_key 단위로 옵션 행을 구분하므로, 과거 UNIQUE가 남아 있으면
+   * 새 ON CONFLICT 대상보다 먼저 duplicate key 오류를 발생시킨다.
+   *
+   * 운영 DB마다 uq_/ux_ 이름이 달랐던 이력이 있어 인덱스와 제약조건을 모두 제거한다.
+   */
+  await pool.query(`ALTER TABLE gm_basket DROP CONSTRAINT IF EXISTS uq_gm_basket_owner_item`);
+  await pool.query(`ALTER TABLE gm_basket DROP CONSTRAINT IF EXISTS ux_gm_basket_owner_item`);
   await pool.query(`DROP INDEX IF EXISTS uq_gm_basket_owner_item`);
+  await pool.query(`DROP INDEX IF EXISTS ux_gm_basket_owner_item`);
   await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_basket_owner_cart_item ON gm_basket (cart_item_key, COALESCE(member_id,''), COALESCE(guest_key,''))`);
   __basketSchemaReady=true;
 }
