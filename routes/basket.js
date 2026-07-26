@@ -167,23 +167,9 @@ async function ensureBasketSchema(pool){
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS internal_product_code TEXT`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS cafe24_product_no TEXT`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS gm_internal_link INTEGER NOT NULL DEFAULT 0`);
-  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS cart_item_key TEXT`);
-  await pool.query(`UPDATE gm_basket SET cart_item_key=(mall_code || '_' || pi_ii_vi || '::DEFAULT') WHERE cart_item_key IS NULL OR BTRIM(cart_item_key)=''`);
-  await pool.query(`ALTER TABLE gm_basket ALTER COLUMN cart_item_key SET NOT NULL`);
-  /*
-   * GM_BASKET_MULTI_OPTION_UNIQUE_FIX
-   *
-   * 과거 구조는 동일 소유자의 mall_code + pi_ii_vi를 한 행으로 강제했다.
-   * 현재 구조는 cart_item_key 단위로 옵션 행을 구분하므로, 과거 UNIQUE가 남아 있으면
-   * 새 ON CONFLICT 대상보다 먼저 duplicate key 오류를 발생시킨다.
-   *
-   * 운영 DB마다 uq_/ux_ 이름이 달랐던 이력이 있어 인덱스와 제약조건을 모두 제거한다.
-   */
-  await pool.query(`ALTER TABLE gm_basket DROP CONSTRAINT IF EXISTS uq_gm_basket_owner_item`);
-  await pool.query(`ALTER TABLE gm_basket DROP CONSTRAINT IF EXISTS ux_gm_basket_owner_item`);
-  await pool.query(`DROP INDEX IF EXISTS uq_gm_basket_owner_item`);
-  await pool.query(`DROP INDEX IF EXISTS ux_gm_basket_owner_item`);
-  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_basket_owner_cart_item ON gm_basket (cart_item_key, COALESCE(member_id,''), COALESCE(guest_key,''))`);
+  /* 기존 장바구니 식별 기준을 유지한다.
+   * UNIQUE: mall_code + pi_ii_vi + owner(member_id/guest_key)
+   * cart_item_key 전용 UNIQUE/index는 생성하거나 기존 제약을 삭제하지 않는다. */
   __basketSchemaReady=true;
 }
 
@@ -201,7 +187,7 @@ async function upsertOne(pool,b){
   const sql=`INSERT INTO gm_basket (
       mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,cart_item_key,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW())
-    ON CONFLICT (cart_item_key, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
+    ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
       quantity=gm_basket.quantity + EXCLUDED.quantity,
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''),gm_basket.source_mall),
       source_uid=COALESCE(NULLIF(EXCLUDED.source_uid,''),gm_basket.source_uid),
