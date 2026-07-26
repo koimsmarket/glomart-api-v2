@@ -91,7 +91,7 @@ function itemKey(b){
   const fromUid=splitProductUid(b.product_uid||b.productUid);
   const mall=s(b.mall_code||b.mallCode||fromUid.mall_code,'CPKR');
   const pi=s(b.pi_ii_vi||b.piIiVi||fromUid.pi_ii_vi);
-  return { mall_code:mall, pi_ii_vi:pi };
+  return { mall_code:mall, pi_ii_vi:pi, cart_item_key:s(b.cart_item_key||b.cartItemKey||b.basket_item_key||b.basketItemKey) };
 }
 function ownerWhere(b){
   const member=s(b.member_id);
@@ -110,6 +110,7 @@ function rowPayload(b){
     member_id:s(b.member_id),
     guest_key:s(b.guest_key),
     pi_ii_vi:key.pi_ii_vi,
+    cart_item_key:key.cart_item_key || ((key.mall_code||'CPKR')+'_'+key.pi_ii_vi+'::DEFAULT'),
     product_name:s(b.product_name||b.productName||b.title||b.name,''),
     option_name:s(b.option_name||b.optionName),
     option_value:s(b.option_value||b.optionValue),
@@ -166,6 +167,11 @@ async function ensureBasketSchema(pool){
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS internal_product_code TEXT`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS cafe24_product_no TEXT`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS gm_internal_link INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS cart_item_key TEXT`);
+  await pool.query(`UPDATE gm_basket SET cart_item_key=(mall_code || '_' || pi_ii_vi || '::DEFAULT') WHERE cart_item_key IS NULL OR BTRIM(cart_item_key)=''`);
+  await pool.query(`ALTER TABLE gm_basket ALTER COLUMN cart_item_key SET NOT NULL`);
+  await pool.query(`DROP INDEX IF EXISTS uq_gm_basket_owner_item`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_basket_owner_cart_item ON gm_basket (cart_item_key, COALESCE(member_id,''), COALESCE(guest_key,''))`);
   __basketSchemaReady=true;
 }
 
@@ -181,9 +187,9 @@ async function upsertOne(pool,b){
   if(!p.thumb_url) throw new Error('thumb_url is required');
   if(!p.amount || p.amount <= 0) throw new Error('amount is required');
   const sql=`INSERT INTO gm_basket (
-      mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW(),NOW())
-    ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
+      mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,cart_item_key,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW())
+    ON CONFLICT (cart_item_key, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
       quantity=gm_basket.quantity + EXCLUDED.quantity,
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''),gm_basket.source_mall),
       source_uid=COALESCE(NULLIF(EXCLUDED.source_uid,''),gm_basket.source_uid),
@@ -202,7 +208,7 @@ async function upsertOne(pool,b){
       thumb_file_name=EXCLUDED.thumb_file_name,
       updated_at=NOW()
     RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid, (xmax = 0) AS __gm_inserted`;
-  const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
+  const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.cart_item_key,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
   const r=await pool.query(sql,params);
   const row=r.rows[0];
   const inserted=!!row.__gm_inserted;
@@ -258,28 +264,37 @@ router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
 router.post(['/api/basket/quantity','/api/gm/basket/update'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, owner=ownerWhere(b), key=itemKey(b), qty=Math.max(1,n(b.quantity,1));
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  if(!owner || !key.mall_code || !key.pi_ii_vi) return res.status(400).json({ok:false,error:'mall_code/pi_ii_vi and member_id/guest_key are required'});
-  try{ const r=await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE mall_code=$2 AND pi_ii_vi=$3 AND ${owner.col}=$4 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.mall_code,key.pi_ii_vi,owner.val]); const external_count=await ownerExternalCount(pool,owner); res.json({ok:true,item:r.rows[0]||null,external_count}); }
+  if(!owner || (!key.cart_item_key && (!key.mall_code || !key.pi_ii_vi))) return res.status(400).json({ok:false,error:'cart_item_key or mall_code/pi_ii_vi and member_id are required'});
+  try{ const r=key.cart_item_key
+    ? await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE cart_item_key=$2 AND ${owner.col}=$3 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.cart_item_key,owner.val])
+    : await pool.query(`UPDATE gm_basket SET quantity=$1, updated_at=NOW() WHERE mall_code=$2 AND pi_ii_vi=$3 AND ${owner.col}=$4 RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,[qty,key.mall_code,key.pi_ii_vi,owner.val]); const external_count=await ownerExternalCount(pool,owner); res.json({ok:true,item:r.rows[0]||null,external_count}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
 router.delete(['/api/basket/delete','/api/gm/basket/item'], async (req,res)=>{
   const pool=db(req), b=req.body||{}, owner=ownerWhere(b);
   const productUids=Array.isArray(b.product_uids)?b.product_uids.map(x=>s(x)).filter(Boolean):[];
+  const cartItemKeys=Array.isArray(b.cart_item_keys)?b.cart_item_keys.map(x=>s(x)).filter(Boolean):[];
   const keys=Array.isArray(b.items)?b.items.map(itemKey).filter(k=>k.mall_code&&k.pi_ii_vi):[];
   const single=itemKey(b);
   if(single.mall_code && single.pi_ii_vi) keys.push(single);
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
-  if(!owner || (!productUids.length && !keys.length)) return res.status(400).json({ok:false,error:'basket item key and member_id/guest_key are required'});
+  if(!owner || (!productUids.length && !cartItemKeys.length && !keys.length)) return res.status(400).json({ok:false,error:'basket item key and member_id/guest_key are required'});
   try{
     let deleted=[];
+    if(cartItemKeys.length){
+      const r=await pool.query(`DELETE FROM gm_basket WHERE ${owner.col}=$1 AND cart_item_key = ANY($2::text[]) RETURNING cart_item_key`,[owner.val,cartItemKeys]);
+      deleted=deleted.concat(r.rows.map(x=>x.cart_item_key));
+    }
     if(productUids.length){
       const r=await pool.query(`DELETE FROM gm_basket WHERE ${owner.col}=$1 AND (mall_code || '_' || pi_ii_vi) = ANY($2::text[]) RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`,[owner.val,productUids]);
       deleted=deleted.concat(r.rows.map(x=>x.product_uid));
     }
     for(const k of keys){
-      const r=await pool.query(`DELETE FROM gm_basket WHERE ${owner.col}=$1 AND mall_code=$2 AND pi_ii_vi=$3 RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`,[owner.val,k.mall_code,k.pi_ii_vi]);
-      deleted=deleted.concat(r.rows.map(x=>x.product_uid));
+      const r=k.cart_item_key
+        ? await pool.query(`DELETE FROM gm_basket WHERE ${owner.col}=$1 AND cart_item_key=$2 RETURNING cart_item_key`,[owner.val,k.cart_item_key])
+        : await pool.query(`DELETE FROM gm_basket WHERE ${owner.col}=$1 AND mall_code=$2 AND pi_ii_vi=$3 RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`,[owner.val,k.mall_code,k.pi_ii_vi]);
+      deleted=deleted.concat(r.rows.map(x=>x.cart_item_key||x.product_uid).filter(Boolean));
     }
     const external_count=await ownerExternalCount(pool,owner);
     res.json({ok:true,deleted:Array.from(new Set(deleted)),external_count});
