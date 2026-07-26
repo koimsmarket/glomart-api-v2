@@ -1626,6 +1626,49 @@ function normalizeRemoteDeliveryPolicy(p){
   };
 }
 
+async function refreshCoupangDetailIdentity(pool, p, id){
+  const mall = cleanText(id && id.mallCode).toUpperCase();
+  if(mall !== 'CPKR') return { applied:false, reason:'not_coupang' };
+
+  const source = cleanText(
+    p && (p.source || p.collector_source || p.collectorSource || p.context || p.from || p.origin)
+  ).toLowerCase();
+  const detailSignal = source.indexOf('detail') >= 0 ||
+    cleanText(p && (p.gm_detail || p.gmDetail || p.detail_collector || p.detailCollector)) === '1' ||
+    !!(p && (p.detail_json || p.detailJson || p.option_json || p.optionJson || p.linked_product_id || p.linkedProductId));
+
+  if(!detailSignal) return { applied:false, reason:'not_detail_payload' };
+  if(!id || !id.uid || !id.productId || !id.itemId || !id.vendorItemId){
+    return { applied:false, reason:'identity_missing' };
+  }
+
+  const r = await pool.query(`
+    UPDATE gm_product
+       SET product_id=$2,
+           item_id=$3,
+           vendor_item_id=$4,
+           pi_ii_vi=$5,
+           source_uid=CASE
+             WHEN COALESCE(source_uid,'')='' OR source_uid=pi_ii_vi THEN $5
+             ELSE source_uid
+           END,
+           updated_at=now()
+     WHERE product_uid=$1
+       AND mall_code='CPKR'
+       AND product_id=$2
+       AND vendor_item_id=$4
+       AND COALESCE(item_id,'')<>$3
+    RETURNING product_uid, product_id, item_id, vendor_item_id, pi_ii_vi
+  `,[id.uid,id.productId,id.itemId,id.vendorItemId,id.pi]);
+
+  const row = r.rows && r.rows[0];
+  if(row){
+    try{ console.log('[GM_COUPANG_IID_REFRESH]', { applied:true, product_uid:row.product_uid, product_id:row.product_id, item_id:row.item_id, vendor_item_id:row.vendor_item_id, pi_ii_vi:row.pi_ii_vi }); }catch(_e){}
+    return { applied:true, item:row };
+  }
+  return { applied:false, reason:'no_matching_pid_vid_or_same_iid' };
+}
+
 async function upsertProduct(pool, raw, parent={}){
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
@@ -1636,6 +1679,14 @@ async function upsertProduct(pool, raw, parent={}){
   if(!productName) missing.push('product_name');
   if(missing.length){
     return { ok:false, skipped:true, reason:'required field missing: ' + missing.join(','), missing, uid:id.uid||'', pi_ii_vi:id.pi||'', mall_code:id.mallCode||'', product_id:id.productId||'', source_url:pickProductUrl(p), title_sample:cleanText(p.title||p.name||p.productName||p.product_name).slice(0,120) };
+  }
+
+  let identity_refresh = null;
+  try{
+    identity_refresh = await refreshCoupangDetailIdentity(pool, p, id);
+  }catch(e){
+    identity_refresh = { applied:false, error:compactError(e) };
+    console.error('[GM_COUPANG_IID_REFRESH_ERROR]', Object.assign({ product_uid:id.uid, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId }, compactError(e)));
   }
 
   // product_url 저장 중단: 필요 시 아래 줄을 부활한다.
@@ -1921,7 +1972,7 @@ async function upsertProduct(pool, raw, parent={}){
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats })
+    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats, identity_refresh })
   };
 }
 
