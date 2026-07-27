@@ -1027,18 +1027,20 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
   const db = dbFrom(req);
   const limit = Math.min(Math.max(Number(req.query.limit || 50000), 1), 50000);
   const format=String(req.query.format||'csv').toLowerCase();
+  const groupNo=Math.max(Number(req.query.group||0),0);
+  const groupCount=Math.max(Number(req.query.groups||0),0);
   if(!['csv','xlsx'].includes(format)) return fail(res,400,'invalid format');
   try{
     const requestedKeys=String(req.query.tables||'').split(',').map(v=>v.trim()).filter(Boolean);
     const selectedKeys=(requestedKeys.length?requestedKeys:Object.keys(TABLES)).filter(k=>TABLES[k]);
     if(!selectedKeys.length) return fail(res,400,'no valid tables selected');
-    console.log('[GM_BUILDER_EXPORT_ALL_START_V030]', JSON.stringify({ limit, format, selected:selectedKeys.length, keys:selectedKeys }));
+    console.log('[GM_BUILDER_EXPORT_ALL_START_V031]', JSON.stringify({ limit, format, group:groupNo, groups:groupCount, selected:selectedKeys.length, keys:selectedKeys }));
     const files=[];
     const errors=[];
     for(const key of selectedKeys){
       const spec = TABLES[key];
       try{
-        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_START_V030]',JSON.stringify({key,table:spec.table,format}));
+        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_START_V031]',JSON.stringify({key,table:spec.table,format}));
         let cols = await getColumns(db, spec.table);
         if(!cols.length){ errors.push({key, table:spec.table, error:'no columns'}); continue; }
         if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
@@ -1046,7 +1048,7 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
         files.push(format==='xlsx'
           ? { name:`${spec.table}.xlsx`, data:makeXlsx(r.rows,cols,spec.table) }
           : { name:`${spec.table}.csv`, data:toCsv(r.rows,cols) });
-        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_DONE_V030]',JSON.stringify({key,table:spec.table,format,rows:r.rows.length}));
+        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_DONE_V031]',JSON.stringify({key,table:spec.table,format,rows:r.rows.length}));
       }catch(e){
         errors.push({ key, table:spec.table, error:String(e && e.message || e) });
       }
@@ -1056,8 +1058,9 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
       files.push({ name:'_export_errors.csv', data:toCsv(errors,errorCols) });
     }
     const zip = makeZip(files);
-    console.log('[GM_BUILDER_EXPORT_ALL_DONE_V030]', JSON.stringify({ format, files:files.length, errors:errors.length, bytes:zip.length }));
-    const fname = `gm_selected_tables_${format}_${Date.now()}.zip`;
+    console.log('[GM_BUILDER_EXPORT_ALL_DONE_V031]', JSON.stringify({ format, group:groupNo, groups:groupCount, files:files.length, errors:errors.length, bytes:zip.length }));
+    const groupTag=groupNo&&groupCount?`_${String(groupNo).padStart(2,'0')}of${String(groupCount).padStart(2,'0')}`:'';
+    const fname = `gm_selected_tables${groupTag}_${format}_${Date.now()}.zip`;
     res.setHeader('Content-Type','application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     res.setHeader('Content-Length', String(zip.length));
@@ -1065,7 +1068,7 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
     res.setHeader('X-Content-Type-Options','nosniff');
     res.end(zip);
   }catch(e){
-    console.error('[GM_BUILDER_EXPORT_ALL_FAIL_V030]', { detail:String(e && e.message || e) });
+    console.error('[GM_BUILDER_EXPORT_ALL_FAIL_V031]', { detail:String(e && e.message || e) });
     fail(res, 500, 'export all failed', { detail:String(e && e.message || e) });
   }
 });

@@ -75,7 +75,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <select id="format"><option value="csv">CSV</option><option value="xlsx">Excel (.xlsx)</option></select>
     <div class="buttonRow">
       <button onclick="download(this)">개별 다운로드</button>
-      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 다운로드</button>
+      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 5개조 다운로드</button>
     </div>
     <div class="exportPick">
       <div class="exportPickHead"><b>ZIP에 포함할 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
@@ -307,27 +307,60 @@ async function download(button){
 }
 
 let downloadAllRunning=false;
+function splitIntoFiveGroups(items){
+  const groups=[[],[],[],[],[]];
+  items.forEach((item,index)=>groups[index%5].push(item));
+  return groups.filter(group=>group.length);
+}
+function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
 async function downloadAll(button){
   if(downloadAllRunning) return;
   const selected=selectedExportTables();
   if(!selected.length){ alert('다운로드할 테이블을 하나 이상 선택하세요.'); return; }
   downloadAllRunning=true;
   const f=document.getElementById('format').value;
-  const url=`${API}/api/gm/builder/export-all?format=${encodeURIComponent(f)}&limit=50000&tables=${encodeURIComponent(selected.join(','))}&t=${Date.now()}`;
-  const timed=startButtonTimer(button,`선택 ${f.toUpperCase()} 생성 중`);
-  log(`${selected.length}개 테이블 ZIP 생성 중입니다. 다운로드가 시작될 때까지 버튼은 비활성화됩니다.`);
+  const groups=splitIntoFiveGroups(selected);
+  const timed=startButtonTimer(button,`5개조 ${f.toUpperCase()} 준비 중`);
+  const results=[];
+  log(`${selected.length}개 테이블을 ${groups.length}개 조로 나누어 순차 다운로드합니다.`);
   try{
-    const r=await fetch(url,{method:'GET',cache:'no-store'});
-    if(!r.ok){const txt=await r.text().catch(()=>String(r.status));log(`선택 ZIP 다운로드 실패: ${r.status} ${txt.slice(0,1200)}`);return;}
-    const blob=await r.blob();
-    const ct=(r.headers.get('content-type')||'').toLowerCase();
-    if(!ct.includes('zip')&&!ct.includes('octet-stream')){const txt=await blob.text().catch(()=>'<binary>');log(`ZIP 응답이 아닙니다: ${txt.slice(0,1000)}`);return;}
-    const a=document.createElement('a'),objectUrl=URL.createObjectURL(blob);
-    a.href=objectUrl;a.download=`gm_selected_tables_${f}_${Date.now()}.zip`;
-    document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(objectUrl);a.remove();},1000);
-    log(`선택 다운로드 시작: ${a.download} / ${selected.length}개 / ${timed?timed.seconds:0}초 / ${blob.size.toLocaleString()} bytes`);
-  }catch(e){log(`선택 ZIP 다운로드 오류: ${e&&e.message||e}`);}
-  finally{downloadAllRunning=false;stopButtonTimer(timed);}
+    for(let i=0;i<groups.length;i++){
+      const group=groups[i];
+      button.textContent=`${i+1}/${groups.length}조 생성 중 · ${timed?timed.seconds:0}초`;
+      const url=`${API}/api/gm/builder/export-all?format=${encodeURIComponent(f)}&limit=50000&group=${i+1}&groups=${groups.length}&tables=${encodeURIComponent(group.join(','))}&t=${Date.now()}`;
+      log(`${i+1}/${groups.length}조 ZIP 생성 중: ${group.length}개 테이블\n${group.join(', ')}`);
+      try{
+        const r=await fetch(url,{method:'GET',cache:'no-store'});
+        if(!r.ok){
+          const txt=await r.text().catch(()=>String(r.status));
+          results.push({group:i+1,ok:false,status:r.status,error:txt.slice(0,500)});
+          continue;
+        }
+        const blob=await r.blob();
+        const ct=(r.headers.get('content-type')||'').toLowerCase();
+        if(!ct.includes('zip')&&!ct.includes('octet-stream')){
+          const txt=await blob.text().catch(()=>'<binary>');
+          results.push({group:i+1,ok:false,status:r.status,error:`ZIP 응답 아님: ${txt.slice(0,300)}`});
+          continue;
+        }
+        const a=document.createElement('a'),objectUrl=URL.createObjectURL(blob);
+        a.href=objectUrl;
+        a.download=`gm_selected_${String(i+1).padStart(2,'0')}of${String(groups.length).padStart(2,'0')}_${f}_${Date.now()}.zip`;
+        document.body.appendChild(a);a.click();
+        setTimeout(()=>{URL.revokeObjectURL(objectUrl);a.remove();},3000);
+        results.push({group:i+1,ok:true,tables:group.length,bytes:blob.size,file:a.download});
+        if(i<groups.length-1) await sleep(1500);
+      }catch(e){
+        results.push({group:i+1,ok:false,error:String(e&&e.message||e)});
+      }
+    }
+    const okCount=results.filter(x=>x.ok).length;
+    const failCount=results.length-okCount;
+    log({action:'selected-export-5-groups',selected:selected.length,groups:groups.length,success:okCount,failed:failCount,seconds:timed?timed.seconds:0,results});
+  }finally{
+    downloadAllRunning=false;
+    stopButtonTimer(timed);
+  }
 }
 
 async function send(apply,button){
