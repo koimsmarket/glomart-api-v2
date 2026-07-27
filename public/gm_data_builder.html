@@ -27,7 +27,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <body>
 <div class="wrap">
 <h1>GM Safe Update Builder V028</h1>
-<div class="sub">CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
+<div class="sub">CSV·Excel 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
   <div class="statusHead">
@@ -71,38 +71,37 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <label>대상</label>
     <select id="downTable"></select>
     <label>형식</label>
-    <select id="format"><option value="csv">CSV</option><option value="json">JSON 미리보기</option></select>
+    <select id="format"><option value="csv">CSV</option><option value="xlsx">Excel (.xlsx)</option></select>
     <button onclick="download()">다운로드</button>
-    <button class="gray" onclick="preview()">JSON 미리보기</button>
-    <button class="gray" onclick="downloadAll()">전체 CSV 다운로드</button>
+    <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">전체 다운로드</button>
   </div>
   <div class="card">
     <h2>안전 업데이트</h2>
     <label>대상</label>
     <select id="upTable"></select>
-    <label>CSV 파일</label>
-    <input type="file" id="file" accept=".csv,text/csv">
+    <label>CSV 또는 Excel 파일</label>
+    <input type="file" id="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
     <button class="gray" onclick="dryRun()">검증만 실행</button>
     <button class="red" onclick="applyUpdate()">APPLY 입력 후 업데이트</button>
     <hr>
-    <label>전체 업로드용 CSV 여러 개</label>
-    <input type="file" id="multiFiles" accept=".csv,text/csv" multiple>
+    <label>전체 업로드용 CSV·Excel 여러 개</label>
+    <input type="file" id="multiFiles" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple>
     <button class="gray" onclick="dryRunAll()">전체 검증</button>
     <button class="red" onclick="applyAll()">전체 APPLY</button>
-    <p class="small">파일명에 gm_product, gm_order, gm_basket 등 테이블명이 포함되어야 자동 매칭됩니다.</p>
+    <p class="small">CSV·Excel 파일명에 gm_product, gm_order, gm_basket 등 테이블명이 포함되어야 자동 매칭됩니다.</p>
   </div>
 </div>
 
 
 <div class="card" style="margin-top:16px;border-color:#f0b8b8;background:#fffafa">
 <h2>개발용 파일 강제 업로드</h2>
-<p class="small">개발 기간 전용입니다. 전체 초기화 없이, 선택한 CSV 행과 충돌하는 기존 행만 삭제 후 CSV 그대로 다시 INSERT합니다. 일반 안전규칙, blocked 컬럼, 빈값 유지 규칙을 적용하지 않습니다.</p>
+<p class="small">개발 기간 전용입니다. 전체 초기화 없이, 선택한 CSV·Excel 행과 충돌하는 기존 행만 삭제 후 그대로 다시 INSERT합니다. 일반 안전규칙, blocked 컬럼, 빈값 유지 규칙을 적용하지 않습니다.</p>
 <div class="grid">
   <div>
     <label>대상</label>
     <select id="devTable"></select>
-    <label>CSV 파일</label>
-    <input type="file" id="devFile" accept=".csv,text/csv">
+    <label>CSV 또는 Excel 파일</label>
+    <input type="file" id="devFile" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
   </div>
   <div>
     <label>실행</label><br>
@@ -111,11 +110,11 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
   </div>
 </div>
 <hr>
-<label>전체 복원용 CSV 여러 개</label>
-<input type="file" id="devMultiFiles" accept=".csv,text/csv" multiple>
+<label>전체 복원용 CSV·Excel 여러 개</label>
+<input type="file" id="devMultiFiles" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple>
 <button class="gray" onclick="devOverwriteAll(false)">여러 파일 검증</button>
 <button class="red" onclick="devOverwriteAll(true)">여러 파일 강제 업로드</button>
-<p class="small">파일명에 gm_category, gm_product 등 테이블명이 포함되어야 자동 매칭됩니다. 각 파일의 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 전체 테이블 초기화는 하지 않습니다.</p>
+<p class="small">CSV·Excel 파일명에 gm_category, gm_product 등 테이블명이 포함되어야 자동 매칭됩니다. 각 파일의 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 전체 테이블 초기화는 하지 않습니다.</p>
 </div>
 
 
@@ -140,7 +139,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <div class="card" style="margin-top:16px">
 <h2>Cafe24 회원 CSV 업로드</h2>
 <p class="small">Cafe24 회원명부 CSV 96개 컬럼은 cafe24_raw_json에 원본 보존하고, 주문에 필요한 핵심 컬럼만 gm_member / gm_member_address에 반영합니다. BLANK/빈값은 기존 서버값을 덮어쓰지 않습니다. DRY RUN은 검증 결과 CSV만 다운로드하고, APPLY는 실제 저장 후 결과 CSV를 다운로드합니다.</p>
-<input id="memberFile" type="file" accept=".csv,.txt">
+<input id="memberFile" type="file" accept=".csv,.xlsx,.xls,.txt,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
 <button onclick="memberDryRun()">회원 DRY RUN</button>
 <button class="red" onclick="memberApply()">회원 APPLY</button>
 <button class="secondary" onclick="downloadMemberTemplate()">회원 업로드 템플릿 다운로드</button>
@@ -153,6 +152,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const API = location.origin;
 const tables = {
@@ -271,71 +271,78 @@ async function saveSnapshot(){
 async function download(){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
   const url = `${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=${encodeURIComponent(f)}&t=${Date.now()}`;
-  log({ action:'export.request', table:t, format:f, url });
+  log(`다운로드 준비 중: ${t} / ${f.toUpperCase()}`);
   try{
     const r = await fetch(url, { method:'GET', cache:'no-store' });
-    const ct = (r.headers.get('content-type')||'').toLowerCase();
-    log({ action:'export.response', table:t, status:r.status, ok:r.ok, content_type:ct });
     if(!r.ok){
       const txt = await r.text().catch(()=>String(r.status));
-      log({ action:'export.failed', table:t, status:r.status, body:txt.slice(0,1200) });
-      return;
-    }
-    if(f === 'json' || ct.includes('application/json')){
-      const j = await r.json();
-      log({ action:'export.json.preview', table:t, count:j.count, rows:j.rows || j.items || j });
+      log(`다운로드 실패: ${r.status} ${txt.slice(0,1200)}`);
       return;
     }
     const blob = await r.blob();
     const a = document.createElement('a');
     const objectUrl = URL.createObjectURL(blob);
     a.href = objectUrl;
-    a.download = `${t}_${Date.now()}.csv`;
+    a.download = `${t}_${Date.now()}.${f === 'xlsx' ? 'xlsx' : 'csv'}`;
     document.body.appendChild(a);
     a.click();
     setTimeout(()=>{ URL.revokeObjectURL(objectUrl); a.remove(); }, 1000);
-    log({ action:'export.downloaded', table:t, bytes:blob.size, filename:a.download });
+    log(`다운로드 완료: ${a.download} (${blob.size.toLocaleString()} bytes)`);
   }catch(e){
-    log({ action:'export.error', table:t, message:String(e&&e.message||e) });
+    log(`다운로드 오류: ${String(e&&e.message||e)}`);
   }
 }
-async function downloadAll(){
-  const url = `${API}/api/gm/builder/export-all?limit=50000&t=${Date.now()}`;
-  log('전체 CSV ZIP 생성 요청 중...');
+
+let downloadAllRunning=false;
+async function downloadAll(button){
+  if(downloadAllRunning) return;
+  downloadAllRunning=true;
+  const f=document.getElementById('format').value;
+  const url = `${API}/api/gm/builder/export-all?format=${encodeURIComponent(f)}&limit=50000&t=${Date.now()}`;
+  const original=button.textContent;
+  let seconds=0;
+  button.disabled=true;
+  button.textContent=`전체 ${f.toUpperCase()} 생성 중 · 0초`;
+  log(`전체 ${f.toUpperCase()} ZIP 생성 중입니다. 다운로드가 시작될 때까지 버튼은 비활성화됩니다.`);
+  const timer=setInterval(()=>{
+    seconds++;
+    button.textContent=`전체 ${f.toUpperCase()} 생성 중 · ${seconds}초`;
+  },1000);
   try{
     const r = await fetch(url, { method:'GET', cache:'no-store' });
     if(!r.ok){
       const txt = await r.text().catch(()=>String(r.status));
-      log('전체 ZIP 다운로드 실패: '+r.status+' '+txt);
+      log(`전체 ZIP 다운로드 실패: ${r.status} ${txt.slice(0,1200)}`);
       return;
     }
     const blob = await r.blob();
     const ct = (r.headers.get('content-type')||'').toLowerCase();
     if(!ct.includes('zip') && !ct.includes('octet-stream')){
       const txt = await blob.text().catch(()=>'<binary>');
-      log('ZIP 응답이 아닙니다: '+txt.slice(0,1000));
+      log(`ZIP 응답이 아닙니다: ${txt.slice(0,1000)}`);
       return;
     }
     const a = document.createElement('a');
     const objectUrl = URL.createObjectURL(blob);
     a.href = objectUrl;
-    a.download = `gm_all_tables_${Date.now()}.zip`;
+    a.download = `gm_all_tables_${f}_${Date.now()}.zip`;
     document.body.appendChild(a);
     a.click();
     setTimeout(()=>{ URL.revokeObjectURL(objectUrl); a.remove(); }, 1000);
-    log({ action:'export_all_zip.downloaded', bytes:blob.size, url });
+    log(`전체 다운로드 시작: ${a.download} / ${seconds}초 / ${blob.size.toLocaleString()} bytes`);
   }catch(e){
-    log('전체 ZIP 다운로드 오류: '+(e&&e.message||e));
+    log(`전체 ZIP 다운로드 오류: ${e&&e.message||e}`);
+  }finally{
+    clearInterval(timer);
+    downloadAllRunning=false;
+    button.disabled=false;
+    button.textContent=original;
   }
 }
-async function preview(){
-  const t=document.getElementById('downTable').value;
-  const r=await fetch(`${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=json`);
-  log(await r.json());
-}
+
 async function send(apply){
   const f=document.getElementById('file').files[0];
-  if(!f){ alert('CSV 파일을 선택하세요.'); return; }
+  if(!f){ alert('CSV 또는 Excel 파일을 선택하세요.'); return; }
   if(apply){ const x=prompt('실제 업데이트 하려면 APPLY 라고 입력하세요.'); if(x !== 'APPLY') return; }
   const t=document.getElementById('upTable').value;
   await uploadOne(t,f,apply);
@@ -357,6 +364,14 @@ function inferTableFromFileName(name){
 }
 async function readCsvText(file){
   const buf=await file.arrayBuffer();
+  const name=String(file&&file.name||'').toLowerCase();
+  if(name.endsWith('.xlsx') || name.endsWith('.xls')){
+    if(!window.XLSX) throw new Error('Excel 변환 모듈을 불러오지 못했습니다. 페이지를 새로고침하세요.');
+    const wb=XLSX.read(buf,{type:'array',cellDates:false,raw:false});
+    const sheetName=wb.SheetNames[0];
+    if(!sheetName) throw new Error('Excel 파일에 시트가 없습니다.');
+    return XLSX.utils.sheet_to_csv(wb.Sheets[sheetName],{FS:',',RS:'\n',blankrows:false});
+  }
   let text=new TextDecoder('utf-8').decode(buf);
   if((text.match(/�/g)||[]).length>5){
     try{ text=new TextDecoder('euc-kr').decode(buf); }catch(e){}
@@ -392,7 +407,7 @@ async function uploadOne(tableKey,file,apply){
 }
 async function sendAll(apply){
   const files=[...document.getElementById('multiFiles').files];
-  if(!files.length){ alert('CSV 파일들을 선택하세요.'); return; }
+  if(!files.length){ alert('CSV 또는 Excel 파일들을 선택하세요.'); return; }
   if(apply){ const x=prompt('전체 실제 업데이트 하려면 APPLY ALL 이라고 입력하세요.'); if(x !== 'APPLY ALL') return; }
   const result=[];
   for(const f of files){
@@ -413,7 +428,7 @@ async function sendAll(apply){
 
 async function uploadCafe24Members(apply){
   const f=document.getElementById('memberFile').files[0];
-  if(!f){ alert('Cafe24 회원 CSV 파일을 선택하세요.'); return; }
+  if(!f){ alert('Cafe24 회원 CSV 또는 Excel 파일을 선택하세요.'); return; }
   if(apply){ const x=prompt('회원정보를 실제 저장하려면 MEMBER APPLY 라고 입력하세요.'); if(x !== 'MEMBER APPLY') return; }
   const text=await readCsvText(f);
   await uploadCafe24MemberText(text,f.name,apply);
@@ -434,7 +449,7 @@ async function uploadDevOne(tableKey,file,apply,mode){
 }
 async function devOverwrite(apply){
   const f=document.getElementById('devFile').files[0];
-  if(!f){ alert('CSV 파일을 선택하세요.'); return; }
+  if(!f){ alert('CSV 또는 Excel 파일을 선택하세요.'); return; }
   const t=document.getElementById('devTable').value;
   if(apply){
     const x=prompt('선택한 CSV 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 실행하려면 DEV FILE RESTORE 를 입력하세요.');
@@ -445,7 +460,7 @@ async function devOverwrite(apply){
 }
 async function devOverwriteAll(apply){
   const files=[...document.getElementById('devMultiFiles').files];
-  if(!files.length){ alert('CSV 파일들을 선택하세요.'); return; }
+  if(!files.length){ alert('CSV 또는 Excel 파일들을 선택하세요.'); return; }
   if(apply){
     const x=prompt('여러 CSV 파일을 강제 업로드합니다. 전체 초기화는 하지 않습니다. 실행하려면 DEV FILE RESTORE ALL 을 입력하세요.');
     if(x !== 'DEV FILE RESTORE ALL') return;

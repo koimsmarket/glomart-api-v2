@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V028_EXPORT_ALL_RESTORE';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V029_CSV_XLSX_TIMER';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -435,6 +435,42 @@ function makeZip(files){
   const end=Buffer.concat([u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(centralSize),u32(offset),u16(0)]);
   return Buffer.concat([...local,...central,end]);
 }
+
+function xmlEscape(v){
+  if(v === null || v === undefined) return '';
+  if(typeof v === 'object') v = JSON.stringify(v);
+  return String(v)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+}
+function excelColumnName(index){
+  let n=index+1, out='';
+  while(n>0){ const r=(n-1)%26; out=String.fromCharCode(65+r)+out; n=Math.floor((n-1)/26); }
+  return out;
+}
+function makeXlsx(rows, columns, sheetName='Data'){
+  const safeSheet=String(sheetName||'Data').replace(/[\/*?:[\]]/g,' ').slice(0,31) || 'Data';
+  const allRows=[columns, ...rows.map(r=>columns.map(c=>r[c]))];
+  const rowXml=allRows.map((vals,ri)=>{
+    const cells=vals.map((v,ci)=>{
+      const ref=excelColumnName(ci)+(ri+1);
+      const text=xmlEscape(v);
+      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
+    }).join('');
+    return `<row r="${ri+1}">${cells}</row>`;
+  }).join('');
+  const files=[
+    {name:'[Content_Types].xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
+    {name:'_rels/.rels',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`},
+    {name:'docProps/core.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:creator>Glomart Builder</dc:creator><cp:lastModifiedBy>Glomart Builder</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:created></cp:coreProperties>`},
+    {name:'docProps/app.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Glomart Builder</Application></Properties>`},
+    {name:'xl/workbook.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${xmlEscape(safeSheet)}" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+    {name:'xl/_rels/workbook.xml.rels',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`},
+    {name:'xl/worksheets/sheet1.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowXml}</sheetData></worksheet>`}
+  ];
+  return makeZip(files);
+}
+
 function parseCsv(text) {
   text = String(text || '').replace(/^\ufeff/, '');
   const rows = [];
@@ -934,29 +970,33 @@ router.get('/api/gm/builder/export', async (req,res)=>{
   if (!spec) return fail(res, 400, 'invalid table');
 
   const format = String(req.query.format || 'csv').toLowerCase();
+  if(!['csv','xlsx'].includes(format)) return fail(res,400,'invalid format');
   const db = dbFrom(req);
-  // V018: no default 5,000 row cap for single-table export.
-  // If limit is provided, use it. If omitted, stream all rows in pages.
   const rawLimit = req.query.limit === undefined ? 0 : Number(req.query.limit || 0);
   const limit = rawLimit > 0 ? Math.min(Math.max(rawLimit, 1), 200000) : 0;
   const pageSize = Math.min(Math.max(Number(req.query.pageSize || 1000), 100), 5000);
-  try { console.log('[GM_BUILDER_EXPORT_REQUEST_V021]', JSON.stringify({ table:spec.table, key:String(req.query.table||''), format, limit, pageSize })); } catch(_) {}
+  try { console.log('[GM_BUILDER_EXPORT_REQUEST_V029]', JSON.stringify({ table:spec.table, key:String(req.query.table||''), format, limit, pageSize })); } catch(_) {}
 
   try {
     let cols = await getColumns(db, spec.table);
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
 
-    if (format === 'json') {
+    if(format === 'xlsx'){
       const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
       const r = await db.query(sql, limit ? [limit] : []);
-      try { console.log('[GM_BUILDER_EXPORT_JSON_DONE_V021]', JSON.stringify({ table:spec.table, count:r.rows.length })); } catch(_) {}
-      return ok(res, { table:spec.table, count:r.rows.length, columns:cols, rows:r.rows });
+      const xlsx=makeXlsx(r.rows,cols,spec.table);
+      res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${spec.table}_${Date.now()}.xlsx"`);
+      res.setHeader('Content-Length',String(xlsx.length));
+      res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
+      console.log('[GM_BUILDER_EXPORT_XLSX_DONE_V029]', JSON.stringify({table:spec.table,rows:r.rows.length,bytes:xlsx.length}));
+      return res.end(xlsx);
     }
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${spec.table}_${Date.now()}.csv"`);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.write('﻿' + cols.map(csvEscape).join(',') + '\n');
+    res.write('\ufeff' + cols.map(csvEscape).join(',') + '\n');
 
     let offset = 0;
     let sent = 0;
@@ -968,15 +1008,12 @@ router.get('/api/gm/builder/export', async (req,res)=>{
         [take, offset]
       );
       if (!r.rows.length) break;
-      for (const row of r.rows) {
-        res.write(cols.map(c => csvEscape(row[c])).join(',') + '\n');
-      }
+      for (const row of r.rows) res.write(cols.map(c => csvEscape(row[c])).join(',') + '\n');
       sent += r.rows.length;
       offset += r.rows.length;
-      try { console.log('[GM_BUILDER_EXPORT_STREAM_V018]', JSON.stringify({ table:spec.table, sent, offset, pageSize })); } catch(_) {}
       if (r.rows.length < take) break;
     }
-    try { console.log('[GM_BUILDER_EXPORT_CSV_DONE_V021]', JSON.stringify({ table:spec.table, sent })); } catch(_) {}
+    console.log('[GM_BUILDER_EXPORT_CSV_DONE_V029]', JSON.stringify({ table:spec.table, sent }));
     res.end();
   } catch(e) {
     if (!res.headersSent) return fail(res, 500, 'export failed', { detail:String(e && e.message || e) });
@@ -989,36 +1026,43 @@ router.get('/api/gm/builder/export', async (req,res)=>{
 router.get('/api/gm/builder/export-all', async (req,res)=>{
   const db = dbFrom(req);
   const limit = Math.min(Math.max(Number(req.query.limit || 50000), 1), 50000);
+  const format=String(req.query.format||'csv').toLowerCase();
+  if(!['csv','xlsx'].includes(format)) return fail(res,400,'invalid format');
   try{
-    console.log('[GM_BUILDER_EXPORT_ALL_START_V028]', JSON.stringify({ limit }));
+    console.log('[GM_BUILDER_EXPORT_ALL_START_V029]', JSON.stringify({ limit, format }));
     const files=[];
     const errors=[];
     for(const key of Object.keys(TABLES)){
       const spec = TABLES[key];
       try{
+        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_START_V029]',JSON.stringify({key,table:spec.table,format}));
         let cols = await getColumns(db, spec.table);
         if(!cols.length){ errors.push({key, table:spec.table, error:'no columns'}); continue; }
         if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
         const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
-        files.push({ name: `${spec.table}.csv`, data: toCsv(r.rows, cols) });
+        files.push(format==='xlsx'
+          ? { name:`${spec.table}.xlsx`, data:makeXlsx(r.rows,cols,spec.table) }
+          : { name:`${spec.table}.csv`, data:toCsv(r.rows,cols) });
+        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_DONE_V029]',JSON.stringify({key,table:spec.table,format,rows:r.rows.length}));
       }catch(e){
         errors.push({ key, table:spec.table, error:String(e && e.message || e) });
       }
     }
     if(errors.length){
-      files.push({ name:'_export_errors.json', data: JSON.stringify({ ok:false, errors }, null, 2) });
+      const errorCols=['key','table','error'];
+      files.push({ name:'_export_errors.csv', data:toCsv(errors,errorCols) });
     }
     const zip = makeZip(files);
-    console.log('[GM_BUILDER_EXPORT_ALL_DONE_V028]', JSON.stringify({ files:files.length, errors:errors.length, bytes:zip.length }));
-    const fname = `gm_all_tables_${Date.now()}.zip`;
-    res.setHeader('Content-Type','application/octet-stream');
+    console.log('[GM_BUILDER_EXPORT_ALL_DONE_V029]', JSON.stringify({ format, files:files.length, errors:errors.length, bytes:zip.length }));
+    const fname = `gm_all_tables_${format}_${Date.now()}.zip`;
+    res.setHeader('Content-Type','application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     res.setHeader('Content-Length', String(zip.length));
     res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
     res.setHeader('X-Content-Type-Options','nosniff');
     res.end(zip);
   }catch(e){
-    console.error('[GM_BUILDER_EXPORT_ALL_FAIL_V028]', { detail:String(e && e.message || e) });
+    console.error('[GM_BUILDER_EXPORT_ALL_FAIL_V029]', { detail:String(e && e.message || e) });
     fail(res, 500, 'export all failed', { detail:String(e && e.message || e) });
   }
 });
