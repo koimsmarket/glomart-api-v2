@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V033</title>
+<title>GM Safe Update Builder V043</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -27,7 +27,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V033</h1>
+<h1>GM Safe Update Builder V043</h1>
 <div class="sub">Excel·CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -75,11 +75,11 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <select id="format"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV</option></select>
     <div class="buttonRow">
       <button onclick="download(this)">개별 다운로드</button>
-      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 5개조 개별 다운로드</button>
+      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 DB ZIP 다운로드</button>
     </div>
     <div class="exportPick">
-      <div class="exportPickHead"><b>5개 조로 나누어 받을 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
-      <div class="small">기본값은 전부 선택입니다. 용량이 큰 상품 gm_product는 전체 다운로드에서 제외되며 개별 다운로드를 이용하세요.</div>
+      <div class="exportPickHead"><b>ZIP에 포함할 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
+      <div class="small">기본값은 전부 선택입니다. 선택한 테이블은 CSV 파일로 하나의 ZIP에 들어갑니다. 상품 gm_product는 ZIP 안에서 단독으로 먼저 생성되고, 완료된 뒤 나머지 테이블을 순차 생성합니다.</div>
       <div id="exportTableChecks" class="exportPickList"></div>
     </div>
   </div>
@@ -244,7 +244,6 @@ function fill(){
   }
   const box=document.getElementById('exportTableChecks');
   if(box) box.innerHTML=Object.entries(tables)
-    .filter(([k])=>k!=='products')
     .map(([k,v])=>`<label class="exportPickItem"><input type="checkbox" class="exportTableCheck" value="${k}" checked><span>${v}</span></label>`).join('');
 }
 function setAllExportChecks(checked){ document.querySelectorAll('.exportTableCheck').forEach(x=>x.checked=!!checked); }
@@ -295,95 +294,252 @@ async function saveSnapshot(){
   const r=await fetch(`${API}/api/gm/dashboard/snapshot`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});
   const j=await r.json(); log(j); await loadDashboard(false);
 }
+async function requestCsvExport(table){
+  const pageSize = table === 'products' ? 250 : 2000;
+  const url = `${API}/api/gm/builder/export?table=${encodeURIComponent(table)}&format=csv&pageSize=${pageSize}&t=${Date.now()}`;
+  const r = await fetch(url,{method:'GET',cache:'no-store'});
+  if(r.ok) return r;
+  const txt = await r.text().catch(()=>String(r.status));
+  const err = new Error(`HTTP ${r.status} ${txt.slice(0,500)}`);
+  err.httpStatus = r.status;
+  throw err;
+}
+async function writeResponseToDirectory(response,filename,directoryHandle){
+  const fileHandle=await directoryHandle.getFileHandle(filename,{create:true});
+  const writable=await fileHandle.createWritable();
+  let bytes=0;
+  try{
+    if(response.body && typeof response.body.getReader==='function'){
+      const reader=response.body.getReader();
+      while(true){
+        const {done,value}=await reader.read();
+        if(done) break;
+        if(value && value.byteLength){
+          await writable.write(value);
+          bytes+=value.byteLength;
+        }
+      }
+    }else{
+      const blob=await response.blob();
+      await writable.write(blob);
+      bytes=blob.size;
+    }
+    await writable.close();
+  }catch(e){
+    try{ await writable.abort(); }catch(_){ }
+    throw e;
+  }
+  const savedFile=await fileHandle.getFile();
+  if(savedFile.size!==bytes){
+    throw new Error(`저장 크기 불일치: ${filename} (${savedFile.size}/${bytes})`);
+  }
+  return {filename,bytes:savedFile.size,verified:true,streamed:true};
+}
+async function responseToBlobWithRetry(table){
+  let lastError=null;
+  for(let attempt=1;attempt<=2;attempt++){
+    try{
+      const response=await requestCsvExport(table);
+      return await response.blob();
+    }catch(e){
+      lastError=e;
+      const retryable=!e.httpStatus || [502,503,504].includes(e.httpStatus);
+      if(!retryable || attempt===2) throw e;
+      log(`${table}: 서버 일시 오류, 5초 후 1회 재시도합니다.`);
+      await sleep(5000);
+    }
+  }
+  throw lastError||new Error('download failed');
+}
+async function saveCsvStream(table,filename,directoryHandle){
+  let lastError=null;
+  for(let attempt=1;attempt<=2;attempt++){
+    try{
+      const response=await requestCsvExport(table);
+      if(directoryHandle){
+        return await writeResponseToDirectory(response,filename,directoryHandle);
+      }
+      const blob=await response.blob();
+      await saveBlobAsFile(blob,filename,null);
+      return {filename,bytes:blob.size,verified:false,streamed:false};
+    }catch(e){
+      lastError=e;
+      const retryable=!e.httpStatus || [502,503,504].includes(e.httpStatus);
+      if(!retryable || attempt===2) throw e;
+      log(`${table}: 전송 중 오류, 5초 후 처음부터 1회 재시도합니다.`);
+      await sleep(5000);
+    }
+  }
+  throw lastError||new Error('download failed');
+}
+async function exportTableToFile(table,format,directoryHandle){
+  const stamp=Date.now();
+  const actualFormat=(table==='products' && format==='xlsx') ? 'csv' : format;
+  if(actualFormat==='csv'){
+    const filename=`${table}_${stamp}.csv`;
+    const saved=await saveCsvStream(table,filename,directoryHandle);
+    return {...saved,requested_format:format,actual_format:actualFormat};
+  }
+  if(!window.XLSX) throw new Error('Excel 변환 라이브러리를 불러오지 못했습니다.');
+  const csvBlob=await responseToBlobWithRetry(table);
+  const text=await csvBlob.text();
+  const wb=XLSX.read(text,{type:'string',raw:true});
+  const oldName=wb.SheetNames[0];
+  const safeName=String(table||'Data').replace(/[\\/*?:[\]]/g,' ').slice(0,31)||'Data';
+  if(oldName!==safeName){
+    wb.Sheets[safeName]=wb.Sheets[oldName];
+    delete wb.Sheets[oldName];
+    wb.SheetNames[0]=safeName;
+  }
+  const out=XLSX.write(wb,{bookType:'xlsx',type:'array',compression:true});
+  const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const filename=`${table}_${stamp}.xlsx`;
+  await saveBlobAsFile(blob,filename,directoryHandle);
+  return {filename,bytes:blob.size,verified:!!directoryHandle,streamed:false,requested_format:format,actual_format:actualFormat};
+}
 async function download(button){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
-  const url = `${API}/api/gm/builder/export?table=${encodeURIComponent(t)}&format=${encodeURIComponent(f)}&t=${Date.now()}`;
-  const timed=startButtonTimer(button,`${f.toUpperCase()} 준비 중`);
-  log(`개별 다운로드 준비 중: ${t} / ${f.toUpperCase()}`);
+  const timed=startButtonTimer(button,`${f==='xlsx'?'Excel':'CSV'} 준비 중`);
+  log(`개별 다운로드 준비 중: ${t} / ${f==='xlsx'?'Excel':'CSV'}`);
   try{
-    const r = await fetch(url, { method:'GET', cache:'no-store' });
-    if(!r.ok){ const txt=await r.text().catch(()=>String(r.status)); log(`다운로드 실패: ${r.status} ${txt.slice(0,1200)}`); return; }
-    const blob=await r.blob();
-    const a=document.createElement('a'), objectUrl=URL.createObjectURL(blob);
-    a.href=objectUrl; a.download=`${t}_${Date.now()}.${f==='xlsx'?'xlsx':'csv'}`;
-    document.body.appendChild(a); a.click();
-    setTimeout(()=>{URL.revokeObjectURL(objectUrl);a.remove();},1000);
-    log(`다운로드 시작: ${a.download} / ${timed?timed.seconds:0}초 / ${blob.size.toLocaleString()} bytes`);
+    const saved=await exportTableToFile(t,f,null);
+    log(`다운로드 시작: ${saved.filename} / ${timed?timed.seconds:0}초 / ${saved.bytes.toLocaleString()} bytes`);
   }catch(e){ log(`다운로드 오류: ${String(e&&e.message||e)}`); }
   finally{ stopButtonTimer(timed); }
 }
 
 let downloadAllRunning=false;
 function splitIntoFiveGroups(items){
-  const count=Math.min(5,Math.max(1,items.length));
-  const groups=Array.from({length:count},()=>[]);
-  [...items].forEach((item,index)=>groups[index%count].push(item));
-  return groups.filter(group=>group.length);
+  const unique=[...new Set(items)];
+  const product=unique.includes('products') ? ['products'] : [];
+  const rest=unique.filter(x=>x!=='products');
+  const groupCount=Math.min(4,Math.max(1,rest.length));
+  const groups=[];
+  if(product.length) groups.push(product); // 1번 조: 상품 단독
+  if(rest.length){
+    const restGroups=Array.from({length:groupCount},()=>[]);
+    rest.forEach((item,index)=>restGroups[index%groupCount].push(item));
+    groups.push(...restGroups.filter(g=>g.length));
+  }
+  return groups;
 }
 function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
-function saveBlobAsFile(blob,filename){
+async function chooseDownloadDirectory(){
+  if(!window.isSecureContext || typeof window.showDirectoryPicker!=='function') return null;
+  try{
+    return await window.showDirectoryPicker({id:'gm-builder-export',mode:'readwrite'});
+  }catch(e){
+    if(e && e.name==='AbortError') throw new Error('저장 폴더 선택이 취소되었습니다.');
+    throw e;
+  }
+}
+async function saveBlobAsFile(blob,filename,directoryHandle){
+  if(directoryHandle){
+    const fileHandle=await directoryHandle.getFileHandle(filename,{create:true});
+    const writable=await fileHandle.createWritable();
+    try{
+      await writable.write(blob);
+      await writable.close();
+    }catch(e){
+      try{ await writable.abort(); }catch(_){ }
+      throw e;
+    }
+    const savedFile=await fileHandle.getFile();
+    if(savedFile.size!==blob.size){
+      throw new Error(`저장 크기 불일치: ${filename} (${savedFile.size}/${blob.size})`);
+    }
+    return {verified:true,size:savedFile.size};
+  }
   const a=document.createElement('a');
   const objectUrl=URL.createObjectURL(blob);
   a.href=objectUrl;
   a.download=filename;
   document.body.appendChild(a);
   a.click();
-  setTimeout(()=>{URL.revokeObjectURL(objectUrl);a.remove();},3000);
+  await sleep(1200);
+  URL.revokeObjectURL(objectUrl);
+  a.remove();
+  return {verified:false,size:blob.size};
+}
+async function runExportGroup(group,gi,totalGroups,format,timed,shared,directoryHandle){
+  const groupResult=[];
+  for(let i=0;i<group.length;i++){
+    const table=group[i];
+    const ordinal=++shared.started;
+    setButtonTimerLabel(timed,`${gi+1}/${totalGroups}조 ${ordinal}/${shared.total} ${table}`);
+    try{
+      // gm_product는 단독 실행하며 Excel 선택 상태에서도 CSV 스트림으로 디스크에 직접 기록합니다.
+      const saved=await exportTableToFile(table,format,directoryHandle);
+      shared.completed++;
+      const actualFormat=saved.actual_format;
+      const row={group:gi+1,table,ok:true,bytes:saved.bytes,file:saved.filename,requested_format:format,actual_format:actualFormat,verified:saved.verified,streamed:saved.streamed};
+      groupResult.push(row);
+      shared.results.push(row);
+      log(`${gi+1}/${totalGroups}조 ${shared.completed}/${shared.total} 완료: ${saved.filename}`+(actualFormat!==format?' (상품은 안정성을 위해 CSV)':''));
+    }catch(e){
+      shared.completed++;
+      const msg=String(e&&e.message||e);
+      const row={group:gi+1,table,ok:false,error:msg};
+      groupResult.push(row);
+      shared.results.push(row);
+      log(`${gi+1}/${totalGroups}조 ${table} 실패: ${msg} / 다른 조는 계속 진행합니다.`);
+    }
+    if(i<group.length-1) await sleep(800);
+  }
+  return groupResult;
 }
 async function downloadAll(button){
   if(downloadAllRunning) return;
   const selected=selectedExportTables();
   if(!selected.length){ alert('다운로드할 테이블을 하나 이상 선택하세요.'); return; }
-
   downloadAllRunning=true;
-  const f=document.getElementById('format').value;
-  const ext=f==='xlsx'?'xlsx':'csv';
-  const groups=splitIntoFiveGroups(selected);
-  const total=selected.length;
-  const timed=startButtonTimer(button,`${groups.length}개조 0/${total} 준비 중`);
-  const results=[];
-  let completed=0;
-
-  log(`${total}개 테이블을 ${groups.length}개 조로 나누고, ZIP 없이 파일별로 순차 다운로드합니다. gm_product는 제외됩니다.`);
+  const timed=startButtonTimer(button,`DB ZIP 준비 중 0/${selected.length}`);
+  const ordered=[...selected.filter(x=>x==='products'),...selected.filter(x=>x!=='products')];
+  const url=`${API}/api/gm/builder/export-all?tables=${encodeURIComponent(ordered.join(','))}&t=${Date.now()}`;
+  const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
+  const filename=`glomart_db_${stamp}.zip`;
   try{
-    for(let gi=0;gi<groups.length;gi++){
-      const group=groups[gi];
-      log(`${gi+1}/${groups.length}조 시작: ${group.join(', ')}`);
-
-      for(let ti=0;ti<group.length;ti++){
-        const table=group[ti];
-        setButtonTimerLabel(timed,`${gi+1}/${groups.length}조 ${completed+1}/${total} ${table}`);
-        const url=`${API}/api/gm/builder/export?table=${encodeURIComponent(table)}&format=${encodeURIComponent(f)}&t=${Date.now()}`;
-        try{
-          const r=await fetch(url,{method:'GET',cache:'no-store'});
-          if(!r.ok){
-            const txt=await r.text().catch(()=>String(r.status));
-            results.push({group:gi+1,table,ok:false,status:r.status,error:txt.slice(0,500)});
-            log(`${table} 다운로드 실패: HTTP ${r.status}`);
-            completed++;
-            continue;
-          }
-          const blob=await r.blob();
-          const filename=`${table}_${Date.now()}.${ext}`;
-          saveBlobAsFile(blob,filename);
-          results.push({group:gi+1,table,ok:true,bytes:blob.size,file:filename});
-          completed++;
-          log(`${gi+1}/${groups.length}조 ${completed}/${total} 완료: ${filename} / ${blob.size.toLocaleString()} bytes`);
-          await sleep(700);
-        }catch(e){
-          completed++;
-          results.push({group:gi+1,table,ok:false,error:String(e&&e.message||e)});
-          log(`${table} 다운로드 오류: ${String(e&&e.message||e)}`);
-        }
+    log(`${ordered.length}개 테이블을 ZIP 하나로 생성합니다. gm_product는 첫 번째로 단독 생성되며 완료 전에는 다른 테이블을 시작하지 않습니다.`);
+    if(window.isSecureContext && typeof window.showSaveFilePicker==='function'){
+      const handle=await window.showSaveFilePicker({
+        suggestedName:filename,
+        types:[{description:'ZIP archive',accept:{'application/zip':['.zip']}}]
+      });
+      const response=await fetch(url,{method:'GET',cache:'no-store'});
+      if(!response.ok){
+        const text=await response.text().catch(()=>String(response.status));
+        throw new Error(`HTTP ${response.status} ${text.slice(0,500)}`);
       }
-      log(`${gi+1}/${groups.length}조 완료`);
-      if(gi<groups.length-1) await sleep(1200);
+      if(!response.body) throw new Error('ZIP 스트림을 받을 수 없습니다.');
+      const writable=await handle.createWritable();
+      const reader=response.body.getReader();
+      let bytes=0;
+      try{
+        while(true){
+          const {done,value}=await reader.read();
+          if(done) break;
+          if(value&&value.byteLength){ await writable.write(value); bytes+=value.byteLength; }
+        }
+        await writable.close();
+      }catch(e){
+        try{await writable.abort();}catch(_){ }
+        throw e;
+      }
+      const saved=await handle.getFile();
+      if(saved.size!==bytes) throw new Error(`ZIP 저장 크기 불일치 (${saved.size}/${bytes})`);
+      log(`DB ZIP 저장 완료: ${saved.name} / ${saved.size.toLocaleString()} bytes / ${timed?timed.seconds:0}초`);
+    }else{
+      const a=document.createElement('a');
+      a.href=url;
+      a.download=filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      log(`DB ZIP 다운로드를 시작했습니다: ${filename}\n브라우저 다운로드 완료 여부는 다운로드 목록에서 확인하세요.`);
     }
-
-    const okCount=results.filter(x=>x.ok).length;
-    const fail=results.filter(x=>!x.ok);
-    log({action:'selected-export-5-groups-individual-v034',selected:total,groups:groups.length,success:okCount,failed:fail.length,seconds:timed?timed.seconds:0,failures:fail});
-    if(fail.length) alert(`다운로드 완료: 성공 ${okCount}개, 실패 ${fail.length}개\n하단 로그에서 실패 테이블을 확인하세요.`);
+  }catch(e){
+    if(e&&e.name==='AbortError') log('DB ZIP 저장이 취소되었습니다.');
+    else log(`DB ZIP 다운로드 오류: ${String(e&&e.message||e)}`);
   }finally{
     downloadAllRunning=false;
     stopButtonTimer(timed);

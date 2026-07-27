@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V029_CSV_XLSX_TIMER';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V043_STREAM_ZIP_EXPORT';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -435,42 +435,6 @@ function makeZip(files){
   const end=Buffer.concat([u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(centralSize),u32(offset),u16(0)]);
   return Buffer.concat([...local,...central,end]);
 }
-
-function xmlEscape(v){
-  if(v === null || v === undefined) return '';
-  if(typeof v === 'object') v = JSON.stringify(v);
-  return String(v)
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'')
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
-}
-function excelColumnName(index){
-  let n=index+1, out='';
-  while(n>0){ const r=(n-1)%26; out=String.fromCharCode(65+r)+out; n=Math.floor((n-1)/26); }
-  return out;
-}
-function makeXlsx(rows, columns, sheetName='Data'){
-  const safeSheet=String(sheetName||'Data').replace(/[\/*?:[\]]/g,' ').slice(0,31) || 'Data';
-  const allRows=[columns, ...rows.map(r=>columns.map(c=>r[c]))];
-  const rowXml=allRows.map((vals,ri)=>{
-    const cells=vals.map((v,ci)=>{
-      const ref=excelColumnName(ci)+(ri+1);
-      const text=xmlEscape(v);
-      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
-    }).join('');
-    return `<row r="${ri+1}">${cells}</row>`;
-  }).join('');
-  const files=[
-    {name:'[Content_Types].xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`},
-    {name:'_rels/.rels',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`},
-    {name:'docProps/core.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:creator>Glomart Builder</dc:creator><cp:lastModifiedBy>Glomart Builder</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:created></cp:coreProperties>`},
-    {name:'docProps/app.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Glomart Builder</Application></Properties>`},
-    {name:'xl/workbook.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${xmlEscape(safeSheet)}" sheetId="1" r:id="rId1"/></sheets></workbook>`},
-    {name:'xl/_rels/workbook.xml.rels',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`},
-    {name:'xl/worksheets/sheet1.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowXml}</sheetData></worksheet>`}
-  ];
-  return makeZip(files);
-}
-
 function parseCsv(text) {
   text = String(text || '').replace(/^\ufeff/, '');
   const rows = [];
@@ -970,106 +934,277 @@ router.get('/api/gm/builder/export', async (req,res)=>{
   if (!spec) return fail(res, 400, 'invalid table');
 
   const format = String(req.query.format || 'csv').toLowerCase();
-  if(!['csv','xlsx'].includes(format)) return fail(res,400,'invalid format');
+  if (format !== 'csv') return fail(res, 400, 'only csv export is supported');
+
   const db = dbFrom(req);
   const rawLimit = req.query.limit === undefined ? 0 : Number(req.query.limit || 0);
   const limit = rawLimit > 0 ? Math.min(Math.max(rawLimit, 1), 200000) : 0;
-  const pageSize = Math.min(Math.max(Number(req.query.pageSize || 1000), 100), 5000);
-  try { console.log('[GM_BUILDER_EXPORT_REQUEST_V029]', JSON.stringify({ table:spec.table, key:String(req.query.table||''), format, limit, pageSize })); } catch(_) {}
+  const requestedPageSize = Number(req.query.pageSize || 0);
+  const defaultPageSize = spec.table === 'gm_product' ? 250 : 2000;
+  const maxPageSize = spec.table === 'gm_product' ? 500 : 5000;
+  const pageSize = Math.min(Math.max(requestedPageSize || defaultPageSize, 100), maxPageSize);
+  const startedAt = Date.now();
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+  let aborted = false;
+  let sent = 0;
+  let client = null;
+  let transactionStarted = false;
+
+  req.on('aborted', ()=>{ aborted = true; });
+  res.on('close', ()=>{ if (!res.writableEnded) aborted = true; });
+
+  try { console.log('[GM_BUILDER_EXPORT_REQUEST_V038]', JSON.stringify({ requestId, table:spec.table, key:String(req.query.table||''), format, limit, pageSize })); } catch(_) {}
 
   try {
-    let cols = await getColumns(db, spec.table);
+    client = typeof db.connect === 'function' ? await db.connect() : db;
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    transactionStarted = true;
+
+    let cols = await getColumns(client, spec.table);
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
+    if (!cols.length) throw new Error('no exportable columns');
 
-    if(format === 'xlsx'){
-      const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
-      const r = await db.query(sql, limit ? [limit] : []);
-      const xlsx=makeXlsx(r.rows,cols,spec.table);
-      res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename="${spec.table}_${Date.now()}.xlsx"`);
-      res.setHeader('Content-Length',String(xlsx.length));
-      res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
-      console.log('[GM_BUILDER_EXPORT_XLSX_DONE_V029]', JSON.stringify({table:spec.table,rows:r.rows.length,bytes:xlsx.length}));
-      return res.end(xlsx);
-    }
+    // Use the real primary key whenever one exists. If there is no PK, use the
+    // configured logical key and ctid as the final tie breaker. The repeatable-
+    // read snapshot keeps the full export stable while OFFSET pages are read.
+    const pkResult = await client.query(`
+      SELECT a.attname AS column_name
+        FROM pg_index i
+        JOIN pg_attribute a
+          ON a.attrelid = i.indrelid
+         AND a.attnum = ANY(i.indkey)
+       WHERE i.indrelid = $1::regclass
+         AND i.indisprimary
+       ORDER BY array_position(i.indkey, a.attnum)
+    `, [spec.table]);
+    let orderCols = pkResult.rows.map(r=>String(r.column_name||'')).filter(c=>cols.includes(c));
+    if (!orderCols.length && Array.isArray(spec.key)) orderCols = spec.key.filter(c=>cols.includes(c));
+    if (!orderCols.length && Array.isArray(spec.keyAny) && Array.isArray(spec.keyAny[0])) orderCols = spec.keyAny[0].filter(c=>cols.includes(c));
+    const orderSql = [...orderCols.map(c=>`${qIdent(c)} ASC NULLS FIRST`), 'ctid ASC'].join(', ');
 
+    res.status(200);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${spec.table}_${Date.now()}.csv"`);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.write('\ufeff' + cols.map(csvEscape).join(',') + '\n');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('X-GM-Export-Protocol', 'v038-abort-on-failure');
+    res.setHeader('X-GM-Export-Request-Id', requestId);
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const write = async (chunk) => {
+      if (aborted || res.destroyed) throw new Error('client disconnected');
+      if (res.write(chunk)) return;
+      await new Promise((resolve,reject)=>{
+        const onDrain=()=>{cleanup();resolve();};
+        const onClose=()=>{cleanup();reject(new Error('client disconnected'));};
+        const cleanup=()=>{res.off('drain',onDrain);res.off('close',onClose);};
+        res.once('drain',onDrain);
+        res.once('close',onClose);
+      });
+    };
+
+    await write('\ufeff' + cols.map(csvEscape).join(',') + '\n');
 
     let offset = 0;
-    let sent = 0;
-    while (true) {
+    while (!aborted) {
       const take = limit ? Math.min(pageSize, limit - sent) : pageSize;
       if (take <= 0) break;
-      const r = await db.query(
-        `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1 OFFSET $2`,
+      const r = await client.query(
+        `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${orderSql} LIMIT $1 OFFSET $2`,
         [take, offset]
       );
       if (!r.rows.length) break;
-      for (const row of r.rows) res.write(cols.map(c => csvEscape(row[c])).join(',') + '\n');
-      sent += r.rows.length;
+
+      for (const row of r.rows) {
+        await write(cols.map(c => csvEscape(row[c])).join(',') + '\n');
+        sent++;
+        if (limit && sent >= limit) break;
+      }
       offset += r.rows.length;
-      if (r.rows.length < take) break;
+      try { console.log('[GM_BUILDER_EXPORT_PAGE_V038]', JSON.stringify({ requestId, table:spec.table, sent, offset, pageSize, orderCols, elapsedMs:Date.now()-startedAt })); } catch(_) {}
+      if (r.rows.length < take || (limit && sent >= limit)) break;
     }
-    console.log('[GM_BUILDER_EXPORT_CSV_DONE_V029]', JSON.stringify({ table:spec.table, sent }));
-    res.end();
+
+    if (aborted) throw new Error('client disconnected');
+    await client.query('COMMIT');
+    transactionStarted = false;
+    if (!res.writableEnded) res.end();
+    try { console.log('[GM_BUILDER_EXPORT_DONE_V038]', JSON.stringify({ requestId, table:spec.table, sent, elapsedMs:Date.now()-startedAt })); } catch(_) {}
   } catch(e) {
-    if (!res.headersSent) return fail(res, 500, 'export failed', { detail:String(e && e.message || e) });
-    try { res.end(); } catch(_) {}
+    if (transactionStarted && client) await client.query('ROLLBACK').catch(()=>{});
+    transactionStarted = false;
+    try { console.error('[GM_BUILDER_EXPORT_FAIL_V038]', JSON.stringify({ requestId, table:spec.table, sent, detail:String(e && e.message || e), headersSent:res.headersSent, elapsedMs:Date.now()-startedAt })); } catch(_) {}
+    if (!res.headersSent) return fail(res, 500, 'export failed', { detail:String(e && e.message || e), request_id:requestId });
+    // Never finish a partially generated CSV as a successful response. Destroying
+    // the socket makes fetch() reject instead of saving a truncated file.
+    try { res.destroy(e instanceof Error ? e : new Error(String(e))); } catch(_) {}
+  } finally {
+    if (client && client !== db && typeof client.release === 'function') client.release();
   }
 });
 
 
-// 전체 테이블 CSV를 한 번에 ZIP으로 다운로드한다.
-router.get('/api/gm/builder/export-all', async (req,res)=>{
-  const db = dbFrom(req);
-  const limit = Math.min(Math.max(Number(req.query.limit || 50000), 1), 50000);
-  const format=String(req.query.format||'csv').toLowerCase();
-  const groupNo=Math.max(Number(req.query.group||0),0);
-  const groupCount=Math.max(Number(req.query.groups||0),0);
-  if(!['csv','xlsx'].includes(format)) return fail(res,400,'invalid format');
+// V043: selected tables are exported as one streaming ZIP response.
+// No third-party ZIP package is required. Entries are stored without compression,
+// written one table at a time, and gm_product is always processed alone first.
+const ZIP_CRC_TABLE = (()=>{
+  const table = new Uint32Array(256);
+  for(let n=0;n<256;n++){
+    let c=n;
+    for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
+    table[n]=c>>>0;
+  }
+  return table;
+})();
+function zipCrcUpdate(crc,buf){
+  let c=crc>>>0;
+  for(let i=0;i<buf.length;i++) c=ZIP_CRC_TABLE[(c^buf[i])&0xff]^(c>>>8);
+  return c>>>0;
+}
+function zipU16(n){ const b=Buffer.allocUnsafe(2); b.writeUInt16LE(n&0xffff,0); return b; }
+function zipU32(n){ const b=Buffer.allocUnsafe(4); b.writeUInt32LE(n>>>0,0); return b; }
+function zipDosDateTime(d=new Date()){
+  const year=Math.max(1980,d.getFullYear());
+  const time=((d.getHours()&31)<<11)|((d.getMinutes()&63)<<5)|((Math.floor(d.getSeconds()/2))&31);
+  const date=(((year-1980)&127)<<9)|(((d.getMonth()+1)&15)<<5)|(d.getDate()&31);
+  return {time,date};
+}
+async function exportTableCsvIntoZip({req,res,db,spec,key,writeZip}){
+  const requestedPageSize = Number(req.query.pageSize || 0);
+  const defaultPageSize = spec.table === 'gm_product' ? 250 : 2000;
+  const maxPageSize = spec.table === 'gm_product' ? 500 : 5000;
+  const pageSize = Math.min(Math.max(requestedPageSize || defaultPageSize,100),maxPageSize);
+  const client = typeof db.connect === 'function' ? await db.connect() : db;
+  let transactionStarted=false;
+  let sent=0;
   try{
-    const requestedKeys=String(req.query.tables||'').split(',').map(v=>v.trim()).filter(Boolean);
-    const selectedKeys=(requestedKeys.length?requestedKeys:Object.keys(TABLES)).filter(k=>TABLES[k]);
-    if(!selectedKeys.length) return fail(res,400,'no valid tables selected');
-    console.log('[GM_BUILDER_EXPORT_ALL_START_V031]', JSON.stringify({ limit, format, group:groupNo, groups:groupCount, selected:selectedKeys.length, keys:selectedKeys }));
-    const files=[];
-    const errors=[];
-    for(const key of selectedKeys){
-      const spec = TABLES[key];
-      try{
-        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_START_V031]',JSON.stringify({key,table:spec.table,format}));
-        let cols = await getColumns(db, spec.table);
-        if(!cols.length){ errors.push({key, table:spec.table, error:'no columns'}); continue; }
-        if(spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
-        const r = await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order} LIMIT $1`, [limit]);
-        files.push(format==='xlsx'
-          ? { name:`${spec.table}.xlsx`, data:makeXlsx(r.rows,cols,spec.table) }
-          : { name:`${spec.table}.csv`, data:toCsv(r.rows,cols) });
-        console.log('[GM_BUILDER_EXPORT_ALL_TABLE_DONE_V031]',JSON.stringify({key,table:spec.table,format,rows:r.rows.length}));
-      }catch(e){
-        errors.push({ key, table:spec.table, error:String(e && e.message || e) });
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    transactionStarted=true;
+    let cols=await getColumns(client,spec.table);
+    if(spec.table==='gm_member') cols=cols.filter(c=>!/^password_/i.test(c));
+    if(!cols.length) throw new Error(`no exportable columns: ${spec.table}`);
+    const pkResult=await client.query(`
+      SELECT a.attname AS column_name
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey)
+       WHERE i.indrelid=$1::regclass AND i.indisprimary
+       ORDER BY array_position(i.indkey,a.attnum)
+    `,[spec.table]);
+    let orderCols=pkResult.rows.map(r=>String(r.column_name||'')).filter(c=>cols.includes(c));
+    if(!orderCols.length && Array.isArray(spec.key)) orderCols=spec.key.filter(c=>cols.includes(c));
+    if(!orderCols.length && Array.isArray(spec.keyAny) && Array.isArray(spec.keyAny[0])) orderCols=spec.keyAny[0].filter(c=>cols.includes(c));
+    const orderSql=[...orderCols.map(c=>`${qIdent(c)} ASC NULLS FIRST`),'ctid ASC'].join(', ');
+
+    await writeZip(Buffer.from('\ufeff'+cols.map(csvEscape).join(',')+'\n','utf8'));
+    let offset=0;
+    while(true){
+      const r=await client.query(
+        `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${orderSql} LIMIT $1 OFFSET $2`,
+        [pageSize,offset]
+      );
+      if(!r.rows.length) break;
+      for(const row of r.rows){
+        await writeZip(Buffer.from(cols.map(c=>csvEscape(row[c])).join(',')+'\n','utf8'));
+        sent++;
       }
+      offset+=r.rows.length;
+      if(r.rows.length<pageSize) break;
     }
-    if(errors.length){
-      const errorCols=['key','table','error'];
-      files.push({ name:'_export_errors.csv', data:toCsv(errors,errorCols) });
-    }
-    const zip = makeZip(files);
-    console.log('[GM_BUILDER_EXPORT_ALL_DONE_V031]', JSON.stringify({ format, group:groupNo, groups:groupCount, files:files.length, errors:errors.length, bytes:zip.length }));
-    const groupTag=groupNo&&groupCount?`_${String(groupNo).padStart(2,'0')}of${String(groupCount).padStart(2,'0')}`:'';
-    const fname = `gm_selected_tables${groupTag}_${format}_${Date.now()}.zip`;
-    res.setHeader('Content-Type','application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
-    res.setHeader('Content-Length', String(zip.length));
-    res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
-    res.setHeader('X-Content-Type-Options','nosniff');
-    res.end(zip);
+    await client.query('COMMIT');
+    transactionStarted=false;
+    return {key,table:spec.table,rows:sent};
   }catch(e){
-    console.error('[GM_BUILDER_EXPORT_ALL_FAIL_V031]', { detail:String(e && e.message || e) });
-    fail(res, 500, 'export all failed', { detail:String(e && e.message || e) });
+    if(transactionStarted) await client.query('ROLLBACK').catch(()=>{});
+    throw e;
+  }finally{
+    if(client!==db && typeof client.release==='function') client.release();
+  }
+}
+router.get('/api/gm/builder/export-all', async (req,res)=>{
+  const raw=String(req.query.tables||'').split(',').map(x=>x.trim()).filter(Boolean);
+  const unique=[...new Set(raw)];
+  if(!unique.length) return fail(res,400,'no tables selected');
+  const invalid=unique.filter(k=>!tableSpec(k));
+  if(invalid.length) return fail(res,400,'invalid table',{invalid});
+
+  // gm_product is a single standalone first entry. Everything else follows sequentially.
+  const ordered=[...unique.filter(k=>k==='products'),...unique.filter(k=>k!=='products')];
+  const db=dbFrom(req);
+  const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
+  const filename=`glomart_db_${stamp}.zip`;
+  const central=[];
+  let offset=0;
+  let aborted=false;
+  req.on('aborted',()=>{aborted=true;});
+  res.on('close',()=>{if(!res.writableEnded) aborted=true;});
+
+  const writeRaw=async(buf)=>{
+    if(aborted||res.destroyed) throw new Error('client disconnected');
+    if(!Buffer.isBuffer(buf)) buf=Buffer.from(buf);
+    offset+=buf.length;
+    if(res.write(buf)) return;
+    await new Promise((resolve,reject)=>{
+      const cleanup=()=>{res.off('drain',onDrain);res.off('close',onClose);};
+      const onDrain=()=>{cleanup();resolve();};
+      const onClose=()=>{cleanup();reject(new Error('client disconnected'));};
+      res.once('drain',onDrain); res.once('close',onClose);
+    });
+  };
+
+  try{
+    res.status(200);
+    res.setHeader('Content-Type','application/zip');
+    res.setHeader('Content-Disposition',`attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
+    res.setHeader('X-Accel-Buffering','no');
+    res.setHeader('X-GM-Export-Protocol','v043-stream-zip');
+    if(typeof res.flushHeaders==='function') res.flushHeaders();
+
+    for(let i=0;i<ordered.length;i++){
+      const key=ordered[i];
+      const spec=tableSpec(key);
+      const entryName=Buffer.from(`${spec.table}.csv`,'utf8');
+      const {time,date}=zipDosDateTime();
+      const localOffset=offset;
+      const flags=0x0808;
+      const local=Buffer.concat([
+        zipU32(0x04034b50),zipU16(20),zipU16(flags),zipU16(0),zipU16(time),zipU16(date),
+        zipU32(0),zipU32(0),zipU32(0),zipU16(entryName.length),zipU16(0),entryName
+      ]);
+      await writeRaw(local);
+      let crc=0xffffffff;
+      let size=0;
+      const writeEntry=async(buf)=>{
+        if(!Buffer.isBuffer(buf)) buf=Buffer.from(buf);
+        crc=zipCrcUpdate(crc,buf); size+=buf.length; await writeRaw(buf);
+      };
+      console.log('[GM_BUILDER_ZIP_TABLE_START_V043]',JSON.stringify({index:i+1,total:ordered.length,key,table:spec.table,productStandalone:key==='products'}));
+      const result=await exportTableCsvIntoZip({req,res,db,spec,key,writeZip:writeEntry});
+      crc=(crc^0xffffffff)>>>0;
+      await writeRaw(Buffer.concat([zipU32(0x08074b50),zipU32(crc),zipU32(size),zipU32(size)]));
+      central.push({entryName,time,date,flags,crc,size,localOffset});
+      console.log('[GM_BUILDER_ZIP_TABLE_DONE_V043]',JSON.stringify({...result,size}));
+    }
+
+    const centralOffset=offset;
+    for(const e of central){
+      await writeRaw(Buffer.concat([
+        zipU32(0x02014b50),zipU16(20),zipU16(20),zipU16(e.flags),zipU16(0),zipU16(e.time),zipU16(e.date),
+        zipU32(e.crc),zipU32(e.size),zipU32(e.size),zipU16(e.entryName.length),zipU16(0),zipU16(0),
+        zipU16(0),zipU16(0),zipU32(0),zipU32(e.localOffset),e.entryName
+      ]));
+    }
+    const centralSize=offset-centralOffset;
+    await writeRaw(Buffer.concat([
+      zipU32(0x06054b50),zipU16(0),zipU16(0),zipU16(central.length),zipU16(central.length),
+      zipU32(centralSize),zipU32(centralOffset),zipU16(0)
+    ]));
+    res.end();
+    console.log('[GM_BUILDER_ZIP_DONE_V043]',JSON.stringify({filename,tables:ordered.length,bytes:offset}));
+  }catch(e){
+    console.error('[GM_BUILDER_ZIP_FAIL_V043]',JSON.stringify({detail:String(e&&e.message||e),headersSent:res.headersSent,tablesCompleted:central.length}));
+    if(!res.headersSent) return fail(res,500,'zip export failed',{detail:String(e&&e.message||e)});
+    try{res.destroy(e instanceof Error?e:new Error(String(e)));}catch(_){ }
   }
 });
 
