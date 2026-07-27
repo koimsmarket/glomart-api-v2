@@ -103,7 +103,7 @@ function rowPayload(b){
   return {
     mall_code:key.mall_code,
     source_mall:s(b.source_mall||b.sourceMall),
-    source_uid:s(b.source_uid||b.sourceUid),
+    source_uid:null,
     internal_product_code:s(b.internal_product_code||b.internalProductCode),
     cafe24_product_no:s(b.cafe24_product_no||b.cafe24ProductNo),
     gm_internal_link:n(b.gm_internal_link||b.gmInternalLink,0)===1?1:0,
@@ -257,6 +257,59 @@ router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
   if(!owner) return res.status(400).json({ok:false,error:'member_id is required'});
   try{ const r=await pool.query(selectSql(`WHERE ${owner.col}=$1 ORDER BY added_at DESC`),[owner.val]); const external_count=r.rows.reduce((sum,row)=>sum+Math.max(0,n(row.quantity,1)),0); res.json({ok:true,items:r.rows,external_count}); }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
+});
+
+/*
+ * 외부상품 주문서 미완료 표시.
+ * - 평상시 외부 장바구니: source_uid = NULL
+ * - 주문서 진입 외부상품: source_uid = pi_ii_vi
+ * 회원당 진행 중 외부 주문은 한 묶음만 유지한다.
+ */
+router.post('/api/gm/basket/order-pending', async (req,res)=>{
+  const pool=db(req), b=req.body||{}, owner=ownerWhere(b);
+  if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  if(!owner) return res.status(400).json({ok:false,error:'member_id is required'});
+  const action=s(b.action,'mark');
+  const keys=Array.isArray(b.cart_item_keys)?b.cart_item_keys.map(x=>s(x)).filter(Boolean):[];
+  const client=await pool.connect();
+  try{
+    await ensureBasketSchema(client);
+    await client.query('BEGIN');
+    const cleared=await client.query(
+      `UPDATE gm_basket
+          SET source_uid=NULL, updated_at=NOW()
+        WHERE ${owner.col}=$1
+          AND COALESCE(source_uid,'')<>''
+          AND COALESCE(internal_product_code,'')=''
+          AND COALESCE(cafe24_product_no,'')=''
+        RETURNING cart_item_key`,
+      [owner.val]
+    );
+    let marked={rows:[]};
+    if(action==='mark'){
+      if(!keys.length) throw new Error('cart_item_keys are required');
+      marked=await client.query(
+        `UPDATE gm_basket
+            SET source_uid=pi_ii_vi, updated_at=NOW()
+          WHERE ${owner.col}=$1
+            AND cart_item_key = ANY($2::text[])
+            AND COALESCE(internal_product_code,'')=''
+            AND COALESCE(cafe24_product_no,'')=''
+          RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid`,
+        [owner.val,keys]
+      );
+      if(marked.rows.length!==keys.length){
+        throw new Error(`pending_mark_mismatch:${marked.rows.length}/${keys.length}`);
+      }
+    }else if(action!=='clear'){
+      throw new Error('unsupported action');
+    }
+    await client.query('COMMIT');
+    res.json({ok:true,action,cleared:cleared.rows.length,updated:marked.rows.length,items:marked.rows});
+  }catch(e){
+    try{await client.query('ROLLBACK');}catch(_e){}
+    res.status(500).json({ok:false,error:e.message});
+  }finally{client.release();}
 });
 
 router.post(['/api/basket/quantity','/api/gm/basket/update'], async (req,res)=>{

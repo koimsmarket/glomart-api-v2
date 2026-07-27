@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V030</title>
+<title>GM Safe Update Builder V033</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -27,8 +27,8 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </head>
 <body>
 <div class="wrap">
-<h1>GM Safe Update Builder V030</h1>
-<div class="sub">CSV·Excel 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
+<h1>GM Safe Update Builder V033</h1>
+<div class="sub">Excel·CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
   <div class="statusHead">
@@ -72,14 +72,14 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <label>대상</label>
     <select id="downTable"></select>
     <label>형식</label>
-    <select id="format"><option value="csv">CSV</option><option value="xlsx">Excel (.xlsx)</option></select>
+    <select id="format"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV</option></select>
     <div class="buttonRow">
       <button onclick="download(this)">개별 다운로드</button>
       <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 5개조 다운로드</button>
     </div>
     <div class="exportPick">
-      <div class="exportPickHead"><b>ZIP에 포함할 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
-      <div class="small">기본값은 전부 선택입니다. 제외할 테이블만 체크를 해제하세요.</div>
+      <div class="exportPickHead"><b>5개 조에 포함할 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
+      <div class="small">기본값은 전부 선택입니다. 용량이 큰 상품 gm_product는 전체 다운로드에서 제외되며 개별 다운로드를 이용하세요.</div>
       <div id="exportTableChecks" class="exportPickList"></div>
     </div>
   </div>
@@ -87,28 +87,28 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <h2>안전 업데이트</h2>
     <label>대상</label>
     <select id="upTable"></select>
-    <label>CSV 또는 Excel 파일</label>
+    <label>Excel 또는 CSV 파일</label>
     <input type="file" id="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
     <button class="gray" onclick="dryRun(this)">검증만 실행</button>
     <button class="red" onclick="applyUpdate(this)">APPLY 입력 후 업데이트</button>
     <hr>
-    <label>전체 업로드용 CSV·Excel 여러 개</label>
+    <label>전체 업로드용 Excel·CSV 여러 개</label>
     <input type="file" id="multiFiles" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple>
     <button class="gray" onclick="dryRunAll(this)">전체 검증</button>
     <button class="red" onclick="applyAll(this)">전체 APPLY</button>
-    <p class="small">CSV·Excel 파일명에 gm_product, gm_order, gm_basket 등 테이블명이 포함되어야 자동 매칭됩니다.</p>
+    <p class="small">Excel·CSV 파일명에 gm_product, gm_order, gm_basket 등 테이블명이 포함되어야 자동 매칭됩니다.</p>
   </div>
 </div>
 
 
 <div class="card" style="margin-top:16px;border-color:#f0b8b8;background:#fffafa">
 <h2>개발용 파일 강제 업로드</h2>
-<p class="small">개발 기간 전용입니다. 전체 초기화 없이, 선택한 CSV·Excel 행과 충돌하는 기존 행만 삭제 후 그대로 다시 INSERT합니다. 일반 안전규칙, blocked 컬럼, 빈값 유지 규칙을 적용하지 않습니다.</p>
+<p class="small">개발 기간 전용입니다. 전체 초기화 없이, 선택한 Excel·CSV 행과 충돌하는 기존 행만 삭제 후 그대로 다시 INSERT합니다. 일반 안전규칙, blocked 컬럼, 빈값 유지 규칙을 적용하지 않습니다.</p>
 <div class="grid">
   <div>
     <label>대상</label>
     <select id="devTable"></select>
-    <label>CSV 또는 Excel 파일</label>
+    <label>Excel 또는 CSV 파일</label>
     <input type="file" id="devFile" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
   </div>
   <div>
@@ -118,11 +118,11 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
   </div>
 </div>
 <hr>
-<label>전체 복원용 CSV·Excel 여러 개</label>
+<label>전체 복원용 Excel·CSV 여러 개</label>
 <input type="file" id="devMultiFiles" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple>
 <button class="gray" onclick="devOverwriteAll(false,this)">여러 파일 검증</button>
 <button class="red" onclick="devOverwriteAll(true,this)">여러 파일 강제 업로드</button>
-<p class="small">CSV·Excel 파일명에 gm_category, gm_product 등 테이블명이 포함되어야 자동 매칭됩니다. 각 파일의 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 전체 테이블 초기화는 하지 않습니다.</p>
+<p class="small">Excel·CSV 파일명에 gm_category, gm_product 등 테이블명이 포함되어야 자동 매칭됩니다. 각 파일의 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 전체 테이블 초기화는 하지 않습니다.</p>
 </div>
 
 
@@ -243,16 +243,23 @@ function fill(){
     document.getElementById(id).innerHTML = Object.entries(tables).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
   }
   const box=document.getElementById('exportTableChecks');
-  if(box) box.innerHTML=Object.entries(tables).map(([k,v])=>`<label class="exportPickItem"><input type="checkbox" class="exportTableCheck" value="${k}" checked><span>${v}</span></label>`).join('');
+  if(box) box.innerHTML=Object.entries(tables)
+    .filter(([k])=>k!=='products')
+    .map(([k,v])=>`<label class="exportPickItem"><input type="checkbox" class="exportTableCheck" value="${k}" checked><span>${v}</span></label>`).join('');
 }
 function setAllExportChecks(checked){ document.querySelectorAll('.exportTableCheck').forEach(x=>x.checked=!!checked); }
 function selectedExportTables(){ return [...document.querySelectorAll('.exportTableCheck:checked')].map(x=>x.value); }
 function startButtonTimer(button,label){
   if(!button) return null;
-  const state={button,original:button.textContent,seconds:0,timer:null};
-  button.disabled=true; button.textContent=`${label} · 0초`;
-  state.timer=setInterval(()=>{ state.seconds++; button.textContent=`${label} · ${state.seconds}초`; },1000);
+  const state={button,original:button.textContent,seconds:0,label:String(label||''),timer:null};
+  button.disabled=true; button.textContent=`${state.label} · 0초`;
+  state.timer=setInterval(()=>{ state.seconds++; button.textContent=`${state.label} · ${state.seconds}초`; },1000);
   return state;
+}
+function setButtonTimerLabel(state,label){
+  if(!state) return;
+  state.label=String(label||'');
+  state.button.textContent=`${state.label} · ${state.seconds}초`;
 }
 function stopButtonTimer(state){ if(!state) return; clearInterval(state.timer); state.button.disabled=false; state.button.textContent=state.original; }
 function log(x){ document.getElementById('log').textContent = typeof x === 'string' ? x : JSON.stringify(x,null,2); }
@@ -308,8 +315,8 @@ async function download(button){
 
 let downloadAllRunning=false;
 function splitIntoFiveGroups(items){
-  const groups=[[],[],[],[],[]];
-  items.forEach((item,index)=>groups[index%5].push(item));
+  const groups=Array.from({length:5},()=>[]);
+  [...items].forEach((item,index)=>groups[index%5].push(item));
   return groups.filter(group=>group.length);
 }
 function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
@@ -320,13 +327,13 @@ async function downloadAll(button){
   downloadAllRunning=true;
   const f=document.getElementById('format').value;
   const groups=splitIntoFiveGroups(selected);
-  const timed=startButtonTimer(button,`5개조 ${f.toUpperCase()} 준비 중`);
+  const timed=startButtonTimer(button,`${groups.length}개조 ${f.toUpperCase()} 준비 중`);
   const results=[];
-  log(`${selected.length}개 테이블을 ${groups.length}개 조로 나누어 순차 다운로드합니다.`);
+  log(`${selected.length}개 테이블을 ${groups.length}개 조로 나누어 순차 다운로드합니다. gm_product는 전체 다운로드에서 제외됩니다.`);
   try{
     for(let i=0;i<groups.length;i++){
       const group=groups[i];
-      button.textContent=`${i+1}/${groups.length}조 생성 중 · ${timed?timed.seconds:0}초`;
+      setButtonTimerLabel(timed,`${i+1}/${groups.length}조 ZIP 준비 중`);
       const url=`${API}/api/gm/builder/export-all?format=${encodeURIComponent(f)}&limit=50000&group=${i+1}&groups=${groups.length}&tables=${encodeURIComponent(group.join(','))}&t=${Date.now()}`;
       log(`${i+1}/${groups.length}조 ZIP 생성 중: ${group.length}개 테이블\n${group.join(', ')}`);
       try{
@@ -338,9 +345,10 @@ async function downloadAll(button){
         }
         const blob=await r.blob();
         const ct=(r.headers.get('content-type')||'').toLowerCase();
-        if(!ct.includes('zip')&&!ct.includes('octet-stream')){
+        const validType=ct.includes('zip')||ct.includes('octet-stream');
+        if(!validType){
           const txt=await blob.text().catch(()=>'<binary>');
-          results.push({group:i+1,ok:false,status:r.status,error:`ZIP 응답 아님: ${txt.slice(0,300)}`});
+          results.push({group:i+1,ok:false,status:r.status,error:`다운로드 응답 형식 오류: ${txt.slice(0,300)}`});
           continue;
         }
         const a=document.createElement('a'),objectUrl=URL.createObjectURL(blob);
@@ -356,7 +364,7 @@ async function downloadAll(button){
     }
     const okCount=results.filter(x=>x.ok).length;
     const failCount=results.length-okCount;
-    log({action:'selected-export-5-groups',selected:selected.length,groups:groups.length,success:okCount,failed:failCount,seconds:timed?timed.seconds:0,results});
+    log({action:'selected-export-5-groups-v033',selected:selected.length,groups:groups.length,success:okCount,failed:failCount,seconds:timed?timed.seconds:0,results});
   }finally{
     downloadAllRunning=false;
     stopButtonTimer(timed);
@@ -365,7 +373,7 @@ async function downloadAll(button){
 
 async function send(apply,button){
   const f=document.getElementById('file').files[0];
-  if(!f){ alert('CSV 또는 Excel 파일을 선택하세요.'); return; }
+  if(!f){ alert('Excel 또는 CSV 파일을 선택하세요.'); return; }
   if(apply){ const x=prompt('실제 업데이트 하려면 APPLY 라고 입력하세요.'); if(x !== 'APPLY') return; }
   const t=document.getElementById('upTable').value;
   const timed=startButtonTimer(button,apply?'업데이트 중':'검증 중');
@@ -431,7 +439,7 @@ async function uploadOne(tableKey,file,apply){
 }
 async function sendAll(apply,button){
   const files=[...document.getElementById('multiFiles').files];
-  if(!files.length){ alert('CSV 또는 Excel 파일들을 선택하세요.'); return; }
+  if(!files.length){ alert('Excel 또는 CSV 파일들을 선택하세요.'); return; }
   if(apply){ const x=prompt('전체 실제 업데이트 하려면 APPLY ALL 이라고 입력하세요.'); if(x !== 'APPLY ALL') return; }
   const timed=startButtonTimer(button,apply?'전체 업데이트 중':'전체 검증 중');
   const result=[];
@@ -455,7 +463,7 @@ async function sendAll(apply,button){
 
 async function uploadCafe24Members(apply,button){
   const f=document.getElementById('memberFile').files[0];
-  if(!f){ alert('Cafe24 회원 CSV 또는 Excel 파일을 선택하세요.'); return; }
+  if(!f){ alert('Cafe24 회원 Excel 또는 CSV 파일을 선택하세요.'); return; }
   if(apply){ const x=prompt('회원정보를 실제 저장하려면 MEMBER APPLY 라고 입력하세요.'); if(x !== 'MEMBER APPLY') return; }
   const timed=startButtonTimer(button,apply?'회원 업로드 중':'회원 검증 중');
   try{ const text=await readCsvText(f); await uploadCafe24MemberText(text,f.name,apply); await loadDashboard(false); } finally{ stopButtonTimer(timed); }
@@ -475,7 +483,7 @@ async function uploadDevOne(tableKey,file,apply,mode){
 }
 async function devOverwrite(apply,button){
   const f=document.getElementById('devFile').files[0];
-  if(!f){ alert('CSV 또는 Excel 파일을 선택하세요.'); return; }
+  if(!f){ alert('Excel 또는 CSV 파일을 선택하세요.'); return; }
   const t=document.getElementById('devTable').value;
   if(apply){
     const x=prompt('선택한 CSV 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 실행하려면 DEV FILE RESTORE 를 입력하세요.');
@@ -486,7 +494,7 @@ async function devOverwrite(apply,button){
 }
 async function devOverwriteAll(apply,button){
   const files=[...document.getElementById('devMultiFiles').files];
-  if(!files.length){ alert('CSV 또는 Excel 파일들을 선택하세요.'); return; }
+  if(!files.length){ alert('Excel 또는 CSV 파일들을 선택하세요.'); return; }
   if(apply){
     const x=prompt('여러 CSV 파일을 강제 업로드합니다. 전체 초기화는 하지 않습니다. 실행하려면 DEV FILE RESTORE ALL 을 입력하세요.');
     if(x !== 'DEV FILE RESTORE ALL') return;
