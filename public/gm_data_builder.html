@@ -75,10 +75,10 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <select id="format"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV</option></select>
     <div class="buttonRow">
       <button onclick="download(this)">개별 다운로드</button>
-      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 5개조 다운로드</button>
+      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 5개조 개별 다운로드</button>
     </div>
     <div class="exportPick">
-      <div class="exportPickHead"><b>5개 조에 포함할 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
+      <div class="exportPickHead"><b>5개 조로 나누어 받을 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
       <div class="small">기본값은 전부 선택입니다. 용량이 큰 상품 gm_product는 전체 다운로드에서 제외되며 개별 다운로드를 이용하세요.</div>
       <div id="exportTableChecks" class="exportPickList"></div>
     </div>
@@ -315,56 +315,75 @@ async function download(button){
 
 let downloadAllRunning=false;
 function splitIntoFiveGroups(items){
-  const groups=Array.from({length:5},()=>[]);
-  [...items].forEach((item,index)=>groups[index%5].push(item));
+  const count=Math.min(5,Math.max(1,items.length));
+  const groups=Array.from({length:count},()=>[]);
+  [...items].forEach((item,index)=>groups[index%count].push(item));
   return groups.filter(group=>group.length);
 }
 function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
+function saveBlobAsFile(blob,filename){
+  const a=document.createElement('a');
+  const objectUrl=URL.createObjectURL(blob);
+  a.href=objectUrl;
+  a.download=filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{URL.revokeObjectURL(objectUrl);a.remove();},3000);
+}
 async function downloadAll(button){
   if(downloadAllRunning) return;
   const selected=selectedExportTables();
   if(!selected.length){ alert('다운로드할 테이블을 하나 이상 선택하세요.'); return; }
+
   downloadAllRunning=true;
   const f=document.getElementById('format').value;
+  const ext=f==='xlsx'?'xlsx':'csv';
   const groups=splitIntoFiveGroups(selected);
-  const timed=startButtonTimer(button,`${groups.length}개조 ${f.toUpperCase()} 준비 중`);
+  const total=selected.length;
+  const timed=startButtonTimer(button,`${groups.length}개조 0/${total} 준비 중`);
   const results=[];
-  log(`${selected.length}개 테이블을 ${groups.length}개 조로 나누어 순차 다운로드합니다. gm_product는 전체 다운로드에서 제외됩니다.`);
+  let completed=0;
+
+  log(`${total}개 테이블을 ${groups.length}개 조로 나누고, ZIP 없이 파일별로 순차 다운로드합니다. gm_product는 제외됩니다.`);
   try{
-    for(let i=0;i<groups.length;i++){
-      const group=groups[i];
-      setButtonTimerLabel(timed,`${i+1}/${groups.length}조 ZIP 준비 중`);
-      const url=`${API}/api/gm/builder/export-all?format=${encodeURIComponent(f)}&limit=50000&group=${i+1}&groups=${groups.length}&tables=${encodeURIComponent(group.join(','))}&t=${Date.now()}`;
-      log(`${i+1}/${groups.length}조 ZIP 생성 중: ${group.length}개 테이블\n${group.join(', ')}`);
-      try{
-        const r=await fetch(url,{method:'GET',cache:'no-store'});
-        if(!r.ok){
-          const txt=await r.text().catch(()=>String(r.status));
-          results.push({group:i+1,ok:false,status:r.status,error:txt.slice(0,500)});
-          continue;
+    for(let gi=0;gi<groups.length;gi++){
+      const group=groups[gi];
+      log(`${gi+1}/${groups.length}조 시작: ${group.join(', ')}`);
+
+      for(let ti=0;ti<group.length;ti++){
+        const table=group[ti];
+        setButtonTimerLabel(timed,`${gi+1}/${groups.length}조 ${completed+1}/${total} ${table}`);
+        const url=`${API}/api/gm/builder/export?table=${encodeURIComponent(table)}&format=${encodeURIComponent(f)}&t=${Date.now()}`;
+        try{
+          const r=await fetch(url,{method:'GET',cache:'no-store'});
+          if(!r.ok){
+            const txt=await r.text().catch(()=>String(r.status));
+            results.push({group:gi+1,table,ok:false,status:r.status,error:txt.slice(0,500)});
+            log(`${table} 다운로드 실패: HTTP ${r.status}`);
+            completed++;
+            continue;
+          }
+          const blob=await r.blob();
+          const filename=`${table}_${Date.now()}.${ext}`;
+          saveBlobAsFile(blob,filename);
+          results.push({group:gi+1,table,ok:true,bytes:blob.size,file:filename});
+          completed++;
+          log(`${gi+1}/${groups.length}조 ${completed}/${total} 완료: ${filename} / ${blob.size.toLocaleString()} bytes`);
+          await sleep(700);
+        }catch(e){
+          completed++;
+          results.push({group:gi+1,table,ok:false,error:String(e&&e.message||e)});
+          log(`${table} 다운로드 오류: ${String(e&&e.message||e)}`);
         }
-        const blob=await r.blob();
-        const ct=(r.headers.get('content-type')||'').toLowerCase();
-        const validType=ct.includes('zip')||ct.includes('octet-stream');
-        if(!validType){
-          const txt=await blob.text().catch(()=>'<binary>');
-          results.push({group:i+1,ok:false,status:r.status,error:`다운로드 응답 형식 오류: ${txt.slice(0,300)}`});
-          continue;
-        }
-        const a=document.createElement('a'),objectUrl=URL.createObjectURL(blob);
-        a.href=objectUrl;
-        a.download=`gm_selected_${String(i+1).padStart(2,'0')}of${String(groups.length).padStart(2,'0')}_${f}_${Date.now()}.zip`;
-        document.body.appendChild(a);a.click();
-        setTimeout(()=>{URL.revokeObjectURL(objectUrl);a.remove();},3000);
-        results.push({group:i+1,ok:true,tables:group.length,bytes:blob.size,file:a.download});
-        if(i<groups.length-1) await sleep(1500);
-      }catch(e){
-        results.push({group:i+1,ok:false,error:String(e&&e.message||e)});
       }
+      log(`${gi+1}/${groups.length}조 완료`);
+      if(gi<groups.length-1) await sleep(1200);
     }
+
     const okCount=results.filter(x=>x.ok).length;
-    const failCount=results.length-okCount;
-    log({action:'selected-export-5-groups-v033',selected:selected.length,groups:groups.length,success:okCount,failed:failCount,seconds:timed?timed.seconds:0,results});
+    const fail=results.filter(x=>!x.ok);
+    log({action:'selected-export-5-groups-individual-v034',selected:total,groups:groups.length,success:okCount,failed:fail.length,seconds:timed?timed.seconds:0,failures:fail});
+    if(fail.length) alert(`다운로드 완료: 성공 ${okCount}개, 실패 ${fail.length}개\n하단 로그에서 실패 테이블을 확인하세요.`);
   }finally{
     downloadAllRunning=false;
     stopButtonTimer(timed);
