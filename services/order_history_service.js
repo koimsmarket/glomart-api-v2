@@ -1,114 +1,120 @@
 /* services/order_history_service.js
- * GM_ORDER_HISTORY_SERVICE_V001
- * 주문 생성/처리와 분리된 주문조회 전용 서비스.
+ * GM_ORDER_HISTORY_SERVICE_V003
+ * 주문 생성/저장 로직과 분리된 주문조회 전용 서비스.
+ * 이 파일은 gm_order / gm_order_item을 읽기만 하며 주문 저장 흐름을 수정하지 않는다.
  */
 'use strict';
 
+const VERSION = 'GM_ORDER_HISTORY_SERVICE_V003';
+
 function text(v){ return String(v == null ? '' : v).trim(); }
-function int(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):(d||0); }
-function dateOnly(v){
-  const s=text(v);
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+function int(v, def){ const n = Number(v); return Number.isFinite(n) ? Math.trunc(n) : (def || 0); }
+function sourceType(item){
+  const source = text(item && (item.source_mall || item.mall_code)).toUpperCase();
+  return source === 'GMKR' || source === 'CAFE24' ? 'CAFE24' : 'EXTERNAL';
 }
-function sourceType(items){
-  if(!Array.isArray(items) || !items.length) return 'CAFE24';
-  const external=items.some((it)=>{
-    const mall=text(it.mall_code).toUpperCase();
-    const src=text(it.source_mall).toUpperCase();
-    return !!src || (mall && !['CAFE24','INTERNAL','GM_INTERNAL'].includes(mall));
-  });
-  return external ? 'EXTERNAL' : 'CAFE24';
-}
-function displayStatus(o){
-  const customer=text(o.customer_status).toUpperCase();
+function displayStatus(order, items){
+  const cs = text(order.cs_status || order.cancel_status).toUpperCase();
+  if(cs && !['NONE','N','NULL'].includes(cs)) return cs;
+  const customer = text(order.customer_status).toUpperCase();
   if(customer === 'PURCHASE_CONFIRMED') return '구매확정';
-  const cs=text(o.cs_status || o.cancel_status).toUpperCase();
-  const csMap={
-    CANCEL_REQUESTED:'취소신청',CANCEL_PROCESSING:'취소처리중',CANCEL_COMPLETED:'취소완료',CANCEL_REJECTED:'취소거절',CANCEL_WITHDRAWN:'취소철회',
-    EXCHANGE_REQUESTED:'교환신청',EXCHANGE_PROCESSING:'교환처리중',EXCHANGE_COMPLETED:'교환완료',EXCHANGE_REJECTED:'교환거절',EXCHANGE_WITHDRAWN:'교환철회',
-    RETURN_REQUESTED:'반품신청',RETURN_PROCESSING:'반품처리중',RETURN_COMPLETED:'반품완료',RETURN_REJECTED:'반품거절',RETURN_WITHDRAWN:'반품철회'
+  const seller = text(order.seller_status).toUpperCase();
+  const sellerMap = {
+    READY_TO_ORDER:'주문대기', ORDERED:'주문완료', PREPARING:'상품준비중',
+    SHIPPING:'배송중', DELIVERED:'배송완료', CANCELLED:'주문취소'
   };
-  if(csMap[cs]) return csMap[cs];
-  const seller=text(o.seller_status || o.shipping_status || o.order_status).toUpperCase();
-  const map={
-    READY_TO_ORDER:'주문대기',ORDERED:'주문완료',PREPARING:'상품준비중',SHIPPING:'배송중',DELIVERED:'배송완료',CANCELLED:'취소완료',
-    PENDING:'처리대기',PAID:'결제완료',PAYMENT_COMPLETE:'결제완료',COMPLETE:'완료',COMPLETED:'완료',CANCEL:'취소완료',CANCELED:'취소완료'
+  if(sellerMap[seller]) return sellerMap[seller];
+  const shipping = text(order.shipping_status || (items[0] && items[0].item_shipping_status)).toLowerCase();
+  const shippingMap = { pending:'배송준비중', preparing:'상품준비중', shipping:'배송중', delivered:'배송완료', completed:'배송완료' };
+  if(shippingMap[shipping]) return shippingMap[shipping];
+  const status = text(order.order_status || (items[0] && items[0].item_order_status));
+  return status || '주문완료';
+}
+function normalizeOrder(order, items){
+  const normalizedItems = items.map((item) => ({
+    order_no: text(item.order_no),
+    cafe24_order_no: text(item.cafe24_order_no),
+    source_type: sourceType(item),
+    source_mall: text(item.source_mall || item.mall_code),
+    product_name: text(item.product_name),
+    option_name: text(item.option_name),
+    option_value: text(item.option_value),
+    quantity: int(item.quantity, 1),
+    customer_order_price: int(item.customer_order_price || item.mall_sale_price, 0),
+    product_amount: int(item.product_amount, 0),
+    delivery_fee: int(item.delivery_fee, 0),
+    product_url: text(item.product_url),
+    thumb_url: text(item.thumb_file_name),
+    carrier_name: text(item.carrier_name),
+    tracking_number: text(item.tracking_number),
+    item_order_status: text(item.item_order_status),
+    item_shipping_status: text(item.item_shipping_status)
+  }));
+  const first = normalizedItems[0] || {};
+  const source = normalizedItems.some((x) => x.source_type === 'EXTERNAL') ? 'EXTERNAL' : 'CAFE24';
+  return {
+    order_no: text(order.order_no),
+    cafe24_order_no: text(order.cafe24_order_no || first.cafe24_order_no),
+    order_group_key: text(order.order_group_key || order.cafe24_order_no || order.order_no),
+    member_id: text(order.member_id),
+    source_type: source,
+    ordered_at: order.ordered_at || order.created_at || null,
+    total_product_price: int(order.total_product_price, 0),
+    total_delivery_fee: int(order.total_delivery_fee, 0),
+    total_payment_price: int(order.total_payment_price, 0),
+    seller_status: text(order.seller_status),
+    customer_status: text(order.customer_status),
+    order_status: text(order.order_status),
+    payment_status: text(order.payment_status),
+    shipping_status: text(order.shipping_status),
+    cs_status: text(order.cs_status),
+    display_status: displayStatus(order, items),
+    items: normalizedItems
   };
-  return map[seller] || text(o.shipping_status || o.order_status) || '주문완료';
-}
-function groupKey(o){
-  if(text(o.order_group_key)) return text(o.order_group_key);
-  const tracking=(o.items||[]).map(x=>text(x.tracking_number)).find(Boolean);
-  if(/^\d{8}_/.test(tracking)) return tracking.split('_').slice(0,2).join('_');
-  const no=text(o.cafe24_order_no || o.order_no);
-  const m=no.match(/(\d{8})/);
-  return m ? m[1] : no;
 }
 
-async function columnSet(pool, table){
-  const r=await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1`,[table]);
-  return new Set(r.rows.map(x=>x.column_name));
-}
-function selectOptional(cols,name,fallback){
-  return cols.has(name) ? `o.${name}` : `${fallback} AS ${name}`;
-}
-
-async function listOrders(pool, input){
-  const memberId=text(input.member_id);
-  if(!memberId) throw Object.assign(new Error('member_id required'),{statusCode:400});
-  const page=Math.max(1,int(input.page,1));
-  const pageSize=Math.min(50,Math.max(5,int(input.page_size,20)));
-  const start=dateOnly(input.start_date);
-  const end=dateOnly(input.end_date);
-  const csOnly=text(input.cs_only)==='1';
-  const orderCols=await columnSet(pool,'gm_order');
-
-  const where=['o.member_id=$1'];
-  const params=[memberId];
-  if(start){ params.push(start); where.push(`o.ordered_at >= $${params.length}::date`); }
-  if(end){ params.push(end); where.push(`o.ordered_at < ($${params.length}::date + INTERVAL '1 day')`); }
-  if(csOnly){
-    const clauses=[];
-    if(orderCols.has('cs_status')) clauses.push(`COALESCE(o.cs_status,'')<>''`);
-    if(orderCols.has('cancel_status')) clauses.push(`COALESCE(o.cancel_status,'')<>''`);
-    if(orderCols.has('seller_status')) clauses.push(`o.seller_status='CANCELLED'`);
-    where.push(clauses.length ? `(${clauses.join(' OR ')})` : 'FALSE');
-  }
-
-  const count=await pool.query(`SELECT COUNT(*)::int AS total FROM gm_order o WHERE ${where.join(' AND ')}`,params);
-  const total=int(count.rows[0]&&count.rows[0].total,0);
-  params.push(pageSize,(page-1)*pageSize);
-  const limitPos=params.length-1, offsetPos=params.length;
-
-  const sql=`
-    SELECT
-      o.order_no,o.cafe24_order_no,o.member_id,o.ordered_at,o.total_product_price,o.total_delivery_fee,o.total_payment_price,
-      o.order_status,o.payment_status,o.shipping_status,o.cs_status,o.cancel_status,o.purchase_confirmed_yn,
-      ${selectOptional(orderCols,'seller_status','NULL::text')},
-      ${selectOptional(orderCols,'customer_status','NULL::text')},
-      ${selectOptional(orderCols,'order_group_key','NULL::text')},
-      COALESCE(json_agg(json_build_object(
-        'pi_ii_vi',i.pi_ii_vi,'product_name',i.product_name,'option_name',i.option_name,'option_value',i.option_value,
-        'quantity',i.quantity,'customer_order_price',i.customer_order_price,'product_amount',i.product_amount,
-        'mall_code',i.mall_code,'source_mall',i.source_mall,'product_url',i.product_url,'thumb_file_name',i.thumb_file_name,
-        'carrier_name',i.carrier_name,'tracking_number',i.tracking_number,'item_order_status',i.item_order_status,'item_shipping_status',i.item_shipping_status
-      ) ORDER BY i.created_at ASC,i.pi_ii_vi ASC) FILTER (WHERE i.order_no IS NOT NULL),'[]'::json) AS items
-    FROM gm_order o
-    LEFT JOIN gm_order_item i ON i.order_no=o.order_no
-    WHERE ${where.join(' AND ')}
-    GROUP BY o.order_no
-    ORDER BY o.ordered_at DESC,o.order_no DESC
-    LIMIT $${limitPos} OFFSET $${offsetPos}`;
-  const r=await pool.query(sql,params);
-  const orders=r.rows.map(o=>{
-    o.items=Array.isArray(o.items)?o.items:[];
-    o.source_type=sourceType(o.items);
-    o.display_status=displayStatus(o);
-    o.order_group_key=groupKey(o);
-    o.can_cafe24_action=o.source_type==='CAFE24' && !!text(o.cafe24_order_no);
-    return o;
+async function list(pool, options){
+  if(!pool) throw new Error('DB pool is not attached');
+  const memberId = text(options && options.member_id);
+  if(!memberId) throw new Error('member_id_required');
+  const page = Math.max(1, int(options && options.page, 1));
+  const limit = Math.min(50, Math.max(1, int(options && options.limit, 20)));
+  const offset = (page - 1) * limit;
+  const values = [memberId];
+  const where = ['o.member_id = $1'];
+  const startDate = text(options && options.start_date);
+  const endDate = text(options && options.end_date);
+  if(startDate){ values.push(startDate); where.push(`o.ordered_at >= $${values.length}::date`); }
+  if(endDate){ values.push(endDate); where.push(`o.ordered_at < ($${values.length}::date + INTERVAL '1 day')`); }
+  const countSql = `SELECT COUNT(*)::int AS total FROM gm_order o WHERE ${where.join(' AND ')}`;
+  const total = (await pool.query(countSql, values)).rows[0].total;
+  values.push(limit, offset);
+  const orderSql = `
+    SELECT o.*
+      FROM gm_order o
+     WHERE ${where.join(' AND ')}
+     ORDER BY COALESCE(o.ordered_at, o.created_at) DESC, o.order_no DESC
+     LIMIT $${values.length - 1} OFFSET $${values.length}`;
+  const orderRows = (await pool.query(orderSql, values)).rows;
+  if(!orderRows.length) return { version: VERSION, page, limit, total, total_pages: Math.max(1, Math.ceil(total / limit)), orders: [] };
+  const orderNos = orderRows.map((row) => row.order_no);
+  const itemRows = (await pool.query(
+    `SELECT * FROM gm_order_item WHERE order_no = ANY($1::text[]) ORDER BY created_at ASC, pi_ii_vi ASC`,
+    [orderNos]
+  )).rows;
+  const byOrder = new Map();
+  itemRows.forEach((item) => {
+    if(!byOrder.has(item.order_no)) byOrder.set(item.order_no, []);
+    byOrder.get(item.order_no).push(item);
   });
-  return {orders,total,page,page_size:pageSize,total_pages:Math.max(1,Math.ceil(total/pageSize))};
+  return {
+    version: VERSION,
+    page,
+    limit,
+    total,
+    total_pages: Math.max(1, Math.ceil(total / limit)),
+    orders: orderRows.map((order) => normalizeOrder(order, byOrder.get(order.order_no) || []))
+  };
 }
 
-module.exports={listOrders};
+module.exports = { VERSION, list };
