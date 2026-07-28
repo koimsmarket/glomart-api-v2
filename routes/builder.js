@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V043_STREAM_ZIP_EXPORT';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V046_UNORDERED_CURSOR_ZIP';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -1044,9 +1044,10 @@ router.get('/api/gm/builder/export', async (req,res)=>{
 });
 
 
-// V043: selected tables are exported as one streaming ZIP response.
-// No third-party ZIP package is required. Entries are stored without compression,
-// written one table at a time, and gm_product is always processed alone first.
+// V046: selected tables are exported as one streaming ZIP response.
+// PostgreSQL server-side cursors remove OFFSET scans. Full DB export does not
+// require a stable row order, so ORDER BY is intentionally omitted to allow a
+// plain sequential scan. Each fetched page is converted to one CSV buffer.
 const ZIP_CRC_TABLE = (()=>{
   const table = new Uint32Array(256);
   for(let n=0;n<256;n++){
@@ -1069,51 +1070,59 @@ function zipDosDateTime(d=new Date()){
   const date=(((year-1980)&127)<<9)|(((d.getMonth()+1)&15)<<5)|(d.getDate()&31);
   return {time,date};
 }
-async function exportTableCsvIntoZip({req,res,db,spec,key,writeZip}){
-  const requestedPageSize = Number(req.query.pageSize || 0);
-  const defaultPageSize = spec.table === 'gm_product' ? 250 : 2000;
-  const maxPageSize = spec.table === 'gm_product' ? 500 : 5000;
-  const pageSize = Math.min(Math.max(requestedPageSize || defaultPageSize,100),maxPageSize);
-  const client = typeof db.connect === 'function' ? await db.connect() : db;
+function safeCursorName(key){
+  return `gm_export_${String(key||'table').replace(/[^a-zA-Z0-9_]/g,'_')}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+}
+async function exportTableCsvIntoZip({req,db,spec,key,writeZip,requestId}){
+  const requestedPageSize=Number(req.query.pageSize||0);
+  const defaultPageSize=spec.table==='gm_product'?2000:5000;
+  const maxPageSize=spec.table==='gm_product'?5000:10000;
+  const pageSize=Math.min(Math.max(requestedPageSize||defaultPageSize,100),maxPageSize);
+  const client=typeof db.connect==='function'?await db.connect():db;
+  const cursorName=safeCursorName(key);
   let transactionStarted=false;
+  let cursorDeclared=false;
   let sent=0;
+  let page=0;
+  const startedAt=Date.now();
   try{
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
     transactionStarted=true;
+    // Keep a safety limit, but allow large/toasted tables enough time per FETCH.
+    // A slow client may hold the read-only cursor while backpressure drains.
+    await client.query("SET LOCAL statement_timeout = '120000ms'");
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '600000ms'");
+
     let cols=await getColumns(client,spec.table);
     if(spec.table==='gm_member') cols=cols.filter(c=>!/^password_/i.test(c));
     if(!cols.length) throw new Error(`no exportable columns: ${spec.table}`);
-    const pkResult=await client.query(`
-      SELECT a.attname AS column_name
-        FROM pg_index i
-        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey)
-       WHERE i.indrelid=$1::regclass AND i.indisprimary
-       ORDER BY array_position(i.indkey,a.attnum)
-    `,[spec.table]);
-    let orderCols=pkResult.rows.map(r=>String(r.column_name||'')).filter(c=>cols.includes(c));
-    if(!orderCols.length && Array.isArray(spec.key)) orderCols=spec.key.filter(c=>cols.includes(c));
-    if(!orderCols.length && Array.isArray(spec.keyAny) && Array.isArray(spec.keyAny[0])) orderCols=spec.keyAny[0].filter(c=>cols.includes(c));
-    const orderSql=[...orderCols.map(c=>`${qIdent(c)} ASC NULLS FIRST`),'ctid ASC'].join(', ');
 
     await writeZip(Buffer.from('\ufeff'+cols.map(csvEscape).join(',')+'\n','utf8'));
-    let offset=0;
+
+    // The repeatable-read cursor itself advances exactly once through the snapshot.
+    // ORDER BY is unnecessary for a full export and can force an expensive sort or
+    // index-ordered heap access on gm_product, so use the planner's sequential scan.
+    await client.query(`DECLARE ${qIdent(cursorName)} NO SCROLL CURSOR FOR SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)}`);
+    cursorDeclared=true;
+
     while(true){
-      const r=await client.query(
-        `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${orderSql} LIMIT $1 OFFSET $2`,
-        [pageSize,offset]
-      );
+      const r=await client.query(`FETCH FORWARD ${pageSize} FROM ${qIdent(cursorName)}`);
       if(!r.rows.length) break;
-      for(const row of r.rows){
-        await writeZip(Buffer.from(cols.map(c=>csvEscape(row[c])).join(',')+'\n','utf8'));
-        sent++;
-      }
-      offset+=r.rows.length;
+      page++;
+      const csvPage=r.rows.map(row=>cols.map(c=>csvEscape(row[c])).join(',')).join('\n')+'\n';
+      await writeZip(Buffer.from(csvPage,'utf8'));
+      sent+=r.rows.length;
+      console.log('[GM_BUILDER_ZIP_PAGE_V046]',JSON.stringify({requestId,key,table:spec.table,page,rows:r.rows.length,totalRows:sent,pageSize,elapsedMs:Date.now()-startedAt}));
       if(r.rows.length<pageSize) break;
     }
+
+    await client.query(`CLOSE ${qIdent(cursorName)}`);
+    cursorDeclared=false;
     await client.query('COMMIT');
     transactionStarted=false;
-    return {key,table:spec.table,rows:sent};
+    return {key,table:spec.table,rows:sent,pages:page,pageSize,elapsedMs:Date.now()-startedAt};
   }catch(e){
+    if(cursorDeclared) await client.query(`CLOSE ${qIdent(cursorName)}`).catch(()=>{});
     if(transactionStarted) await client.query('ROLLBACK').catch(()=>{});
     throw e;
   }finally{
@@ -1127,14 +1136,16 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
   const invalid=unique.filter(k=>!tableSpec(k));
   if(invalid.length) return fail(res,400,'invalid table',{invalid});
 
-  // gm_product is a single standalone first entry. Everything else follows sequentially.
+  // gm_product is always exported first and completes before any other table starts.
   const ordered=[...unique.filter(k=>k==='products'),...unique.filter(k=>k!=='products')];
   const db=dbFrom(req);
   const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
   const filename=`glomart_db_${stamp}.zip`;
+  const requestId=`${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
   const central=[];
   let offset=0;
   let aborted=false;
+  const startedAt=Date.now();
   req.on('aborted',()=>{aborted=true;});
   res.on('close',()=>{if(!res.writableEnded) aborted=true;});
 
@@ -1152,12 +1163,14 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
   };
 
   try{
+    console.log('[GM_BUILDER_ZIP_START_V046]',JSON.stringify({requestId,filename,tables:ordered}));
     res.status(200);
     res.setHeader('Content-Type','application/zip');
     res.setHeader('Content-Disposition',`attachment; filename="${filename}"`);
     res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
     res.setHeader('X-Accel-Buffering','no');
-    res.setHeader('X-GM-Export-Protocol','v043-stream-zip');
+    res.setHeader('X-GM-Export-Protocol','v046-unordered-cursor-zip');
+    res.setHeader('X-GM-Export-Request-Id',requestId);
     if(typeof res.flushHeaders==='function') res.flushHeaders();
 
     for(let i=0;i<ordered.length;i++){
@@ -1176,14 +1189,16 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
       let size=0;
       const writeEntry=async(buf)=>{
         if(!Buffer.isBuffer(buf)) buf=Buffer.from(buf);
-        crc=zipCrcUpdate(crc,buf); size+=buf.length; await writeRaw(buf);
+        crc=zipCrcUpdate(crc,buf);
+        size+=buf.length;
+        await writeRaw(buf);
       };
-      console.log('[GM_BUILDER_ZIP_TABLE_START_V043]',JSON.stringify({index:i+1,total:ordered.length,key,table:spec.table,productStandalone:key==='products'}));
-      const result=await exportTableCsvIntoZip({req,res,db,spec,key,writeZip:writeEntry});
+      console.log('[GM_BUILDER_ZIP_TABLE_START_V046]',JSON.stringify({requestId,index:i+1,total:ordered.length,key,table:spec.table,productStandalone:key==='products'}));
+      const result=await exportTableCsvIntoZip({req,db,spec,key,writeZip:writeEntry,requestId});
       crc=(crc^0xffffffff)>>>0;
       await writeRaw(Buffer.concat([zipU32(0x08074b50),zipU32(crc),zipU32(size),zipU32(size)]));
       central.push({entryName,time,date,flags,crc,size,localOffset});
-      console.log('[GM_BUILDER_ZIP_TABLE_DONE_V043]',JSON.stringify({...result,size}));
+      console.log('[GM_BUILDER_ZIP_TABLE_DONE_V046]',JSON.stringify({requestId,...result,size}));
     }
 
     const centralOffset=offset;
@@ -1200,10 +1215,10 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
       zipU32(centralSize),zipU32(centralOffset),zipU16(0)
     ]));
     res.end();
-    console.log('[GM_BUILDER_ZIP_DONE_V043]',JSON.stringify({filename,tables:ordered.length,bytes:offset}));
+    console.log('[GM_BUILDER_ZIP_DONE_V046]',JSON.stringify({requestId,filename,tables:ordered.length,bytes:offset,elapsedMs:Date.now()-startedAt}));
   }catch(e){
-    console.error('[GM_BUILDER_ZIP_FAIL_V043]',JSON.stringify({detail:String(e&&e.message||e),headersSent:res.headersSent,tablesCompleted:central.length}));
-    if(!res.headersSent) return fail(res,500,'zip export failed',{detail:String(e&&e.message||e)});
+    console.error('[GM_BUILDER_ZIP_FAIL_V046]',JSON.stringify({requestId,detail:String(e&&e.message||e),headersSent:res.headersSent,tablesCompleted:central.length,elapsedMs:Date.now()-startedAt}));
+    if(!res.headersSent) return fail(res,500,'zip export failed',{detail:String(e&&e.message||e),request_id:requestId});
     try{res.destroy(e instanceof Error?e:new Error(String(e)));}catch(_){ }
   }
 });
