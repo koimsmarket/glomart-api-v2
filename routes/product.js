@@ -797,7 +797,7 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       option_count = CASE WHEN $2::int > 0 THEN $2::int ELSE option_count END,
       option_json = CASE WHEN $3::jsonb IS NOT NULL THEN option_json ELSE option_json END,
       thumb_json = CASE
-        WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) WHEN jsonb_typeof(thumb_json)='string' THEN COALESCE(NULLIF(split_part(trim(both '"' from thumb_json::text),'|',1),'')::int,0) ELSE 0 END
+        WHEN $4::int > 0
         THEN $5::jsonb ELSE thumb_json END,
       detail_json = CASE WHEN $6::int > 0 THEN $7::jsonb ELSE detail_json END,
       cp_selected_code = CASE
@@ -1828,7 +1828,7 @@ async function upsertProduct(pool, raw, parent={}){
       option_count=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
       option_json=CASE WHEN COALESCE(EXCLUDED.option_count,0) >= 2 THEN EXCLUDED.option_json WHEN COALESCE(EXCLUDED.option_count,0)=1 THEN NULL ELSE gm_product.option_json END,
       thumb_json=CASE
-        WHEN $70::int > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) WHEN jsonb_typeof(gm_product.thumb_json)='string' THEN COALESCE(NULLIF(split_part(trim(both '"' from gm_product.thumb_json::text),'|',1),'')::int,0) ELSE 0 END,0)
+        WHEN $70::int > 0
         THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
       detail_json=CASE
         WHEN jsonb_typeof(EXCLUDED.detail_json)='object'
