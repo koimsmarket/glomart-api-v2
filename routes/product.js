@@ -557,9 +557,9 @@ function pickDeliveryText(p){
   return '';
 }
 
-// 배송일은 절대 날짜 문구를 장기 보관하지 않고 "최소일/최대일" term으로 저장한다.
-// 예: 7월 17일 ~ 7월 19일, 수집일 7월 14일 => 3/5
-// 이미 term(3/5)으로 들어온 값은 그대로 검증하여 사용한다.
+// 배송일은 절대 날짜 문구를 장기 보관하지 않고 "최소일|최대일" term으로 저장한다.
+// 예: 7월 17일 ~ 7월 19일, 수집일 7월 14일 => 3|5
+// 이미 term(3|5)으로 들어온 값은 그대로 검증하여 사용한다.
 function deliveryBaseDate(p){
   p=p||{};
   const candidates=[
@@ -596,12 +596,12 @@ function validDeliveryTerm(min,max){
   if(!Number.isFinite(min)||!Number.isFinite(max)) return '';
   min=Math.max(0,Math.round(min)); max=Math.max(0,Math.round(max));
   if(min>max||max>365) return '';
-  return String(min)+'/'+String(max);
+  return String(min)+'|'+String(max);
 }
 function normalizeDeliveryTerm(raw,p){
   const text=cleanText(raw||'');
   if(!text) return '';
-  let m=text.match(/^\s*(\d{1,3})\s*\/\s*(\d{1,3})\s*(?:일)?\s*$/);
+  let m=text.match(/^\s*(\d{1,3})\s*[|/]\s*(\d{1,3})\s*(?:일)?\s*$/);
   if(m) return validDeliveryTerm(m[1],m[2]);
 
   const base=deliveryBaseDate(p);
@@ -620,9 +620,9 @@ function normalizeDeliveryTerm(raw,p){
   // 그렇지 않으면 "7월 15일 ~ 17일"을 15/17로 오인한다.
   m=text.match(/(?:^|\s)(\d{1,3})\s*(?:일)?\s*[-~–—]\s*(\d{1,3})\s*일(?:\s|$)/);
   if(m) return validDeliveryTerm(m[1],m[2]);
-  if(/오늘/.test(text)) return '0/0';
-  if(/내일/.test(text)) return '1/1';
-  if(/모레/.test(text)) return '2/2';
+  if(/오늘/.test(text)) return '0|0';
+  if(/내일/.test(text)) return '1|1';
+  if(/모레/.test(text)) return '2|2';
   m=text.match(/(?:주문일\s*)?\+\s*(\d{1,3})\s*일/);
   if(m) return validDeliveryTerm(m[1],m[1]);
   m=text.match(/(\d{1,3})\s*일\s*(?:내|이내)\s*배송\s*예정/);
@@ -770,7 +770,7 @@ function compactError(e){
 }
 function detailSignalStats(optionJson, thumbJson, detailJson, p){
   optionJson = optionJson || {}; detailJson = detailJson || {}; p = p || {};
-  const thumbCount = Array.isArray(thumbJson) ? thumbJson.length : 0;
+  const thumbCount = thumbPipeCount(thumbJson);
   const detailCount = (Array.isArray(detailJson.images) ? detailJson.images.length : 0) +
     (Array.isArray(detailJson.blocks) ? detailJson.blocks.length : 0) +
     (Array.isArray(detailJson.texts) ? detailJson.texts.length : 0);
@@ -790,14 +790,14 @@ function detailSignalStats(optionJson, thumbJson, detailJson, p){
 async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee){
   const stats = detailSignalStats(optionJson, thumbJson, detailJson, p);
   const remoteDelivery = normalizeRemoteDeliveryPolicy(p);
-  const hasDetail = stats.option_count > 0 || stats.thumb_count > 1 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
+  const hasDetail = stats.option_count > 0 || stats.thumb_count > 0 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
   if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats, id };
   const q = `
     UPDATE gm_product SET
       option_count = CASE WHEN $2::int > 0 THEN $2::int ELSE option_count END,
       option_json = CASE WHEN $3::jsonb IS NOT NULL THEN option_json ELSE option_json END,
       thumb_json = CASE
-        WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
+        WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) WHEN jsonb_typeof(thumb_json)='string' THEN COALESCE(NULLIF(split_part(trim(both '"' from thumb_json::text),'|',1),'')::int,0) ELSE 0 END
         THEN $5::jsonb ELSE thumb_json END,
       detail_json = CASE WHEN $6::int > 0 THEN $7::jsonb ELSE detail_json END,
       cp_selected_code = CASE
@@ -834,7 +834,7 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       updated_at = now()
     WHERE product_uid = $1 OR (mall_code=$33 AND pi_ii_vi=$34)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
-      CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
+      CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) WHEN jsonb_typeof(thumb_json)='string' THEN COALESCE(NULLIF(split_part(trim(both '"' from thumb_json::text),'|',1),'')::int,0) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
       COALESCE(NULLIF(detail_json->>'block_count','')::int,0) AS detail_block_count,
       supplier_name, cp_fix_code, cp_match, buyable_qty, return_shipping_fee,
@@ -920,33 +920,40 @@ function pickMallCategoryLeaf(p, mallCategoryJson){
   return direct;
 }
 
+function parseThumbPipe(v){
+  if(v===undefined||v===null) return [];
+  if(Array.isArray(v)) return v;
+  if(typeof v==='object'){
+    if(Array.isArray(v.images)) return v.images;
+    if(Array.isArray(v.rows)) return v.rows;
+    if(Array.isArray(v.urls)) return v.urls;
+    v=v.pipe||v.value||'';
+  }
+  let t=cleanText(v);
+  if(!t) return [];
+  try{ const j=JSON.parse(t); if(j!==t) return parseThumbPipe(j); }catch(_e){}
+  const parts=t.split('|');
+  if(/^\d+$/.test(cleanText(parts[0]))) parts.shift();
+  return parts.map(cleanText).filter(Boolean);
+}
+function thumbPipeCount(v){ return parseThumbPipe(v).length; }
 function normalizeThumbJson(p){
   p=p||{};
-  if(p.thumb_json && typeof p.thumb_json === 'object' && !Array.isArray(p.thumb_json)){
-    if(Array.isArray(p.thumb_json.images) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.images;
-    if(Array.isArray(p.thumb_json.rows) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.rows;
-    if(Array.isArray(p.thumb_json.urls) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.urls;
-  }
-  if(p.thumbJson && typeof p.thumbJson === 'object' && !Array.isArray(p.thumbJson)){
-    if(Array.isArray(p.thumbJson.images) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.images;
-    if(Array.isArray(p.thumbJson.rows) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.rows;
-    if(Array.isArray(p.thumbJson.urls) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.urls;
-  }
-  const out=[]; const seen=new Set();
-  function add(v, source){
-    if(v && typeof v === 'object') v = v.url || v.src || v.image || v.thumb || '';
-    v = normalizeUrl(v);
-    if(!v || seen.has(v)) return;
-    seen.add(v);
-    out.push(v);
-  }
-  [p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.skuThumbnailImages,p.topImages,p.mainImages,p.thumbs].forEach((a)=>{
-    if(Array.isArray(a)) a.forEach(x=>add(x,'array'));
+  const main=normalizeUrl(p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl || p.thumbnail || p.image || p.mainImage || '');
+  const candidates=[];
+  [p.thumb_pipe,p.thumbPipe,p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.topImages,p.mainImages,p.thumbs].forEach((a)=>{
+    parseThumbPipe(a).forEach(x=>candidates.push(x));
   });
-  add(p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl || p.thumbnail || p.image || p.mainImage, 'main');
-  return out;
+  const out=[]; const seen=new Set();
+  const mainKey=main;
+  for(const x of candidates){
+    const u=normalizeUrl(x);
+    if(!u || u===mainKey || seen.has(u)) continue;
+    seen.add(u); out.push(u);
+    if(out.length>=9) break;
+  }
+  return String(out.length)+(out.length?'|'+out.join('|'):'');
 }
-
 function normalizeDetailJson(p){
   p=p||{};
   if(p.detail_json && typeof p.detail_json === 'object' && !Array.isArray(p.detail_json)){
@@ -1821,8 +1828,7 @@ async function upsertProduct(pool, raw, parent={}){
       option_count=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
       option_json=CASE WHEN COALESCE(EXCLUDED.option_count,0) >= 2 THEN EXCLUDED.option_json WHEN COALESCE(EXCLUDED.option_count,0)=1 THEN NULL ELSE gm_product.option_json END,
       thumb_json=CASE
-        WHEN jsonb_typeof(EXCLUDED.thumb_json)='array'
-         AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) ELSE 0 END,0)
+        WHEN $70::int > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) WHEN jsonb_typeof(gm_product.thumb_json)='string' THEN COALESCE(NULLIF(split_part(trim(both '"' from gm_product.thumb_json::text),'|',1),'')::int,0) ELSE 0 END,0)
         THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
       detail_json=CASE
         WHEN jsonb_typeof(EXCLUDED.detail_json)='object'
@@ -1843,7 +1849,7 @@ async function upsertProduct(pool, raw, parent={}){
       normal_price=COALESCE(EXCLUDED.normal_price, gm_product.normal_price),
       discount_price=EXCLUDED.discount_price,
       delivery_fee=EXCLUDED.delivery_fee,
-      -- 배송 term은 유효한 신규값(예: 3/8, 8/8)만 교체한다.
+      -- 배송 term은 유효한 신규값(예: 3|8, 8|8)만 교체한다.
       -- 검색결과의 NULL/빈값/파싱실패는 기존 상세 수집값을 유지한다.
       delivery_eta_text=COALESCE(NULLIF(BTRIM(EXCLUDED.delivery_eta_text),''), gm_product.delivery_eta_text),
       delivery_type=COALESCE(NULLIF(EXCLUDED.delivery_type,''), gm_product.delivery_type),
@@ -1921,7 +1927,8 @@ async function upsertProduct(pool, raw, parent={}){
     p.return_period_days == null && p.returnPeriodDays == null ? null : toInt(p.return_period_days || p.returnPeriodDays, 0),
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0),
     remoteDelivery.jeju_provided,
-    remoteDelivery.island_provided
+    remoteDelivery.island_provided,
+    thumbPipeCount(thumbJson)
   ];
 
   try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, delivery_eta_text_raw:pickDeliveryText(p), delivery_eta_text:pickDeliveryTerm(p), delivery_type:pickDeliveryType(p) }); }catch(_trace){}
