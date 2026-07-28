@@ -1660,6 +1660,7 @@ app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
 app.use(require('./routes/account'));
 app.use(require('./routes/order'));
+app.use(require('./routes/order_history')); // GM 주문조회 전용: 주문 저장/처리 코드와 분리
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
