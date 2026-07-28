@@ -505,13 +505,58 @@ router.post('/api/gm/order/create', async (req, res) => {
   if(!client) return fail(res, 500, 'DB client connect failed');
   try{
     const orderRow = buildOrderRow(raw, inputItems);
+    const orderMode=clean(raw.order_mode||raw.orderMode||'external').toLowerCase();
     await client.query('BEGIN');
     const orderAction = await upsertOrder(client, orderRow);
     const itemResult = await replaceOrderItems(client, orderRow, inputItems);
+
+    /* 외부 단독 주문은 결과 페이지 JavaScript에 의존하지 않고 주문 저장 트랜잭션 안에서
+       이번 주문에 실제 저장된 상품만 gm_basket에서 삭제한다. 혼합 주문은 Cafe24 확정 전이므로
+       여기서 삭제하지 않고 /cafe24-confirm 단계의 기존 정리 로직에 맡긴다. */
+    let basketBefore=0;
+    let basketDeleted=0;
+    let basketRemain=0;
+    let basketDeletedRows=[];
+    if(orderMode!=='mixed'){
+      const basketBeforeResult = await client.query(`
+        SELECT COUNT(*)::int AS count
+          FROM gm_basket
+         WHERE (($1<>'' AND member_id=$1) OR ($2<>'' AND guest_key=$2))
+      `,[clean(orderRow.member_id),clean(orderRow.guest_key)]);
+      basketBefore=Number(basketBeforeResult.rows[0]&&basketBeforeResult.rows[0].count)||0;
+
+      const basketCleanup = await client.query(`
+        DELETE FROM gm_basket b
+        USING gm_order_item oi
+        WHERE oi.order_no=$1
+          AND COALESCE(oi.source_mall,oi.mall_code,'') <> 'GMKR'
+          AND b.mall_code=oi.mall_code
+          AND b.pi_ii_vi=oi.pi_ii_vi
+          AND (($2<>'' AND b.member_id=$2) OR ($3<>'' AND b.guest_key=$3))
+        RETURNING b.mall_code,b.pi_ii_vi,b.cart_item_key
+      `,[orderRow.order_no,clean(orderRow.member_id),clean(orderRow.guest_key)]);
+      basketDeleted=basketCleanup.rowCount||0;
+      basketDeletedRows=basketCleanup.rows||[];
+
+      const basketRemainResult = await client.query(`
+        SELECT COUNT(*)::int AS count
+          FROM gm_basket
+         WHERE (($1<>'' AND member_id=$1) OR ($2<>'' AND guest_key=$2))
+      `,[clean(orderRow.member_id),clean(orderRow.guest_key)]);
+      basketRemain=Number(basketRemainResult.rows[0]&&basketRemainResult.rows[0].count)||0;
+    }
+
     await client.query('COMMIT');
-    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price }));
-    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price });
-    const orderMode=clean(raw.order_mode||raw.orderMode||'external').toLowerCase();
+    console.log('[GM_ORDER_CREATE_BASKET_DELETE]', JSON.stringify({
+      order_no:orderRow.order_no,
+      before:basketBefore,
+      requested:itemResult.itemCount,
+      deleted:basketDeleted,
+      remain:basketRemain,
+      deleted_keys:basketDeletedRows.map(row=>row.cart_item_key||((row.mall_code||'')+'_'+(row.pi_ii_vi||'')))
+    }));
+    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price, basket_deleted:basketDeleted, basket_remain:basketRemain }));
+    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price, basket_deleted:basketDeleted, basket_before:basketBefore, basket_remain:basketRemain });
     // 혼합 주문은 Cafe24 내부상품이 합쳐지기 전이므로 여기서 집계하지 않는다.
     // 외부 전용 주문만 저장 완료 직후 직접 집계하고, 실패할 때만 큐로 넘긴다.
     if(orderMode!=='mixed'){
