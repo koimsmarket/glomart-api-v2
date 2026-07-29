@@ -371,14 +371,39 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       await client.query(`INSERT INTO gm_member_relation_count (member_id,calculated_yn)
         VALUES ($1,'F') ON CONFLICT (member_id) DO NOTHING`,[p.member_id]);
     }
-    // 회원 동기화는 gm_member만 갱신한다.
-    // 주문서 진입/회원 동기화 과정에서 gm_member_address를 자동 INSERT/UPDATE하지 않는다.
-    // 배송지 등록·수정은 전용 address/upsert API에서만 처리한다.
-    const ar=await client.query(`SELECT * FROM gm_member_address
-      WHERE member_id=$1
-      ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC
-      LIMIT 1`, [p.member_id]);
-    const address=ar.rows[0] || null;
+    // 회원가입/회원수정에서 명시적으로 보낸 기본주소만 gm_member_address와 동기화한다.
+    // 로그인/주문서/백그라운드 회원 동기화는 이 경로를 타지 않는다.
+    let address=null;
+    const syncDefaultAddress = yn(b.sync_default_address_yn || b.syncDefaultAddressYn) === 'Y';
+    const hasProfileAddress = !!(p.default_zipcode && p.default_address1 && (p.default_receiver_name || p.member_name) && (p.default_receiver_mobile || p.default_receiver_phone || p.phone));
+    if(syncDefaultAddress && hasProfileAddress){
+      const sourceAddress=addressPayload({
+        member_id:p.member_id,address_name:'기본배송지',
+        receiver_name:p.default_receiver_name||p.member_name,
+        receiver_phone:p.default_receiver_phone||p.phone,
+        receiver_mobile:p.default_receiver_mobile||p.phone,
+        zipcode:p.default_zipcode,address1:p.default_address1,address2:p.default_address2,
+        address_old:p.default_address_old,address_full:p.default_address_full,
+        sido:p.default_sido,sigungu:p.default_sigungu,eup_myeon_dong:p.default_eup_myeon_dong,
+        customs_clearance_code:p.customs_clearance_code,delivery_memo:p.delivery_memo,is_default:'Y'
+      },p.member_id);
+      const currentDefault=await client.query(`SELECT address_id FROM gm_member_address WHERE member_id=$1 AND is_default='Y' ORDER BY updated_at DESC,created_at DESC LIMIT 1 FOR UPDATE`,[p.member_id]);
+      let addressId=currentDefault.rows[0]&&s(currentDefault.rows[0].address_id);
+      if(!addressId){
+        const same=await client.query(`SELECT address_id FROM gm_member_address WHERE member_id=$1 AND COALESCE(zipcode,'')=$2 AND COALESCE(address1,'')=$3 AND COALESCE(address2,'')=$4 ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`,[p.member_id,sourceAddress.zipcode,sourceAddress.address1,sourceAddress.address2]);
+        addressId=same.rows[0]&&s(same.rows[0].address_id);
+      }
+      if(!addressId) addressId=stableAddressId(Object.assign({},sourceAddress,{address_id:''}),p.member_id);
+      await client.query(`UPDATE gm_member_address SET is_default='N',updated_at=NOW() WHERE member_id=$1 AND address_id<>$2 AND is_default='Y'`,[p.member_id,addressId]);
+      const ar=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'Y',NOW(),NOW())
+        ON CONFLICT (address_id) DO UPDATE SET address_name=EXCLUDED.address_name,receiver_name=EXCLUDED.receiver_name,receiver_phone=EXCLUDED.receiver_phone,receiver_mobile=EXCLUDED.receiver_mobile,zipcode=EXCLUDED.zipcode,address1=EXCLUDED.address1,address2=EXCLUDED.address2,address_old=EXCLUDED.address_old,address_full=EXCLUDED.address_full,sido=EXCLUDED.sido,sigungu=EXCLUDED.sigungu,eup_myeon_dong=EXCLUDED.eup_myeon_dong,customs_clearance_code=EXCLUDED.customs_clearance_code,delivery_memo=EXCLUDED.delivery_memo,is_default='Y',updated_at=NOW() RETURNING *`,
+        [addressId,p.member_id,'기본배송지',sourceAddress.receiver_name,sourceAddress.receiver_phone,sourceAddress.receiver_mobile,sourceAddress.zipcode,sourceAddress.address1,sourceAddress.address2,sourceAddress.address_old,sourceAddress.address_full,sourceAddress.sido,sourceAddress.sigungu,sourceAddress.eup_myeon_dong,sourceAddress.customs_clearance_code,sourceAddress.delivery_memo]);
+      address=ar.rows[0]||null;
+    }else{
+      const ar=await client.query(`SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC,last_used_at DESC NULLS LAST,updated_at DESC,created_at DESC LIMIT 1`,[p.member_id]);
+      address=ar.rows[0]||null;
+    }
     await client.query('COMMIT');
     res.json({ok:true,member:redactMember(mr.rows[0]),default_address:address,is_new_member:isNewMember,recommender_attach_pending:attachRecommender});
     if(isNewMember && req.app.locals.eventQueue){
