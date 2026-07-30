@@ -230,11 +230,6 @@ function parseMaybeJsonAny(v){
   }
   return null;
 }
-function addIfMissingField(dst, key, val){
-  if(val === undefined || val === null) return;
-  const empty = dst[key] === undefined || dst[key] === null || (typeof dst[key] === 'string' && cleanText(dst[key]) === '') || (Array.isArray(dst[key]) && dst[key].length === 0);
-  if(empty) dst[key] = val;
-}
 function collectPayloadContainers(raw, maxDepth=4){
   const out=[]; const seen=new Set();
   const visit=(v, depth)=>{
@@ -511,20 +506,6 @@ function pickThumbUrl(p){
   );
 }
 
-function pickOptionName(p){
-  return cleanText(
-    p.option_name || p.optionName || p.display_option_name || p.displayOptionName ||
-    p.selected_option_name || p.selectedOptionName || p.sku_name || p.skuName ||
-    p.variant_name || p.variantName || p.optionTitle || p.option_title || ''
-  );
-}
-function pickOptionValue(p){
-  return cleanText(
-    p.option_value || p.optionValue || p.display_option_value || p.displayOptionValue ||
-    p.selected_option_value || p.selectedOptionValue || p.sku_value || p.skuValue ||
-    p.variant_value || p.variantValue || p.optionText || p.option_text || ''
-  );
-}
 function pickDeliveryTextDirect(p){
   return firstNonEmpty(p || {}, ['delivery_eta_text','deliveryEtaText','deliveryRangeText','delivery_range_text','deliveryDateText','delivery_date_text','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
 }
@@ -739,7 +720,6 @@ function normalizeProductPayload(raw, parent={}){
   return { p, id:{ productId, itemId, vendorItemId, mallCode, pi, uid }, productName };
 }
 
-function jsonCleanText(v){ return cleanText(v); }
 function safeJsonString(v){
   try{
     if(v === undefined || v === null || v === '') return '[]';
@@ -1139,9 +1119,6 @@ function normalizeOptionJson(p, id){
 
 // GM_PRODUCT_OPTION_TABLE_V001
 // 옵션은 상품 JSON에 중복 저장하지 않고 gm_product_option에만 운영 컬럼으로 저장한다.
-function makeEmptyOptionJson(){
-  return { iid_vid:'' };
-}
 function makeProductOptionLinkJson(optionJson, id){
   optionJson = optionJson || {}; id = id || {};
   const vals = [];
