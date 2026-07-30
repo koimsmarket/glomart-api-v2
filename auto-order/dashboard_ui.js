@@ -40,9 +40,17 @@
   }
 
   async function getJson(url){
-    const r = await fetch(url, {credentials:'include', headers:{Accept:'application/json'}});
-    if (!r.ok) throw new Error(String(r.status));
-    return r.json();
+    const r = await fetch(url, {
+      credentials:'include',
+      cache:'no-store',
+      headers:{Accept:'application/json'}
+    });
+    const text = await r.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (_) {}
+    if (!r.ok) throw new Error(`${url} HTTP ${r.status}: ${body?.detail || body?.error || text.slice(0,160) || 'request failed'}`);
+    if (!body || body.ok === false) throw new Error(`${url}: ${body?.detail || body?.error || 'invalid response'}`);
+    return body;
   }
 
   function setValue(id, value){
@@ -169,9 +177,21 @@
       getJson(API.clients),
       getJson(API.attention)
     ]);
+    const errors = [];
     if (result[0].status === 'fulfilled') setSummary(result[0].value.data || result[0].value);
+    else errors.push('summary: ' + result[0].reason?.message);
+
     if (result[1].status === 'fulfilled') setClients(result[1].value.data || result[1].value);
+    else errors.push('clients: ' + result[1].reason?.message);
+
     if (result[2].status === 'fulfilled') setAttention(result[2].value.data || result[2].value);
+    else errors.push('attention: ' + result[2].reason?.message);
+
+    if (errors.length) {
+      console.error('[GM_DASHBOARD_API_ERROR_V011]', errors);
+      $('realtimeUpdated').textContent = '데이터 연결 오류 - Console 확인';
+      toast(errors[0]);
+    }
   }
 
   $('searchForm').addEventListener('submit', e => {

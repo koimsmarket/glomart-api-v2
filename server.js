@@ -120,7 +120,7 @@ const gmAutoOrderSend = (rel) => (req, res) => res.sendFile(path.join(GM_AUTO_OR
 app.get(['/auto-order', '/auto-order/'], gmAutoOrderSend('index.html'));
 app.get('/auto-order/index.html', gmAutoOrderSend('index.html'));
 app.get('/auto-order/dashboard.css', gmAutoOrderSend('dashboard.css'));
-app.get('/auto-order/dashboard.js', gmAutoOrderSend('dashboard.js'));
+app.get('/auto-order/dashboard_ui.js', gmAutoOrderSend('dashboard_ui.js'));
 app.get('/auto-order/manifest.webmanifest', gmAutoOrderSend('manifest.webmanifest'));
 app.get('/auto-order/sw.js', gmAutoOrderSend('sw.js'));
 app.get('/auto-order/icon.svg', gmAutoOrderSend('icon.svg'));
@@ -356,15 +356,15 @@ function makePool(){
 const pool = makePool();
 app.locals.pool = pool;
 
-/* GM_AUTO_ORDER_DASHBOARD_API_MOUNT_V001
- * 외부상품 운영센터 대시보드 API.
- * 실제 외부몰 접속은 하지 않고 Glomart DB만 조회한다.
+/* GM_AUTO_ORDER_DASHBOARD_API_V012
+ * Auto-order dashboard API only.
+ * All dashboard logic stays inside auto-order/routes/auto_order_dashboard.js.
  */
 try {
-  app.use(require('./auto-order/routes/dashboard'));
-  console.log('[GM_AUTO_ORDER_DASHBOARD_API_V001] mounted');
+  app.use(require('./auto-order/routes/auto_order_dashboard'));
+  console.log('[GM_AUTO_ORDER_DASHBOARD_API_V012] mounted');
 } catch (e) {
-  console.error('[GM_AUTO_ORDER_DASHBOARD_API_V001] mount failed:', String(e && e.message || e));
+  console.error('[GM_AUTO_ORDER_DASHBOARD_API_V012] mount failed:', String(e && e.message || e));
 }
 
 let dbReady = false;

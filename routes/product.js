@@ -494,6 +494,17 @@ function buildProductUrlFromId(id){
   return '';
 }
 function pickThumbUrl(p){
+  p=p||{};
+  const detailThumbSources=[
+    p.thumbnailImages,p.topImages,p.mainImages,p.thumbs,p.galleryImages,p.thumbnails
+  ];
+  for(const src of detailThumbSources){
+    const rows=parseThumbPipe(src);
+    for(const x of rows){
+      const u=normalizeUrl(x);
+      if(u) return u;
+    }
+  }
   return normalizeUrl(
     p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl ||
     p.thumbnail || p.thumbnail_url || p.thumbnailUrl || p.image || p.image_url || p.imageUrl || p.img || p.img_url || p.imgUrl
@@ -939,9 +950,11 @@ function parseThumbPipe(v){
 function thumbPipeCount(v){ return parseThumbPipe(v).length; }
 function normalizeThumbJson(p){
   p=p||{};
-  const main=normalizeUrl(p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl || p.thumbnail || p.image || p.mainImage || '');
+  const main=pickThumbUrl(p);
   const candidates=[];
-  [p.thumb_pipe,p.thumbPipe,p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.topImages,p.mainImages,p.thumbs].forEach((a)=>{
+  // 상세 수집 배열을 우선 사용한다. 대표 1번은 pickThumbUrl()이 가져가고,
+  // 여기에는 같은 배열의 2~10번 이미지만 남는다.
+  [p.thumbnailImages,p.topImages,p.mainImages,p.thumbs,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.images,p.thumb_pipe,p.thumbPipe,p.thumb_json,p.thumbJson].forEach((a)=>{
     parseThumbPipe(a).forEach(x=>candidates.push(x));
   });
   const out=[]; const seen=new Set();
