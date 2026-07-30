@@ -642,26 +642,125 @@ function basketSelectSql(where){
   return `SELECT *, (mall_code || '_' || pi_ii_vi) AS product_uid FROM gm_basket ${where || ''}`;
 }
 
-app.get('/', (req,res)=>{
+app.get('/', async (req,res)=>{
   const routes = [
     'GET /health','GET /api/gm/health','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
     'GET /api/gm/dashboard/realtime','POST /api/gm/dashboard/snapshot','POST /api/gm/search/log',
     'POST /api/gm/product/queue','POST /api/gm/product/upsert','POST /api/gm/keyword/translate','GET /api/gm/keyword/lookup',
     'GET /api/gm/builder/export','GET /api/gm/builder/export-all','GET /gm_data_builder.html'
   ];
+
   const wantsJson = /application\/json/i.test(String(req.headers.accept||'')) && !/text\/html/i.test(String(req.headers.accept||''));
-  if(wantsJson) return ok(res,{ service:'glomart-api', mode:'json-cache-plus-postgresql', dbReady, dbError, routes });
+
+  let liveDbOk = false;
+  let liveDbError = '';
+  let liveDbTime = null;
+  let builderState = null;
+
+  try{
+    const db = await pool.query('SELECT NOW() AS now');
+    liveDbOk = true;
+    liveDbTime = db && db.rows && db.rows[0] ? db.rows[0].now : null;
+  }catch(e){
+    liveDbError = String(e && e.message || e);
+  }
+
+  if(liveDbOk){
+    try{
+      const built = await buildDashboardRealtime(Date.now());
+      builderState = built && built.current ? built.current : null;
+    }catch(e){
+      console.error('[GM_ROOT_BUILDER_STATUS_V016]', String(e && e.message || e));
+    }
+  }
+
+  if(wantsJson){
+    return ok(res,{
+      service:'glomart-api',
+      mode:'json-cache-plus-postgresql',
+      dbReady:liveDbOk,
+      dbError:liveDbError,
+      migrationWarning:dbError || '',
+      dbTime:liveDbTime,
+      builder:builderState,
+      routes
+    });
+  }
+
   const esc = v => String(v==null?'':v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const routeHtml = routes.map(r=>{ const m=String(r).match(/^(GET|POST)\s+(.+)$/); const path=m?m[2]:r; const isGet=/^GET /.test(r); return `<li><b>${esc(m?m[1]:'')}</b> ${isGet?`<a href="${esc(path)}">${esc(path)}</a>`:esc(path)}</li>`; }).join('');
+  const routeHtml = routes.map(r=>{
+    const m=String(r).match(/^(GET|POST)\s+(.+)$/);
+    const path=m?m[2]:r;
+    const isGet=/^GET /.test(r);
+    return `<li><b>${esc(m?m[1]:'')}</b> ${isGet?`<a href="${esc(path)}">${esc(path)}</a>`:esc(path)}</li>`;
+  }).join('');
+
+  const q = builderState && builderState.queue ? builderState.queue : {};
+  const d = builderState && builderState.db_size ? builderState.db_size : {};
+  const w = builderState && builderState.warning ? builderState.warning : {};
+  const apiMs = builderState && builderState.api_response_ms != null ? builderState.api_response_ms : null;
+
+  const dbUsage = d.percent == null ? '-' : `${Number(d.percent).toLocaleString('ko-KR')}%`;
+  const dbMb = d.mb == null ? '-' : `${Number(d.mb).toLocaleString('ko-KR')} MB`;
+  const queuePending = Number(q.pending || 0).toLocaleString('ko-KR');
+  const queueFailed = Number(q.failed || 0).toLocaleString('ko-KR');
+  const queueDone = Number(q.done || 0).toLocaleString('ko-KR');
+  const queueTotal = Number(q.total || 0).toLocaleString('ko-KR');
+  const builderLevel = [w.db,w.queue,w.worker].some(x=>String(x||'').toLowerCase()==='danger')
+    ? '위험'
+    : [w.db,w.queue,w.worker].some(x=>String(x||'').toLowerCase()==='warning')
+      ? '확인 필요'
+      : '정상';
+
   res.setHeader('Content-Type','text/html; charset=utf-8');
   res.end(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Glomart API Status</title>
-  <style>body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;color:#111}.wrap{max-width:980px;margin:30px auto;padding:0 18px}.card{background:#fff;border:1px solid #dde3ea;border-radius:16px;padding:22px;margin:14px 0;box-shadow:0 6px 22px rgba(0,0,0,.06)}h1{margin:0 0 16px}.grid{display:grid;grid-template-columns:160px 1fr;gap:10px 14px}.ok{color:#078a2f;font-weight:900}.ng{color:#c1121f;font-weight:900}.btn{display:inline-block;padding:10px 14px;margin:4px 6px 4px 0;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:800}.gray{background:#4b5563}.red{background:#b91c1c}ul{columns:2;line-height:1.8}code{word-break:break-all}</style></head><body><div class="wrap">
-  <div class="card"><h1>Glomart API Status</h1><div class="grid">
-  <b>서버 상태</b><span class="ok">OK</span>
-  <b>DB 상태</b><span class="${dbReady?'ok':'ng'}">${dbReady?'OK':'ERROR'}</span>
-  <b>DB 오류</b><code>${esc(dbError||'-')}</code>
-  <b>버전</b><code>${esc(VERSION)}</code>
-  </div><p><a class="btn" href="/api/gm/health">Health 확인</a><a class="btn gray" href="/gm_data_builder.html">Data Builder 열기</a><a class="btn red" href="/api/gm/builder/export-all?limit=50000">전체 CSV ZIP</a></p></div>
+  <style>
+  body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;color:#111}
+  .wrap{max-width:980px;margin:30px auto;padding:0 18px}
+  .card{background:#fff;border:1px solid #dde3ea;border-radius:16px;padding:22px;margin:14px 0;box-shadow:0 6px 22px rgba(0,0,0,.06)}
+  h1{margin:0 0 16px}.grid{display:grid;grid-template-columns:160px 1fr;gap:10px 14px}
+  .ok{color:#078a2f;font-weight:900}.ng{color:#c1121f;font-weight:900}.warn{color:#b26a00;font-weight:900}
+  .btn{display:inline-block;padding:10px 14px;margin:4px 6px 4px 0;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none;font-weight:800}
+  .gray{background:#4b5563}.red{background:#b91c1c}.green{background:#0b8f3c}
+  ul{columns:2;line-height:1.8}code{word-break:break-all}
+  .status-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}
+  .status-box{background:#f8fafc;border:1px solid #e3e7ec;border-radius:10px;padding:13px}
+  .status-box span{display:block;color:#6b7280;font-size:12px;margin-bottom:7px}
+  .status-box strong{font-size:18px}
+  @media(max-width:760px){.status-grid{grid-template-columns:repeat(2,1fr)}ul{columns:1}}
+  </style></head><body><div class="wrap">
+
+  <div class="card">
+    <h1>Glomart API Status</h1>
+    <div class="grid">
+      <b>서버 상태</b><span class="ok">OK</span>
+      <b>DB 연결</b><span class="${liveDbOk?'ok':'ng'}">${liveDbOk?'OK':'ERROR'}</span>
+      <b>DB 연결 오류</b><code>${esc(liveDbError||'-')}</code>
+      <b>Migration 경고</b><code class="${dbError?'warn':''}">${esc(dbError||'-')}</code>
+      <b>버전</b><code>${esc(VERSION)}</code>
+    </div>
+    <p>
+      <a class="btn" href="/api/gm/health">Health 확인</a>
+      <a class="btn green" href="/gm_data_builder.html">GM Safe Update Builder 열기</a>
+      <a class="btn gray" href="/api/gm/dashboard/realtime">Builder 상태 JSON</a>
+      <a class="btn red" href="/api/gm/builder/export-all?limit=50000">전체 CSV ZIP</a>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>GM Safe Update Builder 상태</h2>
+    <div class="status-grid">
+      <div class="status-box"><span>Builder 상태</span><strong>${esc(builderLevel)}</strong></div>
+      <div class="status-box"><span>DB 사용률</span><strong>${esc(dbUsage)}</strong><small>${esc(dbMb)}</small></div>
+      <div class="status-box"><span>Queue</span><strong>${queuePending} 대기</strong><small>전체 ${queueTotal}</small></div>
+      <div class="status-box"><span>Queue 실패</span><strong>${queueFailed}</strong><small>완료 ${queueDone}</small></div>
+      <div class="status-box"><span>API 응답</span><strong>${apiMs==null?'-':esc(apiMs+' ms')}</strong></div>
+      <div class="status-box"><span>DB 기준 용량</span><strong>${d.limit_mb==null?'-':esc(Number(d.limit_mb).toLocaleString('ko-KR')+' MB')}</strong></div>
+      <div class="status-box"><span>마지막 처리</span><strong style="font-size:12px">${esc(q.last_processed_at||'-')}</strong></div>
+      <div class="status-box"><span>DB 시간</span><strong style="font-size:12px">${esc(liveDbTime||'-')}</strong></div>
+    </div>
+  </div>
+
   <div class="card"><h2>주요 라우트</h2><ul>${routeHtml}</ul></div>
   </div></body></html>`);
 })
