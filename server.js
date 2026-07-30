@@ -355,6 +355,18 @@ function makePool(){
 
 const pool = makePool();
 app.locals.pool = pool;
+
+/* GM_AUTO_ORDER_DASHBOARD_API_MOUNT_V001
+ * 외부상품 운영센터 대시보드 API.
+ * 실제 외부몰 접속은 하지 않고 Glomart DB만 조회한다.
+ */
+try {
+  app.use(require('./auto-order/routes/dashboard'));
+  console.log('[GM_AUTO_ORDER_DASHBOARD_API_V001] mounted');
+} catch (e) {
+  console.error('[GM_AUTO_ORDER_DASHBOARD_API_V001] mount failed:', String(e && e.message || e));
+}
+
 let dbReady = false;
 let dbError = '';
 

@@ -1084,7 +1084,7 @@ function normalizeOptionJson(p, id){
       const uid=uid0 || (id.mallCode && pi0 ? id.mallCode + '_' + pi0 : pi0);
       const name0=cleanText(r[4] || r[5] || p.optionName || p.product_name || p.productName || '기본옵션');
       if(!uid && !name0) return;
-      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
+      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),normalizeDeliveryTerm(r[9]||'',p),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
       return;
     }
     if(!r || typeof r !== 'object') return;
@@ -1102,7 +1102,7 @@ function normalizeOptionJson(p, id){
     const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.delivery_type || r.shipType || p.shippingLabel || p.deliveryType || p.delivery_type || '');
     const img = normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.colorImage || r.image || r.thumbnail || r.thumb || '');
     const sold = !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || r.sale_status || '')));
-    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryRangeText || r.delivery_range_text || r.deliveryDateText || r.delivery_date_text || r.arrivalText || r.etaText || p.delivery_eta_text || p.deliveryEtaText || p.deliveryRangeText || p.delivery_range_text || p.deliveryDateText || p.delivery_date_text || p.arrivalText || p.deliveryText || p.shippingText || p.etaText || ''),img,sold,cleanText(r.source || '')]);
+    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,normalizeDeliveryTerm(r.delivery_eta_text || r.deliveryEtaText || r.deliveryRangeText || r.delivery_range_text || r.deliveryDateText || r.delivery_date_text || r.arrivalText || r.etaText || p.delivery_eta_text || p.deliveryEtaText || p.deliveryRangeText || p.delivery_range_text || p.deliveryDateText || p.delivery_date_text || p.arrivalText || p.deliveryText || p.shippingText || p.etaText || '',p),img,sold,cleanText(r.source || '')]);
   }));
 
   // 검색결과 payload에는 옵션배열이 없지만 현재 리스트 행 자체가 대표 판매옵션이다.
@@ -1112,7 +1112,7 @@ function normalizeOptionJson(p, id){
     const uid = cleanText(id.mallCode && id.pi ? id.mallCode + '_' + id.pi : id.pi);
     rows.push([
       uid, id.productId, id.itemId || '', id.vendorItemId || id.productId, name,
-      pickPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryText(p),
+      pickPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryTerm(p),
       normalizeUrl(p.option_image_url || p.optionImageUrl || p.thumb_origin_url || p.thumbOriginUrl || p.thumbnail || p.image || ''),
       /품절|sold\s*out/i.test(cleanText(p.soldout_yn || p.soldoutYn || p.soldout || p.sale_status || '')),
       'search-row'

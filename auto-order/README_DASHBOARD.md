@@ -18,3 +18,16 @@ Glomart 대시보드를 같은 순서와 정보 밀도로 재구성했습니다.
 ## 외부몰 접속 원칙
 서버는 쿠팡/알리에 직접 접속하지 않습니다.
 실제 외부몰 작업은 지정 관리자 PC 또는 Android 클라이언트가 수행합니다.
+
+
+## V007 데이터 연결
+신규 서버 라우트:
+- GET /api/auto-order/dashboard/summary
+- GET /api/auto-order/dashboard/clients
+- GET /api/auto-order/dashboard/attention
+
+현재 summary/attention은 gm_order / gm_order_item을 실제 조회합니다.
+DB 스키마 차이에 대응하기 위해 존재하는 컬럼만 동적으로 사용합니다.
+
+실행기(client) 데이터는 아직 서버 Client Registry가 없으므로 빈 배열을 반환합니다.
+다음 자동주문 연결 단계에서 PC PWA / Android 실행기 heartbeat와 함께 연결합니다.
