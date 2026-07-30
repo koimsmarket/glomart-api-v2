@@ -19,7 +19,7 @@ function enqueueAfterResponse(label, task){
   if(typeof setImmediate==='function') setImmediate(run);
   else setTimeout(run,0);
 }
-const VERSION = 'GM_ORDER_ROUTE_V040_DIRECT_FIRST_QUEUE_FALLBACK';
+const VERSION = 'GM_ORDER_ROUTE_V041_SERVER_ONLY_SUPPLY_PRICE';
 
 async function applyOrderCompletedDirect(req,orderNo,meta){
   const pool=db(req);
@@ -185,6 +185,57 @@ function sourceUidFrom(v, mall, key){
   if(!k) return '';
   const m = clean(mall).toUpperCase();
   return m && k.indexOf(m + '_') !== 0 ? m + '_' + k : k;
+}
+
+/*
+ * 외부상품 원가는 주문서/장바구니 payload에서 받지 않는다.
+ * 상세 수집 시 gm_product_option에 저장된 공급처 실제가격(mall_sale_price)을
+ * 주문 생성 시 서버에서 정확한 옵션 UID(pi_ii_vi)로만 조회해 스냅샷으로 저장한다.
+ * 정확한 옵션행이 없거나 가격이 없으면 추정/fallback 없이 NULL로 둔다.
+ */
+function sourcePiKey(v, mall){
+  let key = clean(v);
+  const m = clean(mall).toUpperCase();
+  if(m && key.toUpperCase().indexOf(m + '_') === 0) key = key.slice(m.length + 1);
+  return key;
+}
+async function resolveSupplyPriceFromExactOption(client, src, mallCode, sourceMall, sourceUid, pi){
+  const mall = clean(sourceMall || mallCode).toUpperCase();
+  if(!mall || mall === 'GMKR' || mall === 'CAFE24' || mall === 'INTERNAL'){
+    return { price:null, source:'INTERNAL', key:'' };
+  }
+
+  const candidates = [];
+  function add(v){
+    const key = sourcePiKey(v, mall);
+    if(key && candidates.indexOf(key) < 0) candidates.push(key);
+  }
+  add(itemVal(src, ['pi_ii_vi','piIiVi'], ''));
+  add(sourceUid);
+  add(itemVal(src, ['source_uid','sourceUid','product_uid','productUid','uid'], ''));
+  add(pi);
+
+  for(const key of candidates){
+    const r = await client.query(`
+      SELECT pi_ii_vi, mall_sale_price
+        FROM gm_product_option
+       WHERE mall_code=$1 AND pi_ii_vi=$2
+       LIMIT 1
+    `, [mall, key]);
+    if(!r.rows[0]) continue;
+    const price = money(r.rows[0].mall_sale_price, 0);
+    if(price > 0) return { price, source:'gm_product_option.mall_sale_price', key };
+    return { price:null, source:'OPTION_PRICE_EMPTY', key };
+  }
+
+  return { price:null, source:'OPTION_NOT_FOUND', key:candidates[0] || '' };
+}
+function publicOrderItems(rows){
+  return (rows || []).map(row => {
+    const out = Object.assign({}, row);
+    delete out.final_supply_price;
+    return out;
+  });
 }
 function addrVal(raw, keys){ return clean(pick(raw, keys, pick(raw.address || {}, keys, ''))); }
 function totalVal(raw, keys, def){ return money(pick(raw, keys, pick(raw.totals || {}, keys, def)), def); }
@@ -379,6 +430,18 @@ async function replaceOrderItems(client, orderRow, inputItems){
     const amount = money(itemVal(src, ['product_amount','amount','line_amount'], 0), 0) || (unit * qty);
     const sourceMall = sourceMallFrom(itemVal(src, ['source_mall','sourceMall','source_code','sourceCode'], ''), itemVal(src, ['source_uid','sourceUid'], ''), itemVal(src, ['product_url','source_url','url'], ''), mallCode);
     const sourceUid = sourceUidFrom(itemVal(src, ['source_uid','sourceUid','product_uid','uid'], ''), sourceMall, itemVal(src, ['source_key','sourceKey','key'], '')) || pi;
+    const supply = await resolveSupplyPriceFromExactOption(client, src, mallCode, sourceMall, sourceUid, pi);
+    try{
+      console.log('[GM_ORDER_SUPPLY_PRICE]', JSON.stringify({
+        order_no:orderRow.order_no,
+        mall:sourceMall || mallCode,
+        pi_ii_vi:sourcePiKey(pi, sourceMall || mallCode),
+        source_uid:sourceUid,
+        final_supply_price:supply.price,
+        source:supply.source,
+        lookup_key:supply.key || ''
+      }));
+    }catch(_supplyLog){}
     const inserted = await client.query(`
       INSERT INTO gm_order_item (
         order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
@@ -394,7 +457,7 @@ async function replaceOrderItems(client, orderRow, inputItems){
       orderRow.order_no, pi, clean(itemVal(src, ['product_name','productName','name','title'], '')),
       clean(itemVal(src, ['option_name','optionName'], '')), clean(itemVal(src, ['option_value','optionValue','selected_option','selectedOption'], '')),
       qty, mallUnit || unit, unit,
-      itemVal(src, ['final_supply_price','supply_price'], null) == null ? null : money(itemVal(src, ['final_supply_price','supply_price'], null), 0),
+      supply.price,
       amount, clean(itemVal(src, ['delivery_type','ship_type','shipping_type'], '')),
       money(itemVal(src, ['delivery_fee','shipping_fee'], 0), 0), money(itemVal(src, ['extra_area_delivery_fee','extra_fee'], 0), 0),
       mallCode, clean(itemVal(src, ['supplier_id','supplierId'], '')), clean(itemVal(src, ['supplier_name','supplierName','seller','seller_name'], '')),
@@ -580,7 +643,7 @@ router.get('/api/gm/order/get', async (req, res) => {
   try{
     const order = await pool.query('SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1', [orderNo]);
     const items = await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC', [orderNo]);
-    ok(res, { action:'order.get', order:order.rows[0] || null, items:items.rows || [] });
+    ok(res, { action:'order.get', order:order.rows[0] || null, items:publicOrderItems(items.rows) });
   }catch(e){
     console.error('[GM_ORDER_GET_ERROR]', String(e && e.message || e));
     fail(res, 500, 'order get failed', { detail:String(e && e.message || e) });
@@ -617,7 +680,7 @@ router.get('/api/order/:order_no', async (req,res)=>{
   try{
     const order = await pool.query('SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1', [req.params.order_no]);
     const items = await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC', [req.params.order_no]);
-    ok(res, { action:'order.get', order:order.rows[0] || null, items:items.rows || [] });
+    ok(res, { action:'order.get', order:order.rows[0] || null, items:publicOrderItems(items.rows) });
   }catch(e){ fail(res, 500, 'order get failed', { detail:String(e && e.message || e) }); }
 });
 module.exports = router;

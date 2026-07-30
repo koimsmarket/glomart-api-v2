@@ -109,6 +109,35 @@ app.get('/download/android/glomart_v1.0.apk', (req, res) => {
 app.use(express.static(GM_PUBLIC_DIR));
 app.use('/public', express.static(GM_PUBLIC_DIR));
 
+/* GM_AUTO_ORDER_DASHBOARD_V005
+ * auto-order contains both browser-side runner files and future server-side
+ * routes/services/workers. Never expose the whole auto-order directory.
+ * Only the admin UI and browser runner paths below are public.
+ */
+const GM_AUTO_ORDER_DIR = path.join(__dirname, 'auto-order');
+const gmAutoOrderSend = (rel) => (req, res) => res.sendFile(path.join(GM_AUTO_ORDER_DIR, rel));
+
+app.get(['/auto-order', '/auto-order/'], gmAutoOrderSend('index.html'));
+app.get('/auto-order/index.html', gmAutoOrderSend('index.html'));
+app.get('/auto-order/dashboard.css', gmAutoOrderSend('dashboard.css'));
+app.get('/auto-order/dashboard.js', gmAutoOrderSend('dashboard.js'));
+app.get('/auto-order/manifest.webmanifest', gmAutoOrderSend('manifest.webmanifest'));
+app.get('/auto-order/sw.js', gmAutoOrderSend('sw.js'));
+app.get('/auto-order/icon.svg', gmAutoOrderSend('icon.svg'));
+
+app.get('/auto-order/order/order.html', gmAutoOrderSend(path.join('order', 'order.html')));
+app.get('/auto-order/auto/auto_order.html', gmAutoOrderSend(path.join('auto', 'auto_order.html')));
+app.get('/auto-order/delivery/delivery.html', gmAutoOrderSend(path.join('delivery', 'delivery.html')));
+app.get('/auto-order/claim/claim.html', gmAutoOrderSend(path.join('claim', 'claim.html')));
+app.get('/auto-order/cs/cs.html', gmAutoOrderSend(path.join('cs', 'cs.html')));
+
+/* Client runner assets only. Server-side auto-order folders are not exposed. */
+app.use('/auto-order/js', express.static(path.join(GM_AUTO_ORDER_DIR, 'js'), {
+  etag: true,
+  maxAge: 0
+}));
+app.get('/auto-order/GM_AUTO_ORDER.user.js', gmAutoOrderSend('GM_AUTO_ORDER.user.js'));
+
 /* GM_HEALTH_V004_DB_RUNTIME
  * Cloudtype / UptimeRobot 운영용 health endpoint.
  * Must be registered directly in the entry file before route modules.
