@@ -40,135 +40,151 @@
   </aside>
 
   <main class="main">
-    <section class="page-head">
+    <section class="page-head cafe-page-head">
       <div>
         <h1>주문 대시보드</h1>
-        <p>외부상품 주문 · 자동주문 · 배송 · 클레임 · CS 통합 현황</p>
       </div>
       <button id="refreshBtn" class="btn" type="button">새로고침</button>
     </section>
 
-    <section class="ops-strip panel">
-      <div class="mode-block">
-        <span class="label">자동주문 모드</span>
-        <strong id="modeText">SEMI_AUTO</strong>
-        <span class="badge">결제 수동</span>
-      </div>
-      <div class="ops-item">
-        <span>실행기 온라인</span>
-        <b id="clientOnline">0</b><em>대</em>
-      </div>
-      <div class="ops-item">
-        <span>쿠팡 준비</span>
-        <b id="cpkrReady">0</b><em>대</em>
-      </div>
-      <div class="ops-item">
-        <span>알리 준비</span>
-        <b id="alkrReady">0</b><em>대</em>
-      </div>
-      <div class="ops-item alert">
-        <span>결제대기</span>
-        <b id="paymentWaiting">0</b><em>건</em>
-      </div>
+    <section class="easy-search" aria-label="주문 조건검색">
+      <label class="sr-only" for="searchType">검색 조건</label>
+      <select id="searchType" class="search-select">
+        <option value="order_no">Glomart 주문번호</option>
+        <option value="source_order_no">원몰 주문번호</option>
+        <option value="mobile">휴대폰 번호</option>
+        <option value="customer_name">고객명</option>
+        <option value="product_name">상품명</option>
+      </select>
+      <form id="searchForm" class="search-form">
+        <label class="sr-only" for="searchKeyword">검색어</label>
+        <input id="searchKeyword" type="search" autocomplete="off" placeholder="검색어를 입력하세요">
+        <button class="search-btn" type="submit" aria-label="검색">⌕</button>
+      </form>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>실시간 주문 현황</h2>
-        <span>오늘 00:00 ~ 현재</span>
-      </div>
-      <div class="summary-grid">
-        <button class="summary-card" data-target="orders-today">
-          <span>오늘 주문</span><strong id="todayOrders">0</strong><em>건</em>
-        </button>
-        <div class="summary-card">
-          <span>오늘 주문금액</span><strong id="todayAmount">0</strong><em>원</em>
+    <section class="panel cafe-card">
+      <div class="panel-head cafe-card-head">
+        <div class="head-line">
+          <h2>실시간 매출 현황</h2>
+          <span id="realtimeUpdated">최종 업데이트 일시 : - (실시간 조회)</span>
         </div>
-        <button class="summary-card" data-target="auto-success">
-          <span>자동주문 완료</span><strong id="autoSuccess">0</strong><em>건</em>
-        </button>
-        <button class="summary-card" data-target="delivered">
-          <span>배송완료</span><strong id="delivered">0</strong><em>건</em>
-        </button>
+        <button class="btn compact" data-target="realtime-orders" type="button">실시간 주문 현황 보기</button>
       </div>
-    </section>
 
-    <section class="panel attention">
-      <div class="panel-head">
-        <h2>처리 필요</h2>
-        <span class="danger">자동처리되지 않았거나 관리자 판단이 필요한 건</span>
-      </div>
-      <div class="task-grid">
-        <button data-target="auto-failed"><span>자동주문 실패</span><strong id="autoFailed">0</strong></button>
-        <button data-target="login-required"><span>로그인 필요</span><strong id="loginRequired">0</strong></button>
-        <button data-target="payment-waiting"><span>결제대기</span><strong id="paymentWaiting2">0</strong></button>
-        <button data-target="price-changed"><span>가격변경</span><strong id="priceChanged">0</strong></button>
-        <button data-target="stock-error"><span>품절/옵션 오류</span><strong id="stockError">0</strong></button>
-        <button data-target="no-invoice"><span>송장 미확보</span><strong id="noInvoice">0</strong></button>
-        <button data-target="delivery-delay"><span>배송지연</span><strong id="deliveryDelay">0</strong></button>
-        <button data-target="claims"><span>취소/교환/반품</span><strong id="claimPending">0</strong></button>
-        <button data-target="cs"><span>미처리 CS</span><strong id="pendingCs">0</strong></button>
-      </div>
-    </section>
-
-    <div class="two-col">
-      <section class="panel">
-        <div class="panel-head"><h2>주문 · 배송 현황</h2></div>
-        <div class="status-list">
-          <button data-target="received"><span>주문접수</span><strong id="received">0</strong></button>
-          <button data-target="auto-waiting"><span>자동주문 대기</span><strong id="autoWaiting">0</strong></button>
-          <button data-target="preparing"><span>상품준비</span><strong id="preparing">0</strong></button>
-          <button data-target="shipping"><span>배송중</span><strong id="shipping">0</strong></button>
-          <button data-target="delivered"><span>배송완료</span><strong id="delivered2">0</strong></button>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head"><h2>오늘 자동 처리</h2></div>
-        <div class="status-list plain">
-          <div><span>쿠팡 자동주문</span><strong id="coupangAuto">0</strong></div>
-          <div><span>원몰 주문번호 수집</span><strong id="sourceOrderCollected">0</strong></div>
-          <div><span>송장 자동수집</span><strong id="invoiceCollected">0</strong></div>
-          <div><span>배송상태 자동갱신</span><strong id="deliveryUpdated">0</strong></div>
-          <div><span>자동 후처리</span><strong id="autoPostProcess">0</strong></div>
-        </div>
-      </section>
-    </div>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2>자동주문 실행기</h2>
-        <button class="link-btn" data-target="clients">관리</button>
-      </div>
-      <div class="table-wrap">
-        <table>
+      <div class="sales-table-wrap">
+        <table class="sales-table">
           <thead>
             <tr>
-              <th>실행기</th><th>형태</th><th>관리자</th><th>쿠팡</th><th>알리</th><th>현재 작업</th><th>마지막 연결</th>
+              <th>구분</th>
+              <th>오늘</th>
+              <th>이번 달</th>
+              <th>바로가기</th>
             </tr>
           </thead>
-          <tbody id="clientRows">
-            <tr class="empty"><td colspan="7">등록된 실행기 데이터가 없습니다.</td></tr>
+          <tbody>
+            <tr class="highlight">
+              <th>총 주문 금액</th>
+              <td><strong id="todayOrderAmount">0</strong><em>원</em><a href="./order/order.html?period=today" class="count-link"><span id="todayOrders">0</span>건</a></td>
+              <td><strong id="monthOrderAmount">0</strong><em>원</em><a href="./order/order.html?period=month" class="count-link"><span id="monthOrders">0</span>건</a></td>
+              <td><a class="mini-btn" href="./order/order.html">주문조회</a></td>
+            </tr>
+            <tr>
+              <th>총 실 결제 금액</th>
+              <td><strong id="todayPaidAmount">0</strong><em>원</em><a href="./order/order.html?filter=paid&period=today" class="count-link"><span id="todayPaidCount">0</span>건</a></td>
+              <td><strong id="monthPaidAmount">0</strong><em>원</em><a href="./order/order.html?filter=paid&period=month" class="count-link"><span id="monthPaidCount">0</span>건</a></td>
+              <td><a class="mini-btn" href="./order/order.html?filter=paid">결제조회</a></td>
+            </tr>
+            <tr>
+              <th>총 환불 금액</th>
+              <td><strong id="todayRefundAmount">0</strong><em>원</em><a href="./claim/claim.html?filter=refund&period=today" class="count-link"><span id="todayRefundCount">0</span>건</a></td>
+              <td><strong id="monthRefundAmount">0</strong><em>원</em><a href="./claim/claim.html?filter=refund&period=month" class="count-link"><span id="monthRefundCount">0</span>건</a></td>
+              <td><a class="mini-btn" href="./claim/claim.html?filter=refund">환불조회</a></td>
+            </tr>
           </tbody>
         </table>
       </div>
     </section>
 
+    <section class="panel cafe-card">
+      <div class="panel-head cafe-card-head simple"><h2>오늘의 할 일</h2></div>
+      <div class="todo-grid">
+        <a href="./auto/auto_order.html?filter=waiting" class="todo-item"><span>자동주문대기</span><strong id="autoWaiting">0</strong></a>
+        <a href="./delivery/delivery.html?filter=preparing" class="todo-item"><span>상품준비중</span><strong id="preparing">0</strong></a>
+        <a href="./delivery/delivery.html?filter=hold" class="todo-item"><span>배송보류중</span><strong id="deliveryHold">0</strong></a>
+        <a href="./delivery/delivery.html?filter=ready" class="todo-item"><span>배송준비중</span><strong id="deliveryReady">0</strong></a>
+        <a href="./delivery/delivery.html?filter=shipping" class="todo-item"><span>배송중</span><strong id="shipping">0</strong></a>
+        <a href="./claim/claim.html?filter=cancel" class="todo-item paired"><span>취소신청</span><strong id="cancelRequest">0</strong><small>처리중 <b id="cancelProcessing">0</b></small></a>
+        <a href="./claim/claim.html?filter=exchange" class="todo-item paired"><span>교환신청</span><strong id="exchangeRequest">0</strong><small>처리중 <b id="exchangeProcessing">0</b></small></a>
+        <a href="./claim/claim.html?filter=return" class="todo-item paired"><span>반품신청</span><strong id="returnRequest">0</strong><small>처리중 <b id="returnProcessing">0</b></small></a>
+        <a href="./claim/claim.html?filter=refund_waiting" class="todo-item"><span>환불전</span><strong id="refundWaiting">0</strong></a>
+      </div>
+    </section>
+
+    <section class="panel cafe-card">
+      <div class="panel-head cafe-card-head simple"><h2>오늘 처리한 일</h2></div>
+      <div class="done-grid">
+        <a href="./auto/auto_order.html?filter=success&period=today"><span>자동주문완료</span><strong id="autoSuccess">0</strong></a>
+        <a href="./auto/auto_order.html?filter=payment_done&period=today"><span>결제완료</span><strong id="paymentDone">0</strong></a>
+        <a href="./delivery/delivery.html?filter=ready_done&period=today"><span>배송준비중 처리</span><strong id="deliveryReadyDone">0</strong></a>
+        <a href="./delivery/delivery.html?filter=shipping_started&period=today"><span>배송중 처리</span><strong id="shippingStarted">0</strong></a>
+        <a href="./delivery/delivery.html?filter=delivered&period=today"><span>배송완료</span><strong id="delivered">0</strong></a>
+        <a href="./claim/claim.html?filter=cancel_done&period=today"><span>취소완료</span><strong id="cancelDone">0</strong></a>
+        <a href="./claim/claim.html?filter=exchange_done&period=today"><span>교환완료</span><strong id="exchangeDone">0</strong></a>
+        <a href="./claim/claim.html?filter=return_done&period=today"><span>반품완료</span><strong id="returnDone">0</strong></a>
+        <a href="./claim/claim.html?filter=refund_done&period=today"><span>환불완료</span><strong id="refundDone">0</strong></a>
+      </div>
+    </section>
+
+    <section class="panel auto-ops-card">
+      <div class="panel-head cafe-card-head simple">
+        <h2>자동주문 운영 현황</h2>
+        <span>Glomart 외부상품 전용</span>
+      </div>
+      <div class="ops-strip">
+        <div class="mode-block">
+          <span class="label">자동주문 모드</span>
+          <strong id="modeText">SEMI_AUTO</strong>
+          <span class="badge">결제 수동</span>
+        </div>
+        <div class="ops-item"><span>실행기 온라인</span><b id="clientOnline">0</b><em>대</em></div>
+        <div class="ops-item"><span>쿠팡 준비</span><b id="cpkrReady">0</b><em>대</em></div>
+        <div class="ops-item"><span>알리 준비</span><b id="alkrReady">0</b><em>대</em></div>
+        <div class="ops-item alert"><span>결제대기</span><b id="paymentWaiting">0</b><em>건</em></div>
+      </div>
+      <div class="exception-row">
+        <a href="./auto/auto_order.html?filter=failed"><span>자동주문 실패</span><strong id="autoFailed">0</strong></a>
+        <a href="./auto/auto_order.html?filter=login"><span>로그인 필요</span><strong id="loginRequired">0</strong></a>
+        <a href="./auto/auto_order.html?filter=price"><span>가격변경</span><strong id="priceChanged">0</strong></a>
+        <a href="./auto/auto_order.html?filter=stock"><span>품절/옵션 오류</span><strong id="stockError">0</strong></a>
+        <a href="./delivery/delivery.html?filter=no_invoice"><span>송장 미확보</span><strong id="noInvoice">0</strong></a>
+        <a href="./delivery/delivery.html?filter=delay"><span>배송지연</span><strong id="deliveryDelay">0</strong></a>
+        <a href="./cs/cs.html?filter=pending"><span>미처리 CS</span><strong id="pendingCs">0</strong></a>
+      </div>
+    </section>
+
     <section class="panel">
-      <div class="panel-head">
-        <h2>최근 처리 필요 주문</h2>
-        <button class="link-btn" data-target="attention-orders">전체보기</button>
+      <div class="panel-head cafe-card-head simple">
+        <h2>자동주문 실행기</h2>
+        <a class="text-link" href="./auto/auto_order.html?view=clients">관리</a>
       </div>
       <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>주문일시</th><th>Glomart 주문번호</th><th>판매처</th><th>상품</th><th>자동주문</th><th>배송</th><th>처리 필요</th>
-            </tr>
-          </thead>
-          <tbody id="attentionRows">
-            <tr class="empty"><td colspan="7">처리 필요 주문 데이터가 없습니다.</td></tr>
-          </tbody>
+        <table class="list-table">
+          <thead><tr><th>실행기</th><th>형태</th><th>관리자</th><th>쿠팡</th><th>알리</th><th>현재 작업</th><th>마지막 연결</th></tr></thead>
+          <tbody id="clientRows"><tr class="empty"><td colspan="7">등록된 실행기 데이터가 없습니다.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head cafe-card-head simple">
+        <h2>최근 처리 필요 주문</h2>
+        <a class="text-link" href="./order/order.html?filter=attention">전체보기</a>
+      </div>
+      <div class="table-wrap">
+        <table class="list-table">
+          <thead><tr><th>주문일시</th><th>Glomart 주문번호</th><th>판매처</th><th>상품</th><th>자동주문</th><th>배송</th><th>처리 필요</th></tr></thead>
+          <tbody id="attentionRows"><tr class="empty"><td colspan="7">처리 필요 주문 데이터가 없습니다.</td></tr></tbody>
         </table>
       </div>
     </section>

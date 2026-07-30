@@ -1,35 +1,20 @@
-# GM_AUTO_ORDER_DASHBOARD_V005
+# GM_AUTO_ORDER_DASHBOARD_V006
 
-기준: V004 대시보드 구조 + 기존 auto-order 자동주문 엔진 통합.
+V005 기준. Cafe24 주문 대시보드의 검증된 화면 구조를 참고하여
+Glomart 대시보드를 같은 순서와 정보 밀도로 재구성했습니다.
 
-## 대시보드/관리 화면
-- index.html
-- dashboard.css
-- dashboard.js
-- order/order.html
-- auto/auto_order.html
-- delivery/delivery.html
-- claim/claim.html
-- cs/cs.html
-
-## 기존 자동주문 엔진
-기존 파일을 삭제하지 않고 CPKR V002 기준으로 보강했습니다.
-- GM_AUTO_ORDER.user.js
-- js/GM_AUTO_ORDER_CORE.js
-- js/GM_AUTO_ORDER_QUEUE.js
-- js/GM_AUTO_ORDER_UTIL.js
-- js/cpkr/GM_AUTO_ORDER_CPKR.js
-- js/cpkr/CPKR_CART_CLEAR.js
-- js/cpkr/CPKR_PRODUCT.js
-- js/cpkr/CPKR_CART.js
-- js/cpkr/CPKR_CHECKOUT.js
-
-## 중요 보안 구조
-auto-order 전체 폴더를 express.static으로 공개하지 않습니다.
-server.js는 대시보드 파일과 브라우저 실행용 js/ 경로만 명시적으로 공개합니다.
-향후 auto-order/routes, services, workers, migrations, credentials 등 서버 파일이 생겨도
-웹에서 직접 내려받을 수 없도록 하기 위한 구조입니다.
+## V006 주요 변경
+- 상단 조건검색 추가
+- 실시간 매출 현황을 Cafe24 구조처럼 변경
+  - 총 주문 금액
+  - 총 실 결제 금액
+  - 총 환불 금액
+  - 오늘 / 이번 달 / 바로가기
+- 오늘의 할 일 추가
+- 오늘 처리한 일 추가
+- Glomart 전용 자동주문 운영 현황은 별도 카드로 유지
+- Cafe24 HTML/JS/CSS 내부 코드는 복사하지 않고 신규 작성
 
 ## 외부몰 접속 원칙
 서버는 쿠팡/알리에 직접 접속하지 않습니다.
-PC Tampermonkey/PWA 실행기 또는 Android WebView 클라이언트가 실제 외부몰 작업을 수행합니다.
+실제 외부몰 작업은 지정 관리자 PC 또는 Android 클라이언트가 수행합니다.
