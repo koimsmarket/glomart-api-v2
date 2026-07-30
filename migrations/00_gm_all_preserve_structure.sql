@@ -362,9 +362,9 @@ CREATE TABLE IF NOT EXISTS gm_product_interest (
   last_visited_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- V017 existing-table compatibility:
--- CREATE TABLE IF NOT EXISTS does not add missing columns to an older table.
--- Add mall_code before any index/constraint references it.
+-- V019: existing-table compatibility.
+-- CREATE TABLE IF NOT EXISTS does not add a missing column to an older table.
+-- Ensure mall_code exists before the indexes below reference it.
 ALTER TABLE gm_product_interest
   ADD COLUMN IF NOT EXISTS mall_code VARCHAR(20) NOT NULL DEFAULT 'CPKR';
 
