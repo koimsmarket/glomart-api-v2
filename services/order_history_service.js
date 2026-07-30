@@ -1,17 +1,17 @@
 /* services/order_history_service.js
- * GM_ORDER_HISTORY_SERVICE_V003
+ * GM_ORDER_HISTORY_SERVICE_V004
  * 주문 생성/저장 로직과 분리된 주문조회 전용 서비스.
- * 이 파일은 gm_order / gm_order_item을 읽기만 하며 주문 저장 흐름을 수정하지 않는다.
+ * gm_order / gm_order_item을 읽기만 한다.
  */
 'use strict';
 
-const VERSION = 'GM_ORDER_HISTORY_SERVICE_V003';
-
+const VERSION = 'GM_ORDER_HISTORY_SERVICE_V004';
 function text(v){ return String(v == null ? '' : v).trim(); }
 function int(v, def){ const n = Number(v); return Number.isFinite(n) ? Math.trunc(n) : (def || 0); }
 function sourceType(item){
   const source = text(item && (item.source_mall || item.mall_code)).toUpperCase();
-  return source === 'GMKR' || source === 'CAFE24' ? 'CAFE24' : 'EXTERNAL';
+  /* Cafe24 내부 주문 collector가 GMKR로 저장한다. 빈 값도 과거 내부 데이터 호환을 위해 내부로 본다. */
+  return (!source || source === 'GMKR' || source === 'CAFE24' || source === 'INTERNAL') ? 'CAFE24' : 'EXTERNAL';
 }
 function displayStatus(order, items){
   const cs = text(order.cs_status || order.cancel_status).toUpperCase();
@@ -36,6 +36,8 @@ function normalizeOrder(order, items){
     cafe24_order_no: text(item.cafe24_order_no),
     source_type: sourceType(item),
     source_mall: text(item.source_mall || item.mall_code),
+    mall_code: text(item.mall_code),
+    pi_ii_vi: text(item.pi_ii_vi),
     product_name: text(item.product_name),
     option_name: text(item.option_name),
     option_value: text(item.option_value),
@@ -51,13 +53,15 @@ function normalizeOrder(order, items){
     item_shipping_status: text(item.item_shipping_status)
   }));
   const first = normalizedItems[0] || {};
-  const source = normalizedItems.some((x) => x.source_type === 'EXTERNAL') ? 'EXTERNAL' : 'CAFE24';
+  const hasExternal = normalizedItems.some((x) => x.source_type === 'EXTERNAL');
+  const hasInternal = normalizedItems.some((x) => x.source_type === 'CAFE24');
   return {
     order_no: text(order.order_no),
     cafe24_order_no: text(order.cafe24_order_no || first.cafe24_order_no),
     order_group_key: text(order.order_group_key || order.cafe24_order_no || order.order_no),
     member_id: text(order.member_id),
-    source_type: source,
+    source_type: hasExternal ? 'EXTERNAL' : 'CAFE24',
+    source_mix: hasExternal && hasInternal ? 'MIXED' : (hasExternal ? 'EXTERNAL' : 'CAFE24'),
     ordered_at: order.ordered_at || order.created_at || null,
     total_product_price: int(order.total_product_price, 0),
     total_delivery_fee: int(order.total_delivery_fee, 0),
@@ -72,6 +76,21 @@ function normalizeOrder(order, items){
     items: normalizedItems
   };
 }
+function collectStats(orders){
+  const stats={orders:orders.length,items:0,internal_items:0,external_items:0,internal_orders:0,external_orders:0,mixed_orders:0};
+  for(const order of orders){
+    let hasInternal=false, hasExternal=false;
+    for(const item of order.items){
+      stats.items++;
+      if(item.source_type==='EXTERNAL'){stats.external_items++;hasExternal=true;}
+      else{stats.internal_items++;hasInternal=true;}
+    }
+    if(hasInternal&&hasExternal)stats.mixed_orders++;
+    else if(hasExternal)stats.external_orders++;
+    else stats.internal_orders++;
+  }
+  return stats;
+}
 
 async function list(pool, options){
   if(!pool) throw new Error('DB pool is not attached');
@@ -84,37 +103,51 @@ async function list(pool, options){
   const where = ['o.member_id = $1'];
   const startDate = text(options && options.start_date);
   const endDate = text(options && options.end_date);
-  if(startDate){ values.push(startDate); where.push(`o.ordered_at >= $${values.length}::date`); }
-  if(endDate){ values.push(endDate); where.push(`o.ordered_at < ($${values.length}::date + INTERVAL '1 day')`); }
+  if(startDate){ values.push(startDate); where.push(`COALESCE(o.ordered_at,o.created_at) >= $${values.length}::date`); }
+  if(endDate){ values.push(endDate); where.push(`COALESCE(o.ordered_at,o.created_at) < ($${values.length}::date + INTERVAL '1 day')`); }
+
   const countSql = `SELECT COUNT(*)::int AS total FROM gm_order o WHERE ${where.join(' AND ')}`;
-  const total = (await pool.query(countSql, values)).rows[0].total;
-  values.push(limit, offset);
+  const countResult = await pool.query(countSql, values);
+  const total = int(countResult.rows[0] && countResult.rows[0].total, 0);
+
+  const pageValues = values.slice();
+  pageValues.push(limit, offset);
   const orderSql = `
     SELECT o.*
       FROM gm_order o
      WHERE ${where.join(' AND ')}
      ORDER BY COALESCE(o.ordered_at, o.created_at) DESC, o.order_no DESC
-     LIMIT $${values.length - 1} OFFSET $${values.length}`;
-  const orderRows = (await pool.query(orderSql, values)).rows;
-  if(!orderRows.length) return { version: VERSION, page, limit, total, total_pages: Math.max(1, Math.ceil(total / limit)), orders: [] };
-  const orderNos = orderRows.map((row) => row.order_no);
+     LIMIT $${pageValues.length - 1} OFFSET $${pageValues.length}`;
+  const orderRows = (await pool.query(orderSql, pageValues)).rows;
+
+  if(!orderRows.length){
+    const stats={orders:0,items:0,internal_items:0,external_items:0,internal_orders:0,external_orders:0,mixed_orders:0};
+    console.log('['+VERSION+'] QUERY',JSON.stringify({member_id:memberId,total,page,returned_orders:0,stats}));
+    return { version:VERSION, page, limit, total, total_pages:Math.max(1,Math.ceil(total/limit)), stats, orders:[] };
+  }
+
+  const orderNos = orderRows.map((row) => text(row.order_no)).filter(Boolean);
   const itemRows = (await pool.query(
-    `SELECT * FROM gm_order_item WHERE order_no = ANY($1::text[]) ORDER BY created_at ASC, pi_ii_vi ASC`,
+    `SELECT * FROM gm_order_item WHERE order_no = ANY($1::text[]) ORDER BY order_no ASC, created_at ASC, pi_ii_vi ASC`,
     [orderNos]
   )).rows;
   const byOrder = new Map();
-  itemRows.forEach((item) => {
-    if(!byOrder.has(item.order_no)) byOrder.set(item.order_no, []);
-    byOrder.get(item.order_no).push(item);
-  });
+  for(const item of itemRows){
+    const key=text(item.order_no);
+    if(!byOrder.has(key)) byOrder.set(key, []);
+    byOrder.get(key).push(item);
+  }
+  const orders=orderRows.map((order) => normalizeOrder(order, byOrder.get(text(order.order_no)) || []));
+  const stats=collectStats(orders);
+  console.log('['+VERSION+'] QUERY',JSON.stringify({member_id:memberId,total,page,returned_orders:orders.length,raw_items:itemRows.length,stats}));
   return {
     version: VERSION,
     page,
     limit,
     total,
     total_pages: Math.max(1, Math.ceil(total / limit)),
-    orders: orderRows.map((order) => normalizeOrder(order, byOrder.get(order.order_no) || []))
+    stats,
+    orders
   };
 }
-
 module.exports = { VERSION, list };
