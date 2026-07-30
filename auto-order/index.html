@@ -9,7 +9,7 @@
   <title>Glomart 외부상품 운영센터</title>
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./dashboard.css?v=gm_v1">
+  <link rel="stylesheet" href="./dashboard.css?v=gm_v15">
 </head>
 <body>
 <header class="topbar">
@@ -61,6 +61,15 @@
         <input id="searchKeyword" type="search" autocomplete="off" placeholder="검색어를 입력하세요">
         <button class="search-btn" type="submit" aria-label="검색">⌕</button>
       </form>
+    </section>
+
+    <section class="system-status-bar" aria-label="시스템 상태">
+      <div class="system-status-item"><span>시스템</span><strong id="systemState">정상</strong></div>
+      <div class="system-status-item"><span>DB 사용률</span><strong id="systemDb">-</strong></div>
+      <div class="system-status-item"><span>Builder Queue</span><strong><b id="systemQueue">0</b> 대기</strong></div>
+      <div class="system-status-item"><span>Queue 실패</span><strong id="systemFailed">0</strong></div>
+      <div class="system-status-item"><span>API 응답</span><strong id="systemApiMs">-</strong></div>
+      <a class="builder-link" href="/gm_data_builder.html" target="_blank" rel="noopener">DB / Queue Builder 열기</a>
     </section>
 
     <section class="panel cafe-card">
@@ -192,6 +201,6 @@
     <div id="toast" class="toast" hidden></div>
   </main>
 </div>
-<script src="./dashboard_ui.js?v=gm_v1"></script>
+<script src="./dashboard_ui.js?v=gm_v15"></script>
 </body>
 </html>

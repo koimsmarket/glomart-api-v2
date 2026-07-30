@@ -11,7 +11,8 @@
   const API = {
     summary: '/api/auto-order/dashboard/summary',
     clients: '/api/auto-order/dashboard/clients',
-    attention: '/api/auto-order/dashboard/attention'
+    attention: '/api/auto-order/dashboard/attention',
+    system: '/api/gm/dashboard/realtime'
   };
 
   const numberIds = [
@@ -161,6 +162,31 @@
     </tr>`).join('');
   }
 
+  function setSystemStatus(payload){
+    const current = payload?.current || payload?.data?.current || null;
+    if (!current) return;
+
+    const db = current.db_size || {};
+    const q = current.queue || {};
+    const warning = current.warning || {};
+
+    if ($('systemDb')) {
+      const pct = Number(db.percent);
+      $('systemDb').textContent = Number.isFinite(pct) ? pct.toLocaleString('ko-KR') + '%' : '-';
+    }
+    if ($('systemQueue')) $('systemQueue').textContent = fmt(q.pending || 0);
+    if ($('systemFailed')) $('systemFailed').textContent = fmt(q.failed || 0);
+    if ($('systemApiMs')) $('systemApiMs').textContent = fmt(current.api_response_ms || 0) + 'ms';
+
+    const el = $('systemState');
+    if (el) {
+      const danger = ['danger','warning'].includes(String(warning.db || '').toLowerCase())
+        || ['danger','warning'].includes(String(warning.queue || '').toLowerCase());
+      el.textContent = danger ? '확인 필요' : '정상';
+      el.classList.toggle('warn', danger);
+    }
+  }
+
   function toast(msg){
     const el = $('toast');
     el.textContent = msg;
@@ -175,7 +201,8 @@
     const result = await Promise.allSettled([
       getJson(API.summary),
       getJson(API.clients),
-      getJson(API.attention)
+      getJson(API.attention),
+      getJson(API.system)
     ]);
     const errors = [];
     if (result[0].status === 'fulfilled') setSummary(result[0].value.data || result[0].value);
@@ -187,8 +214,11 @@
     if (result[2].status === 'fulfilled') setAttention(result[2].value.data || result[2].value);
     else errors.push('attention: ' + result[2].reason?.message);
 
+    if (result[3].status === 'fulfilled') setSystemStatus(result[3].value);
+    else console.warn('[GM_DASHBOARD_SYSTEM_STATUS]', result[3].reason?.message);
+
     if (errors.length) {
-      console.error('[GM_DASHBOARD_API_ERROR_V011]', errors);
+      console.error('[GM_DASHBOARD_API_ERROR_V015]', errors);
       $('realtimeUpdated').textContent = '데이터 연결 오류 - Console 확인';
       toast(errors[0]);
     }
