@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS gm_basket (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- V017 existing-table compatibility:
+-- If gm_basket already exists from an older version, CREATE TABLE IF NOT EXISTS
+-- does not add mall_code. Add it before indexes that reference mall_code.
+ALTER TABLE gm_basket
+  ADD COLUMN IF NOT EXISTS mall_code TEXT NOT NULL DEFAULT 'CPKR';
+
 CREATE INDEX IF NOT EXISTS idx_gm_basket_member_id
   ON gm_basket (member_id);
 

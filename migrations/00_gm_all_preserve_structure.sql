@@ -362,6 +362,12 @@ CREATE TABLE IF NOT EXISTS gm_product_interest (
   last_visited_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- V017 existing-table compatibility:
+-- CREATE TABLE IF NOT EXISTS does not add missing columns to an older table.
+-- Add mall_code before any index/constraint references it.
+ALTER TABLE gm_product_interest
+  ADD COLUMN IF NOT EXISTS mall_code VARCHAR(20) NOT NULL DEFAULT 'CPKR';
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_product_interest_member_item
   ON gm_product_interest (member_id, mall_code, pi_ii_vi)
   WHERE member_id IS NOT NULL AND member_id <> '';
