@@ -64,11 +64,18 @@ function boolFlag(v, def='F'){
   return def;
 }
 
-async function getTemplateCollectionLock(client, templateId){
+async function getTemplateCollectionLock(client, templateId, creatorMemberId){
   const id=i(templateId,0);
-  if(!id) return { collection_count:0, is_locked:false, _diag:{ collection_ids:[], members:[], rows:[] } };
+  if(!id) return { collection_count:0, total_collection_count:0, is_locked:false, _diag:{ creator_member_id:'', collection_ids:[], members:[], rows:[], other_rows:[] } };
   const table=(await client.query("SELECT to_regclass('public.gm_smartfit_collection') AS name")).rows[0];
-  if(!table || !table.name) return { collection_count:0, is_locked:false, _diag:{ collection_ids:[], members:[], rows:[] } };
+  if(!table || !table.name) return { collection_count:0, total_collection_count:0, is_locked:false, _diag:{ creator_member_id:'', collection_ids:[], members:[], rows:[], other_rows:[] } };
+
+  let creator=s(creatorMemberId);
+  if(!creator){
+    const tr=(await client.query('SELECT creator_member_id FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1',[id])).rows[0];
+    creator=s(tr && tr.creator_member_id);
+  }
+
   const allCols=(await client.query(`SELECT column_name FROM information_schema.columns
     WHERE table_schema='public' AND table_name='gm_smartfit_collection'
     ORDER BY ordinal_position`)).rows.map(x=>x.column_name);
@@ -79,11 +86,30 @@ async function getTemplateCollectionLock(client, templateId){
   const selected=preferred.filter(x=>allCols.indexOf(x)>=0);
   const selectList=selected.length ? selected.map(x=>'"'+x+'"').join(',') : '*';
   const rows=(await client.query(`SELECT ${selectList} FROM gm_smartfit_collection WHERE ${where} ORDER BY 1`,[id])).rows;
-  const count=rows.length;
-  const collectionIds=rows.map(r=>r.collection_id ?? r.id).filter(v=>v!==undefined && v!==null);
-  const members=Array.from(new Set(rows.map(r=>s(r.member_id)).filter(Boolean)));
-  const result={ collection_count:count, is_locked:count>0, _diag:{ collection_ids:collectionIds, members, rows } };
-  console.log('[SMARTFIT_COLLECTION_LOCK_CHECK]',{ template_id:id, collection_count:count, rows });
+  const otherRows=rows.filter(r=>{
+    const m=s(r.member_id);
+    if(!creator) return true;          // 생성자를 확인 못하면 기존처럼 보수적으로 잠금
+    if(!m) return true;                // 소유자를 확인 못하는 collection도 보수적으로 잠금
+    return m!==creator;                // 생성자 본인의 collection 기록은 잠금에서 제외
+  });
+  const count=otherRows.length;
+  const totalCount=rows.length;
+  const collectionIds=otherRows.map(r=>r.collection_id ?? r.id).filter(v=>v!==undefined && v!==null);
+  const members=Array.from(new Set(otherRows.map(r=>s(r.member_id)).filter(Boolean)));
+  const result={
+    collection_count:count,
+    total_collection_count:totalCount,
+    is_locked:count>0,
+    _diag:{ creator_member_id:creator, collection_ids:collectionIds, members, rows, other_rows:otherRows }
+  };
+  console.log('[SMARTFIT_COLLECTION_LOCK_CHECK_V150]',{
+    template_id:id,
+    creator_member_id:creator,
+    total_collection_count:totalCount,
+    other_member_collection_count:count,
+    is_locked:result.is_locked,
+    members
+  });
   return result;
 }
 
@@ -417,7 +443,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
   console.log('[SMARTFIT_SAVE_DB] TEMPLATE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
   const pool=db(req); const client=await pool.connect();
   let productLocked=false;
-  console.log('[SMARTFIT_SAVE_V149] PRODUCT_LOCK_SCOPE_READY');
+  console.log('[SMARTFIT_SAVE_V150] OWNER_COLLECTION_EXCLUDED_FROM_LOCK');
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.creatorMemberId);
     if(!member) return fail(res,401,'login required');
@@ -452,7 +478,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       if(!old) throw new Error('template not found');
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
       console.log('[SMARTFIT_SAVE_V142] STEP2_COLLECTION_CHECK', { template_id:templateId });
-      const collectionLock=await getTemplateCollectionLock(client,templateId);
+      const collectionLock=await getTemplateCollectionLock(client,templateId,old.creator_member_id);
       const collectedCount=collectionLock.collection_count;
       productLocked=collectionLock.is_locked;
       console.log('[SMARTFIT_SAVE_V142] PRODUCT_LOCK_STATUS',{template_id:templateId,product_locked:productLocked,collected_count:collectedCount,diag:collectionLock._diag});
@@ -877,7 +903,11 @@ router.post('/api/gm/smartfit/template/trash', async (req,res)=>{
     if(!old) return fail(res,404,'template not found');
     if(!(await isOwnerOrAdmin(pool, member, old.creator_member_id))) return fail(res,403,'permission denied');
     const trash=boolFlag(b.trash_yn || b.trash || b.on,'T');
-    if(trash==='T' && i(old.collection_count,0)>0) return fail(res,409,'collected template cannot be deleted; change visibility to private');
+    if(trash==='T'){
+      const lock=await getTemplateCollectionLock(pool,templateId,old.creator_member_id);
+      console.log('[SMARTFIT_TEMPLATE_TRASH_LOCK_V150]',{template_id:templateId,member_id:member,other_member_collection_count:lock.collection_count,total_collection_count:lock.total_collection_count,is_locked:lock.is_locked});
+      if(lock.is_locked) return fail(res,409,'collected template cannot be deleted; change visibility to private');
+    }
     const r=await pool.query("UPDATE gm_smartfit_template SET is_deleted=$1, deleted_at=CASE WHEN $1='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1='T' THEN $2 ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE template_id=$3 RETURNING *",[trash,member,templateId]);
     ok(res,{ template:r.rows[0] });
   }catch(e){ fail(res,400,'template trash failed',{ detail:String(e.message||e) }); }
@@ -909,8 +939,9 @@ router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
     const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
     if(!old) throw new Error('template not found');
     if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
-    const cc=(await client.query("SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T'",[templateId])).rows[0];
-    if(i(cc&&cc.n,0)>0) throw new Error('collected template cannot be deleted; change visibility to private');
+    const lock=await getTemplateCollectionLock(client,templateId,old.creator_member_id);
+    console.log('[SMARTFIT_TEMPLATE_DELETE_LOCK_V150]',{template_id:templateId,member_id:member,other_member_collection_count:lock.collection_count,total_collection_count:lock.total_collection_count,is_locked:lock.is_locked});
+    if(lock.is_locked) throw new Error('collected template cannot be deleted; change visibility to private');
     await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[templateId]);
     await client.query('DELETE FROM gm_smartfit_collection WHERE template_id=$1',[templateId]);
     await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1',[templateId]);
