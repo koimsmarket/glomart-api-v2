@@ -2,9 +2,10 @@
 
 const express = require('express');
 const router = express.Router();
+const controlTower = require('../services/control_tower_service');
 
 /*
- * GM_AUTO_ORDER_DASHBOARD_API_V013
+ * GM_AUTO_ORDER_DASHBOARD_API_V015
  *
  * This is the ONLY auto-order dashboard server route file.
  *
@@ -509,7 +510,7 @@ router.get('/api/auto-order/dashboard/summary', async (req, res) => {
   if(!pool){
     return res.status(503).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V013',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V015',
       error:'database pool not ready'
     });
   }
@@ -518,14 +519,14 @@ router.get('/api/auto-order/dashboard/summary', async (req, res) => {
     const data = await buildSummary(pool);
     return res.json({
       ok:true,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V013',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V015',
       data
     });
   }catch(e){
-    console.error('[GM_AUTO_ORDER_DASHBOARD_SUMMARY_V013]', String(e && e.stack || e));
+    console.error('[GM_AUTO_ORDER_DASHBOARD_SUMMARY_V015]', String(e && e.stack || e));
     return res.status(500).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V013',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V015',
       error:'dashboard summary failed',
       detail:String(e && e.message || e)
     });
@@ -534,7 +535,7 @@ router.get('/api/auto-order/dashboard/summary', async (req, res) => {
 
 router.get('/api/auto-order/orders', async (req, res) => {
   const pool = poolFrom(req);
-  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_DASHBOARD_API_V013',error:'database pool not ready'});
+  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_DASHBOARD_API_V015',error:'database pool not ready'});
   const opts={q:String(req.query.q||'').trim().slice(0,120),order_mode:String(req.query.order_mode||'').trim().slice(0,40),payment_status:String(req.query.payment_status||'').trim().slice(0,40),order_status:String(req.query.order_status||'').trim().slice(0,40),limit:safeInt(req.query.limit,100,1,500),offset:safeInt(req.query.offset,0,0,1000000)};
   try{
     const data=await buildOrderList(pool,opts);
@@ -550,7 +551,7 @@ router.get('/api/auto-order/dashboard/clients', (req, res) => {
   // PC PWA / Android client registry is connected in the next auto-order phase.
   return res.json({
     ok:true,
-    version:'GM_AUTO_ORDER_DASHBOARD_API_V013',
+    version:'GM_AUTO_ORDER_DASHBOARD_API_V015',
     data:[]
   });
 });
@@ -560,7 +561,7 @@ router.get('/api/auto-order/dashboard/attention', async (req, res) => {
   if(!pool){
     return res.status(503).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V013',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V015',
       error:'database pool not ready'
     });
   }
@@ -569,15 +570,79 @@ router.get('/api/auto-order/dashboard/attention', async (req, res) => {
     const data = await buildAttention(pool);
     return res.json({
       ok:true,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V013',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V015',
       data
     });
   }catch(e){
-    console.error('[GM_AUTO_ORDER_DASHBOARD_ATTENTION_V013]', String(e && e.stack || e));
+    console.error('[GM_AUTO_ORDER_DASHBOARD_ATTENTION_V015]', String(e && e.stack || e));
     return res.status(500).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V013',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V015',
       error:'dashboard attention failed',
+      detail:String(e && e.message || e)
+    });
+  }
+});
+
+
+router.post('/api/auto-order/control-tower/sync', async (req, res) => {
+  const pool = poolFrom(req);
+  if(!pool) return res.status(503).json({ ok:false, version:'GM_AUTO_ORDER_CONTROL_TOWER_API_V002', error:'database pool not ready' });
+
+  try{
+    const limit = safeInt((req.body && req.body.limit) || req.query.limit, 200, 1, 1000);
+    const data = await controlTower.syncRecentOrders(pool, { limit });
+    console.log('[GM_AUTO_ORDER_CONTROL_TOWER_SYNC_V002]', JSON.stringify({
+      scanned:data.scanned,
+      actionable_orders:data.actionable_orders,
+      external_orders:data.external_orders,
+      auto_orders:data.auto_orders,
+      works:data.works,
+      wait_payment:data.wait_payment,
+      ready:data.ready,
+      skipped_internal:data.skipped_internal
+    }));
+    return res.json({ ok:true, version:'GM_AUTO_ORDER_CONTROL_TOWER_API_V002', data });
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_CONTROL_TOWER_SYNC_FAIL_V002]', String(e && e.stack || e));
+    return res.status(500).json({
+      ok:false,
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_API_V002',
+      error:'control tower sync failed',
+      detail:String(e && e.message || e)
+    });
+  }
+});
+
+router.get('/api/auto-order/control-tower', async (req, res) => {
+  const pool = poolFrom(req);
+  if(!pool) return res.status(503).json({ ok:false, version:'GM_AUTO_ORDER_CONTROL_TOWER_API_V002', error:'database pool not ready' });
+
+  try{
+    // Reconcile first so a newly-created gm_order is visible immediately
+    // when the operator opens the control tower.
+    const sync = await controlTower.syncRecentOrders(pool, {
+      limit:safeInt(req.query.sync_limit, 200, 1, 1000)
+    });
+    const data = await controlTower.listControlTower(pool, {
+      q:String(req.query.q || '').trim().slice(0,120),
+      work_status:String(req.query.work_status || '').trim().slice(0,40),
+      mall_code:String(req.query.mall_code || '').trim().slice(0,20),
+      limit:safeInt(req.query.limit, 200, 1, 500),
+      offset:safeInt(req.query.offset, 0, 0, 1000000)
+    });
+    return res.json({
+      ok:true,
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_API_V002',
+      sync,
+      data
+    });
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_CONTROL_TOWER_LIST_FAIL_V002]', String(e && e.stack || e));
+    return res.status(500).json({
+      ok:false,
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_API_V002',
+      error:'control tower list failed',
       detail:String(e && e.message || e)
     });
   }

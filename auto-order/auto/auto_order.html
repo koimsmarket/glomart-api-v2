@@ -5,6 +5,36 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>자동주문 - Glomart 외부상품 운영센터</title>
   <link rel="stylesheet" href="../dashboard.css?v=gm_v1">
+  <style>
+    .tower-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:14px 16px;border-bottom:1px solid #e5e9ef}
+    .tower-card{border:1px solid #e1e5ea;border-radius:6px;padding:12px;background:#fff}
+    .tower-card .label{font-size:12px;color:#727983}
+    .tower-card .value{font-size:24px;font-weight:800;margin-top:5px}
+    .tower-tools{display:grid;grid-template-columns:minmax(220px,1fr) 150px 150px 110px 110px;gap:8px;padding:14px 16px;border-bottom:1px solid #e6e9ee}
+    .tower-tools input,.tower-tools select,.tower-tools button{height:38px;border:1px solid #cfd5dd;border-radius:4px;padding:0 10px;background:#fff}
+    .tower-tools button{cursor:pointer}
+    .tower-tools .primary{background:#1d63c6;color:#fff;border-color:#1d63c6}
+    .tower-summary{padding:10px 16px;color:#626a74;font-size:13px;border-bottom:1px solid #e6e9ee}
+    .tower-table-wrap{overflow:auto}
+    .tower-table{width:100%;min-width:1220px;border-collapse:collapse;font-size:13px}
+    .tower-table th,.tower-table td{padding:10px 8px;border-bottom:1px solid #e8ecf1;text-align:left;vertical-align:top}
+    .tower-table th{background:#f7f8fa;white-space:nowrap}
+    .tower-table .num{text-align:right;white-space:nowrap}
+    .order-no{font-weight:700;color:#1167c5}
+    .pill{display:inline-block;padding:2px 8px;border-radius:12px;background:#edf1f5;white-space:nowrap}
+    .pill.ready{background:#e5f6e9;color:#20723a}
+    .pill.wait{background:#fff3d6;color:#8a6100}
+    .pill.run{background:#e7f0ff;color:#145dab}
+    .pill.fail{background:#fde8e8;color:#b3261e}
+    .muted{color:#8a929b}
+    .empty{text-align:center!important;padding:44px!important;color:#8e96a0}
+    .product{max-width:360px;white-space:normal;line-height:1.45}
+    @media(max-width:900px){
+      .tower-cards{grid-template-columns:1fr 1fr}
+      .tower-tools{grid-template-columns:1fr 1fr}
+      .tower-tools .wide{grid-column:1/-1}
+    }
+  </style>
 </head>
 <body>
 <header class="topbar">
@@ -16,50 +46,213 @@
     <div class="side-group">주문 운영</div>
     <nav class="side-nav">
       <a href="../">대시보드</a>
-      <a class="" href="../order/order.html">주문관리</a>
+      <a href="../order/order.html">주문관리</a>
       <a class="active" href="../auto/auto_order.html">자동주문</a>
-      <a class="" href="../delivery/delivery.html">배송관리</a>
-      <a class="" href="../claim/claim.html">취소/교환/반품</a>
-      <a class="" href="../cs/cs.html">CS관리</a>
+      <a href="../delivery/delivery.html">배송관리</a>
+      <a href="../claim/claim.html">취소/교환/반품</a>
+      <a href="../cs/cs.html">CS관리</a>
     </nav>
   </aside>
+
   <main class="main">
     <section class="page-head">
       <div>
-        <h1>자동주문</h1>
-        <p>자동주문 Queue · 실행기 · 결제대기 · 실패 관리</p>
+        <h1>자동주문 컨트롤타워</h1>
+        <p>주문 완료 → 주문처(GMKR/쿠팡/알리)별 작업 생성 → 결제대기/실행대기 → 실행기 배정 순서로 관리합니다.</p>
       </div>
+      <button id="refreshBtn" type="button">새로고침</button>
     </section>
+
     <section class="panel">
-      <div class="panel-head" style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-        <div>
-          <h2>자동주문 대상</h2>
-          <div style="margin-top:5px;color:#7b8490;font-size:12px">결제 전은 결제대기, 결제 확인 후는 주문대기입니다.</div>
-        </div>
-        <button id="gmAoRefresh" type="button" style="height:34px;padding:0 14px;border:1px solid #cbd2da;background:#fff;cursor:pointer">새로고침</button>
+      <div class="panel-head"><h2>후속 처리 계획</h2></div>
+      <div class="tower-cards">
+        <div class="tower-card"><div class="label">전체 작업</div><div id="cTotal" class="value">0</div></div>
+        <div class="tower-card"><div class="label">결제대기</div><div id="cWait" class="value">0</div></div>
+        <div class="tower-card"><div class="label">실행대기</div><div id="cReady" class="value">0</div></div>
+        <div class="tower-card"><div class="label">실행중/기타</div><div id="cOther" class="value">0</div></div>
       </div>
-      <div id="gmAoCounts" style="padding:12px 16px;border-bottom:1px solid #e5e8ec"></div>
-      <div style="overflow:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:1180px">
-          <thead><tr style="background:#f7f8fa;border-bottom:1px solid #e5e8ec">
-            <th style="padding:12px 10px;text-align:left">주문일</th>
-            <th style="padding:12px 10px;text-align:left">Glomart 주문번호</th>
-            <th style="padding:12px 10px;text-align:left">주문자</th>
-            <th style="padding:12px 10px;text-align:center">판매처</th>
-            <th style="padding:12px 10px;text-align:center">주문완료</th>
-            <th style="padding:12px 10px;text-align:right">상품금액</th>
-            <th style="padding:12px 10px;text-align:right">배송비</th>
-            <th style="padding:12px 10px;text-align:center">결제</th>
-            <th style="padding:12px 10px;text-align:center">자동주문</th>
-            <th style="padding:12px 10px;text-align:left">관리자</th>
-            <th style="padding:12px 10px;text-align:left">외부몰 ID</th>
-          </tr></thead>
-          <tbody id="gmAoRows"><tr><td colspan="11" style="padding:32px;text-align:center;color:#8b929b">불러오는 중입니다.</td></tr></tbody>
+
+      <div class="tower-tools">
+        <input id="q" class="wide" type="search" placeholder="주문번호 / 자동주문번호 / 회원ID 검색">
+        <select id="mall">
+          <option value="">전체 주문처</option>
+          <option value="GMKR">내부상품/공급업체</option>
+          <option value="CPKR">쿠팡</option>
+          <option value="ALKR">알리</option>
+        </select>
+        <select id="status">
+          <option value="">전체 상태</option>
+          <option value="WAIT_PAYMENT">결제대기</option>
+          <option value="READY">실행대기</option>
+          <option value="RUNNING">실행중</option>
+          <option value="FAILED">실패</option>
+          <option value="COMPLETED">완료</option>
+        </select>
+        <button id="searchBtn" type="button">조회</button>
+        <button id="syncBtn" class="primary" type="button">주문 동기화</button>
+      </div>
+
+      <div id="summary" class="tower-summary">조회 중...</div>
+
+      <div class="tower-table-wrap">
+        <table class="tower-table">
+          <thead>
+            <tr>
+              <th>주문일</th>
+              <th>Glomart 주문번호</th>
+              <th>주문처</th>
+              <th>상품</th>
+              <th>수량</th>
+              <th>결제</th>
+              <th>작업상태</th>
+              <th>담당 관리자</th>
+              <th>몰 계정</th>
+              <th>외부몰 주문번호</th>
+              <th>예상 주문금액</th>
+              <th>오류</th>
+            </tr>
+          </thead>
+          <tbody id="rows"><tr><td colspan="12" class="empty">조회 중...</td></tr></tbody>
         </table>
       </div>
     </section>
   </main>
 </div>
-  <script src="../js/auto_order_ui.js?v=GM_AUTO_ORDER_UI_V001"></script>
+
+<script>
+(function(){
+  'use strict';
+  var VERSION='GM_AUTO_ORDER_CONTROL_TOWER_UI_V002';
+  var $=function(id){return document.getElementById(id);};
+
+  function esc(v){
+    return String(v==null?'':v)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+  function won(v){
+    var n=Number(v||0);
+    return (Number.isFinite(n)?n:0).toLocaleString('ko-KR')+'원';
+  }
+  function date(v){
+    if(!v)return '-';
+    var d=new Date(v);
+    if(Number.isNaN(d.getTime()))return esc(v);
+    return d.toLocaleDateString('ko-KR');
+  }
+  function cls(s){
+    s=String(s||'').toUpperCase();
+    if(s==='READY')return 'pill ready';
+    if(s==='WAIT_PAYMENT')return 'pill wait';
+    if(s==='RUNNING')return 'pill run';
+    if(s==='FAILED')return 'pill fail';
+    return 'pill';
+  }
+  function koStatus(s){
+    s=String(s||'').toUpperCase();
+    var map={
+      WAIT_PAYMENT:'결제대기',
+      READY:'실행대기',
+      RUNNING:'실행중',
+      FAILED:'실패',
+      COMPLETED:'완료',
+      CANCELLED:'취소',
+      PENDING:'대기'
+    };
+    return map[s]||s||'-';
+  }
+
+  async function load(){
+    $('summary').textContent='컨트롤타워 동기화 및 조회 중...';
+    $('rows').innerHTML='<tr><td colspan="12" class="empty">조회 중...</td></tr>';
+
+    var p=new URLSearchParams();
+    var q=$('q').value.trim();
+    var mall=$('mall').value;
+    var status=$('status').value;
+    if(q)p.set('q',q);
+    if(mall)p.set('mall_code',mall);
+    if(status)p.set('work_status',status);
+    p.set('limit','200');
+    p.set('sync_limit','300');
+
+    try{
+      var r=await fetch('/api/auto-order/control-tower?'+p.toString(),{cache:'no-store'});
+      var j=await r.json();
+      if(!r.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+r.status));
+
+      var data=j.data||{};
+      var rows=Array.isArray(data.rows)?data.rows:[];
+      var counts=data.visible_status_counts||{};
+
+      $('cTotal').textContent=Number(data.total||0).toLocaleString('ko-KR');
+      $('cWait').textContent=Number(counts.WAIT_PAYMENT||0).toLocaleString('ko-KR');
+      $('cReady').textContent=Number(counts.READY||0).toLocaleString('ko-KR');
+      var other=rows.length-Number(counts.WAIT_PAYMENT||0)-Number(counts.READY||0);
+      $('cOther').textContent=Math.max(0,other).toLocaleString('ko-KR');
+
+      var sync=j.sync||{};
+      $('summary').textContent=
+        '총 '+Number(data.total||0).toLocaleString('ko-KR')+'건 · 현재 '+rows.length+'건 표시'+
+        ' / 최근 주문 '+Number(sync.scanned||0)+'건 점검'+
+        ' / 주문대상 '+Number(sync.actionable_orders||sync.external_orders||0)+'건'+
+        ' / '+VERSION;
+
+      if(!rows.length){
+        $('rows').innerHTML='<tr><td colspan="12" class="empty">자동주문 작업이 없습니다.</td></tr>';
+        return;
+      }
+
+      $('rows').innerHTML=rows.map(function(x){
+        var payment=x.payment_completed_at?'결제완료':'결제대기';
+        var err=[x.last_error_code,x.last_error_message].filter(Boolean).join(' / ');
+        return '<tr>'+
+          '<td>'+date(x.ordered_at)+'</td>'+
+          '<td><span class="order-no">'+esc(x.order_no)+'</span><div class="muted">'+esc(x.auto_order_no)+'</div></td>'+
+          '<td>'+esc(x.mall_code||'-')+'</td>'+
+          '<td class="product">'+esc(x.product_names||'-')+'</td>'+
+          '<td class="num">'+esc(x.received_item_count||0)+'</td>'+
+          '<td>'+esc(payment)+'</td>'+
+          '<td><span class="'+cls(x.work_status)+'">'+esc(koStatus(x.work_status))+'</span></td>'+
+          '<td>'+esc(x.admin_id||'-')+'</td>'+
+          '<td>'+esc(x.mall_account_id||'-')+'</td>'+
+          '<td>'+esc(x.mall_order_no||'-')+'</td>'+
+          '<td class="num"><strong>'+won(x.actual_payment_amount)+'</strong></td>'+
+          '<td>'+esc(err||'-')+'</td>'+
+        '</tr>';
+      }).join('');
+    }catch(e){
+      $('summary').textContent='컨트롤타워 조회 실패';
+      $('rows').innerHTML='<tr><td colspan="12" class="empty">'+esc(e&&e.message||e)+'</td></tr>';
+    }
+  }
+
+  async function sync(){
+    $('syncBtn').disabled=true;
+    $('syncBtn').textContent='동기화 중';
+    try{
+      var r=await fetch('/api/auto-order/control-tower/sync',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({limit:500})
+      });
+      var j=await r.json();
+      if(!r.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+r.status));
+      await load();
+    }catch(e){
+      alert('자동주문 동기화 실패: '+(e&&e.message||e));
+    }finally{
+      $('syncBtn').disabled=false;
+      $('syncBtn').textContent='주문 동기화';
+    }
+  }
+
+  $('refreshBtn').addEventListener('click',load);
+  $('searchBtn').addEventListener('click',load);
+  $('syncBtn').addEventListener('click',sync);
+  $('q').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+  load();
+})();
+</script>
 </body>
 </html>
