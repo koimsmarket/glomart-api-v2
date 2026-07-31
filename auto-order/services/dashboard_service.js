@@ -1,7 +1,7 @@
 'use strict';
 
 /*
- * GM_AUTO_ORDER_DASHBOARD_SERVICE_V015
+ * GM_AUTO_ORDER_DASHBOARD_SERVICE_V016
  *
  * Dashboard DB aggregation only.
  * - Uses the CURRENT Glomart schema/status values.
@@ -115,6 +115,46 @@ function emptySummary(){
     delivery_delay:0,
     pending_cs:0
   };
+}
+
+
+async function applyAutoOrderControlTower(pool, out){
+  if(!(await tableExists(pool, 'gm_auto_order_work'))) return out;
+
+  const wc = await columns(pool, 'gm_auto_order_work');
+  const workType = text('w', wc, ['work_type']);
+  const workStatus = text('w', wc, ['work_status']);
+
+  const r = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (
+        WHERE upper(${workType})='ORDER'
+          AND upper(${workStatus}) IN ('WAIT_PAYMENT','PENDING','READY')
+      )::int AS auto_order_waiting,
+
+      COUNT(*) FILTER (
+        WHERE upper(${workType})='ORDER'
+          AND upper(${workStatus})='WAIT_PAYMENT'
+      )::int AS payment_waiting,
+
+      COUNT(*) FILTER (
+        WHERE upper(${workType})='ORDER'
+          AND upper(${workStatus}) IN ('COMPLETED','DONE')
+      )::int AS auto_order_success,
+
+      COUNT(*) FILTER (
+        WHERE upper(${workType})='ORDER'
+          AND upper(${workStatus}) IN ('ERROR','FAILED','MANUAL_REQUIRED')
+      )::int AS auto_order_failed
+    FROM gm_auto_order_work w
+  `);
+
+  const x = r.rows[0] || {};
+  out.auto_order_waiting = n(x.auto_order_waiting);
+  out.payment_waiting = n(x.payment_waiting);
+  out.auto_order_success = n(x.auto_order_success);
+  out.auto_order_failed = n(x.auto_order_failed);
+  return out;
 }
 
 async function buildSummary(pool){
@@ -448,6 +488,8 @@ async function buildSummary(pool){
     if(k === 'mode' || k === 'updated_at') continue;
     out[k] = n(v);
   }
+
+  await applyAutoOrderControlTower(pool, out);
 
   out.updated_at = new Date().toISOString();
   return out;
