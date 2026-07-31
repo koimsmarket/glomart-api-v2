@@ -43,4 +43,8 @@ router.get('/api/auto-order/dashboard/attention', async (req, res) => {
   }
 });
 
+
+// GM_AUTO_ORDER_LIST_API_V001
+router.use(require('./auto_order_orders'));
+
 module.exports = router;
