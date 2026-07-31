@@ -329,7 +329,6 @@ router.post('/api/gm/smartfit/space/save', async (req,res)=>{
     const visibility=visibilityOf(b.visibility || b.is_public || 'private','private');
     await client.query('BEGIN');
     let saved;
-    let productLocked=false;
     if(spaceId){
       const old=(await client.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 FOR UPDATE',[spaceId])).rows[0];
       if(!old) throw new Error('space not found');
@@ -446,6 +445,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     console.log('[SMARTFIT_SAVE_V136] STEP1_BEGIN');
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
+    let productLocked=false;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
