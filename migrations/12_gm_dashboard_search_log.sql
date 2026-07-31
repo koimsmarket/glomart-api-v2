@@ -60,6 +60,19 @@ CREATE TABLE IF NOT EXISTS gm_search_log (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- V021 existing-table compatibility:
+-- gm_search_log may already exist from an older schema.
+-- CREATE TABLE IF NOT EXISTS does not add missing columns, so ensure every
+-- column used by the indexes below exists before creating those indexes.
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS search_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS keyword_normalized TEXT;
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS category_code TEXT;
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS category_no TEXT;
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS country_code TEXT;
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS lang_code TEXT;
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS mall_code TEXT;
+ALTER TABLE gm_search_log ADD COLUMN IF NOT EXISTS cache_used BOOLEAN NOT NULL DEFAULT FALSE;
+
 CREATE INDEX IF NOT EXISTS idx_gm_search_log_at
   ON gm_search_log (search_at DESC);
 
