@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V046_UNORDERED_CURSOR_ZIP';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V047_DEV_RESTORE_ORDER_FIX';
+console.log('[GM_BUILDER_ROUTE_V047] routes/builder.js loaded');
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -1399,7 +1400,19 @@ function rowColumnsFromRows(rows, dbColumns){
   return out;
 }
 function devCellValue(v){
-  const x = clean(v);
+  let x = clean(v);
+  if(x === '') return null;
+
+  // Builder CSV/XLSX export may preserve JSON-style wrapping quotes
+  // around timestamps, e.g. "2026-07-16T15:27:59.000Z".
+  // Remove only one matching outer quote pair in DEV restore paths.
+  if(
+    x.length >= 2 &&
+    ((x[0] === '"' && x[x.length-1] === '"') ||
+     (x[0] === "'" && x[x.length-1] === "'"))
+  ){
+    x = x.slice(1,-1);
+  }
   return x === '' ? null : x;
 }
 
@@ -1412,13 +1425,12 @@ function devFirstValue(row, names){
 }
 
 function normalizeDevRestoreRows(spec, rows){
-  // 개발용 파일 복원 전용 보정.
-  // 일반 업로드/운영 저장 로직에는 영향을 주지 않는다.
-  // 과거 gm_order 백업에는 현재 NOT NULL 필드 일부가 비어 있을 수 있으므로
-  // 복원이 실패하지 않도록 "기존 행 안에서 찾을 수 있는 값"을 우선 재사용한다.
+  // DEV FILE RESTORE only.
+  // Do not alter normal Builder update behavior or live order creation.
   if(!spec || spec.table !== 'gm_order') return { rows, filled:{} };
 
   const filled = {};
+
   function setIfBlank(row, col, value){
     if(clean(row[col]) !== '') return;
     const v = clean(value);
@@ -1427,35 +1439,81 @@ function normalizeDevRestoreRows(spec, rows){
     filled[col] = (filled[col] || 0) + 1;
   }
 
-  for(const row of rows){
-    const memberOrGuest = devFirstValue(row, ['member_id','guest_key','order_no']);
+  function numValue(v){
+    const x = clean(v).replace(/,/g,'');
+    const n = Number(x);
+    return Number.isFinite(n) ? n : 0;
+  }
 
+  for(const row of rows){
+    const identity = devFirstValue(row, ['member_id','guest_key','order_no']);
+
+    // Current gm_order NOT NULL identity/contact columns.
     setIfBlank(row, 'orderer_name',
       devFirstValue(row, ['receiver_name','customs_name','depositor_name','member_id','guest_key','order_no'])
+    );
+    setIfBlank(row, 'receiver_name',
+      devFirstValue(row, ['orderer_name','customs_name','depositor_name','member_id','guest_key','order_no'])
     );
 
     setIfBlank(row, 'orderer_mobile',
       devFirstValue(row, ['orderer_phone','receiver_mobile','receiver_phone','receiver_safe_phone','depositor_phone'])
     );
-
-    setIfBlank(row, 'receiver_name',
-      devFirstValue(row, ['orderer_name','customs_name','depositor_name','member_id','guest_key','order_no'])
-    );
-
     setIfBlank(row, 'receiver_mobile',
       devFirstValue(row, ['receiver_phone','receiver_safe_phone','orderer_mobile','orderer_phone','depositor_phone'])
     );
 
-    // 과거 백업에 배송지 일부가 비어 있는 경우가 있다.
-    // 임의의 실제 주소를 만들지 않고 복원 필요 상태임을 명시한다.
+    // If historical backup itself did not contain these values, keep the row
+    // restorable but explicitly mark that operational data needs later review.
+    setIfBlank(row, 'orderer_name', identity || 'RESTORE_REQUIRED');
+    setIfBlank(row, 'receiver_name', identity || 'RESTORE_REQUIRED');
+    setIfBlank(row, 'orderer_mobile', 'RESTORE_REQUIRED');
+    setIfBlank(row, 'receiver_mobile', 'RESTORE_REQUIRED');
     setIfBlank(row, 'receiver_zipcode', 'RESTORE_REQUIRED');
     setIfBlank(row, 'receiver_address1', 'RESTORE_REQUIRED');
 
-    // 이름/전화번호도 모든 대체 후보가 비어 있으면 명시적인 복원 표시값을 사용한다.
-    setIfBlank(row, 'orderer_name', memberOrGuest || 'RESTORE_REQUIRED');
-    setIfBlank(row, 'receiver_name', memberOrGuest || 'RESTORE_REQUIRED');
-    setIfBlank(row, 'orderer_mobile', 'RESTORE_REQUIRED');
-    setIfBlank(row, 'receiver_mobile', 'RESTORE_REQUIRED');
+    // Current gm_order NOT NULL payment/status columns.
+    setIfBlank(row, 'payment_method', 'pending');
+    setIfBlank(row, 'payment_method_display', '미정');
+    setIfBlank(row, 'order_status', 'ordered');
+    setIfBlank(row, 'payment_status', 'pending');
+    setIfBlank(row, 'shipping_status', 'pending');
+
+    // Current gm_order NOT NULL amount columns.
+    if(clean(row.total_product_price) === ''){
+      row.total_product_price = '0';
+      filled.total_product_price = (filled.total_product_price || 0) + 1;
+    }
+    if(clean(row.total_delivery_fee) === ''){
+      row.total_delivery_fee = '0';
+      filled.total_delivery_fee = (filled.total_delivery_fee || 0) + 1;
+    }
+
+    const product = numValue(row.total_product_price);
+    const delivery = numValue(row.total_delivery_fee);
+    const extra = numValue(row.extra_area_delivery_fee);
+
+    if(clean(row.total_payment_price) === ''){
+      row.total_payment_price = String(product + delivery + extra);
+      filled.total_payment_price = (filled.total_payment_price || 0) + 1;
+    }
+    if(clean(row.expected_payment_amount) === ''){
+      row.expected_payment_amount = clean(row.total_payment_price) || String(product + delivery + extra);
+      filled.expected_payment_amount = (filled.expected_payment_amount || 0) + 1;
+    }
+
+    // Current gm_order NOT NULL timestamps.
+    setIfBlank(row, 'ordered_at',
+      devFirstValue(row, ['created_at','updated_at'])
+    );
+    setIfBlank(row, 'created_at',
+      devFirstValue(row, ['ordered_at','updated_at'])
+    );
+
+    // Last-resort only for malformed historical rows.
+    const nowIso = new Date().toISOString();
+    setIfBlank(row, 'ordered_at', nowIso);
+    setIfBlank(row, 'created_at', row.ordered_at || nowIso);
   }
 
   return { rows, filled };
@@ -1628,11 +1686,11 @@ async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
       for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'RESTORED_DEV_FILE_ROW', '', '', 'APPLIED'));
     }
     if(client) await client.query('COMMIT');
-    try{ console.log('[GM_DEV_FILE_RESTORE_DONE_V024]', JSON.stringify({ table:spec.table, rows:rows.length, columns:inputCols.length, applied, deleted, confirmed, keys:usedKeys, filled:restoreFilled, ms:Date.now()-start })); }catch(_){}
+    try{ console.log('[GM_DEV_FILE_RESTORE_DONE_V025]', JSON.stringify({ table:spec.table, rows:rows.length, columns:inputCols.length, applied, deleted, confirmed, keys:usedKeys, filled:restoreFilled, ms:Date.now()-start })); }catch(_){}
   }catch(e){
     if(client) await client.query('ROLLBACK').catch(()=>{});
     result.push(resultRow('', spec.table, '', 'FAIL', '', '', String(e && e.message || e)));
-    try{ console.error('[GM_DEV_FILE_RESTORE_FAIL_V024]', spec.table, String(e && e.message || e)); }catch(_){}
+    try{ console.error('[GM_DEV_FILE_RESTORE_FAIL_V025]', spec.table, String(e && e.message || e)); }catch(_){}
   }finally{
     if(client) client.release();
   }
