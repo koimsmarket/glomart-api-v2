@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V079_COLLECTION_DIAG_PRODUCT_ONLY_LOCK';
+const VERSION = 'GM_SMARTFIT_SERVER_V080_PRODUCTLOCK_SCOPE_FIX';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -416,6 +416,8 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
 router.post('/api/gm/smartfit/template/save', async (req,res)=>{
   console.log('[SMARTFIT_SAVE_DB] TEMPLATE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
   const pool=db(req); const client=await pool.connect();
+  let productLocked=false;
+  console.log('[SMARTFIT_SAVE_V149] PRODUCT_LOCK_SCOPE_READY');
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.creatorMemberId);
     if(!member) return fail(res,401,'login required');
@@ -445,7 +447,6 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     console.log('[SMARTFIT_SAVE_V136] STEP1_BEGIN');
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
-    let productLocked=false;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
