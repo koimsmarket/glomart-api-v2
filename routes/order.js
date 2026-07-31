@@ -19,7 +19,8 @@ function enqueueAfterResponse(label, task){
   if(typeof setImmediate==='function') setImmediate(run);
   else setTimeout(run,0);
 }
-const VERSION = 'GM_ORDER_ROUTE_V042_ORDER_CREATE_DIAGNOSTIC';
+const VERSION = 'GM_ORDER_ROUTE_V043_ORDER_CREATE_DIAGNOSTIC';
+console.log('[GM_ORDER_ROUTE_V043] routes/order.js loaded');
 
 async function applyOrderCompletedDirect(req,orderNo,meta){
   const pool=db(req);
@@ -563,7 +564,7 @@ async function replaceCafe24InternalItems(client, orderRow, inputItems){
 router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
   try{
     const body=req.body||{};
-    console.log('[GM_CAFE24_CONFIRM_IN_V042]',JSON.stringify({
+    console.log('[GM_CAFE24_CONFIRM_IN_V043]',JSON.stringify({
       order_no:clean(body.order_no||body.gm_order_no||body.cafe24_order_no||body.cafe24OrderNo),
       cafe24_order_no:clean(body.cafe24_order_no||body.cafe24OrderNo||body.order_id||body.orderId),
       member_id:clean(body.member_id||body.memberId),
@@ -629,7 +630,7 @@ router.post('/api/gm/order/create', async (req, res) => {
   try{
     const body=req.body||{};
     const items=normalizeItems(body);
-    console.log('[GM_ORDER_CREATE_IN_V042]',JSON.stringify({
+    console.log('[GM_ORDER_CREATE_IN_V043]',JSON.stringify({
       order_no:clean(body.order_no||body.gm_order_no||body.orderNo),
       member_id:clean(body.member_id||body.memberId),
       guest_key:clean(body.guest_key||body.guestKey),
@@ -722,7 +723,7 @@ router.get('/api/gm/order/diagnostic', async (req,res)=>{
   if(!pool) return fail(res,500,'DB pool is not attached');
   try{
     const data=await gmOrderDiagnostic(pool);
-    console.log('[GM_ORDER_DIAGNOSTIC_V042]',JSON.stringify({
+    console.log('[GM_ORDER_DIAGNOSTIC_V043]',JSON.stringify({
       counts:data.counts,
       recent_basket:data.recent_basket.length,
       recent_orders:data.recent_orders.length,
@@ -730,7 +731,7 @@ router.get('/api/gm/order/diagnostic', async (req,res)=>{
     }));
     ok(res,{action:'order.diagnostic',data});
   }catch(e){
-    console.error('[GM_ORDER_DIAGNOSTIC_ERROR_V042]',String(e&&e.stack||e));
+    console.error('[GM_ORDER_DIAGNOSTIC_ERROR_V043]',String(e&&e.stack||e));
     fail(res,500,'order diagnostic failed',{detail:String(e&&e.message||e)});
   }
 });
