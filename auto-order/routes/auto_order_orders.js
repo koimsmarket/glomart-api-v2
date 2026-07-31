@@ -3,7 +3,7 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_AUTO_ORDER_LIST_API_V001';
+const VERSION = 'GM_AUTO_ORDER_LIST_API_V002';
 
 function poolFrom(req){
   return req && req.app && req.app.locals ? req.app.locals.pool : null;
@@ -31,6 +31,176 @@ function amount(v){
   return Number.isFinite(n) ? n : 0;
 }
 
+async function tableExists(pool, table){
+  const r = await pool.query(`
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema='public' AND table_name=$1
+    LIMIT 1
+  `,[table]);
+  return r.rows.length > 0;
+}
+
+async function countTable(pool, table){
+  if(!(await tableExists(pool, table))) return null;
+  const r = await pool.query(`SELECT COUNT(*)::int AS n FROM "${table}"`);
+  return Number(r.rows[0] && r.rows[0].n || 0);
+}
+
+async function collectDiagnostic(pool){
+  const names = [
+    'gm_order','gm_order_item',
+    'gm_auto_order','gm_auto_order_item','gm_auto_order_work'
+  ];
+  const tables = {};
+  for(const name of names){
+    const exists = await tableExists(pool,name);
+    tables[name] = { exists, count: exists ? await countTable(pool,name) : null };
+  }
+
+  const out = {
+    version: VERSION,
+    checked_at: new Date().toISOString(),
+    tables,
+    source_mall: [],
+    mall_code: [],
+    source_uid_prefix: [],
+    external_item_count: 0,
+    candidate_order_count: 0,
+    recent_items: [],
+    auto_order_status: [],
+    work_status: [],
+    warnings: []
+  };
+
+  if(tables.gm_order_item.exists){
+    out.source_mall = (await pool.query(`
+      SELECT COALESCE(NULLIF(btrim(source_mall),''),'(EMPTY)') AS value, COUNT(*)::int AS count
+      FROM gm_order_item
+      GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 30
+    `)).rows;
+
+    out.mall_code = (await pool.query(`
+      SELECT COALESCE(NULLIF(btrim(mall_code),''),'(EMPTY)') AS value, COUNT(*)::int AS count
+      FROM gm_order_item
+      GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 30
+    `)).rows;
+
+    out.source_uid_prefix = (await pool.query(`
+      SELECT
+        CASE
+          WHEN upper(COALESCE(source_uid,'')) LIKE 'CPKR_%' THEN 'CPKR_'
+          WHEN upper(COALESCE(source_uid,'')) LIKE 'ALKR_%' THEN 'ALKR_'
+          WHEN COALESCE(source_uid,'')='' THEN '(EMPTY)'
+          ELSE split_part(COALESCE(source_uid,''),'_',1)
+        END AS value,
+        COUNT(*)::int AS count
+      FROM gm_order_item
+      GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 30
+    `)).rows;
+
+    const ext = await pool.query(`
+      SELECT
+        COUNT(*)::int AS item_count,
+        COUNT(DISTINCT order_no)::int AS order_count
+      FROM gm_order_item i
+      WHERE
+        upper(COALESCE(i.source_mall,'')) IN ('CPKR','ALKR')
+        OR upper(COALESCE(i.mall_code,'')) IN ('CPKR','ALKR')
+        OR upper(COALESCE(i.source_uid,'')) LIKE 'CPKR_%'
+        OR upper(COALESCE(i.source_uid,'')) LIKE 'ALKR_%'
+        OR lower(COALESCE(i.product_url,'')) LIKE '%coupang.com%'
+        OR lower(COALESCE(i.product_url,'')) LIKE '%link.coupang.com%'
+        OR lower(COALESCE(i.product_url,'')) LIKE '%aliexpress.com%'
+    `);
+    out.external_item_count = Number(ext.rows[0] && ext.rows[0].item_count || 0);
+    out.candidate_order_count = Number(ext.rows[0] && ext.rows[0].order_count || 0);
+
+    const samples = await pool.query(`
+      SELECT
+        order_no, pi_ii_vi, mall_code, source_mall, source_uid,
+        product_name, product_url, item_order_status, created_at,
+        CASE
+          WHEN upper(COALESCE(source_mall,''))='CPKR'
+            OR upper(COALESCE(mall_code,''))='CPKR'
+            OR upper(COALESCE(source_uid,'')) LIKE 'CPKR_%'
+            OR lower(COALESCE(product_url,'')) LIKE '%coupang.com%'
+            OR lower(COALESCE(product_url,'')) LIKE '%link.coupang.com%' THEN 'CPKR'
+          WHEN upper(COALESCE(source_mall,''))='ALKR'
+            OR upper(COALESCE(mall_code,''))='ALKR'
+            OR upper(COALESCE(source_uid,'')) LIKE 'ALKR_%'
+            OR lower(COALESCE(product_url,'')) LIKE '%aliexpress.com%' THEN 'ALKR'
+          ELSE ''
+        END AS detected_mall
+      FROM gm_order_item
+      ORDER BY created_at DESC NULLS LAST
+      LIMIT 20
+    `);
+    out.recent_items = samples.rows;
+  }
+
+  if(tables.gm_auto_order.exists){
+    out.auto_order_status = (await pool.query(`
+      SELECT COALESCE(process_status,'(NULL)') AS status, COUNT(*)::int AS count
+      FROM gm_auto_order
+      GROUP BY 1 ORDER BY 2 DESC,1
+    `)).rows;
+  }
+
+  if(tables.gm_auto_order_work.exists){
+    out.work_status = (await pool.query(`
+      SELECT
+        COALESCE(work_type,'(NULL)') AS work_type,
+        COALESCE(work_status,'(NULL)') AS status,
+        COUNT(*)::int AS count
+      FROM gm_auto_order_work
+      GROUP BY 1,2 ORDER BY 1,3 DESC,2
+    `)).rows;
+  }
+
+  if(!tables.gm_order.exists) out.warnings.push('gm_order table missing');
+  if(!tables.gm_order_item.exists) out.warnings.push('gm_order_item table missing');
+  if(!tables.gm_auto_order.exists) out.warnings.push('gm_auto_order table missing: migration 101 not applied');
+  if(!tables.gm_auto_order_item.exists) out.warnings.push('gm_auto_order_item table missing: migration 101 not applied');
+  if(!tables.gm_auto_order_work.exists) out.warnings.push('gm_auto_order_work table missing: migration 101 not applied');
+
+  if(tables.gm_order_item.exists && tables.gm_order_item.count > 0 && out.external_item_count === 0){
+    out.warnings.push('gm_order_item exists but current CPKR/ALKR detection found 0 external items');
+  }
+  if(out.external_item_count > 0 && out.candidate_order_count === 0){
+    out.warnings.push('external items exist but candidate order count is 0');
+  }
+  if(out.candidate_order_count > 0 && tables.gm_auto_order.exists && tables.gm_auto_order.count === 0){
+    out.warnings.push('candidate orders exist but gm_auto_order is still empty: sync is not creating rows');
+  }
+
+  return out;
+}
+
+
+router.get('/api/auto-order/orders/diagnostic', async (req,res)=>{
+  const pool = poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,version:VERSION,error:'database pool not ready'});
+  try{
+    const data = await collectDiagnostic(pool);
+    console.log('[GM_AUTO_ORDER_DIAGNOSTIC_V002]', JSON.stringify({
+      tables:data.tables,
+      external_item_count:data.external_item_count,
+      candidate_order_count:data.candidate_order_count,
+      source_mall:data.source_mall,
+      mall_code:data.mall_code,
+      warnings:data.warnings
+    }));
+    return res.json({ok:true,version:VERSION,data});
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_DIAGNOSTIC_ERROR_V002]',String(e && e.stack || e));
+    return res.status(500).json({
+      ok:false,version:VERSION,error:'auto-order diagnostic failed',
+      detail:String(e && e.message || e)
+    });
+  }
+});
+
 router.post('/api/auto-order/orders/sync', async (req,res)=>{
   const pool = poolFrom(req);
   if(!pool) return res.status(503).json({ok:false,version:VERSION,error:'database pool not ready'});
@@ -39,6 +209,19 @@ router.post('/api/auto-order/orders/sync', async (req,res)=>{
   let createdOrders=0, createdItems=0, createdWorks=0;
 
   try{
+    const before = await collectDiagnostic(db);
+    console.log('[GM_AUTO_ORDER_SYNC_BEFORE_V002]', JSON.stringify({
+      gm_order:before.tables.gm_order,
+      gm_order_item:before.tables.gm_order_item,
+      gm_auto_order:before.tables.gm_auto_order,
+      gm_auto_order_work:before.tables.gm_auto_order_work,
+      external_item_count:before.external_item_count,
+      candidate_order_count:before.candidate_order_count,
+      source_mall:before.source_mall,
+      mall_code:before.mall_code,
+      warnings:before.warnings
+    }));
+
     const or = await db.query(`
       SELECT o.*
       FROM gm_order o
@@ -180,12 +363,32 @@ router.post('/api/auto-order/orders/sync', async (req,res)=>{
       }
     }
 
+    const after = await collectDiagnostic(db);
+    console.log('[GM_AUTO_ORDER_SYNC_AFTER_V002]', JSON.stringify({
+      scanned_orders:or.rows.length,
+      created_orders:createdOrders,
+      created_items:createdItems,
+      created_works:createdWorks,
+      gm_auto_order:after.tables.gm_auto_order,
+      gm_auto_order_item:after.tables.gm_auto_order_item,
+      gm_auto_order_work:after.tables.gm_auto_order_work,
+      work_status:after.work_status,
+      warnings:after.warnings
+    }));
+
     return res.json({
       ok:true,version:VERSION,
       scanned_orders:or.rows.length,
       created_orders:createdOrders,
       created_items:createdItems,
-      created_works:createdWorks
+      created_works:createdWorks,
+      diagnostic:{
+        external_item_count:before.external_item_count,
+        candidate_order_count:before.candidate_order_count,
+        source_mall:before.source_mall,
+        mall_code:before.mall_code,
+        warnings:after.warnings
+      }
     });
   }catch(e){
     console.error('[GM_AUTO_ORDER_SYNC_V001]',String(e && e.stack || e));
