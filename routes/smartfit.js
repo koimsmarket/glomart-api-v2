@@ -443,6 +443,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
   console.log('[SMARTFIT_SAVE_DB] TEMPLATE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
   const pool=db(req); const client=await pool.connect();
   const saveState={ productLocked:false };
+  console.log('[SMARTFIT_SAVE_V156] SCHEMA_SAFE_INTERNAL_SAVE');
   console.log('[SMARTFIT_SAVE_V152] PRODUCT_LOCK_STATE_READY', saveState);
   console.log('[SMARTFIT_SAVE_V150] OWNER_COLLECTION_EXCLUDED_FROM_LOCK');
   try{
@@ -511,7 +512,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         if(merged.has(key)){
           const existing=merged.get(key);
           existing.qty=Math.min(999,existing.qty+qty);
-          if(!existing.product_id) existing.product_id=s(raw.product_id || raw.productId || '');
+          if(!existing.product_id) existing.product_id=s(raw.product_id || raw.productId || raw.product_no || raw.productNo || raw.cafe24_product_no || raw.cafe24ProductNo || '');
           if(!existing.source_mall) existing.source_mall=s(raw.source_mall || raw.sourceMall || '');
           if(!existing.source_uid) existing.source_uid=s(raw.source_uid || raw.sourceUid || '');
           if(!existing.internal_product_code) existing.internal_product_code=s(raw.internal_product_code || raw.internalProductCode || '');
@@ -521,7 +522,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           merged.set(key,{
             item_role:s(raw.item_role||raw.role||'ETC')||'ETC',
             mall_code:mallCode,
-            product_id:s(raw.product_id || raw.productId || ''),
+            product_id:s(raw.product_id || raw.productId || raw.product_no || raw.productNo || raw.cafe24_product_no || raw.cafe24ProductNo || ''),
             product_uid:productUid,
             source_mall:s(raw.source_mall || raw.sourceMall || ''),
             source_uid:s(raw.source_uid || raw.sourceUid || ''),
@@ -533,29 +534,15 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           });
         }
       }
-      /* 내부상품은 장바구니에서 cafe24_product_no만 넘긴다.
-       * SmartFit 저장 시 이미 상세 진입 때 저장된 gm_product를 조회하여
-       * source_uid/internal_product_code/PID_IID_VID를 보강한다. */
-      for(const it of merged.values()){
-        if(s(it.source_mall).toUpperCase()!=='GMKR' || !s(it.cafe24_product_no)) continue;
-        const p=(await client.query(`SELECT product_uid,mall_code,product_id,pi_ii_vi,source_mall,source_uid,internal_product_code,cafe24_product_no
-          FROM gm_product
-          WHERE source_mall='GMKR' AND cafe24_product_no=$1
-          ORDER BY updated_at DESC NULLS LAST
-          LIMIT 1`,[it.cafe24_product_no])).rows[0];
-        if(!p){
-          console.warn('[SMARTFIT_INTERNAL_IDENTITY_MISS_V126]',{cafe24_product_no:it.cafe24_product_no});
-          continue;
-        }
-        it.product_uid=s(p.product_uid)||it.product_uid;
-        it.mall_code=s(p.mall_code)||it.mall_code;
-        it.product_id=s(p.product_id)||it.product_id;
-        it.pi_ii_vi=s(p.pi_ii_vi)||it.pi_ii_vi;
-        it.source_mall=s(p.source_mall)||it.source_mall;
-        it.source_uid=s(p.source_uid)||it.source_uid;
-        it.internal_product_code=s(p.internal_product_code)||it.internal_product_code;
-        console.log('[SMARTFIT_INTERNAL_IDENTITY_OK_V126]',{cafe24_product_no:it.cafe24_product_no,product_uid:it.product_uid,pi_ii_vi:it.pi_ii_vi});
-      }
+      /* V156: gm_product에는 cafe24_product_no 컬럼이 없다.
+       * SmartFit 저장 단계에서 gm_product를 cafe24_product_no로 재조회하지 않는다.
+       * 내부상품의 Cafe24 번호는 전달받은 product_no/cafe24_product_no와
+       * gm_smartfit_template.content_json.item_meta에 그대로 보존한다.
+       * 상세 진입 시에는 기존 GM_INTERNAL_PRODUCT_OPEN resolver가 product_no로 PUID를 복원한다. */
+      console.log('[SMARTFIT_INTERNAL_SAVE_V156] NO_GM_PRODUCT_CAFE24_LOOKUP',{
+        template_id:saved && saved.template_id,
+        internal_count:Array.from(merged.values()).filter(it=>s(it.source_mall).toUpperCase()==='GMKR').length
+      });
       normalizedItemCount=merged.size;
 
       console.log('[SMARTFIT_ITEM_SAVE_V072] PREPARE',{

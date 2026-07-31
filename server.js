@@ -12,6 +12,7 @@ const path = require('path');
 const { Pool } = require('pg');
 
 const VERSION = 'GLOMART_API_BASKET_DIRECT_V027';
+console.log('[GM_MIGRATION_ENGINE_V003] baseline<=102 / execute>=103');
 const app = express();
 
 /* GM_HEAD_CORS_KEEPALIVE_V001
@@ -448,13 +449,18 @@ async function initGmDb({ reset=false } = {}){
 
     const current = await getMigrationState(client);
 
-    // One-time bootstrap for an existing production DB:
-    // If no migration history exists yet, DO NOT execute historical SQL again.
-    // Record the current migration files as BASELINE only.
+    // One-time bootstrap for the existing production DB.
+    // Historical files through migration 102 are recorded as BASELINE only.
+    // IMPORTANT: migrations 103+ are NOT baselined; they continue below and execute once.
     if(current.length === 0){
+      const historical = files.filter(name => {
+        const m = String(name).match(/^(\d+)_/);
+        return m && Number(m[1]) <= 102;
+      });
+
       await client.query('BEGIN');
       try{
-        for(const name of files){
+        for(const name of historical){
           const sql = fs.readFileSync(path.join(dir, name), 'utf8');
           const checksum = migrationChecksum(sql);
 
@@ -473,13 +479,10 @@ async function initGmDb({ reset=false } = {}){
         await client.query('ROLLBACK');
         throw e;
       }
-
-      dbReady = true;
-      dbError = '';
-      return result;
     }
 
-    const known = new Map(current.map(r => [r.migration_name, r]));
+    const effectiveState = current.length === 0 ? await getMigrationState(client) : current;
+    const known = new Map(effectiveState.map(r => [r.migration_name, r]));
 
     for(const name of files){
       const file = path.join(dir, name);
