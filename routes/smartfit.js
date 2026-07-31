@@ -717,14 +717,36 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     if(q){ params.push('%'+q+'%'); const p='$'+params.length; where.push(`(i.product_uid ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p} OR COALESCE(p.mall_product_name,'') ILIKE ${p})`); }
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT
-        i.item_id, i.template_id, i.item_role, i.mall_code, COALESCE(p.product_id,'') AS product_id, i.product_uid, i.qty, i.sort_no,
+        i.item_id, i.template_id, i.item_role,
+        COALESCE(NULLIF(i.mall_code,''),p.mall_code,'') AS mall_code,
+        COALESCE(NULLIF(i.product_id,''),p.product_id,'') AS product_id,
+        i.product_uid, i.qty, i.sort_no,
         p.product_name, p.mall_product_name, ''::text AS option_name, ''::text AS option_value,
         p.mall_sale_price AS sale_price, p.final_supply_price,
         p.product_url, p.thumb_origin_url AS thumb_url,
         p.delivery_type, p.delivery_fee, p.delivery_eta_text, p.soldout_yn,
-        p.source_mall, p.pi_ii_vi, p.updated_at
+        COALESCE(NULLIF(i.source_mall,''),p.source_mall,'') AS source_mall,
+        COALESCE(i.source_uid,'') AS source_uid,
+        COALESCE(i.internal_product_code,'') AS internal_product_code,
+        COALESCE(i.cafe24_product_no,'') AS cafe24_product_no,
+        COALESCE(NULLIF(i.pi_ii_vi,''),p.pi_ii_vi,'') AS pi_ii_vi,
+        p.updated_at
       FROM gm_smartfit_item i
-      LEFT JOIN gm_product p ON p.product_uid=i.product_uid
+      LEFT JOIN LATERAL (
+        SELECT gp.*
+        FROM gm_product gp
+        WHERE
+          gp.product_uid=i.product_uid
+          OR (
+            COALESCE(NULLIF(i.product_id,''), split_part(regexp_replace(i.product_uid,'^(CPKR|ALKR)_','','i'),'_',1)) <> ''
+            AND gp.mall_code=COALESCE(NULLIF(i.mall_code,''),gp.mall_code)
+            AND gp.product_id=COALESCE(NULLIF(i.product_id,''), split_part(regexp_replace(i.product_uid,'^(CPKR|ALKR)_','','i'),'_',1))
+          )
+        ORDER BY
+          CASE WHEN gp.product_uid=i.product_uid THEN 0 ELSE 1 END,
+          gp.updated_at DESC NULLS LAST
+        LIMIT 1
+      ) p ON TRUE
       WHERE ${where.join(' AND ')}
       ORDER BY i.sort_no, i.item_id
       LIMIT ${lim}`, params);
