@@ -1,7 +1,7 @@
 'use strict';
 
 /*
- * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V003
+ * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V004
  *
  * Source of truth:
  *   gm_order + gm_order_item
@@ -469,9 +469,15 @@ async function listControlTower(pool, opts){
   `,params);
 
   const counts = {};
+  let assignedVisible = 0;
+  let unassignedVisible = 0;
   for(const row of list.rows){
     const s = upper(row.work_status || 'NONE');
     counts[s] = (counts[s] || 0) + 1;
+    if(s === 'READY'){
+      if(clean(row.admin_id) || clean(row.mall_account_id)) assignedVisible += 1;
+      else unassignedVisible += 1;
+    }
   }
 
   return {
@@ -479,12 +485,14 @@ async function listControlTower(pool, opts){
     total:Number(count.rows[0] && count.rows[0].total || 0),
     limit,
     offset,
-    visible_status_counts:counts
+    visible_status_counts:counts,
+    assigned_visible:assignedVisible,
+    unassigned_visible:unassignedVisible
   };
 }
 
 module.exports = {
-  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V003',
+  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V004',
   ingestOrder,
   syncRecentOrders,
   listControlTower,

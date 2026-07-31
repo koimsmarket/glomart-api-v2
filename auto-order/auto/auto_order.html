@@ -69,10 +69,11 @@
         <div class="tower-card"><div class="label">전체 작업</div><div id="cTotal" class="value">0</div></div>
         <div class="tower-card"><div class="label">결제대기</div><div id="cWait" class="value">0</div></div>
         <div class="tower-card"><div class="label">실행대기</div><div id="cReady" class="value">0</div></div>
-        <div class="tower-card"><div class="label">실행중/기타</div><div id="cOther" class="value">0</div></div>
+        <div class="tower-card"><div class="label">미배정 실행대기</div><div id="cUnassigned" class="value">0</div></div>
+        <div class="tower-card"><div class="label">배정완료 실행대기</div><div id="cAssigned" class="value">0</div></div>
       </div>
 
-      <div class="tower-tools">
+      <div class="tower-tools" style="grid-template-columns:minmax(220px,1fr) 140px 140px 100px 120px 120px;">
         <input id="q" class="wide" type="search" placeholder="주문번호 / 자동주문번호 / 회원ID 검색">
         <select id="mall">
           <option value="">전체 주문처</option>
@@ -89,7 +90,8 @@
           <option value="COMPLETED">완료</option>
         </select>
         <button id="searchBtn" type="button">조회</button>
-        <button id="syncBtn" class="primary" type="button">주문 동기화</button>
+        <button id="syncBtn" type="button">주문 동기화</button>
+        <button id="assignBtn" class="primary" type="button">실행기 배정</button>
       </div>
 
       <div id="summary" class="tower-summary">조회 중...</div>
@@ -122,7 +124,7 @@
 <script>
 (function(){
   'use strict';
-  var VERSION='GM_AUTO_ORDER_CONTROL_TOWER_UI_V003';
+  var VERSION='GM_AUTO_ORDER_CONTROL_TOWER_UI_V004';
   var $=function(id){return document.getElementById(id);};
 
   function esc(v){
@@ -188,8 +190,8 @@
       $('cTotal').textContent=Number(data.total||0).toLocaleString('ko-KR');
       $('cWait').textContent=Number(counts.WAIT_PAYMENT||0).toLocaleString('ko-KR');
       $('cReady').textContent=Number(counts.READY||0).toLocaleString('ko-KR');
-      var other=rows.length-Number(counts.WAIT_PAYMENT||0)-Number(counts.READY||0);
-      $('cOther').textContent=Math.max(0,other).toLocaleString('ko-KR');
+      $('cUnassigned').textContent=Number(data.unassigned_visible||0).toLocaleString('ko-KR');
+      $('cAssigned').textContent=Number(data.assigned_visible||0).toLocaleString('ko-KR');
 
       var sync=j.sync||{};
       $('summary').textContent=
@@ -247,9 +249,39 @@
     }
   }
 
+
+  async function assignReady(){
+    $('assignBtn').disabled=true;
+    $('assignBtn').textContent='배정 중';
+    try{
+      var r=await fetch('/api/auto-order/control-tower/assign-ready',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({limit:300})
+      });
+      var j=await r.json();
+      if(!r.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+r.status));
+      var d=j.data||{};
+      if(Number(d.no_account||0)>0){
+        alert(
+          '배정 완료 '+Number(d.assigned||0)+'건\\n'+
+          '계정 미등록/비활성 '+Number(d.no_account||0)+'건\\n\\n'+
+          '미배정 건은 gm_auto_order_account 등록 후 다시 배정하면 됩니다.'
+        );
+      }
+      await load();
+    }catch(e){
+      alert('실행기 배정 실패: '+(e&&e.message||e));
+    }finally{
+      $('assignBtn').disabled=false;
+      $('assignBtn').textContent='실행기 배정';
+    }
+  }
+
   $('refreshBtn').addEventListener('click',load);
   $('searchBtn').addEventListener('click',load);
   $('syncBtn').addEventListener('click',sync);
+  $('assignBtn').addEventListener('click',assignReady);
   $('q').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
   load();
 })();
