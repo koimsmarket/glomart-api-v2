@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V080_PRODUCTLOCK_SCOPE_FIX';
+const VERSION = 'GM_SMARTFIT_SERVER_V081_TEMPLATE_HARD_DELETE_CLEANUP';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -940,14 +940,53 @@ router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
     if(!old) throw new Error('template not found');
     if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
     const lock=await getTemplateCollectionLock(client,templateId,old.creator_member_id);
-    console.log('[SMARTFIT_TEMPLATE_DELETE_LOCK_V150]',{template_id:templateId,member_id:member,other_member_collection_count:lock.collection_count,total_collection_count:lock.total_collection_count,is_locked:lock.is_locked});
+    console.log('[SMARTFIT_TEMPLATE_DELETE_LOCK_V151]',{template_id:templateId,member_id:member,other_member_collection_count:lock.collection_count,total_collection_count:lock.total_collection_count,is_locked:lock.is_locked});
     if(lock.is_locked) throw new Error('collected template cannot be deleted; change visibility to private');
-    await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[templateId]);
-    await client.query('DELETE FROM gm_smartfit_collection WHERE template_id=$1',[templateId]);
-    await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1',[templateId]);
+
+    // 완전삭제는 템플릿 본체보다 종속자료를 먼저 정리한다.
+    // 1) R2의 template 전용 이미지 슬롯 전체(원본+small)를 먼저 삭제한다.
+    //    image_count가 과거 오류로 실제 파일수와 어긋나도 고아 이미지가 남지 않게 예약 슬롯 전체를 지운다.
+    const imageKeys=[];
+    for(let imageNo=1; imageNo<=r2.RESERVED_IMAGES_PER_ID; imageNo++){
+      imageKeys.push(r2.keyFor('template',templateId,imageNo,'image'));
+      imageKeys.push(r2.keyFor('template',templateId,imageNo,'small'));
+    }
+    console.log('[SMARTFIT_TEMPLATE_DELETE_IMAGE_V151] START',{template_id:templateId,key_count:imageKeys.length,image_count:imageCount(old.image_count)});
+    await r2.deleteKeys(imageKeys);
+    console.log('[SMARTFIT_TEMPLATE_DELETE_IMAGE_V151] DONE',{template_id:templateId,key_count:imageKeys.length});
+
+    // 2) 템플릿 종속 DB 자료 삭제. gm_product / 주문·매출 이력 같은 공용·이력 자료는 삭제하지 않는다.
+    //    일부 보조 테이블은 설치 시점에 따라 없을 수 있으므로 존재할 때만 정리한다.
+    const deleted={ item:0, delta:0, message_receiver:0, collection:0, template:0 };
+    let q=await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[templateId]);
+    deleted.item=q.rowCount||0;
+
+    const deltaTable=(await client.query("SELECT to_regclass('public.gm_smartfit_collection_item_delta') AS name")).rows[0];
+    if(deltaTable && deltaTable.name){
+      q=await client.query('DELETE FROM gm_smartfit_collection_item_delta WHERE template_id=$1',[templateId]);
+      deleted.delta=q.rowCount||0;
+    }
+
+    const messageTable=(await client.query("SELECT to_regclass('public.gm_smartfit_message_receiver') AS name")).rows[0];
+    if(messageTable && messageTable.name){
+      q=await client.query('DELETE FROM gm_smartfit_message_receiver WHERE template_id=$1',[templateId]);
+      deleted.message_receiver=q.rowCount||0;
+    }
+
+    q=await client.query('DELETE FROM gm_smartfit_collection WHERE template_id=$1',[templateId]);
+    deleted.collection=q.rowCount||0;
+    q=await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1',[templateId]);
+    deleted.template=q.rowCount||0;
+    if(deleted.template!==1) throw new Error('template delete row mismatch');
+
+    console.log('[SMARTFIT_TEMPLATE_DELETE_DB_V151]',{template_id:templateId,...deleted});
     await client.query('COMMIT');
-    ok(res,{ deleted:true, template_id:templateId });
-  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'template delete failed',{ detail:String(e.message||e) }); }
+    ok(res,{ deleted:true, template_id:templateId, deleted_rows:deleted, deleted_image_keys:imageKeys.length });
+  }catch(e){
+    try{await client.query('ROLLBACK');}catch(_){}
+    console.error('[SMARTFIT_TEMPLATE_DELETE_V151][ERROR]',{template_id:i((req.body||{}).template_id || (req.body||{}).templateId,0),message:String(e&&e.message||e)});
+    fail(res,400,'template delete failed',{ detail:String(e.message||e) });
+  }
   finally{ client.release(); }
 });
 
