@@ -435,12 +435,13 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
      * product_id 컬럼이 없는 DB에서도 기존 기본 컬럼으로 상품 저장이 가능해야 한다.
      * 컬럼 검사는 트랜잭션 시작 전에 실행하여 저장 트랜잭션을 오염시키지 않는다.
      */
-    const productIdColumnCheck=await client.query(`SELECT EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='gm_smartfit_item' AND column_name='product_id'
-    ) AS ok`);
-    const hasProductId=!!((productIdColumnCheck.rows[0]||{}).ok);
-    console.log('[SMARTFIT_SAVE_V136] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0, has_product_id:hasProductId });
+    const smartfitItemCols=new Set((await client.query(`SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='gm_smartfit_item'
+        AND column_name = ANY($1::text[])`,
+      [['product_id','source_mall','source_uid','internal_product_code','cafe24_product_no','pi_ii_vi']])).rows.map(x=>s(x.column_name)));
+    const hasProductId=smartfitItemCols.has('product_id');
+    console.log('[SMARTFIT_SAVE_V126] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0, has_product_id:hasProductId });
     await client.query('BEGIN');
     console.log('[SMARTFIT_SAVE_V136] STEP1_BEGIN');
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
@@ -482,19 +483,50 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         if(merged.has(key)){
           const existing=merged.get(key);
           existing.qty=Math.min(999,existing.qty+qty);
-          if(!existing.product_id){
-            existing.product_id=s(raw.product_id || raw.productId || raw.product_no || raw.productNo || '');
-          }
+          if(!existing.product_id) existing.product_id=s(raw.product_id || raw.productId || '');
+          if(!existing.source_mall) existing.source_mall=s(raw.source_mall || raw.sourceMall || '');
+          if(!existing.source_uid) existing.source_uid=s(raw.source_uid || raw.sourceUid || '');
+          if(!existing.internal_product_code) existing.internal_product_code=s(raw.internal_product_code || raw.internalProductCode || '');
+          if(!existing.cafe24_product_no) existing.cafe24_product_no=s(raw.cafe24_product_no || raw.cafe24ProductNo || raw.product_no || raw.productNo || '');
+          if(!existing.pi_ii_vi) existing.pi_ii_vi=s(raw.pi_ii_vi || raw.piIiVi || '');
         }else{
           merged.set(key,{
             item_role:s(raw.item_role||raw.role||'ETC')||'ETC',
             mall_code:mallCode,
-            product_id:s(raw.product_id || raw.productId || raw.product_no || raw.productNo || ''),
+            product_id:s(raw.product_id || raw.productId || ''),
             product_uid:productUid,
+            source_mall:s(raw.source_mall || raw.sourceMall || ''),
+            source_uid:s(raw.source_uid || raw.sourceUid || ''),
+            internal_product_code:s(raw.internal_product_code || raw.internalProductCode || ''),
+            cafe24_product_no:s(raw.cafe24_product_no || raw.cafe24ProductNo || raw.product_no || raw.productNo || ''),
+            pi_ii_vi:s(raw.pi_ii_vi || raw.piIiVi || ''),
             qty,
             sort_no:merged.size+1
           });
         }
+      }
+      /* 내부상품은 장바구니에서 cafe24_product_no만 넘긴다.
+       * SmartFit 저장 시 이미 상세 진입 때 저장된 gm_product를 조회하여
+       * source_uid/internal_product_code/PID_IID_VID를 보강한다. */
+      for(const it of merged.values()){
+        if(s(it.source_mall).toUpperCase()!=='GMKR' || !s(it.cafe24_product_no)) continue;
+        const p=(await client.query(`SELECT product_uid,mall_code,product_id,pi_ii_vi,source_mall,source_uid,internal_product_code,cafe24_product_no
+          FROM gm_product
+          WHERE source_mall='GMKR' AND cafe24_product_no=$1
+          ORDER BY updated_at DESC NULLS LAST
+          LIMIT 1`,[it.cafe24_product_no])).rows[0];
+        if(!p){
+          console.warn('[SMARTFIT_INTERNAL_IDENTITY_MISS_V126]',{cafe24_product_no:it.cafe24_product_no});
+          continue;
+        }
+        it.product_uid=s(p.product_uid)||it.product_uid;
+        it.mall_code=s(p.mall_code)||it.mall_code;
+        it.product_id=s(p.product_id)||it.product_id;
+        it.pi_ii_vi=s(p.pi_ii_vi)||it.pi_ii_vi;
+        it.source_mall=s(p.source_mall)||it.source_mall;
+        it.source_uid=s(p.source_uid)||it.source_uid;
+        it.internal_product_code=s(p.internal_product_code)||it.internal_product_code;
+        console.log('[SMARTFIT_INTERNAL_IDENTITY_OK_V126]',{cafe24_product_no:it.cafe24_product_no,product_uid:it.product_uid,pi_ii_vi:it.pi_ii_vi});
       }
       normalizedItemCount=merged.size;
 
@@ -531,17 +563,17 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
         console.log('[SMARTFIT_SAVE_V136] STEP5_INSERT_ITEMS', { template_id:saved.template_id, count:normalizedItemCount, has_product_id:hasProductId });
         for(const it of merged.values()){
-          if(hasProductId){
-            await client.query(`INSERT INTO gm_smartfit_item
-              (template_id,item_role,mall_code,product_id,product_uid,qty,sort_no)
-              VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-              [saved.template_id,it.item_role,it.mall_code,it.product_id||'',it.product_uid,it.qty,it.sort_no]);
-          }else{
-            await client.query(`INSERT INTO gm_smartfit_item
-              (template_id,item_role,mall_code,product_uid,qty,sort_no)
-              VALUES ($1,$2,$3,$4,$5,$6)`,
-              [saved.template_id,it.item_role,it.mall_code,it.product_uid,it.qty,it.sort_no]);
-          }
+          const cols=['template_id','item_role','mall_code'];
+          const vals=[saved.template_id,it.item_role,it.mall_code];
+          if(hasProductId){cols.push('product_id');vals.push(it.product_id||'');}
+          cols.push('product_uid'); vals.push(it.product_uid);
+          if(smartfitItemCols.has('source_mall')){cols.push('source_mall');vals.push(it.source_mall||'');}
+          if(smartfitItemCols.has('source_uid')){cols.push('source_uid');vals.push(it.source_uid||'');}
+          if(smartfitItemCols.has('internal_product_code')){cols.push('internal_product_code');vals.push(it.internal_product_code||'');}
+          if(smartfitItemCols.has('cafe24_product_no')){cols.push('cafe24_product_no');vals.push(it.cafe24_product_no||'');}
+          if(smartfitItemCols.has('pi_ii_vi')){cols.push('pi_ii_vi');vals.push(it.pi_ii_vi||'');}
+          cols.push('qty','sort_no'); vals.push(it.qty,it.sort_no);
+          await client.query(`INSERT INTO gm_smartfit_item (${cols.join(',')}) VALUES (${vals.map((_,idx)=>'$'+(idx+1)).join(',')})`,vals);
           savedItemCount++;
         }
         if(savedItemCount!==normalizedItemCount) throw new Error(`smartfit item save count mismatch: normalized=${normalizedItemCount}, saved=${savedItemCount}`);

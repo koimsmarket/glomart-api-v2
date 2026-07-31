@@ -683,4 +683,13 @@ router.get('/api/order/:order_no', async (req,res)=>{
     ok(res, { action:'order.get', order:order.rows[0] || null, items:publicOrderItems(items.rows) });
   }catch(e){ fail(res, 500, 'order get failed', { detail:String(e && e.message || e) }); }
 });
+// GM_BANK_TRANSACTION_ROUTE_V001
+// Bank payment import is mounted through the existing order router so server.js remains untouched.
+try {
+  router.use(require('../auto-order/routes/bank_transaction'));
+  console.log('[GM_BANK_TRANSACTION_ROUTE_V001] mounted via routes/order');
+} catch (e) {
+  console.error('[GM_BANK_TRANSACTION_ROUTE_V001] mount failed:', String(e && e.message || e));
+}
+
 module.exports = router;
