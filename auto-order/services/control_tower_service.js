@@ -1,7 +1,7 @@
 'use strict';
 
 /*
- * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V002
+ * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V003
  *
  * Source of truth:
  *   gm_order + gm_order_item
@@ -105,10 +105,11 @@ function groupOrderTargets(items, order){
   for(const row of items || []){
     let mall = sourceMall(row);
 
-    // Internal merchandise can pre-date supplier/mall registration.
-    // If it is an internal order and there is no explicit destination code yet,
-    // keep it actionable in the control tower as GMKR instead of dropping it.
-    if(!mall && upper(order && order.order_mode) === 'INTERNAL') mall = 'GMKR';
+    // Current gm_order schema may not contain order_mode.
+    // If an item is not identifiable as Coupang/Ali from its mall/source/url,
+    // keep it actionable as GMKR. At the present stage internal merchandise
+    // also requires automatic follow-up ordering.
+    if(!mall) mall = 'GMKR';
 
     if(!mall) continue;
     if(!groups.has(mall)) groups.set(mall,[]);
@@ -313,7 +314,7 @@ async function syncRecentOrders(pool, opts){
   const limit = Math.max(1,Math.min(1000,int(opts.limit,200)));
 
   const r = await pool.query(`
-    SELECT order_no,order_mode,ordered_at,created_at
+    SELECT order_no,ordered_at,created_at
     FROM gm_order
     ORDER BY COALESCE(ordered_at,created_at) DESC NULLS LAST, order_no DESC
     LIMIT $1
@@ -483,7 +484,7 @@ async function listControlTower(pool, opts){
 }
 
 module.exports = {
-  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V002',
+  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V003',
   ingestOrder,
   syncRecentOrders,
   listControlTower,
