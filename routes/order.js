@@ -19,7 +19,7 @@ function enqueueAfterResponse(label, task){
   if(typeof setImmediate==='function') setImmediate(run);
   else setTimeout(run,0);
 }
-const VERSION = 'GM_ORDER_ROUTE_V041_SERVER_ONLY_SUPPLY_PRICE';
+const VERSION = 'GM_ORDER_ROUTE_V042_ORDER_CREATE_DIAGNOSTIC';
 
 async function applyOrderCompletedDirect(req,orderNo,meta){
   const pool=db(req);
@@ -60,6 +60,61 @@ function orderCompletedAfterResponse(req,orderNo,meta){
 
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
+
+async function gmOrderDiagnostic(pool){
+  const out = {
+    version: VERSION,
+    checked_at: new Date().toISOString(),
+    counts: {},
+    recent_basket: [],
+    recent_orders: [],
+    recent_order_items: []
+  };
+
+  for(const table of ['gm_basket','gm_order','gm_order_item']){
+    const r = await pool.query(`
+      SELECT EXISTS(
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema='public' AND table_name=$1
+      ) AS exists
+    `,[table]);
+    const exists = !!(r.rows[0] && r.rows[0].exists);
+    out.counts[table] = { exists, count:null };
+    if(exists){
+      const c = await pool.query(`SELECT COUNT(*)::int AS n FROM "${table}"`);
+      out.counts[table].count = Number(c.rows[0] && c.rows[0].n || 0);
+    }
+  }
+
+  if(out.counts.gm_basket.exists){
+    out.recent_basket = (await pool.query(`
+      SELECT member_id,guest_key,mall_code,pi_ii_vi,product_name,source_mall,source_uid,created_at,updated_at
+      FROM gm_basket
+      ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST
+      LIMIT 20
+    `)).rows;
+  }
+
+  if(out.counts.gm_order.exists){
+    out.recent_orders = (await pool.query(`
+      SELECT order_no,member_id,guest_key,order_status,payment_status,total_payment_price,ordered_at,created_at,updated_at
+      FROM gm_order
+      ORDER BY COALESCE(updated_at,created_at,ordered_at) DESC NULLS LAST
+      LIMIT 20
+    `)).rows;
+  }
+
+  if(out.counts.gm_order_item.exists){
+    out.recent_order_items = (await pool.query(`
+      SELECT order_no,pi_ii_vi,mall_code,source_mall,source_uid,product_name,item_order_status,created_at,updated_at
+      FROM gm_order_item
+      ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST
+      LIMIT 20
+    `)).rows;
+  }
+
+  return out;
+}
 function clean(v){
   return String(v == null ? '' : v)
     .replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ')
@@ -506,6 +561,18 @@ async function replaceCafe24InternalItems(client, orderRow, inputItems){
 }
 
 router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
+  try{
+    const body=req.body||{};
+    console.log('[GM_CAFE24_CONFIRM_IN_V042]',JSON.stringify({
+      order_no:clean(body.order_no||body.gm_order_no||body.cafe24_order_no||body.cafe24OrderNo),
+      cafe24_order_no:clean(body.cafe24_order_no||body.cafe24OrderNo||body.order_id||body.orderId),
+      member_id:clean(body.member_id||body.memberId),
+      guest_key:clean(body.guest_key||body.guestKey),
+      internal_item_count:Array.isArray(body.internal_items)?body.internal_items.length:0
+    }));
+  }catch(e){
+    console.error('[GM_CAFE24_CONFIRM_IN_LOG_ERROR_V042]',String(e&&e.message||e));
+  }
   const pool=db(req);
   if(!pool)return fail(res,500,'DB pool is not attached');
   const raw=req.body||{};
@@ -559,6 +626,20 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
 });
 
 router.post('/api/gm/order/create', async (req, res) => {
+  try{
+    const body=req.body||{};
+    const items=normalizeItems(body);
+    console.log('[GM_ORDER_CREATE_IN_V042]',JSON.stringify({
+      order_no:clean(body.order_no||body.gm_order_no||body.orderNo),
+      member_id:clean(body.member_id||body.memberId),
+      guest_key:clean(body.guest_key||body.guestKey),
+      order_mode:clean(body.order_mode||body.orderMode||'external'),
+      item_count:items.length,
+      mall_codes:items.map(x=>clean(itemVal(x,['mall_code','mallCode','source_mall','sourceMall'],'')).toUpperCase()).filter(Boolean).slice(0,20)
+    }));
+  }catch(e){
+    console.error('[GM_ORDER_CREATE_IN_LOG_ERROR_V042]',String(e&&e.message||e));
+  }
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const raw = req.body || {};
@@ -635,6 +716,25 @@ router.post('/api/gm/order/create', async (req, res) => {
     client.release();
   }
 });
+
+router.get('/api/gm/order/diagnostic', async (req,res)=>{
+  const pool=db(req);
+  if(!pool) return fail(res,500,'DB pool is not attached');
+  try{
+    const data=await gmOrderDiagnostic(pool);
+    console.log('[GM_ORDER_DIAGNOSTIC_V042]',JSON.stringify({
+      counts:data.counts,
+      recent_basket:data.recent_basket.length,
+      recent_orders:data.recent_orders.length,
+      recent_order_items:data.recent_order_items.length
+    }));
+    ok(res,{action:'order.diagnostic',data});
+  }catch(e){
+    console.error('[GM_ORDER_DIAGNOSTIC_ERROR_V042]',String(e&&e.stack||e));
+    fail(res,500,'order diagnostic failed',{detail:String(e&&e.message||e)});
+  }
+});
+
 router.get('/api/gm/order/get', async (req, res) => {
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
