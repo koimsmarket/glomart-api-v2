@@ -7,6 +7,7 @@ const { startEventQueueWorker } = require('./workers/event_queue_worker');
 const { startMemberRelationWorker } = require('./workers/member_relation_worker');
 const cors = require('cors');
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const { Pool } = require('pg');
 
@@ -370,13 +371,59 @@ try {
 let dbReady = false;
 let dbError = '';
 
+async function ensureMigrationHistory(client){
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS gm_schema_migrations (
+      migration_name TEXT PRIMARY KEY,
+      checksum_sha256 TEXT NOT NULL,
+      apply_type VARCHAR(20) NOT NULL DEFAULT 'APPLIED',
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_gm_schema_migrations_applied_at
+      ON gm_schema_migrations(applied_at DESC)
+  `);
+}
+
+function migrationChecksum(sql){
+  return crypto.createHash('sha256').update(String(sql || ''), 'utf8').digest('hex');
+}
+
+function migrationIsDestructive(sql){
+  const s = String(sql || '')
+    .replace(/--[^\n\r]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+
+  const destructive =
+    /\bTRUNCATE\s+TABLE\b/.test(s) ||
+    /\bDROP\s+TABLE\b/.test(s) ||
+    /\bDROP\s+SCHEMA\b/.test(s) ||
+    /\bDELETE\s+FROM\b(?![\s\S]*\bWHERE\b)/.test(s);
+
+  const explicitlyAllowed = /GM_ALLOW_DESTRUCTIVE_MIGRATION/i.test(String(sql || ''));
+  return destructive && !explicitlyAllowed;
+}
+
+async function getMigrationState(client){
+  const r = await client.query(`
+    SELECT migration_name, checksum_sha256, apply_type, applied_at
+    FROM gm_schema_migrations
+    ORDER BY migration_name
+  `);
+  return r.rows || [];
+}
+
 async function initGmDb({ reset=false } = {}){
-  if (reset) {
-    throw new Error('DB reset is disabled. Use migrations manually if reset is required.');
+  if(reset){
+    throw new Error('DB reset is disabled. Use an explicit maintenance procedure if reset is required.');
   }
 
   const dir = path.join(__dirname, 'migrations');
-  if (!fs.existsSync(dir)) {
+  if(!fs.existsSync(dir)){
     throw new Error('migration directory not found: ' + dir);
   }
 
@@ -384,35 +431,130 @@ async function initGmDb({ reset=false } = {}){
     .filter(name => /^\d+_.*\.sql$/i.test(name))
     .sort((a,b) => a.localeCompare(b, undefined, { numeric:true }));
 
-  if (!files.length) throw new Error('no migration files found');
+  if(!files.length) throw new Error('no migration files found');
 
-  const applied = [];
-  for (const name of files) {
-    const file = path.join(dir, name);
-    const sql = fs.readFileSync(file, 'utf8');
-    if (sql.trim()) {
-      try {
-        await pool.query(sql);
-        applied.push('migrations/' + name);
-      } catch (e) {
+  const client = await pool.connect();
+  const result = {
+    baseline: [],
+    already_applied: [],
+    newly_applied: [],
+    failed: []
+  };
+
+  try{
+    // Prevent two app instances from running the migration bootstrap at the same time.
+    await client.query(`SELECT pg_advisory_lock(hashtext('glomart_schema_migrations_v1'))`);
+    await ensureMigrationHistory(client);
+
+    const current = await getMigrationState(client);
+
+    // One-time bootstrap for an existing production DB:
+    // If no migration history exists yet, DO NOT execute historical SQL again.
+    // Record the current migration files as BASELINE only.
+    if(current.length === 0){
+      await client.query('BEGIN');
+      try{
+        for(const name of files){
+          const sql = fs.readFileSync(path.join(dir, name), 'utf8');
+          const checksum = migrationChecksum(sql);
+
+          await client.query(`
+            INSERT INTO gm_schema_migrations(
+              migration_name, checksum_sha256, apply_type, applied_at
+            )
+            VALUES($1,$2,'BASELINE',now())
+            ON CONFLICT (migration_name) DO NOTHING
+          `,[name,checksum]);
+
+          result.baseline.push('migrations/' + name);
+        }
+        await client.query('COMMIT');
+      }catch(e){
+        await client.query('ROLLBACK');
+        throw e;
+      }
+
+      dbReady = true;
+      dbError = '';
+      return result;
+    }
+
+    const known = new Map(current.map(r => [r.migration_name, r]));
+
+    for(const name of files){
+      const file = path.join(dir, name);
+      const sql = fs.readFileSync(file, 'utf8');
+      const checksum = migrationChecksum(sql);
+      const prev = known.get(name);
+
+      if(prev){
+        if(String(prev.checksum_sha256) !== checksum){
+          throw new Error(
+            '[migration-checksum:' + name + '] historical migration was modified. ' +
+            'Create a NEW migration file instead of editing an applied migration.'
+          );
+        }
+        result.already_applied.push('migrations/' + name);
+        continue;
+      }
+
+      if(!sql.trim()){
+        await client.query(`
+          INSERT INTO gm_schema_migrations(
+            migration_name, checksum_sha256, apply_type, applied_at
+          ) VALUES($1,$2,'APPLIED',now())
+        `,[name,checksum]);
+        result.newly_applied.push('migrations/' + name);
+        continue;
+      }
+
+      if(migrationIsDestructive(sql)){
+        throw new Error(
+          '[migration-safety:' + name + '] destructive SQL blocked. ' +
+          'TRUNCATE/DROP/unscoped DELETE must be handled by an explicit maintenance procedure.'
+        );
+      }
+
+      try{
+        await client.query(sql);
+        await client.query(`
+          INSERT INTO gm_schema_migrations(
+            migration_name, checksum_sha256, apply_type, applied_at
+          ) VALUES($1,$2,'APPLIED',now())
+        `,[name,checksum]);
+        result.newly_applied.push('migrations/' + name);
+      }catch(e){
         const msg = String(e && e.message || e);
+        result.failed.push({ file:'migrations/' + name, error:msg });
         throw new Error('[migration:' + name + '] ' + msg);
       }
     }
-  }
 
-  dbReady = true;
-  dbError = '';
-  return { files:applied };
+    dbReady = true;
+    dbError = '';
+    return result;
+  }finally{
+    try{ await client.query(`SELECT pg_advisory_unlock(hashtext('glomart_schema_migrations_v1'))`); }catch(_){}
+    client.release();
+  }
 }
 
 if(process.env.GM_DB_AUTOINIT !== '0'){
   initGmDb({ reset:false }).then((r) => {
-    console.log('[GM DB READY] migrations/*.sql applied', r && r.files ? r.files.length : '');
+    const baseline = r && r.baseline ? r.baseline.length : 0;
+    const already = r && r.already_applied ? r.already_applied.length : 0;
+    const newly = r && r.newly_applied ? r.newly_applied.length : 0;
+    const failed = r && r.failed ? r.failed.length : 0;
+    console.log('[GM DB READY V002]', JSON.stringify({
+      baseline,
+      already_applied: already,
+      newly_applied: newly,
+      failed
+    }));
   }).catch(err => {
     dbReady = false;
     dbError = String(err && err.message || err);
-    console.error('[GM DB INIT SKIPPED]', dbError);
+    console.error('[GM DB INIT FAILED V002]', dbError);
   });
 }
 
@@ -673,7 +815,7 @@ app.get('/', (req,res)=>{
 
 
 app.get('/api/gm/status', (req,res)=>ok(res,{ service:'glomart-api', version:VERSION, mode:'json-cache-plus-postgresql', dbReady, dbError, routes:[
-  'GET /','GET /health','GET /api/gm/health','GET /api/gm/status','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
+  'GET /','GET /health','GET /api/gm/health','GET /api/gm/status','GET /api/gm/db/migrations','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
   'GET /api/gm/dashboard/realtime','POST /api/gm/dashboard/snapshot','POST /api/gm/search/log',
   'POST /api/gm/product/queue','POST /api/gm/product/upsert','POST /api/gm/keyword/translate','GET /api/gm/keyword/lookup',
   'GET /api/gm/builder/export','GET /api/gm/builder/export-all','GET /gm_data_builder.html'
@@ -690,6 +832,31 @@ app.get('/api/gm/health', async (req,res)=>{
   }
 });
 
+app.get('/api/gm/db/migrations', async (req,res)=>{
+  try{
+    await dbQuery(`
+      CREATE TABLE IF NOT EXISTS gm_schema_migrations (
+        migration_name TEXT PRIMARY KEY,
+        checksum_sha256 TEXT NOT NULL,
+        apply_type VARCHAR(20) NOT NULL DEFAULT 'APPLIED',
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    const r = await dbQuery(`
+      SELECT migration_name, apply_type, applied_at, checksum_sha256
+      FROM gm_schema_migrations
+      ORDER BY migration_name
+    `);
+    ok(res, {
+      action:'db.migrations',
+      count:r.rows.length,
+      rows:r.rows
+    });
+  }catch(e){
+    fail(res,500,'migration status failed',{detail:String(e && e.message || e)});
+  }
+});
+
 app.post('/api/gm/db/init', async (req,res)=>{
   try{ const r = await initGmDb({ reset:false }); ok(res, { action:'db.init', ...r }); }
   catch(e){ fail(res, 500, 'db init failed', { detail:String(e && e.message || e) }); }
@@ -697,6 +864,13 @@ app.post('/api/gm/db/init', async (req,res)=>{
 
 app.post('/api/gm/db/reset', async (req,res)=>{
   try{
+    const enabled = process.env.GM_DB_RESET_ENABLED === '1';
+    const confirm = String(req.body && req.body.confirm || '').trim();
+    if(!enabled || confirm !== 'RESET GM DATA'){
+      return fail(res,403,'db reset disabled',{
+        detail:'Set GM_DB_RESET_ENABLED=1 and send confirm="RESET GM DATA" only during explicit maintenance.'
+      });
+    }
     const before = await tableCounts(GM_RESET_TARGETS);
     const existing = await dbQuery(`
       SELECT table_name
