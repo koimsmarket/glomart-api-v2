@@ -1402,6 +1402,64 @@ function devCellValue(v){
   const x = clean(v);
   return x === '' ? null : x;
 }
+
+function devFirstValue(row, names){
+  for(const name of names || []){
+    const v = clean(row && row[name]);
+    if(v !== '') return v;
+  }
+  return '';
+}
+
+function normalizeDevRestoreRows(spec, rows){
+  // 개발용 파일 복원 전용 보정.
+  // 일반 업로드/운영 저장 로직에는 영향을 주지 않는다.
+  // 과거 gm_order 백업에는 현재 NOT NULL 필드 일부가 비어 있을 수 있으므로
+  // 복원이 실패하지 않도록 "기존 행 안에서 찾을 수 있는 값"을 우선 재사용한다.
+  if(!spec || spec.table !== 'gm_order') return { rows, filled:{} };
+
+  const filled = {};
+  function setIfBlank(row, col, value){
+    if(clean(row[col]) !== '') return;
+    const v = clean(value);
+    if(v === '') return;
+    row[col] = v;
+    filled[col] = (filled[col] || 0) + 1;
+  }
+
+  for(const row of rows){
+    const memberOrGuest = devFirstValue(row, ['member_id','guest_key','order_no']);
+
+    setIfBlank(row, 'orderer_name',
+      devFirstValue(row, ['receiver_name','customs_name','depositor_name','member_id','guest_key','order_no'])
+    );
+
+    setIfBlank(row, 'orderer_mobile',
+      devFirstValue(row, ['orderer_phone','receiver_mobile','receiver_phone','receiver_safe_phone','depositor_phone'])
+    );
+
+    setIfBlank(row, 'receiver_name',
+      devFirstValue(row, ['orderer_name','customs_name','depositor_name','member_id','guest_key','order_no'])
+    );
+
+    setIfBlank(row, 'receiver_mobile',
+      devFirstValue(row, ['receiver_phone','receiver_safe_phone','orderer_mobile','orderer_phone','depositor_phone'])
+    );
+
+    // 과거 백업에 배송지 일부가 비어 있는 경우가 있다.
+    // 임의의 실제 주소를 만들지 않고 복원 필요 상태임을 명시한다.
+    setIfBlank(row, 'receiver_zipcode', 'RESTORE_REQUIRED');
+    setIfBlank(row, 'receiver_address1', 'RESTORE_REQUIRED');
+
+    // 이름/전화번호도 모든 대체 후보가 비어 있으면 명시적인 복원 표시값을 사용한다.
+    setIfBlank(row, 'orderer_name', memberOrGuest || 'RESTORE_REQUIRED');
+    setIfBlank(row, 'receiver_name', memberOrGuest || 'RESTORE_REQUIRED');
+    setIfBlank(row, 'orderer_mobile', 'RESTORE_REQUIRED');
+    setIfBlank(row, 'receiver_mobile', 'RESTORE_REQUIRED');
+  }
+
+  return { rows, filled };
+}
 function pickDevConflictKeys(spec, inputCols){
   const input = new Set(inputCols || []);
   for(const ks of keySets(spec)){
@@ -1534,6 +1592,9 @@ async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
   const batchSize = Math.min(Math.max(Number(req.query.batchSize || 500), 50), 1000);
   const confirmed = devOverwriteConfirmed(req);
   const columns = await getColumns(db, spec.table);
+  const normalized = normalizeDevRestoreRows(spec, rows);
+  rows = normalized.rows;
+  const restoreFilled = normalized.filled || {};
   const inputCols = rowColumnsFromRows(rows, columns);
   const outCols = ['row_no','table','key','result','column_name','value','reason'];
   const result=[];
@@ -1554,7 +1615,7 @@ async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
     if(client) await client.query('BEGIN');
     if(!confirmed){
       usedKeys = devRestoreKeySets(spec, inputCols);
-      result.push(resultRow('', spec.table, usedKeys.map(k=>k.join('+')).join(' / '), 'DRY_RUN', '', '', `DEV_FILE_RESTORE_READY rows=${rows.length} columns=${inputCols.length}; selected rows only; no truncate`));
+      result.push(resultRow('', spec.table, usedKeys.map(k=>k.join('+')).join(' / '), 'DRY_RUN', '', '', `DEV_FILE_RESTORE_READY rows=${rows.length} columns=${inputCols.length}; selected rows only; no truncate; filled=${JSON.stringify(restoreFilled)}`));
       for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'VALID_DEV_FILE_RESTORE', '', '', 'DRY_RUN'));
     }else{
       const r = await restoreDevRowsByFile(client, spec, inputCols, rows, batchSize);
@@ -1567,11 +1628,11 @@ async function handleDevOverwriteImport(req, res, spec, rows, apply, db){
       for(const row of rows.slice(0, 2000)) result.push(resultRow(row.__row_no, spec.table, pickKey(row, spec)?.label || '', 'RESTORED_DEV_FILE_ROW', '', '', 'APPLIED'));
     }
     if(client) await client.query('COMMIT');
-    try{ console.log('[GM_DEV_FILE_RESTORE_DONE_V023]', JSON.stringify({ table:spec.table, rows:rows.length, columns:inputCols.length, applied, deleted, confirmed, keys:usedKeys, ms:Date.now()-start })); }catch(_){}
+    try{ console.log('[GM_DEV_FILE_RESTORE_DONE_V024]', JSON.stringify({ table:spec.table, rows:rows.length, columns:inputCols.length, applied, deleted, confirmed, keys:usedKeys, filled:restoreFilled, ms:Date.now()-start })); }catch(_){}
   }catch(e){
     if(client) await client.query('ROLLBACK').catch(()=>{});
     result.push(resultRow('', spec.table, '', 'FAIL', '', '', String(e && e.message || e)));
-    try{ console.error('[GM_DEV_FILE_RESTORE_FAIL_V023]', spec.table, String(e && e.message || e)); }catch(_){}
+    try{ console.error('[GM_DEV_FILE_RESTORE_FAIL_V024]', spec.table, String(e && e.message || e)); }catch(_){}
   }finally{
     if(client) client.release();
   }
