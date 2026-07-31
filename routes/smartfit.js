@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V081_TEMPLATE_HARD_DELETE_CLEANUP';
+const VERSION = 'GM_SMARTFIT_SERVER_V082_PRODUCTLOCK_STATE_OBJECT';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -442,7 +442,8 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
 router.post('/api/gm/smartfit/template/save', async (req,res)=>{
   console.log('[SMARTFIT_SAVE_DB] TEMPLATE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
   const pool=db(req); const client=await pool.connect();
-  let productLocked=false;
+  const saveState={ productLocked:false };
+  console.log('[SMARTFIT_SAVE_V152] PRODUCT_LOCK_STATE_READY', saveState);
   console.log('[SMARTFIT_SAVE_V150] OWNER_COLLECTION_EXCLUDED_FROM_LOCK');
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.creatorMemberId);
@@ -480,8 +481,8 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       console.log('[SMARTFIT_SAVE_V142] STEP2_COLLECTION_CHECK', { template_id:templateId });
       const collectionLock=await getTemplateCollectionLock(client,templateId,old.creator_member_id);
       const collectedCount=collectionLock.collection_count;
-      productLocked=collectionLock.is_locked;
-      console.log('[SMARTFIT_SAVE_V142] PRODUCT_LOCK_STATUS',{template_id:templateId,product_locked:productLocked,collected_count:collectedCount,diag:collectionLock._diag});
+      saveState.productLocked=collectionLock.is_locked;
+      console.log('[SMARTFIT_SAVE_V142] PRODUCT_LOCK_STATUS',{template_id:templateId,product_locked:saveState.productLocked,collected_count:collectedCount,diag:collectionLock._diag});
       console.log('[SMARTFIT_SAVE_V136] STEP3_TEMPLATE_UPDATE', { template_id:templateId, collected_count:collectedCount });
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
@@ -564,7 +565,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       });
 
       /* 퍼가기 이후에는 상품 구성만 고정하고 일반정보 수정은 허용한다. */
-      if(productLocked){
+      if(saveState.productLocked){
         const itemCols=(await client.query(`SELECT column_name FROM information_schema.columns
           WHERE table_schema='public' AND table_name='gm_smartfit_item'
             AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
@@ -612,7 +613,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         saved:savedItemCount
       });
     }
-    console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount, product_locked:productLocked });
+    console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount, product_locked:saveState.productLocked });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
     ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount });
