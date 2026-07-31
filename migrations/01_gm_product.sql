@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS gm_product (
   PRIMARY KEY (product_uid)
 );
 
+-- V020 existing-table compatibility:
+-- gm_product may already exist from an older schema without mall_code.
+-- CREATE TABLE IF NOT EXISTS does not add missing columns.
+ALTER TABLE gm_product
+  ADD COLUMN IF NOT EXISTS mall_code TEXT NOT NULL DEFAULT 'CPKR';
+
 CREATE INDEX IF NOT EXISTS idx_gm_product_keyword ON gm_product(keyword);
 CREATE INDEX IF NOT EXISTS idx_gm_product_mall_code ON gm_product(mall_code);
 CREATE INDEX IF NOT EXISTS idx_gm_product_cp_selected_code ON gm_product(cp_selected_code);

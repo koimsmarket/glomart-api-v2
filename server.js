@@ -391,8 +391,13 @@ async function initGmDb({ reset=false } = {}){
     const file = path.join(dir, name);
     const sql = fs.readFileSync(file, 'utf8');
     if (sql.trim()) {
-      await pool.query(sql);
-      applied.push('migrations/' + name);
+      try {
+        await pool.query(sql);
+        applied.push('migrations/' + name);
+      } catch (e) {
+        const msg = String(e && e.message || e);
+        throw new Error('[migration:' + name + '] ' + msg);
+      }
     }
   }
 
