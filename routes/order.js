@@ -19,8 +19,8 @@ function enqueueAfterResponse(label, task){
   if(typeof setImmediate==='function') setImmediate(run);
   else setTimeout(run,0);
 }
-const VERSION = 'GM_ORDER_ROUTE_V043_ORDER_CREATE_DIAGNOSTIC';
-console.log('[GM_ORDER_ROUTE_V043] routes/order.js loaded');
+const VERSION = 'GM_ORDER_ROUTE_V044_ORDER_CREATE_DIAGNOSTIC';
+console.log('[GM_ORDER_ROUTE_V044] routes/order.js loaded');
 
 async function applyOrderCompletedDirect(req,orderNo,meta){
   const pool=db(req);
@@ -63,6 +63,46 @@ function orderCompletedAfterResponse(req,orderNo,meta){
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 
 async function gmOrderDiagnostic(pool){
+  async function tableInfo(table){
+    const t = await pool.query(`
+      SELECT EXISTS(
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema='public' AND table_name=$1
+      ) AS exists
+    `,[table]);
+    const exists = !!(t.rows[0] && t.rows[0].exists);
+    if(!exists) return { exists:false, count:null, columns:[] };
+
+    const c = await pool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema='public' AND table_name=$1
+      ORDER BY ordinal_position
+    `,[table]);
+
+    const n = await pool.query(`SELECT COUNT(*)::int AS n FROM "${table}"`);
+    return {
+      exists:true,
+      count:Number(n.rows[0] && n.rows[0].n || 0),
+      columns:c.rows.map(x=>x.column_name)
+    };
+  }
+
+  function first(cols,names){
+    for(const n of names) if(cols.includes(n)) return n;
+    return '';
+  }
+
+  function selectExpr(cols,nameList,alias){
+    const c=first(cols,nameList);
+    return c ? `"${c}" AS "${alias}"` : `NULL AS "${alias}"`;
+  }
+
+  function orderExpr(cols){
+    const c=first(cols,['updated_at','created_at','ordered_at','order_date','reg_date','id']);
+    return c ? `"${c}" DESC NULLS LAST` : '1';
+  }
+
   const out = {
     version: VERSION,
     checked_at: new Date().toISOString(),
@@ -72,44 +112,63 @@ async function gmOrderDiagnostic(pool){
     recent_order_items: []
   };
 
-  for(const table of ['gm_basket','gm_order','gm_order_item']){
-    const r = await pool.query(`
-      SELECT EXISTS(
-        SELECT 1 FROM information_schema.tables
-        WHERE table_schema='public' AND table_name=$1
-      ) AS exists
-    `,[table]);
-    const exists = !!(r.rows[0] && r.rows[0].exists);
-    out.counts[table] = { exists, count:null };
-    if(exists){
-      const c = await pool.query(`SELECT COUNT(*)::int AS n FROM "${table}"`);
-      out.counts[table].count = Number(c.rows[0] && c.rows[0].n || 0);
-    }
-  }
+  out.counts.gm_basket = await tableInfo('gm_basket');
+  out.counts.gm_order = await tableInfo('gm_order');
+  out.counts.gm_order_item = await tableInfo('gm_order_item');
 
   if(out.counts.gm_basket.exists){
+    const c=out.counts.gm_basket.columns;
     out.recent_basket = (await pool.query(`
-      SELECT member_id,guest_key,mall_code,pi_ii_vi,product_name,source_mall,source_uid,created_at,updated_at
+      SELECT
+        ${selectExpr(c,['member_id'],'member_id')},
+        ${selectExpr(c,['guest_key'],'guest_key')},
+        ${selectExpr(c,['mall_code','source_mall'],'mall_code')},
+        ${selectExpr(c,['pi_ii_vi'],'pi_ii_vi')},
+        ${selectExpr(c,['product_name','name'],'product_name')},
+        ${selectExpr(c,['source_mall','mall_code'],'source_mall')},
+        ${selectExpr(c,['source_uid'],'source_uid')},
+        ${selectExpr(c,['created_at','reg_date'],'created_at')},
+        ${selectExpr(c,['updated_at','modified_at'],'updated_at')}
       FROM gm_basket
-      ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST
+      ORDER BY ${orderExpr(c)}
       LIMIT 20
     `)).rows;
   }
 
   if(out.counts.gm_order.exists){
+    const c=out.counts.gm_order.columns;
     out.recent_orders = (await pool.query(`
-      SELECT order_no,member_id,guest_key,order_status,payment_status,total_payment_price,ordered_at,created_at,updated_at
+      SELECT
+        ${selectExpr(c,['order_no','order_id'],'order_no')},
+        ${selectExpr(c,['member_id'],'member_id')},
+        ${selectExpr(c,['guest_key'],'guest_key')},
+        ${selectExpr(c,['order_status','status'],'order_status')},
+        ${selectExpr(c,['payment_status'],'payment_status')},
+        ${selectExpr(c,['total_payment_price','actual_payment_amount','total_amount'],'total_payment_price')},
+        ${selectExpr(c,['ordered_at','order_date'],'ordered_at')},
+        ${selectExpr(c,['created_at','reg_date'],'created_at')},
+        ${selectExpr(c,['updated_at','modified_at'],'updated_at')}
       FROM gm_order
-      ORDER BY COALESCE(updated_at,created_at,ordered_at) DESC NULLS LAST
+      ORDER BY ${orderExpr(c)}
       LIMIT 20
     `)).rows;
   }
 
   if(out.counts.gm_order_item.exists){
+    const c=out.counts.gm_order_item.columns;
     out.recent_order_items = (await pool.query(`
-      SELECT order_no,pi_ii_vi,mall_code,source_mall,source_uid,product_name,item_order_status,created_at,updated_at
+      SELECT
+        ${selectExpr(c,['order_no','order_id'],'order_no')},
+        ${selectExpr(c,['pi_ii_vi'],'pi_ii_vi')},
+        ${selectExpr(c,['mall_code','source_mall'],'mall_code')},
+        ${selectExpr(c,['source_mall','mall_code'],'source_mall')},
+        ${selectExpr(c,['source_uid'],'source_uid')},
+        ${selectExpr(c,['product_name','name'],'product_name')},
+        ${selectExpr(c,['item_order_status','order_status','status'],'item_order_status')},
+        ${selectExpr(c,['created_at','reg_date'],'created_at')},
+        ${selectExpr(c,['updated_at','modified_at'],'updated_at')}
       FROM gm_order_item
-      ORDER BY COALESCE(updated_at,created_at) DESC NULLS LAST
+      ORDER BY ${orderExpr(c)}
       LIMIT 20
     `)).rows;
   }
@@ -564,7 +623,7 @@ async function replaceCafe24InternalItems(client, orderRow, inputItems){
 router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
   try{
     const body=req.body||{};
-    console.log('[GM_CAFE24_CONFIRM_IN_V043]',JSON.stringify({
+    console.log('[GM_CAFE24_CONFIRM_IN_V044]',JSON.stringify({
       order_no:clean(body.order_no||body.gm_order_no||body.cafe24_order_no||body.cafe24OrderNo),
       cafe24_order_no:clean(body.cafe24_order_no||body.cafe24OrderNo||body.order_id||body.orderId),
       member_id:clean(body.member_id||body.memberId),
@@ -630,7 +689,7 @@ router.post('/api/gm/order/create', async (req, res) => {
   try{
     const body=req.body||{};
     const items=normalizeItems(body);
-    console.log('[GM_ORDER_CREATE_IN_V043]',JSON.stringify({
+    console.log('[GM_ORDER_CREATE_IN_V044]',JSON.stringify({
       order_no:clean(body.order_no||body.gm_order_no||body.orderNo),
       member_id:clean(body.member_id||body.memberId),
       guest_key:clean(body.guest_key||body.guestKey),
@@ -723,7 +782,7 @@ router.get('/api/gm/order/diagnostic', async (req,res)=>{
   if(!pool) return fail(res,500,'DB pool is not attached');
   try{
     const data=await gmOrderDiagnostic(pool);
-    console.log('[GM_ORDER_DIAGNOSTIC_V043]',JSON.stringify({
+    console.log('[GM_ORDER_DIAGNOSTIC_V044]',JSON.stringify({
       counts:data.counts,
       recent_basket:data.recent_basket.length,
       recent_orders:data.recent_orders.length,
@@ -731,7 +790,7 @@ router.get('/api/gm/order/diagnostic', async (req,res)=>{
     }));
     ok(res,{action:'order.diagnostic',data});
   }catch(e){
-    console.error('[GM_ORDER_DIAGNOSTIC_ERROR_V043]',String(e&&e.stack||e));
+    console.error('[GM_ORDER_DIAGNOSTIC_ERROR_V044]',String(e&&e.stack||e));
     fail(res,500,'order diagnostic failed',{detail:String(e&&e.message||e)});
   }
 });
