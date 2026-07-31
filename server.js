@@ -12,7 +12,7 @@ const path = require('path');
 const { Pool } = require('pg');
 
 const VERSION = 'GLOMART_API_BASKET_DIRECT_V027';
-console.log('[GM_MIGRATION_ENGINE_V003] baseline<=102 / execute>=103');
+console.log('[GM_MIGRATION_ENGINE_V004] bootstrap baseline<=102 / ADMIN range=900~999 / first admin migration=901');
 const app = express();
 
 /* GM_HEAD_CORS_KEEPALIVE_V001
