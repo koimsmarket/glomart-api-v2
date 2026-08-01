@@ -175,7 +175,7 @@ const AUTO_ORDER_TABLE_KEYS = new Set(['auto_orders','auto_order_items','auto_or
 function isAutoOrderTable(key){return AUTO_ORDER_TABLE_KEYS.has(String(key||''));}
 function builderAuthHeaders(){return {};}
 function ensureAutoOrderBuilderAuth(keyOrKeys){return true;}
-async function redirectCafe24Login(){alert('Cafe24 로그인 연동은 후속 작업으로 보류되었습니다.');return false;}
+async function redirectCafe24Login(){alert('Cafe24 로그인 연동은 후속 작업으로 보류되었습니다. 현재 빌더는 임시 관리자 모드입니다.');return false;}
 
 const tables = {
   products:'상품 gm_product',
@@ -550,13 +550,23 @@ async function downloadAll(button){
       if(saved.size!==bytes) throw new Error(`ZIP 저장 크기 불일치 (${saved.size}/${bytes})`);
       log(`DB ZIP 저장 완료: ${saved.name} / ${saved.size.toLocaleString()} bytes / ${timed?timed.seconds:0}초`);
     }else{
-      const a=document.createElement('a');
-      a.href=url;
-      a.download=filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      log(`DB ZIP 다운로드를 시작했습니다: ${filename}\n브라우저 다운로드 완료 여부는 다운로드 목록에서 확인하세요.`);
+      const response=await fetch(url,{method:'GET',cache:'no-store'});
+      const contentType=String(response.headers.get('content-type')||'').toLowerCase();
+      if(!response.ok){
+        const text=await response.text().catch(()=>String(response.status));
+        throw new Error(`HTTP ${response.status} ${text.slice(0,500)}`);
+      }
+      const blob=await response.blob();
+      const head=new Uint8Array(await blob.slice(0,4).arrayBuffer());
+      const zipSignature=head.length===4 && head[0]===0x50 && head[1]===0x4b &&
+        ((head[2]===0x03 && head[3]===0x04) || (head[2]===0x05 && head[3]===0x06));
+      if(!contentType.includes('application/zip') || !zipSignature){
+        const text=await blob.text().catch(()=> '');
+        throw new Error(`ZIP 응답이 아닙니다. content-type=${contentType||'-'} / ${text.slice(0,300)}`);
+      }
+      if(blob.size<22) throw new Error(`ZIP 응답 크기가 비정상입니다: ${blob.size} bytes`);
+      await saveBlobAsFile(blob,filename,null);
+      log(`DB ZIP 다운로드 완료: ${filename} / ${blob.size.toLocaleString()} bytes`);
     }
   }catch(e){
     if(e&&e.name==='AbortError') log('DB ZIP 저장이 취소되었습니다.');

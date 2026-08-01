@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const VERSION = 'GM_SAFE_UPDATE_BUILDER_V049_CAFE24_SESSION';
-console.log('[GM_BUILDER_ROUTE_V049] routes/builder.js loaded');
+console.log('[GM_BUILDER_ROUTE_V050] routes/builder.js loaded');
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -423,13 +423,31 @@ function gmNeedsAutoOrderBuilderPermission(req,keys){
 }
 async function gmRequireAutoOrderBuilder(req,res,keys){
   if(!gmNeedsAutoOrderBuilderPermission(req,keys)) return null;
+
+  // GM_AUTO_ORDER_V036:
+  // Cafe24 OAuth integration is intentionally deferred while the automatic-order
+  // workflow is completed. Do not return a JSON 401 to download endpoints, because
+  // the browser can save that JSON response with a .zip filename.
   const user=cafe24Auth.currentUser(req);
   if(!user){
-    fail(res,401,'AUTH_REQUIRED',{login_url:'/auth/cafe24/login?return_to='+encodeURIComponent(req.headers.referer||'/gm_data_builder.html')});
-    return false;
+    req.gmAutoOrderBuilderAuth={
+      admin_id:'TEMP_GLOMART_ADMIN',
+      role:'MASTER',
+      temporary:true
+    };
+    console.warn('[GM_BUILDER_TEMP_ACCESS_V001]',JSON.stringify({
+      path:req.originalUrl,
+      keys:keys||gmRequestedBuilderKeys(req),
+      reason:'CAFE24_AUTH_DEFERRED'
+    }));
+    return req.gmAutoOrderBuilderAuth;
   }
+
   if(!cafe24Auth.PRIVILEGED_ROLES.has(String(user.role||'').toUpperCase())){
-    fail(res,403,'AUTO_ORDER_BUILDER_PERMISSION_DENIED',{role:user.role,required:[...cafe24Auth.PRIVILEGED_ROLES]});
+    fail(res,403,'AUTO_ORDER_BUILDER_PERMISSION_DENIED',{
+      role:user.role,
+      required:[...cafe24Auth.PRIVILEGED_ROLES]
+    });
     return false;
   }
   req.gmAutoOrderBuilderAuth=user;
