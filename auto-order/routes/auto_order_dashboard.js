@@ -5,6 +5,7 @@ const router = express.Router();
 const controlTower = require('../services/control_tower_service');
 const assignment = require('../services/assignment_service');
 const paymentConfirm = require('../services/payment_confirm_service');
+const accountService = require('../services/account_service');
 
 /*
  * GM_AUTO_ORDER_DASHBOARD_API_V018
@@ -749,6 +750,51 @@ router.post('/api/auto-order/control-tower/order/:order_no/payment-confirm', asy
       error:'payment confirm failed',
       detail:String(e && e.message || e)
     });
+  }
+});
+
+
+router.get('/api/auto-order/accounts', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,error:'database pool not ready'});
+  try{
+    const data=await accountService.listAccounts(pool,{
+      q:String(req.query.q||'').trim(),
+      mall_code:String(req.query.mall_code||'').trim(),
+      enabled:String(req.query.enabled||'').trim()
+    });
+    res.json({ok:true,version:'GM_AUTO_ORDER_ACCOUNT_API_V001',data});
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_ACCOUNT_LIST_FAIL_V001]',String(e&&e.stack||e));
+    res.status(500).json({ok:false,error:'account list failed',detail:String(e&&e.message||e)});
+  }
+});
+
+router.post('/api/auto-order/accounts', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,error:'database pool not ready'});
+  try{
+    const data=await accountService.saveAccount(pool,req.body||{});
+    console.log('[GM_AUTO_ORDER_ACCOUNT_SAVE_V001]',JSON.stringify({
+      account_admin_id:data.account_admin_id,mall_code:data.mall_code,admin_id:data.admin_id
+    }));
+    res.json({ok:true,version:'GM_AUTO_ORDER_ACCOUNT_API_V001',data});
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_ACCOUNT_SAVE_FAIL_V001]',String(e&&e.stack||e));
+    res.status(400).json({ok:false,error:'account save failed',detail:String(e&&e.message||e)});
+  }
+});
+
+router.patch('/api/auto-order/accounts/:id/enabled', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,error:'database pool not ready'});
+  try{
+    const data=await accountService.setEnabled(pool,{
+      account_admin_id:req.params.id,enabled:req.body&&req.body.enabled
+    });
+    res.json({ok:true,version:'GM_AUTO_ORDER_ACCOUNT_API_V001',data});
+  }catch(e){
+    res.status(400).json({ok:false,error:'account enabled update failed',detail:String(e&&e.message||e)});
   }
 });
 
