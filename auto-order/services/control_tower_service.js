@@ -1,7 +1,7 @@
 'use strict';
 
 /*
- * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V004
+ * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V005
  *
  * Source of truth:
  *   gm_order + gm_order_item
@@ -492,7 +492,7 @@ async function listControlTower(pool, opts){
 }
 
 module.exports = {
-  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V004',
+  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V005',
   ingestOrder,
   syncRecentOrders,
   listControlTower,

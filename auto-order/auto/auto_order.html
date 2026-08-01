@@ -20,6 +20,7 @@
     .tower-table th,.tower-table td{padding:10px 8px;border-bottom:1px solid #e8ecf1;text-align:left;vertical-align:top}
     .tower-table th{background:#f7f8fa;white-space:nowrap}
     .tower-table .num{text-align:right;white-space:nowrap}
+    .pay-confirm-btn{height:30px;padding:0 10px;border:1px solid #d59b00;background:#fff4d6;color:#7b5800;border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap}
     .order-no{font-weight:700;color:#1167c5}
     .pill{display:inline-block;padding:2px 8px;border-radius:12px;background:#edf1f5;white-space:nowrap}
     .pill.ready{background:#e5f6e9;color:#20723a}
@@ -58,7 +59,7 @@
     <section class="page-head">
       <div>
         <h1>자동주문 컨트롤타워</h1>
-        <p>주문 완료 → 주문처(GMKR/쿠팡/알리)별 작업 생성 → 결제대기/실행대기 → 실행기 배정 순서로 관리합니다.</p>
+        <p>주문 완료 → 주문처별 작업 생성 → 수동 결제확인 → 실행대기 → 실행기 배정 순서로 관리합니다.</p>
       </div>
       <button id="refreshBtn" type="button">새로고침</button>
     </section>
@@ -112,9 +113,10 @@
               <th>외부몰 주문번호</th>
               <th>예상 주문금액</th>
               <th>오류</th>
+              <th>처리</th>
             </tr>
           </thead>
-          <tbody id="rows"><tr><td colspan="12" class="empty">조회 중...</td></tr></tbody>
+          <tbody id="rows"><tr><td colspan="13" class="empty">조회 중...</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -124,7 +126,7 @@
 <script>
 (function(){
   'use strict';
-  var VERSION='GM_AUTO_ORDER_CONTROL_TOWER_UI_V004';
+  var VERSION='GM_AUTO_ORDER_CONTROL_TOWER_UI_V005';
   var $=function(id){return document.getElementById(id);};
 
   function esc(v){
@@ -166,7 +168,7 @@
 
   async function load(){
     $('summary').textContent='컨트롤타워 동기화 및 조회 중...';
-    $('rows').innerHTML='<tr><td colspan="12" class="empty">조회 중...</td></tr>';
+    $('rows').innerHTML='<tr><td colspan="13" class="empty">조회 중...</td></tr>';
 
     var p=new URLSearchParams();
     var q=$('q').value.trim();
@@ -201,7 +203,7 @@
         ' / '+VERSION;
 
       if(!rows.length){
-        $('rows').innerHTML='<tr><td colspan="12" class="empty">자동주문 작업이 없습니다.</td></tr>';
+        $('rows').innerHTML='<tr><td colspan="13" class="empty">자동주문 작업이 없습니다.</td></tr>';
         return;
       }
 
@@ -221,11 +223,16 @@
           '<td>'+esc(x.mall_order_no||'-')+'</td>'+
           '<td class="num"><strong>'+won(x.actual_payment_amount)+'</strong></td>'+
           '<td>'+esc(err||'-')+'</td>'+
+          '<td>'+(
+            String(x.work_status||'').toUpperCase()==='WAIT_PAYMENT'
+              ? '<button class="pay-confirm-btn" data-order-no="'+esc(x.order_no)+'" type="button">결제확인</button>'
+              : '-'
+          )+'</td>'+
         '</tr>';
       }).join('');
     }catch(e){
       $('summary').textContent='컨트롤타워 조회 실패';
-      $('rows').innerHTML='<tr><td colspan="12" class="empty">'+esc(e&&e.message||e)+'</td></tr>';
+      $('rows').innerHTML='<tr><td colspan="13" class="empty">'+esc(e&&e.message||e)+'</td></tr>';
     }
   }
 
@@ -277,6 +284,41 @@
       $('assignBtn').textContent='실행기 배정';
     }
   }
+
+
+  async function confirmPayment(orderNo,btn){
+    if(!orderNo)return;
+    if(!window.confirm(orderNo+' 주문을 결제완료로 처리할까요?'))return;
+
+    if(btn){btn.disabled=true;btn.textContent='처리중';}
+    try{
+      var r=await fetch('/api/auto-order/control-tower/order/'+encodeURIComponent(orderNo)+'/payment-confirm',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({admin_id:'MANUAL'})
+      });
+      var j=await r.json();
+      if(!r.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+r.status));
+
+      var d=j.data||{};
+      alert(
+        '결제확인 완료\\n'+
+        '주문번호: '+orderNo+'\\n'+
+        '실행대기 전환: '+Number(d.works_ready||0)+'건'
+      );
+      await load();
+    }catch(e){
+      alert('결제확인 실패: '+(e&&e.message||e));
+    }finally{
+      if(btn){btn.disabled=false;btn.textContent='결제확인';}
+    }
+  }
+
+  $('rows').addEventListener('click',function(e){
+    var btn=e.target.closest('.pay-confirm-btn');
+    if(!btn)return;
+    confirmPayment(btn.getAttribute('data-order-no'),btn);
+  });
 
   $('refreshBtn').addEventListener('click',load);
   $('searchBtn').addEventListener('click',load);

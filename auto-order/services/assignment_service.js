@@ -1,7 +1,7 @@
 'use strict';
 
 /*
- * GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V001
+ * GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V002
  *
  * Purpose:
  * - Assign READY control-tower work to an enabled operator/account.
@@ -298,7 +298,7 @@ async function assignWork(pool,input){
 }
 
 module.exports={
-  VERSION:'GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V001',
+  VERSION:'GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V002',
   listAccounts,
   assignReady,
   assignWork
