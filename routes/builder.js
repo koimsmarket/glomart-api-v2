@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V047_DEV_RESTORE_ORDER_FIX';
-console.log('[GM_BUILDER_ROUTE_V047] routes/builder.js loaded');
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V049_CAFE24_SESSION';
+console.log('[GM_BUILDER_ROUTE_V049] routes/builder.js loaded');
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -342,6 +342,48 @@ const TABLES = {
   smartfit_space_subscriber: { table:'gm_smartfit_space_subscriber', key:['space_no','member_id'], order:'subscribed_at DESC NULLS LAST, space_no DESC', critical:['space_no','member_id'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
   smartfit_subscribe: { table:'gm_smartfit_subscribe', key:['member_id','creator_member_id'], order:'member_id ASC, creator_member_id ASC', critical:['member_id','creator_member_id'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
   smartfit_message_receiver: { table:'gm_smartfit_message_receiver', key:['message_no'], order:'sent_at DESC NULLS LAST, message_no DESC', critical:['message_no'], numeric:[], defaults:{}, enums:{}, blocked:['created_at'] },
+  auto_orders: {
+    table: 'gm_auto_order',
+    key: ['auto_order_no'],
+    order: 'created_at DESC NULLS LAST, auto_order_no DESC',
+    critical: ['auto_order_no','order_no','member_id','mall_code'],
+    numeric: ['received_item_count','ordered_item_count','total_product_price','discount_amount','total_delivery_fee','extra_area_delivery_fee','actual_payment_amount'],
+    defaults: {}, enums: {}, blocked: ['auto_order_no','created_at']
+  },
+  auto_order_items: {
+    table: 'gm_auto_order_item',
+    key: ['auto_order_item_id'],
+    order: 'created_at DESC NULLS LAST, auto_order_item_id DESC',
+    critical: ['auto_order_item_id','auto_order_no','order_no','mall_code'],
+    numeric: ['auto_order_item_id','quantity','ordered_quantity','mall_sale_price','order_attempt_price','ordered_price','item_discount_amount','product_amount'],
+    defaults: {}, enums: {}, blocked: ['auto_order_item_id','created_at']
+  },
+  auto_order_work: {
+    table: 'gm_auto_order_work',
+    key: ['work_id'],
+    order: 'created_at DESC NULLS LAST, work_id DESC',
+    critical: ['work_id','auto_order_no','work_type','work_status'],
+    numeric: ['work_id','priority'],
+    defaults: {}, enums: {}, blocked: ['work_id','created_at']
+  },
+  auto_order_log: {
+    table: 'gm_auto_order_log',
+    key: ['log_id'],
+    order: 'created_at DESC NULLS LAST, log_id DESC',
+    critical: ['log_id','auto_order_no','action_type'],
+    numeric: ['log_id','auto_order_item_id','work_id'],
+    defaults: {}, enums: {}, blocked: ['log_id','created_at']
+  },
+  auto_order_accounts: {
+    table: 'gm_auto_order_account',
+    key: ['account_admin_id'],
+    order: 'updated_at DESC NULLS LAST, account_admin_id DESC',
+    critical: ['account_admin_id','admin_id','account_admin_role'],
+    numeric: ['account_admin_id'],
+    defaults: {}, enums: {},
+    blocked: ['account_admin_id','encrypted_password','created_at']
+  },
+
   dashboard_snapshot: {
     table: 'gm_dashboard_snapshot',
     key: ['snapshot_id'],
@@ -364,435 +406,50 @@ const LIMITS = {
 function dbFrom(req) {
   return req.app.locals.db || req.app.locals.pool;
 }
-function ok(res, data) {
-  res.json({ ok:true, version:VERSION, ...data });
-}
-function fail(res, status, error, extra={}) {
-  res.status(status).json({ ok:false, version:VERSION, error, ...extra });
-}
-function qIdent(s) {
-  return '"' + String(s).replace(/"/g, '""') + '"';
-}
-function clean(v) {
-  return String(v ?? '').replace(/^\ufeff/, '').trim();
-}
-function csvEscape(v) {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'object') v = JSON.stringify(v);
-  v = String(v);
-  return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
-}
-function toCsv(rows, columns) {
-  const lines = [columns.map(csvEscape).join(',')];
-  for (const r of rows) lines.push(columns.map(c => csvEscape(r[c])).join(','));
-  return '\ufeff' + lines.join('\n');
-}
 
-// GM_BUILDER_EXPORT_ALL_ZIP_V001
-// 외부 라이브러리 없이 CSV 여러 개를 ZIP으로 묶는다.
-function crc32Buffer(buf){
-  let table = crc32Buffer.table;
-  if(!table){
-    table = crc32Buffer.table = new Uint32Array(256);
-    for(let i=0;i<256;i++){
-      let c=i;
-      for(let k=0;k<8;k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-      table[i]=c>>>0;
-    }
-  }
-  let crc = 0xFFFFFFFF;
-  for(let i=0;i<buf.length;i++) crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-function dosDateTime(d=new Date()){
-  const time = ((d.getHours() & 31) << 11) | ((d.getMinutes() & 63) << 5) | (Math.floor(d.getSeconds()/2) & 31);
-  const date = (((d.getFullYear()-1980) & 127) << 9) | (((d.getMonth()+1) & 15) << 5) | (d.getDate() & 31);
-  return {time,date};
-}
-function u16(n){ const b=Buffer.alloc(2); b.writeUInt16LE(n & 0xFFFF,0); return b; }
-function u32(n){ const b=Buffer.alloc(4); b.writeUInt32LE(n >>> 0,0); return b; }
-function makeZip(files){
-  const local=[], central=[];
-  let offset=0;
-  const dt=dosDateTime();
-  for(const f of files){
-    const nameBuf=Buffer.from(f.name,'utf8');
-    const data=Buffer.isBuffer(f.data)?f.data:Buffer.from(String(f.data||''),'utf8');
-    const crc=crc32Buffer(data);
-    const lh=Buffer.concat([
-      u32(0x04034b50), u16(20), u16(0), u16(0), u16(dt.time), u16(dt.date),
-      u32(crc), u32(data.length), u32(data.length), u16(nameBuf.length), u16(0), nameBuf
-    ]);
-    local.push(lh,data);
-    const ch=Buffer.concat([
-      u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(dt.time), u16(dt.date),
-      u32(crc), u32(data.length), u32(data.length), u16(nameBuf.length), u16(0), u16(0),
-      u16(0), u16(0), u32(0), u32(offset), nameBuf
-    ]);
-    central.push(ch);
-    offset += lh.length + data.length;
-  }
-  const centralSize=central.reduce((a,b)=>a+b.length,0);
-  const end=Buffer.concat([u32(0x06054b50),u16(0),u16(0),u16(files.length),u16(files.length),u32(centralSize),u32(offset),u16(0)]);
-  return Buffer.concat([...local,...central,end]);
-}
-function parseCsv(text) {
-  text = String(text || '').replace(/^\ufeff/, '');
-  const rows = [];
-  let row = [], cell = '', quote = false;
-  for (let i=0; i<text.length; i++) {
-    const ch = text[i], nx = text[i+1];
-    if (quote) {
-      if (ch === '"' && nx === '"') { cell += '"'; i++; }
-      else if (ch === '"') quote = false;
-      else cell += ch;
-    } else {
-      if (ch === '"') quote = true;
-      else if (ch === ',') { row.push(cell); cell = ''; }
-      else if (ch === '\n') { row.push(cell); rows.push(row); row=[]; cell=''; }
-      else if (ch !== '\r') cell += ch;
-    }
-  }
-  row.push(cell);
-  if (row.length > 1 || row[0] !== '') rows.push(row);
-  if (!rows.length) return [];
-  const header = rows.shift().map(h => clean(h));
-  return rows
-    .filter(r => r.some(v => clean(v) !== ''))
-    .map((r, idx) => {
-      const o = { __row_no: idx + 2 };
-      header.forEach((h,i)=>{ if (h) o[h] = r[i] ?? ''; });
-      return o;
-    });
-}
-async function getColumns(db, table) {
-  const r = await db.query(`
-    SELECT column_name
-    FROM information_schema.columns
-    WHERE table_schema='public' AND table_name=$1
-    ORDER BY ordinal_position
-  `, [table]);
-  return r.rows.map(x => x.column_name);
-}
-function tableSpec(key) {
-  return TABLES[String(key || '').trim()] || null;
-}
-function keySets(spec) {
-  return spec.keyAny || [spec.key];
-}
-function pickKey(row, spec) {
-  for (const ks of keySets(spec)) {
-    const ok = ks.every(k => clean(row[k]) !== '');
-    if (ok) return { keys:ks, values:ks.map(k => clean(row[k])), label:ks.map(k => clean(row[k])).join('+') };
-  }
-  return null;
-}
+const GM_AUTO_ORDER_BUILDER_KEYS = new Set([
+  'auto_orders','auto_order_items','auto_order_work','auto_order_log','auto_order_accounts'
+]);
+const cafe24Auth = require('./cafe24_auth');
 
-function deleteKeySets(spec, columns=[]) {
-  const colSet = new Set(columns || []);
-  const sets = [];
-  function add(ks){
-    if(!Array.isArray(ks) || !ks.length) return;
-    const cleanKs = ks.map(k => clean(k)).filter(Boolean);
-    if(!cleanKs.length) return;
-    if(colSet.size && !cleanKs.every(k => colSet.has(k))) return;
-    const sig = cleanKs.join('|');
-    if(!sets.some(x => x.join('|') === sig)) sets.push(cleanKs);
+function gmRequestedBuilderKeys(req){
+  const out=[];
+  const single=clean(req.query&&req.query.table); if(single) out.push(single);
+  out.push(...String(req.query&&req.query.tables||'').split(',').map(x=>x.trim()).filter(Boolean));
+  return [...new Set(out)];
+}
+function gmNeedsAutoOrderBuilderPermission(req,keys){
+  return (keys||gmRequestedBuilderKeys(req)).some(k=>GM_AUTO_ORDER_BUILDER_KEYS.has(String(k)));
+}
+async function gmRequireAutoOrderBuilder(req,res,keys){
+  if(!gmNeedsAutoOrderBuilderPermission(req,keys)) return null;
+  const user=cafe24Auth.currentUser(req);
+  if(!user){
+    fail(res,401,'AUTH_REQUIRED',{login_url:'/auth/cafe24/login?return_to='+encodeURIComponent(req.headers.referer||'/gm_data_builder.html')});
+    return false;
   }
-  (spec.deleteKeys || []).forEach(add);
-  keySets(spec).forEach(add);
-  if(!sets.length && Array.isArray(columns)){
-    for(const c of ['id','category_id','product_uid','order_no','message_id','address_id','gm_code','cp_code']){
-      if(colSet.has(c)){ add([c]); break; }
-    }
+  if(!cafe24Auth.PRIVILEGED_ROLES.has(String(user.role||'').toUpperCase())){
+    fail(res,403,'AUTO_ORDER_BUILDER_PERMISSION_DENIED',{role:user.role,required:[...cafe24Auth.PRIVILEGED_ROLES]});
+    return false;
   }
-  return sets;
-}
-function pickDeleteKey(row, spec, columns=[]) {
-  for(const ks of deleteKeySets(spec, columns)){
-    const ok = ks.every(k => clean(row[k]) !== '');
-    if(ok) return { keys:ks, values:ks.map(k => clean(row[k])), label:ks.map(k => clean(row[k])).join('+') };
-  }
-  return null;
-}
-function rowLabel(row, columns=[]) {
-  const preferred = ['category_id','gm_code','cp_code','name_ko','product_uid','pi_ii_vi','product_name','title','keyword','order_no','member_id','created_at','updated_at'];
-  const parts = [];
-  for(const c of preferred){
-    if(columns.includes(c) && clean(row[c]) !== '') parts.push(`${c}=${clean(row[c])}`);
-    if(parts.length >= 6) break;
-  }
-  if(parts.length) return parts.join(' | ');
-  return columns.slice(0,8).map(c => `${c}=${clean(row[c])}`).join(' | ');
-}
-function deleteConfirmOk(req){
-  return clean((req.query && req.query.confirm) || (req.body && req.body.confirm) || '') === 'DELETE SELECTED';
-}
-function isNumberValue(v) {
-  if (v === null || v === undefined || clean(v) === '') return false;
-  const n = Number(String(v).replace(/,/g,''));
-  return Number.isFinite(n) && n >= 0;
-}
-function normalizeNumber(v) {
-  const n = Number(String(v).replace(/,/g,''));
-  return Number.isFinite(n) ? n : null;
-}
-function validateCell(col, rawValue, spec) {
-  let value = clean(rawValue);
-  const hasValue = value !== '';
-
-  if (!hasValue && Object.prototype.hasOwnProperty.call(spec.defaults || {}, col)) {
-    value = spec.defaults[col];
-  }
-
-  if (!hasValue && (spec.critical || []).includes(col)) {
-    return { ok:false, value, reason:'CRITICAL_EMPTY' };
-  }
-
-  if (!hasValue) {
-    return { ok:true, value:null, action:'KEEP_OLD' };
-  }
-
-  if ((spec.numeric || []).includes(col)) {
-    if (!isNumberValue(value)) return { ok:false, value, reason:'INVALID_NUMBER' };
-    return { ok:true, value:normalizeNumber(value) };
-  }
-
-  if (spec.enums && spec.enums[col]) {
-    if (!spec.enums[col].includes(value)) {
-      return { ok:false, value, reason:'INVALID_ENUM:' + spec.enums[col].join('|') };
-    }
-  }
-
-  if (col.endsWith('_url') || col === 'product_url' || col === 'thumb_origin_url' || col === 'file_url') {
-    if (value && !/^https?:\/\//i.test(value)) {
-      return { ok:false, value, reason:'INVALID_URL' };
-    }
-  }
-
-  return { ok:true, value };
-}
-function shouldStop(invalid, processed) {
-  if (invalid >= LIMITS.MAX_INVALID) return 'MAX_INVALID';
-  if (processed >= 100 && invalid / processed > LIMITS.MAX_INVALID_RATE) return 'MAX_INVALID_RATE';
-  return '';
-}
-function resultRow(rowNo, table, key, result, column, value, reason) {
-  return { row_no:rowNo, table, key:key || '', result, column_name:column || '', value:value ?? '', reason:reason || '' };
-}
-
-
-
-const CAFE24_MEMBER_HEADERS = [
-  'SNS ID 연동일시','SSO 연동 서비스명','e메일 수신여부','e메일 최근 수신 동의 일자','가입시간','개인인증방법','개인정보 수집 및 이용 동의 여부(주문서 간단 회원가입 시)','개인정보 수집 및 이용 동의 일자(주문서 간단 회원가입 시)','개인정보 제3자 제공 동의 여부','개인정보 제3자 제공 동의 일자','개인정보 처리 위탁 동의 여부','개인정보 처리 위탁 동의 일자','결혼기념일','결혼여부','관심분야','국가','국적','국제면허번호','나이','누적주문건수','답변','도시 (City)','마케팅 목적의 개인정보 수집 및 이용 동의 여부','마케팅 목적의 개인정보 수집 및 이용 동의 일자','모바일 메시지 수신여부','모바일 메시지 최근 수신 동의 일자','모바일앱 이용여부','미가용 적립금','배우자생일','별명','불량회원','사업자구분(P:개인사업자/C:법인사업자)','사업자번호','사용가능 적립금','상호','생년월일','성별','실결제금액','실명인증여부','아이디','양력(T)/음력(F)','업태','여권번호','연동중인 SNS','연소득','영문이름','우편번호','이름','이름(발음)','이메일','인터넷이용장소','자녀','자동차','전화번호','접속 IP','종목','주 (State/Province)','주소1','주소2','지역','직업','직종','총 방문횟수(1년 내)','총 사용 적립금','총 실주문건수','총구매금액','총예치금','총적립금','최종접속일','최종주문일','최종학력','추가사항1','추가사항2','추가사항3','추가사항4','추천인 아이디','탈퇴구분','탈퇴사유','탈퇴여부','탈퇴일','특별회원','평생회원','평생회원 전환일','확인질문','환불계좌정보(은행/계좌/예금주)','회원 가입경로','회원 가입일','회원구분','회원등급','회원등급적용형태','회원등급코드','회원인증여부','휴대폰번호','휴면안내(대량메일) 발송일','휴면처리일','휴면회원 해제일'
-];
-function isBlankCafe24(v) {
-  const x = clean(v);
-  return !x || /^(BLANK|NULL|N\/A|-|없음)$/i.test(x);
-}
-function pickKorRaw(row, names, d='') {
-  for (const n of names) if (row[n] !== undefined && row[n] !== null) return clean(row[n]);
-  return d;
-}
-function moneyOrBlank(v) {
-  if (isBlankCafe24(v)) return '';
-  const n = Number(clean(v).replace(/[^0-9.-]/g, ''));
-  return Number.isFinite(n) ? Math.round(n) : '';
-}
-function intOrBlank(v) { return moneyOrBlank(v); }
-function languageFromCafe24(nationality, country) {
-  const x = (clean(nationality) || clean(country)).toLowerCase();
-  if (!x) return '';
-  const rules = [
-    [/베트남|vietnam|viet/, 'vi'], [/중국|china|chinese|cn/, 'zh'], [/대만|taiwan|tw/, 'tw'], [/일본|japan|jp/, 'ja'],
-    [/태국|thailand|thai/, 'th'], [/우즈베키스탄|uzbek/, 'uz'], [/네팔|nepal/, 'ne'], [/캄보디아|cambodia|khmer/, 'km'],
-    [/인도네시아|indonesia/, 'id'], [/필리핀|philippines|filipino/, 'tl'], [/몽골|mongol/, 'mn'], [/미얀마|myanmar|burma/, 'my'],
-    [/카자흐|kazakh/, 'kk'], [/스리랑카|sri\s*lanka/, 'si'], [/러시아|russia/, 'ru'], [/방글라데시|bangladesh/, 'bn'],
-    [/파키스탄|pakistan|urdu/, 'ur'], [/라오스|laos/, 'lo'], [/인도|india|hindi/, 'hi'], [/튀르키|터키|turkey/, 'tr'],
-    [/이란|iran|persia/, 'fa'], [/스페인|spain|spanish/, 'es'], [/프랑스|france|french/, 'fr'], [/한국|대한민국|korea|kr/, 'ko']
-  ];
-  for (const [re, lang] of rules) if (re.test(x)) return lang;
-  return 'ko';
-}
-function parseRawJson(v){
-  try { if (!v) return {}; if (typeof v === 'object') return v; return JSON.parse(v); } catch(e){ return {}; }
-}
-function rawOrFallback(raw, header, fallback='') {
-  const v = raw && Object.prototype.hasOwnProperty.call(raw, header) ? raw[header] : '';
-  return isBlankCafe24(v) ? fallback : clean(v);
-}
-
-function pickKor(row, names, d='') {
-  for (const n of names) {
-    if (row[n] !== undefined && row[n] !== null && !isBlankCafe24(row[n])) return clean(row[n]);
-  }
-  return d;
-}
-function digits(v) {
-  return clean(v).replace(/[^0-9]/g, '');
-}
-function money(v) {
-  const n = Number(clean(v).replace(/[^0-9.-]/g, ''));
-  return Number.isFinite(n) ? Math.round(n) : 0;
-}
-function splitRefundInfo(v) {
-  const raw = clean(v);
-  const out = { bank:'', account:'', holder:'' };
-  if (!raw) return out;
-  // Cafe24 export is usually "은행/계좌/예금주", but tolerate spaces, pipes and commas.
-  const parts = raw.split(/[\/|,]/).map(x=>clean(x)).filter(Boolean);
-  if (parts.length >= 3) {
-    out.bank = parts[0]; out.account = parts[1]; out.holder = parts.slice(2).join(' ');
-  } else if (parts.length === 2) {
-    out.bank = parts[0]; out.account = parts[1];
-  } else {
-    out.account = raw;
-  }
-  return out;
-}
-
-function ynCafe24(v) {
-  const x = clean(v).toUpperCase();
-  if (!x) return '';
-  if (['T','Y','YES','TRUE','1','동의','수신'].includes(x)) return 'Y';
-  if (['F','N','NO','FALSE','0','거부','미수신'].includes(x)) return 'N';
-  return clean(v);
-}
-function intMoney(v) { return money(v); }
-function intMoneyOrBlank(v) { return intOrBlank(v); }
-function dateText(v) { return clean(v); }
-function rawJsonText(row) {
-  try { return JSON.stringify(row || {}); } catch(e) { return '{}'; }
-}
-function refundJoin(bank, account, holder) {
-  return [clean(bank), clean(account), clean(holder)].filter(Boolean).join('/');
-}
-function cafe24Status(row) {
-  const withdrawn = pickKor(row, ['탈퇴여부']);
-  const dormant = pickKor(row, ['휴면처리일','휴면안내(대량메일) 발송일']);
-  const bad = pickKor(row, ['불량회원']);
-  if (/^(T|Y|1|TRUE|탈퇴)$/i.test(withdrawn)) return 'withdrawn';
-  if (dormant) return 'dormant';
-  if (/^(T|Y|1|TRUE)$/i.test(bad)) return 'blocked';
-  return 'active';
-}
-function compactAddress(zip, a1, a2, old) {
-  return [zip ? '[' + zip + ']' : '', a1, a2, old ? '(' + old + ')' : ''].filter(Boolean).join(' ').trim();
-}
-function mapCafe24Member(row) {
-  const memberId = pickKor(row, ['아이디','ID','회원아이디','member_id']);
-  const name = pickKor(row, ['이름','회원명']);
-  const phone = pickKor(row, ['전화번호']);
-  const mobile = pickKor(row, ['휴대폰번호']);
-  const zip = pickKor(row, ['우편번호']);
-  const addr1 = pickKor(row, ['주소1']);
-  const addr2 = pickKor(row, ['주소2']);
-  const sido = pickKor(row, ['주 (State/Province)','지역']);
-  const city = pickKor(row, ['도시 (City)']);
-  const refund = splitRefundInfo(pickKor(row, ['환불계좌정보(은행/계좌/예금주)']));
-  const pointUsable = moneyOrBlank(pickKorRaw(row, ['사용가능 적립금']));
-  const pointTotal = moneyOrBlank(pickKorRaw(row, ['총적립금']));
-  const nationality = pickKor(row, ['국적']);
-  const country = pickKor(row, ['국가']);
-  const lang = languageFromCafe24(nationality, country);
-  const member = {
-    member_id: memberId,
-    cafe24_member_id: memberId,
-    member_name: name,
-    member_name_en: pickKor(row, ['영문이름']),
-    email: pickKor(row, ['이메일','이메일주소']),
-    phone: mobile || phone,
-    country_code: country,
-    nationality: nationality,
-    language_code: lang,
-    cs_language: lang,
-    recommender_id: pickKor(row, ['추천인 아이디']),
-    member_grade: pickKor(row, ['회원등급']),
-    member_grade_code: pickKor(row, ['회원등급코드']),
-    member_status: cafe24Status(row),
-    deposit_balance: moneyOrBlank(pickKorRaw(row, ['총예치금'])),
-    point_balance: pointUsable !== '' ? pointUsable : pointTotal,
-    refund_bank_name: refund.bank,
-    refund_account_no: refund.account,
-    refund_account_holder: refund.holder,
-    default_receiver_name: name,
-    default_receiver_phone: phone,
-    default_receiver_mobile: mobile,
-    default_zipcode: zip,
-    default_address1: addr1,
-    default_address2: addr2,
-    default_address_old: '',
-    default_address_full: compactAddress(zip, addr1, addr2, ''),
-    default_sido: sido,
-    default_sigungu: city,
-    default_eup_myeon_dong: '',
-    delivery_memo: '',
-    // Cafe24 원본 96개 컬럼은 실제 DB 컬럼을 늘리지 않고 cafe24_raw_json 하나에 100% 보존한다.
-    // gm_member에는 주문/로그인/배송에 바로 필요한 핵심 컬럼만 저장한다.
-    cafe24_raw_json: rawJsonText(row)
-  };
-  const address = {
-    address_id: memberId ? memberId + '_default' : '',
-    member_id: memberId,
-    address_name: '기본배송지',
-    receiver_name: name,
-    receiver_phone: phone,
-    receiver_mobile: mobile,
-    zipcode: zip,
-    address1: addr1,
-    address2: addr2,
-    address_old: '',
-    address_full: compactAddress(zip, addr1, addr2, ''),
-    sido: sido,
-    sigungu: city,
-    eup_myeon_dong: '',
-    delivery_memo: '',
-    is_default: 'Y'
-  };
-  return { member, address };
-}
-
-function cafe24ImportResultRow(row, m, action, memberAction, addressAction, reason) {
-  return {
-    row_no: row.__row_no,
-    member_id: m.member_id || '',
-    result: action,
-    member_action: memberAction || '',
-    address_action: addressAction || '',
-    name: m.member_name || '',
-    email: m.email || '',
-    phone: m.default_receiver_phone || '',
-    mobile: m.default_receiver_mobile || '',
-    zipcode: m.default_zipcode || '',
-    address1: m.default_address1 || '',
-    address2: m.default_address2 || '',
-    member_grade: m.member_grade || '',
-    member_grade_code: m.member_grade_code || '',
-    deposit_balance: m.deposit_balance === undefined ? '' : m.deposit_balance,
-    point_balance: m.point_balance === undefined ? '' : m.point_balance,
-    refund_account_info: refundJoin(m.refund_bank_name, m.refund_account_no, m.refund_account_holder),
-    total_order_count: intMoneyOrBlank(pickKorRaw(row, ['누적주문건수'])),
-    total_purchase_amount: moneyOrBlank(pickKorRaw(row, ['총구매금액','실결제금액'])),
-    last_login_at: pickKorRaw(row, ['최종접속일']),
-    joined_at: pickKorRaw(row, ['회원 가입일']),
-    reason: reason || ''
-  };
-}
-
-async function upsertObject(client, table, obj, keyCols, allowBlank=false) {
-  const cols = Object.keys(obj).filter(k => obj[k] !== undefined && obj[k] !== null && (allowBlank || clean(obj[k]) !== ''));
-  if (!cols.length) return { action:'SKIP', reason:'NO_COLUMNS' };
-  const vals = cols.map(k => obj[k]);
-  const setCols = cols.filter(c => !keyCols.includes(c));
-  const sql = `INSERT INTO ${qIdent(table)} (${cols.map(qIdent).join(',')}) VALUES (${cols.map((_,i)=>'$'+(i+1)).join(',')}) ON CONFLICT (${keyCols.map(qIdent).join(',')}) DO UPDATE SET ${setCols.map(c => `${qIdent(c)}=COALESCE(NULLIF(EXCLUDED.${qIdent(c)}::text,'')::${qIdent(table)}.${qIdent(c)}%TYPE,${qIdent(table)}.${qIdent(c)})`).join(',') || keyCols.map(c=>`${qIdent(c)}=EXCLUDED.${qIdent(c)}`).join(',')}, updated_at=NOW()`;
-  // PostgreSQL cannot use table.column%TYPE in prepared SQL expression. Build a simpler blank-preserving query below.
-  const updateSql = `INSERT INTO ${qIdent(table)} (${cols.map(qIdent).join(',')}) VALUES (${cols.map((_,i)=>'$'+(i+1)).join(',')}) ON CONFLICT (${keyCols.map(qIdent).join(',')}) DO UPDATE SET ${setCols.map(c => `${qIdent(c)}=CASE WHEN EXCLUDED.${qIdent(c)} IS NULL OR EXCLUDED.${qIdent(c)}::text='' THEN ${qIdent(table)}.${qIdent(c)} ELSE EXCLUDED.${qIdent(c)} END`).join(',') || keyCols.map(c=>`${qIdent(c)}=EXCLUDED.${qIdent(c)}`).join(',')}${cols.includes('updated_at') || setCols.includes('updated_at') ? '' : ', updated_at=NOW()'}`;
-  await client.query(updateSql, vals);
-  return { action:'UPSERT' };
+  req.gmAutoOrderBuilderAuth=user;
+  return user;
 }
 
 router.get('/api/gm/builder/tables', (req,res)=>{
   ok(res, { tables:Object.keys(TABLES).map(k=>({ key:k, table:TABLES[k].table, keys:keySets(TABLES[k]) })) });
+});
+
+router.get('/api/gm/builder/auto-order-access', async (req,res)=>{
+  const auth=await gmRequireAutoOrderBuilder(req,res,['auto_orders']);
+  if(auth===false) return;
+  return ok(res,{
+    action:'auto-order-builder.access',
+    access:true,
+    admin_id:auth.admin_id,
+    role:auth.role,
+    tables:[...GM_AUTO_ORDER_BUILDER_KEYS]
+  });
 });
 
 
@@ -931,6 +588,9 @@ router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), as
 });
 
 router.get('/api/gm/builder/export', async (req,res)=>{
+  const exportKey=clean(req.query.table);
+  const auth=await gmRequireAutoOrderBuilder(req,res,[exportKey]);
+  if(auth===false) return;
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
 
@@ -1132,6 +792,8 @@ async function exportTableCsvIntoZip({req,db,spec,key,writeZip,requestId}){
 }
 router.get('/api/gm/builder/export-all', async (req,res)=>{
   const raw=String(req.query.tables||'').split(',').map(x=>x.trim()).filter(Boolean);
+  const auth=await gmRequireAutoOrderBuilder(req,res,raw);
+  if(auth===false) return;
   const unique=[...new Set(raw)];
   if(!unique.length) return fail(res,400,'no tables selected');
   const invalid=unique.filter(k=>!tableSpec(k));
@@ -1716,6 +1378,9 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
 });
 
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
+  const uploadKey=clean(req.query.table);
+  const auth=await gmRequireAutoOrderBuilder(req,res,[uploadKey]);
+  if(auth===false) return;
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
 

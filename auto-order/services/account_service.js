@@ -20,7 +20,7 @@ async function listAccounts(pool,o){
   }
   if(clean(o.mall_code)&&c.has('mall_code')) where.push(`upper(COALESCE(mall_code,''))=${add(upper(o.mall_code))}`);
   if(['true','false'].includes(clean(o.enabled).toLowerCase())&&c.has('enabled')) where.push(`enabled=${add(clean(o.enabled).toLowerCase()==='true')}`);
-  const cols=['account_admin_id','admin_id','account_admin_role','mall_account_id','mall_code','account_name','login_id','can_order','can_payment','can_builder','enabled','created_at','updated_at'].filter(x=>c.has(x));
+  const cols=['account_admin_id','admin_id','account_admin_role','mall_account_id','mall_code','account_name','login_id','can_order','can_payment','enabled','created_at','updated_at'].filter(x=>c.has(x));
   const w=where.length?'WHERE '+where.join(' AND '):'';
   const r=await pool.query(`SELECT ${cols.join(',')} FROM gm_auto_order_account ${w} ORDER BY mall_code,enabled DESC,admin_id,account_admin_id`,p);
   return {rows:r.rows||[],total:r.rows.length};
@@ -35,7 +35,7 @@ async function saveAccount(pool,x){
     admin_id:admin,account_admin_role:upper(x.account_admin_role)||'OPERATOR',
     mall_account_id:clean(x.mall_account_id)||null,mall_code:mall,account_name:name,
     login_id:clean(x.login_id)||null,can_order:bool(x.can_order,true),
-    can_payment:bool(x.can_payment,false),can_builder:bool(x.can_builder,false),enabled:bool(x.enabled,true)
+    can_payment:bool(x.can_payment,false),enabled:bool(x.enabled,true)
   };
   const usable=Object.entries(values).filter(([k])=>c.has(k));
   const pk=id(x.account_admin_id);

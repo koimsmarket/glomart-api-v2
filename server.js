@@ -1888,6 +1888,8 @@ app.use(require('./routes/order_history')); // GM 주문조회 전용 라우트(
 app.use(require('./routes/order_cs')); // GM 주문 취소/교환/반품/구매확정 전용 라우트
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
+app.use(require('./routes/cafe24_auth'));
+console.log('[GM_CAFE24_AUTH_V001] routes/cafe24_auth registered');
 app.use(require('./routes/builder'));
 app.use(require('./routes/network'));
 app.use(require('./routes/smartfit'));

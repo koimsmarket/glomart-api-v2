@@ -18,11 +18,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;borde
 <label>담당 관리자 ID</label><input id="admin" placeholder="admin01"><label>계정명</label><input id="name" placeholder="국내상품 주문담당">
 <label>몰 계정 ID</label><input id="mallAccount"><label>로그인 ID</label><input id="login" placeholder="비밀번호 저장 안 함">
 <label>역할</label><select id="role"><option>OPERATOR</option><option>MASTER</option><option>DEPUTY</option></select>
-<div class="checks"><label><input id="canOrder" type="checkbox" checked> 주문 가능</label><label><input id="canPayment" type="checkbox"> 결제 가능</label><label><input id="canBuilder" type="checkbox"> 빌더 권한</label><label><input id="enabled" type="checkbox" checked> 사용</label></div>
+<div class="checks"><label><input id="canOrder" type="checkbox" checked> 주문 가능</label><label><input id="canPayment" type="checkbox"> 결제 가능</label><label><input id="enabled" type="checkbox" checked> 사용</label></div>
 <div class="actions"><button id="save" class="primary">저장</button><button id="reset">신규 입력</button></div>
 <div class="notice">비밀번호·쿠키·토큰은 저장하지 않습니다. 배정용 메타데이터만 관리합니다.</div></div></div>
 <div class="box"><div class="head">등록 계정</div><div class="tools"><input id="q" placeholder="담당자/계정 검색"><select id="fm"><option value="">전체 주문처</option><option>GMKR</option><option>CPKR</option><option>ALKR</option></select><select id="fe"><option value="">전체 상태</option><option value="true">사용</option><option value="false">중지</option></select><button id="search">조회</button></div>
-<div id="summary" class="summary">조회 중...</div><div class="table"><table><thead><tr><th>주문처</th><th>계정명</th><th>담당자</th><th>몰계정</th><th>로그인ID</th><th>주문</th><th>결제</th><th>빌더</th><th>사용</th><th>관리</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+<div id="summary" class="summary">조회 중...</div><div class="table"><table><thead><tr><th>주문처</th><th>계정명</th><th>담당자</th><th>몰계정</th><th>로그인ID</th><th>주문</th><th>결제</th><th>사용</th><th>관리</th></tr></thead><tbody id="rows"></tbody></table></div></div>
 </section></main></div>
 <script>
 const $=id=>document.getElementById(id), cache=new Map(), yes=v=>v===true||String(v).toLowerCase()==='true';
@@ -30,19 +30,19 @@ function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&l
 function clearForm(){
 $('pk').value='';$('mall').value='GMKR';$('admin').value='';$('name').value='';
 $('mallAccount').value='';$('login').value='';$('role').value='OPERATOR';
-$('canOrder').checked=true;$('canPayment').checked=false;$('canBuilder').checked=false;$('enabled').checked=true;
+$('canOrder').checked=true;$('canPayment').checked=false;$('enabled').checked=true;
 $('save').textContent='저장';
 }
 async function load(){const p=new URLSearchParams();if($('q').value.trim())p.set('q',$('q').value.trim());if($('fm').value)p.set('mall_code',$('fm').value);if($('fe').value)p.set('enabled',$('fe').value);
 const r=await fetch('/api/auto-order/accounts?'+p);const j=await r.json();if(!r.ok||!j.ok)throw Error(j.detail||j.error);const a=j.data.rows||[];cache.clear();a.forEach(x=>cache.set(String(x.account_admin_id),x));$('summary').textContent='총 '+a.length+'건';
-$('rows').innerHTML=a.length?a.map(x=>`<tr><td>${esc(x.mall_code)}</td><td>${esc(x.account_name)}</td><td>${esc(x.admin_id)}</td><td>${esc(x.mall_account_id||'-')}</td><td>${esc(x.login_id||'-')}</td><td>${yes(x.can_order)?'가능':'불가'}</td><td>${yes(x.can_payment)?'가능':'불가'}</td><td>${yes(x.can_builder)||String(x.account_admin_role).toUpperCase()==='MASTER'?'가능':'불가'}</td><td>${yes(x.enabled)?'사용':'중지'}</td><td><button class="small" data-edit="${x.account_admin_id}">수정</button> <button class="small" data-toggle="${x.account_admin_id}" data-enabled="${!yes(x.enabled)}">${yes(x.enabled)?'중지':'사용'}</button></td></tr>`).join(''):'<tr><td colspan="9">등록된 계정이 없습니다.</td></tr>';}
+$('rows').innerHTML=a.length?a.map(x=>`<tr><td>${esc(x.mall_code)}</td><td>${esc(x.account_name)}</td><td>${esc(x.admin_id)}</td><td>${esc(x.mall_account_id||'-')}</td><td>${esc(x.login_id||'-')}</td><td>${yes(x.can_order)?'가능':'불가'}</td><td>${yes(x.can_payment)?'가능':'불가'}</td><td>${yes(x.enabled)?'사용':'중지'}</td><td><button class="small" data-edit="${x.account_admin_id}">수정</button> <button class="small" data-toggle="${x.account_admin_id}" data-enabled="${!yes(x.enabled)}">${yes(x.enabled)?'중지':'사용'}</button></td></tr>`).join(''):'<tr><td colspan="9">등록된 계정이 없습니다.</td></tr>';}
 function edit(id){
 const x=cache.get(String(id));if(!x)return;
 $('pk').value=x.account_admin_id||'';$('mall').value=x.mall_code||'GMKR';
 $('admin').value=x.admin_id||'';$('name').value=x.account_name||'';
 $('mallAccount').value=x.mall_account_id||'';$('login').value=x.login_id||'';
 $('role').value=x.account_admin_role||'OPERATOR';
-$('canOrder').checked=yes(x.can_order);$('canPayment').checked=yes(x.can_payment);$('canBuilder').checked=yes(x.can_builder);
+$('canOrder').checked=yes(x.can_order);$('canPayment').checked=yes(x.can_payment);
 $('enabled').checked=yes(x.enabled);$('save').textContent='수정 저장';scrollTo(0,0);
 }
 async function saveForm(){
@@ -56,7 +56,6 @@ const body={
   account_admin_role:$('role').value,
   can_order:$('canOrder').checked,
   can_payment:$('canPayment').checked,
-  can_builder:$('canBuilder').checked,
   enabled:$('enabled').checked
 };
 if(!body.admin_id||!body.account_name)return alert('담당 관리자 ID와 계정명을 입력하세요.');

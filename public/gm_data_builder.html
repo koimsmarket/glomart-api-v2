@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V043</title>
+<title>GM Safe Update Builder V044</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -26,9 +26,9 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </style>
 </head>
 <body>
-<div id="gmBuilderVersion" style="display:none">GM_DATA_BUILDER_UI_V047_RESTORE_VISIBLE_RESULT</div>
+<div id="gmBuilderVersion" style="display:none">GM_DATA_BUILDER_UI_V048_AUTO_ORDER_TABLES</div>
 <div class="wrap">
-<h1>GM Safe Update Builder V043</h1>
+<h1>GM Safe Update Builder V044</h1>
 <div class="sub">Excel·CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
 
 <div class="statusBox">
@@ -58,6 +58,12 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
       <p class="small">기준: 50% 증설 준비, 70% 증설 진행, 85% 긴급 조치</p>
     </div>
   </div>
+</div>
+
+<div class="warning">
+<b>자동주문 빌더 권한</b><br>
+자동주문 5개 테이블은 Cafe24 로그인 후 MASTER 또는 DEPUTY로 지정된 사용자만 다운로드·업로드할 수 있습니다.<br>
+대시보드의 자동주문 데이터 빌더와 이 전체 DB 빌더는 동일한 서버 API와 권한 정책을 사용합니다.
 </div>
 
 <div class="warning">
@@ -164,12 +170,29 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const API = location.origin;
+
+const AUTO_ORDER_TABLE_KEYS = new Set(['auto_orders','auto_order_items','auto_order_work','auto_order_log','auto_order_accounts']);
+function isAutoOrderTable(key){return AUTO_ORDER_TABLE_KEYS.has(String(key||''));}
+function builderAuthHeaders(){return {};}
+function ensureAutoOrderBuilderAuth(keyOrKeys){return true;}
+async function redirectCafe24Login(){
+  const r=await fetch('/api/auth/me?return_to='+encodeURIComponent(location.pathname),{cache:'no-store'});
+  if(r.ok)return true; const j=await r.json().catch(()=>({})); location.href=j.login_url||('/auth/cafe24/login?return_to='+encodeURIComponent(location.pathname)); return false;
+}
+
 const tables = {
   products:'상품 gm_product',
   product_options:'상품 옵션 gm_product_option',
   cart:'장바구니 gm_basket',
   orders:'주문 gm_order',
   order_items:'주문상품 gm_order_item',
+
+  auto_orders:'자동주문 주문서 gm_auto_order',
+  auto_order_items:'자동주문 주문상품 gm_auto_order_item',
+  auto_order_work:'자동주문 작업큐 gm_auto_order_work',
+  auto_order_log:'자동주문 처리이력 gm_auto_order_log',
+  auto_order_accounts:'자동주문 실행계정 gm_auto_order_account',
+
   supplier:'공급사 gm_supplier',
   cs:'CS gm_cs',
   cs_messages:'CS 메시지 gm_cs_message',
@@ -664,7 +687,7 @@ async function uploadDevOne(tableKey,file,apply,mode){
 
   const r=await fetch(url,{
     method:'POST',
-    headers:{'Content-Type':'text/csv; charset=utf-8'},
+    headers:{'Content-Type':'text/csv; charset=utf-8',...builderAuthHeaders(table)},
     body:text
   });
 
@@ -753,7 +776,8 @@ async function loadDeleteList(){
   const q=document.getElementById('delQuery').value.trim();
   const limit=document.getElementById('delLimit').value || '200';
   const url=`${API}/api/gm/builder/delete-list?table=${encodeURIComponent(table)}&q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`;
-  const r=await fetch(url);
+  if(!ensureAutoOrderBuilderAuth(table)) return;
+  const r=await fetch(url,{headers:builderAuthHeaders(table)});
   const j=await r.json();
   if(!j.ok){ log(j); return; }
   deleteRowsCache=j.rows||[];
@@ -769,6 +793,7 @@ async function loadDeleteList(){
 function toggleDeleteChecks(on){ document.querySelectorAll('.delCheck:not(:disabled)').forEach(x=>x.checked=!!on); }
 async function deleteSelectedRows(){
   const table=document.getElementById('delTable').value;
+  if(blockUnsafeAutoOrderOperation(table,'delete-selected')) return;
   const selected=[...document.querySelectorAll('.delCheck:checked')].map(ch=>deleteRowsCache[Number(ch.dataset.idx)]).filter(Boolean);
   if(!selected.length){ alert('삭제할 행을 선택하세요.'); return; }
   const x=prompt(`${selected.length}개 행을 삭제합니다. 실행하려면 DELETE SELECTED 를 입력하세요.`);
@@ -791,6 +816,20 @@ function applyAll(button){ sendAll(true,button); }
 fill();
 loadDashboard(false);
 setInterval(()=>loadDashboard(false), 60000);
+
+function blockUnsafeAutoOrderOperation(table,operation){
+  if(!isAutoOrderTable(table)) return false;
+  log({
+    ok:false,
+    error:'AUTO_ORDER_UNSAFE_OPERATION_BLOCKED',
+    operation,
+    table,
+    detail:'자동주문 테이블은 안전 업데이트 영역에서만 검증/APPLY 하세요.'
+  });
+  alert('자동주문 테이블은 개발용 강제 업로드·선택 삭제가 차단됩니다. 안전 업데이트를 사용하세요.');
+  return true;
+}
+
 </script>
 </body>
 </html>
