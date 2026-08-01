@@ -198,6 +198,47 @@
       </div>
     </section>
 
+
+    <section class="panel cafe-card" id="autoOrderBuilderPanel">
+      <div class="panel-head cafe-card-head">
+        <div class="head-line">
+          <h2>자동주문 데이터 빌더</h2>
+          <span id="builderAccessState">권한 확인 전</span>
+        </div>
+        <button id="builderAuthBtn" class="btn compact" type="button">빌더 인증</button>
+      </div>
+
+      <div style="padding:16px;">
+        <div style="display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:8px;margin-bottom:14px;">
+          <label><input class="builder-table-check" type="checkbox" value="auto_orders" checked> 주문서</label>
+          <label><input class="builder-table-check" type="checkbox" value="auto_order_items" checked> 주문상품</label>
+          <label><input class="builder-table-check" type="checkbox" value="auto_order_work" checked> 작업큐</label>
+          <label><input class="builder-table-check" type="checkbox" value="auto_order_log"> 처리이력</label>
+          <label><input class="builder-table-check" type="checkbox" value="auto_order_accounts"> 실행계정</label>
+        </div>
+
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+          <button id="builderDownloadBtn" class="btn" type="button">선택 자료 ZIP 다운로드</button>
+          <a class="btn" href="/gm_data_builder.html" target="_blank" rel="noopener">전체 DB 빌더 열기</a>
+        </div>
+
+        <div style="border-top:1px solid #e3e7ec;padding-top:14px;display:grid;grid-template-columns:190px minmax(260px,1fr) 110px 110px;gap:8px;align-items:center;">
+          <select id="builderUploadTable">
+            <option value="auto_orders">주문서</option>
+            <option value="auto_order_items">주문상품</option>
+            <option value="auto_order_work">작업큐</option>
+            <option value="auto_order_log">처리이력</option>
+            <option value="auto_order_accounts">실행계정</option>
+          </select>
+          <input id="builderUploadFile" type="file" accept=".csv,text/csv">
+          <button id="builderDryRunBtn" class="btn" type="button">검증</button>
+          <button id="builderApplyBtn" class="btn" type="button">업로드 적용</button>
+        </div>
+
+        <pre id="builderResult" style="margin:14px 0 0;padding:12px;background:#111827;color:#d7e1ee;border-radius:5px;min-height:54px;white-space:pre-wrap;">MASTER 또는 빌더 권한 계정만 이용할 수 있습니다.</pre>
+      </div>
+    </section>
+
     <div id="toast" class="toast" hidden></div>
   </main>
 </div>
