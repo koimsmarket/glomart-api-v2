@@ -27,13 +27,39 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;borde
 <script>
 const $=id=>document.getElementById(id), cache=new Map(), yes=v=>v===true||String(v).toLowerCase()==='true';
 function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-function clearForm(){pk.value='';mall.value='GMKR';admin.value='';name.value='';mallAccount.value='';login.value='';role.value='OPERATOR';canOrder.checked=true;canPayment.checked=false;enabled.checked=true;save.textContent='저장';}
-async function load(){const p=new URLSearchParams();if(q.value.trim())p.set('q',q.value.trim());if(fm.value)p.set('mall_code',fm.value);if(fe.value)p.set('enabled',fe.value);
-const r=await fetch('/api/auto-order/accounts?'+p);const j=await r.json();if(!r.ok||!j.ok)throw Error(j.detail||j.error);const a=j.data.rows||[];cache.clear();a.forEach(x=>cache.set(String(x.account_admin_id),x));summary.textContent='총 '+a.length+'건';
-rows.innerHTML=a.length?a.map(x=>`<tr><td>${esc(x.mall_code)}</td><td>${esc(x.account_name)}</td><td>${esc(x.admin_id)}</td><td>${esc(x.mall_account_id||'-')}</td><td>${esc(x.login_id||'-')}</td><td>${yes(x.can_order)?'가능':'불가'}</td><td>${yes(x.can_payment)?'가능':'불가'}</td><td>${yes(x.enabled)?'사용':'중지'}</td><td><button class="small" data-edit="${x.account_admin_id}">수정</button> <button class="small" data-toggle="${x.account_admin_id}" data-enabled="${!yes(x.enabled)}">${yes(x.enabled)?'중지':'사용'}</button></td></tr>`).join(''):'<tr><td colspan="9">등록된 계정이 없습니다.</td></tr>';}
-function edit(id){const x=cache.get(String(id));if(!x)return;pk.value=x.account_admin_id;mall.value=x.mall_code;admin.value=x.admin_id||'';name.value=x.account_name||'';mallAccount.value=x.mall_account_id||'';login.value=x.login_id||'';role.value=x.account_admin_role||'OPERATOR';canOrder.checked=yes(x.can_order);canPayment.checked=yes(x.can_payment);enabled.checked=yes(x.enabled);save.textContent='수정 저장';scrollTo(0,0);}
-async function saveForm(){const body={account_admin_id:pk.value||null,mall_code:mall.value,admin_id:admin.value.trim(),account_name:name.value.trim(),mall_account_id:mallAccount.value.trim(),login_id:login.value.trim(),account_admin_role:role.value,can_order:canOrder.checked,can_payment:canPayment.checked,enabled:enabled.checked};if(!body.admin_id||!body.account_name)return alert('담당 관리자 ID와 계정명을 입력하세요.');
+function clearForm(){
+$('pk').value='';$('mall').value='GMKR';$('admin').value='';$('name').value='';
+$('mallAccount').value='';$('login').value='';$('role').value='OPERATOR';
+$('canOrder').checked=true;$('canPayment').checked=false;$('enabled').checked=true;
+$('save').textContent='저장';
+}
+async function load(){const p=new URLSearchParams();if($('q').value.trim())p.set('q',$('q').value.trim());if($('fm').value)p.set('mall_code',$('fm').value);if($('fe').value)p.set('enabled',$('fe').value);
+const r=await fetch('/api/auto-order/accounts?'+p);const j=await r.json();if(!r.ok||!j.ok)throw Error(j.detail||j.error);const a=j.data.rows||[];cache.clear();a.forEach(x=>cache.set(String(x.account_admin_id),x));$('summary').textContent='총 '+a.length+'건';
+$('rows').innerHTML=a.length?a.map(x=>`<tr><td>${esc(x.mall_code)}</td><td>${esc(x.account_name)}</td><td>${esc(x.admin_id)}</td><td>${esc(x.mall_account_id||'-')}</td><td>${esc(x.login_id||'-')}</td><td>${yes(x.can_order)?'가능':'불가'}</td><td>${yes(x.can_payment)?'가능':'불가'}</td><td>${yes(x.enabled)?'사용':'중지'}</td><td><button class="small" data-edit="${x.account_admin_id}">수정</button> <button class="small" data-toggle="${x.account_admin_id}" data-enabled="${!yes(x.enabled)}">${yes(x.enabled)?'중지':'사용'}</button></td></tr>`).join(''):'<tr><td colspan="9">등록된 계정이 없습니다.</td></tr>';}
+function edit(id){
+const x=cache.get(String(id));if(!x)return;
+$('pk').value=x.account_admin_id||'';$('mall').value=x.mall_code||'GMKR';
+$('admin').value=x.admin_id||'';$('name').value=x.account_name||'';
+$('mallAccount').value=x.mall_account_id||'';$('login').value=x.login_id||'';
+$('role').value=x.account_admin_role||'OPERATOR';
+$('canOrder').checked=yes(x.can_order);$('canPayment').checked=yes(x.can_payment);
+$('enabled').checked=yes(x.enabled);$('save').textContent='수정 저장';scrollTo(0,0);
+}
+async function saveForm(){
+const body={
+  account_admin_id:$('pk').value||null,
+  mall_code:$('mall').value,
+  admin_id:$('admin').value.trim(),
+  account_name:$('name').value.trim(),
+  mall_account_id:$('mallAccount').value.trim(),
+  login_id:$('login').value.trim(),
+  account_admin_role:$('role').value,
+  can_order:$('canOrder').checked,
+  can_payment:$('canPayment').checked,
+  enabled:$('enabled').checked
+};
+if(!body.admin_id||!body.account_name)return alert('담당 관리자 ID와 계정명을 입력하세요.');
 const r=await fetch('/api/auto-order/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),j=await r.json();if(!r.ok||!j.ok)return alert(j.detail||j.error);clearForm();load();}
 async function toggle(id,en){const r=await fetch('/api/auto-order/accounts/'+id+'/enabled',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:String(en)==='true'})}),j=await r.json();if(!r.ok||!j.ok)return alert(j.detail||j.error);load();}
-save.addEventListener('click',saveForm);reset.addEventListener('click',clearForm);search.addEventListener('click',load);rows.addEventListener('click',e=>{const a=e.target.closest('[data-edit]');if(a)return edit(a.dataset.edit);const b=e.target.closest('[data-toggle]');if(b)toggle(b.dataset.toggle,b.dataset.enabled);});clearForm();load().catch(e=>summary.textContent=e.message);
+$('save').addEventListener('click',saveForm);$('reset').addEventListener('click',clearForm);$('search').addEventListener('click',load);$('rows').addEventListener('click',e=>{const a=e.target.closest('[data-edit]');if(a)return edit(a.dataset.edit);const b=e.target.closest('[data-toggle]');if(b)toggle(b.dataset.toggle,b.dataset.enabled);});clearForm();load().catch(e=>$('summary').textContent=e.message);
 </script></body></html>
