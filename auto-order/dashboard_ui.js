@@ -250,50 +250,16 @@
   setInterval(tick, 30000);
   load();
 
-  async function authMe(){
-    const r=await fetch('/api/auth/me?return_to='+encodeURIComponent(location.pathname+location.search),{cache:'no-store'});
-    const j=await r.json().catch(()=>({ok:false,error:'INVALID_AUTH_RESPONSE'}));
-    return {response:r,data:j};
-  }
   function setBuilderResult(v){const el=document.getElementById('builderResult');if(el)el.textContent=typeof v==='string'?v:JSON.stringify(v,null,2);}
-  async function builderCheckAccess(redirectOnFail){
+  async function builderCheckAccess(){
     const state=document.getElementById('builderAccessState');
-    try{
-      const {response,data}=await authMe();
-      if(!response.ok||!data.authenticated){
-        if(state)state.textContent='Cafe24 로그인 필요';
-        if(redirectOnFail)location.href=data.login_url||('/auth/cafe24/login?return_to='+encodeURIComponent(location.pathname));
-        return false;
-      }
-      const role=String(data.user.role||'').toUpperCase();
-      const ok=['MASTER','DEPUTY','SUBMASTER'].includes(role);
-      if(state)state.textContent=`${data.user.admin_id} · ${role} · ${ok?'사용 가능':'권한 없음'}`;
-      setBuilderResult({action:'auth',user:data.user,builder_access:ok});
-      return ok;
-    }catch(e){if(state)state.textContent='인증 확인 실패';setBuilderResult(String(e&&e.message||e));return false;}
+    if(state)state.textContent='로그인 연동 후속 작업';
+    setBuilderResult('Cafe24 로그인 연동은 후속 작업으로 보류했습니다. 자동주문 본체 작업에는 영향이 없습니다.');
+    return false;
   }
-  async function builderDownload(){
-    if(!(await builderCheckAccess(true)))return;
-    const tables=[...document.querySelectorAll('.builder-table-check:checked')].map(x=>x.value);
-    if(!tables.length){alert('다운로드할 자료를 선택하세요.');return;}
-    setBuilderResult('ZIP 생성 중...');
-    const r=await fetch('/api/gm/builder/export-all?tables='+encodeURIComponent(tables.join(','))+'&t='+Date.now(),{cache:'no-store'});
-    if(r.status===401){location.href='/auth/cafe24/login?return_to='+encodeURIComponent(location.pathname);return;}
-    if(!r.ok){setBuilderResult('다운로드 실패: '+await r.text());return;}
-    const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='glomart_auto_order_'+Date.now()+'.zip';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
-    setBuilderResult({action:'download',tables,bytes:blob.size});
-  }
-  async function builderUpload(apply){
-    if(!(await builderCheckAccess(true)))return;
-    const table=document.getElementById('builderUploadTable').value,file=document.getElementById('builderUploadFile').files[0];
-    if(!file){alert('CSV 파일을 선택하세요.');return;} if(apply&&prompt('실행하려면 AUTO ORDER APPLY 입력')!=='AUTO ORDER APPLY')return;
-    const r=await fetch('/api/gm/builder/safe-update?table='+encodeURIComponent(table)+'&apply='+(apply?'YES':'NO'),{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:await file.text()});
-    if(r.status===401){location.href='/auth/cafe24/login?return_to='+encodeURIComponent(location.pathname);return;}
-    const type=r.headers.get('content-type')||'';
-    if(type.includes('application/json')){const j=await r.json();setBuilderResult(j);return;}
-    const blob=await r.blob();if(!r.ok){setBuilderResult('업로드 실패');return;}const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(apply?'auto_order_apply_':'auto_order_dryrun_')+Date.now()+'.csv';a.click();setBuilderResult({action:apply?'upload-apply':'upload-dryrun',table,file:file.name});
-  }
-  document.getElementById('builderAuthBtn')?.addEventListener('click',()=>builderCheckAccess(true));
+  async function builderDownload(){return builderCheckAccess();}
+  async function builderUpload(){return builderCheckAccess();}
+  document.getElementById('builderAuthBtn')?.addEventListener('click',()=>builderCheckAccess());
   document.getElementById('builderDownloadBtn')?.addEventListener('click',builderDownload);
   document.getElementById('builderDryRunBtn')?.addEventListener('click',()=>builderUpload(false));
   document.getElementById('builderApplyBtn')?.addEventListener('click',()=>builderUpload(true));

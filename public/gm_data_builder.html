@@ -175,10 +175,7 @@ const AUTO_ORDER_TABLE_KEYS = new Set(['auto_orders','auto_order_items','auto_or
 function isAutoOrderTable(key){return AUTO_ORDER_TABLE_KEYS.has(String(key||''));}
 function builderAuthHeaders(){return {};}
 function ensureAutoOrderBuilderAuth(keyOrKeys){return true;}
-async function redirectCafe24Login(){
-  const r=await fetch('/api/auth/me?return_to='+encodeURIComponent(location.pathname),{cache:'no-store'});
-  if(r.ok)return true; const j=await r.json().catch(()=>({})); location.href=j.login_url||('/auth/cafe24/login?return_to='+encodeURIComponent(location.pathname)); return false;
-}
+async function redirectCafe24Login(){alert('Cafe24 로그인 연동은 후속 작업으로 보류되었습니다.');return false;}
 
 const tables = {
   products:'상품 gm_product',
