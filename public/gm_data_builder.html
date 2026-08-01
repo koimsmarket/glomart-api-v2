@@ -62,7 +62,7 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 
 <div class="warning">
 <b>자동주문 빌더 권한</b><br>
-자동주문 5개 테이블은 Cafe24 로그인 후 MASTER 또는 DEPUTY로 지정된 사용자만 다운로드·업로드할 수 있습니다.<br>
+자동주문 5개 테이블은 활성 MASTER 또는 빌더 권한이 부여된 계정만 다운로드·업로드할 수 있습니다.<br>
 대시보드의 자동주문 데이터 빌더와 이 전체 DB 빌더는 동일한 서버 API와 권한 정책을 사용합니다.
 </div>
 
@@ -171,11 +171,43 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <script>
 const API = location.origin;
 
-const AUTO_ORDER_TABLE_KEYS = new Set(['auto_orders','auto_order_items','auto_order_work','auto_order_log','auto_order_accounts']);
-function isAutoOrderTable(key){return AUTO_ORDER_TABLE_KEYS.has(String(key||''));}
-function builderAuthHeaders(){return {};}
-function ensureAutoOrderBuilderAuth(keyOrKeys){return true;}
-async function redirectCafe24Login(){alert('Cafe24 로그인 연동은 후속 작업으로 보류되었습니다. 현재 빌더는 임시 관리자 모드입니다.');return false;}
+const AUTO_ORDER_TABLE_KEYS = new Set([
+  'auto_orders','auto_order_items','auto_order_work','auto_order_log','auto_order_accounts'
+]);
+const AUTO_ORDER_BUILDER_AUTH = {
+  adminId: sessionStorage.getItem('gm_auto_order_builder_admin_id') || '',
+  key: sessionStorage.getItem('gm_auto_order_builder_key') || ''
+};
+
+function isAutoOrderTable(key){
+  return AUTO_ORDER_TABLE_KEYS.has(String(key || ''));
+}
+function builderAuthHeaders(keyOrKeys){
+  const keys=Array.isArray(keyOrKeys)?keyOrKeys:[keyOrKeys];
+  if(!keys.some(isAutoOrderTable)) return {};
+  return {
+    'X-GM-Admin-ID':AUTO_ORDER_BUILDER_AUTH.adminId,
+    'X-GM-Builder-Key':AUTO_ORDER_BUILDER_AUTH.key
+  };
+}
+function ensureAutoOrderBuilderAuth(keyOrKeys){
+  const keys=Array.isArray(keyOrKeys)?keyOrKeys:[keyOrKeys];
+  if(!keys.some(isAutoOrderTable)) return true;
+
+  if(!AUTO_ORDER_BUILDER_AUTH.adminId){
+    const adminId=prompt('자동주문 빌더 권한 관리자 ID를 입력하세요.','');
+    if(adminId===null) return false;
+    AUTO_ORDER_BUILDER_AUTH.adminId=String(adminId||'').trim();
+    sessionStorage.setItem('gm_auto_order_builder_admin_id',AUTO_ORDER_BUILDER_AUTH.adminId);
+  }
+  if(!AUTO_ORDER_BUILDER_AUTH.key){
+    const key=prompt('Cloudtype AUTO_ORDER_BUILDER_KEY 값을 입력하세요.','');
+    if(key===null) return false;
+    AUTO_ORDER_BUILDER_AUTH.key=String(key||'');
+    sessionStorage.setItem('gm_auto_order_builder_key',AUTO_ORDER_BUILDER_AUTH.key);
+  }
+  return true;
+}
 
 const tables = {
   products:'상품 gm_product',
@@ -550,23 +582,13 @@ async function downloadAll(button){
       if(saved.size!==bytes) throw new Error(`ZIP 저장 크기 불일치 (${saved.size}/${bytes})`);
       log(`DB ZIP 저장 완료: ${saved.name} / ${saved.size.toLocaleString()} bytes / ${timed?timed.seconds:0}초`);
     }else{
-      const response=await fetch(url,{method:'GET',cache:'no-store'});
-      const contentType=String(response.headers.get('content-type')||'').toLowerCase();
-      if(!response.ok){
-        const text=await response.text().catch(()=>String(response.status));
-        throw new Error(`HTTP ${response.status} ${text.slice(0,500)}`);
-      }
-      const blob=await response.blob();
-      const head=new Uint8Array(await blob.slice(0,4).arrayBuffer());
-      const zipSignature=head.length===4 && head[0]===0x50 && head[1]===0x4b &&
-        ((head[2]===0x03 && head[3]===0x04) || (head[2]===0x05 && head[3]===0x06));
-      if(!contentType.includes('application/zip') || !zipSignature){
-        const text=await blob.text().catch(()=> '');
-        throw new Error(`ZIP 응답이 아닙니다. content-type=${contentType||'-'} / ${text.slice(0,300)}`);
-      }
-      if(blob.size<22) throw new Error(`ZIP 응답 크기가 비정상입니다: ${blob.size} bytes`);
-      await saveBlobAsFile(blob,filename,null);
-      log(`DB ZIP 다운로드 완료: ${filename} / ${blob.size.toLocaleString()} bytes`);
+      const a=document.createElement('a');
+      a.href=url;
+      a.download=filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      log(`DB ZIP 다운로드를 시작했습니다: ${filename}\n브라우저 다운로드 완료 여부는 다운로드 목록에서 확인하세요.`);
     }
   }catch(e){
     if(e&&e.name==='AbortError') log('DB ZIP 저장이 취소되었습니다.');
