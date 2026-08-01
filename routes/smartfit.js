@@ -468,7 +468,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       FROM information_schema.columns
       WHERE table_schema='public' AND table_name='gm_smartfit_item'
         AND column_name = ANY($1::text[])`,
-      [['product_id','source_mall','source_uid','internal_product_code','cafe24_product_no','pi_ii_vi']])).rows.map(x=>s(x.column_name)));
+      [['product_id','source_mall','source_uid','internal_product_code','cafe24_product_no','pi_ii_vi','jeju_delivery_yn','jeju_extra_delivery_fee','island_delivery_yn','island_extra_delivery_fee']])).rows.map(x=>s(x.column_name)));
     const hasProductId=smartfitItemCols.has('product_id');
     console.log('[SMARTFIT_SAVE_V126] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0, has_product_id:hasProductId });
     await client.query('BEGIN');
@@ -518,6 +518,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           if(!existing.internal_product_code) existing.internal_product_code=s(raw.internal_product_code || raw.internalProductCode || '');
           if(!existing.cafe24_product_no) existing.cafe24_product_no=s(raw.cafe24_product_no || raw.cafe24ProductNo || raw.product_no || raw.productNo || '');
           if(!existing.pi_ii_vi) existing.pi_ii_vi=s(raw.pi_ii_vi || raw.piIiVi || '');
+          if(!existing.jeju_delivery_yn) existing.jeju_delivery_yn=s(raw.jeju_delivery_yn || raw.jejuDeliveryYn || '');
+          if(existing.jeju_extra_delivery_fee==null && (raw.jeju_extra_delivery_fee!=null || raw.jejuExtraDeliveryFee!=null)) existing.jeju_extra_delivery_fee=i(raw.jeju_extra_delivery_fee!=null?raw.jeju_extra_delivery_fee:raw.jejuExtraDeliveryFee,0);
+          if(!existing.island_delivery_yn) existing.island_delivery_yn=s(raw.island_delivery_yn || raw.islandDeliveryYn || '');
+          if(existing.island_extra_delivery_fee==null && (raw.island_extra_delivery_fee!=null || raw.islandExtraDeliveryFee!=null)) existing.island_extra_delivery_fee=i(raw.island_extra_delivery_fee!=null?raw.island_extra_delivery_fee:raw.islandExtraDeliveryFee,0);
         }else{
           merged.set(key,{
             item_role:s(raw.item_role||raw.role||'ETC')||'ETC',
@@ -529,6 +533,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
             internal_product_code:s(raw.internal_product_code || raw.internalProductCode || ''),
             cafe24_product_no:s(raw.cafe24_product_no || raw.cafe24ProductNo || raw.product_no || raw.productNo || ''),
             pi_ii_vi:s(raw.pi_ii_vi || raw.piIiVi || ''),
+            jeju_delivery_yn:s(raw.jeju_delivery_yn || raw.jejuDeliveryYn || ''),
+            jeju_extra_delivery_fee:(raw.jeju_extra_delivery_fee!=null || raw.jejuExtraDeliveryFee!=null)?i(raw.jeju_extra_delivery_fee!=null?raw.jeju_extra_delivery_fee:raw.jejuExtraDeliveryFee,0):null,
+            island_delivery_yn:s(raw.island_delivery_yn || raw.islandDeliveryYn || ''),
+            island_extra_delivery_fee:(raw.island_extra_delivery_fee!=null || raw.islandExtraDeliveryFee!=null)?i(raw.island_extra_delivery_fee!=null?raw.island_extra_delivery_fee:raw.islandExtraDeliveryFee,0):null,
             qty,
             sort_no:merged.size+1
           });
@@ -587,6 +595,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           if(smartfitItemCols.has('internal_product_code')){cols.push('internal_product_code');vals.push(it.internal_product_code||'');}
           if(smartfitItemCols.has('cafe24_product_no')){cols.push('cafe24_product_no');vals.push(it.cafe24_product_no||'');}
           if(smartfitItemCols.has('pi_ii_vi')){cols.push('pi_ii_vi');vals.push(it.pi_ii_vi||'');}
+          if(smartfitItemCols.has('jeju_delivery_yn')){cols.push('jeju_delivery_yn');vals.push(it.jeju_delivery_yn||'');}
+          if(smartfitItemCols.has('jeju_extra_delivery_fee')){cols.push('jeju_extra_delivery_fee');vals.push(it.jeju_extra_delivery_fee);}
+          if(smartfitItemCols.has('island_delivery_yn')){cols.push('island_delivery_yn');vals.push(it.island_delivery_yn||'');}
+          if(smartfitItemCols.has('island_extra_delivery_fee')){cols.push('island_extra_delivery_fee');vals.push(it.island_extra_delivery_fee);}
           cols.push('qty','sort_no'); vals.push(it.qty,it.sort_no);
           await client.query(`INSERT INTO gm_smartfit_item (${cols.join(',')}) VALUES (${vals.map((_,idx)=>'$'+(idx+1)).join(',')})`,vals);
           savedItemCount++;
@@ -733,6 +745,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT
         i.item_id, i.template_id, i.item_role, i.mall_code, COALESCE(p.product_id,'') AS product_id, i.product_uid, i.qty, i.sort_no,
+        i.jeju_delivery_yn, i.jeju_extra_delivery_fee, i.island_delivery_yn, i.island_extra_delivery_fee,
         p.product_name, p.mall_product_name, ''::text AS option_name, ''::text AS option_value,
         p.mall_sale_price AS sale_price, p.final_supply_price,
         p.product_url, p.thumb_origin_url AS thumb_url,

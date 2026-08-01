@@ -261,6 +261,10 @@ ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS sort_no INTEGER NOT NULL D
 ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS is_deleted CHAR(1) NOT NULL DEFAULT 'F';
 ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;
 ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(80);
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS jeju_delivery_yn TEXT;
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS jeju_extra_delivery_fee INTEGER;
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS island_delivery_yn TEXT;
+ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS island_extra_delivery_fee INTEGER;
 ALTER TABLE gm_smartfit_item ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
 UPDATE gm_smartfit_item SET sort_no=sort_order WHERE COALESCE(sort_no,0)=0 AND sort_order IS NOT NULL;
 ALTER TABLE gm_smartfit_item DROP COLUMN IF EXISTS sort_order;

@@ -1,7 +1,7 @@
 'use strict';
 
 /*
- * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V005
+ * GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V006
  *
  * Source of truth:
  *   gm_order + gm_order_item
@@ -10,10 +10,11 @@
  *   gm_auto_order + gm_auto_order_item + gm_auto_order_work
  *
  * Rules:
- * - GMKR/internal items ALSO create auto-order work.
- *   Until suppliers are directly registered, GMKR is treated as an order destination
- *   and remains in the same control tower flow as CPKR/ALKR.
- * - One auto_order row per order_no + order destination (GMKR/CPKR/ALKR).
+ * - gm_order_item.mall_code is PRODUCT SOURCE (GMKR/CPKR/ALKR/...).
+ * - gm_order_item.source_mall is the ACTUAL PURCHASE DESTINATION.
+ * - gm_auto_order.mall_code stores the purchase destination used for account assignment.
+ * - gm_auto_order_item.mall_code preserves the original product source.
+ * - One auto_order row per order_no + purchase destination.
  * - New work starts WAIT_PAYMENT unless the order is already paid.
  * - A later sync promotes WAIT_PAYMENT -> READY after payment confirmation.
  * - Existing work that already started/finished is never reset by reconciliation.
@@ -31,20 +32,38 @@ function int(v, def){
   const n = Number.parseInt(String(v == null ? '' : v),10);
   return Number.isFinite(n) ? n : (def == null ? 0 : def);
 }
-function sourceMall(row){
-  const direct = upper(row && (row.source_mall || row.mall_code || row.source_code));
-  if(['GMKR','CPKR','ALKR'].includes(direct)) return direct;
+function productSource(row){
+  const direct = upper(row && (row.mall_code || row.source_code));
+  if(direct) return direct;
 
-  const uid = upper(row && (row.source_uid || row.product_uid));
-  if(uid.startsWith('GMKR_')) return 'GMKR';
+  const uid = upper(row && (row.product_uid || row.pi_ii_vi));
+  const m = uid.match(/^([A-Z0-9]+)_/);
+  return m ? m[1] : 'UNKNOWN';
+}
+
+function executionMall(row){
+  // source_mall is the existing DB column intended for the real purchase mall.
+  const explicit = upper(row && row.source_mall);
+  if(explicit) return explicit;
+
+  // External-search products may not need a separate value because their source
+  // and execution mall are the same.
+  const source = productSource(row);
+  if(source === 'CPKR' || source === 'ALKR') return source;
+
+  // Backward compatibility for older order rows: derive from actual purchase key/url.
+  const uid = upper(row && row.source_uid);
   if(uid.startsWith('CPKR_')) return 'CPKR';
   if(uid.startsWith('ALKR_')) return 'ALKR';
 
   const url = clean(row && (row.product_url || row.source_url || row.url)).toLowerCase();
   if(url.includes('coupang.com') || url.includes('link.coupang.com')) return 'CPKR';
   if(url.includes('aliexpress.com')) return 'ALKR';
+
+  // Never treat GMKR itself as a purchase destination.
   return '';
 }
+
 function isPaid(status){
   const s = upper(status).replace(/[\s-]+/g,'_');
   return [
@@ -100,22 +119,55 @@ async function loadOrder(pool, orderNo){
   return { order:o.rows[0], items:items.rows || [] };
 }
 
-function groupOrderTargets(items, order){
+function groupOrderTargets(items){
   const groups = new Map();
+
   for(const row of items || []){
-    let mall = sourceMall(row);
+    const source = productSource(row);
+    const execution = executionMall(row);
+    if(!execution) continue;
 
-    // Current gm_order schema may not contain order_mode.
-    // If an item is not identifiable as Coupang/Ali from its mall/source/url,
-    // keep it actionable as GMKR. At the present stage internal merchandise
-    // also requires automatic follow-up ordering.
-    if(!mall) mall = 'GMKR';
-
-    if(!mall) continue;
-    if(!groups.has(mall)) groups.set(mall,[]);
-    groups.get(mall).push(row);
+    if(!groups.has(execution)) groups.set(execution,[]);
+    groups.get(execution).push({
+      row,
+      source_code:source,
+      execution_mall:execution
+    });
   }
+
   return groups;
+}
+
+async function removeLegacySourceWork(client, orderNo, sourceCode, executionMallCode){
+  if(!sourceCode || sourceCode === 'UNKNOWN' || sourceCode === executionMallCode) return;
+
+  const legacyNo = autoOrderNo(orderNo,sourceCode);
+  const r = await client.query(`
+    SELECT
+      a.mall_order_no,
+      COALESCE(w.work_status,'') AS work_status
+    FROM gm_auto_order a
+    LEFT JOIN LATERAL (
+      SELECT work_status
+      FROM gm_auto_order_work x
+      WHERE x.auto_order_no=a.auto_order_no AND x.work_type='ORDER'
+      ORDER BY x.work_id DESC
+      LIMIT 1
+    ) w ON TRUE
+    WHERE a.auto_order_no=$1
+    FOR UPDATE OF a
+  `,[legacyNo]);
+
+  if(!r.rows.length) return;
+
+  const legacy = r.rows[0];
+  const safe = ['','WAIT_PAYMENT','READY','PENDING'].includes(upper(legacy.work_status));
+  if(!safe || clean(legacy.mall_order_no)) return;
+
+  await client.query(`DELETE FROM gm_auto_order_log WHERE auto_order_no=$1`,[legacyNo]).catch(()=>{});
+  await client.query(`DELETE FROM gm_auto_order_work WHERE auto_order_no=$1`,[legacyNo]);
+  await client.query(`DELETE FROM gm_auto_order_item WHERE auto_order_no=$1`,[legacyNo]);
+  await client.query(`DELETE FROM gm_auto_order WHERE auto_order_no=$1`,[legacyNo]);
 }
 
 async function existingWork(client, aoNo){
@@ -134,7 +186,7 @@ async function ingestOrder(pool, orderNo, meta){
   if(!loaded) return { order_no:orderNo, created:0, works:0, reason:'order_not_found' };
 
   const order = loaded.order;
-  const groups = groupOrderTargets(loaded.items, order);
+  const groups = groupOrderTargets(loaded.items);
   if(!groups.size){
     return { order_no:orderNo, created:0, works:0, skipped_unroutable:true, reason:'no_order_target' };
   }
@@ -150,7 +202,14 @@ async function ingestOrder(pool, orderNo, meta){
   try{
     await client.query('BEGIN');
 
-    for(const [mall, items] of groups.entries()){
+    for(const [mall, routedItems] of groups.entries()){
+      const items = routedItems.map(x=>x.row);
+      const sourceCodes = [...new Set(routedItems.map(x=>x.source_code).filter(Boolean))];
+
+      for(const sourceCode of sourceCodes){
+        await removeLegacySourceWork(client,orderNo,sourceCode,mall);
+      }
+
       const aoNo = autoOrderNo(orderNo,mall);
       const previousWork = await existingWork(client,aoNo);
       const protectedWork = previousWork && !['WAIT_PAYMENT','READY','PENDING'].includes(upper(previousWork.work_status));
@@ -220,7 +279,9 @@ async function ingestOrder(pool, orderNo, meta){
       if(!protectedWork){
         // Before execution starts, item snapshot may safely follow gm_order_item.
         await client.query(`DELETE FROM gm_auto_order_item WHERE auto_order_no=$1`,[aoNo]);
-        for(const row of items){
+        for(const routed of routedItems){
+          const row = routed.row;
+          const sourceCode = routed.source_code;
           const qty = Math.max(1,int(row.quantity,1));
           await client.query(`
             INSERT INTO gm_auto_order_item (
@@ -236,7 +297,7 @@ async function ingestOrder(pool, orderNo, meta){
             aoNo,
             clean(orderNo),
             clean(row.pi_ii_vi),
-            mall,
+            sourceCode,
             clean(row.source_uid || row.product_uid),
             clean(row.product_name),
             clean(row.option_name),
@@ -285,13 +346,14 @@ async function ingestOrder(pool, orderNo, meta){
       `,[
         aoNo,
         'gm_order -> control tower sync',
-        JSON.stringify({ source:meta && meta.source || 'reconcile', payment_status:order.payment_status || '', mall })
+        JSON.stringify({source:meta&&meta.source||'reconcile',payment_status:order.payment_status||'',execution_mall:mall,source_codes:sourceCodes})
       ]).catch(()=>{});
     }
 
     await client.query('COMMIT');
     return {
       order_no:orderNo,
+      execution_malls:[...groups.keys()],
       order_targets:[...groups.keys()],
       external_malls:[...groups.keys()],
       auto_orders:autoOrders,
@@ -438,7 +500,8 @@ async function listControlTower(pool, opts){
       w.requested_at,
       w.started_at,
       w.completed_at,
-      COALESCE(i.product_names,'') AS product_names
+      COALESCE(i.product_names,'') AS product_names,
+      COALESCE(i.source_codes,'') AS source_codes
     FROM gm_auto_order a
     LEFT JOIN LATERAL (
       SELECT *
@@ -448,7 +511,9 @@ async function listControlTower(pool, opts){
       LIMIT 1
     ) w ON TRUE
     LEFT JOIN LATERAL (
-      SELECT string_agg(NULLIF(product_name,''),' / ' ORDER BY auto_order_item_id) AS product_names
+      SELECT
+        string_agg(NULLIF(product_name,''),' / ' ORDER BY auto_order_item_id) AS product_names,
+        string_agg(DISTINCT NULLIF(upper(mall_code),''), ',' ORDER BY NULLIF(upper(mall_code),'')) AS source_codes
       FROM gm_auto_order_item ai
       WHERE ai.auto_order_no=a.auto_order_no
     ) i ON TRUE
@@ -492,7 +557,7 @@ async function listControlTower(pool, opts){
 }
 
 module.exports = {
-  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V005',
+  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V006',
   ingestOrder,
   syncRecentOrders,
   listControlTower,

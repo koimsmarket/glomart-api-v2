@@ -119,6 +119,10 @@ function rowPayload(b){
     amount_type:s(b.amount_type||b.amountType,'unit'),
     delivery_type:s(b.delivery_type||b.deliveryType),
     delivery_fee:n(b.delivery_fee||b.deliveryFee,0),
+    jeju_delivery_yn:s(b.jeju_delivery_yn||b.jejuDeliveryYn),
+    jeju_extra_delivery_fee:(b.jeju_extra_delivery_fee!=null||b.jejuExtraDeliveryFee!=null)?n(b.jeju_extra_delivery_fee!=null?b.jeju_extra_delivery_fee:b.jejuExtraDeliveryFee,0):null,
+    island_delivery_yn:s(b.island_delivery_yn||b.islandDeliveryYn),
+    island_extra_delivery_fee:(b.island_extra_delivery_fee!=null||b.islandExtraDeliveryFee!=null)?n(b.island_extra_delivery_fee!=null?b.island_extra_delivery_fee:b.islandExtraDeliveryFee,0):null,
     product_url:s(b.product_url||b.productUrl||b.url),
     thumb_url:s(b.thumb_url||b.thumbUrl||b.thumb_origin_url||b.thumbOriginUrl||b.thumb_file_name||b.thumbFileName),
     thumb_file_name:s(b.thumb_file_name||b.thumbFileName||b.thumb_url||b.thumbUrl||b.thumb_origin_url||b.thumbOriginUrl)
@@ -167,6 +171,10 @@ async function ensureBasketSchema(pool){
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS internal_product_code TEXT`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS cafe24_product_no TEXT`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS gm_internal_link INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS jeju_delivery_yn TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS jeju_extra_delivery_fee INTEGER`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS island_delivery_yn TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS island_extra_delivery_fee INTEGER`);
   /* 기존 장바구니 식별 기준을 유지한다.
    * UNIQUE: mall_code + pi_ii_vi + owner(member_id/guest_key)
    * cart_item_key 전용 UNIQUE/index는 생성하거나 기존 제약을 삭제하지 않는다. */
@@ -185,8 +193,8 @@ async function upsertOne(pool,b){
   if(!p.thumb_url) throw new Error('thumb_url is required');
   if(!p.amount || p.amount <= 0) throw new Error('amount is required');
   const sql=`INSERT INTO gm_basket (
-      mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,cart_item_key,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW(),NOW())
+      mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,cart_item_key,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,jeju_delivery_yn,jeju_extra_delivery_fee,island_delivery_yn,island_extra_delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,NOW(),NOW())
     ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
       quantity=gm_basket.quantity + EXCLUDED.quantity,
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''),gm_basket.source_mall),
@@ -201,12 +209,16 @@ async function upsertOne(pool,b){
       amount_type=EXCLUDED.amount_type,
       delivery_type=EXCLUDED.delivery_type,
       delivery_fee=EXCLUDED.delivery_fee,
+      jeju_delivery_yn=COALESCE(NULLIF(EXCLUDED.jeju_delivery_yn,''),gm_basket.jeju_delivery_yn),
+      jeju_extra_delivery_fee=COALESCE(EXCLUDED.jeju_extra_delivery_fee,gm_basket.jeju_extra_delivery_fee),
+      island_delivery_yn=COALESCE(NULLIF(EXCLUDED.island_delivery_yn,''),gm_basket.island_delivery_yn),
+      island_extra_delivery_fee=COALESCE(EXCLUDED.island_extra_delivery_fee,gm_basket.island_extra_delivery_fee),
       product_url=EXCLUDED.product_url,
       thumb_url=EXCLUDED.thumb_url,
       thumb_file_name=EXCLUDED.thumb_file_name,
       updated_at=NOW()
     RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid, (xmax = 0) AS __gm_inserted`;
-  const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.cart_item_key,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
+  const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.cart_item_key,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.jeju_delivery_yn,p.jeju_extra_delivery_fee,p.island_delivery_yn,p.island_extra_delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
   const r=await pool.query(sql,params);
   const row=r.rows[0];
   const inserted=!!row.__gm_inserted;

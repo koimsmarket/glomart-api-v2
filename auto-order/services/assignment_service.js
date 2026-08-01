@@ -1,14 +1,13 @@
 'use strict';
 
 /*
- * GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V002
+ * GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V003
  *
  * Purpose:
  * - Assign READY control-tower work to an enabled operator/account.
  * - Use gm_auto_order_account as the assignment master.
- * - CPKR/ALKR require matching mall_code + can_order=true.
- * - GMKR also participates. Until supplier accounts are fully modeled,
- *   GMKR can use a GMKR account row or a generic row whose mall_code is blank.
+ * - gm_auto_order.mall_code is the actual purchase destination.
+ * - Account matching uses the purchase destination, not the product source.
  * - Assignment does NOT start execution. work_status remains READY.
  * - Existing assignment is preserved unless manually reassigned.
  */
@@ -111,10 +110,7 @@ async function candidateAccounts(client,mallCode){
     ) w ON TRUE
     WHERE a.enabled=true
       AND a.can_order=true
-      AND (
-        upper(COALESCE(a.mall_code,''))=$1
-        OR ($1='GMKR' AND COALESCE(a.mall_code,'')='')
-      )
+      AND upper(COALESCE(a.mall_code,''))=$1
     ORDER BY
       COALESCE(w.active_count,0) ASC,
       CASE upper(COALESCE(a.account_admin_role,''))
@@ -298,7 +294,7 @@ async function assignWork(pool,input){
 }
 
 module.exports={
-  VERSION:'GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V002',
+  VERSION:'GM_AUTO_ORDER_ASSIGNMENT_SERVICE_V003',
   listAccounts,
   assignReady,
   assignWork
