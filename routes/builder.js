@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V048_AUTO_ORDER_SECURE';
-console.log('[GM_BUILDER_ROUTE_V048] routes/builder.js loaded');
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V048_AUTO_ORDER_OPEN';
+console.log('[GM_BUILDER_ROUTE_V048_AUTO_ORDER_OPEN] routes/builder.js loaded');
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -432,6 +432,16 @@ function gmRequestedBuilderKeys(req){
 
 function gmNeedsAutoOrderBuilderPermission(req,keys){
   return (keys || gmRequestedBuilderKeys(req)).some(k=>GM_AUTO_ORDER_BUILDER_KEYS.has(String(k)));
+}
+
+function gmLogOpenAutoOrderBuilder(req,keys,action){
+  const tables=(keys||[]).filter(k=>GM_AUTO_ORDER_BUILDER_KEYS.has(String(k)));
+  if(!tables.length) return;
+  console.log('[GM_AUTO_ORDER_BUILDER_OPEN_ACCESS_V001]',JSON.stringify({
+    action,
+    tables,
+    path:req.originalUrl
+  }));
 }
 
 async function gmCheckAutoOrderBuilderPermission(req){
@@ -1072,10 +1082,9 @@ router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), as
 
 router.get('/api/gm/builder/export', async (req,res)=>{
   const exportKey=clean(req.query.table);
-  const auth=await gmRequireAutoOrderBuilder(req,res,[exportKey]);
-  if(auth===false) return;
-  const spec = tableSpec(req.query.table);
+  const spec = tableSpec(exportKey);
   if (!spec) return fail(res, 400, 'invalid table');
+  gmLogOpenAutoOrderBuilder(req,[exportKey],'export');
 
   const format = String(req.query.format || 'csv').toLowerCase();
   if (format !== 'csv') return fail(res, 400, 'only csv export is supported');
@@ -1275,10 +1284,9 @@ async function exportTableCsvIntoZip({req,db,spec,key,writeZip,requestId}){
 }
 router.get('/api/gm/builder/export-all', async (req,res)=>{
   const raw=String(req.query.tables||'').split(',').map(x=>x.trim()).filter(Boolean);
-  const auth=await gmRequireAutoOrderBuilder(req,res,raw);
-  if(auth===false) return;
   const unique=[...new Set(raw)];
   if(!unique.length) return fail(res,400,'no tables selected');
+  gmLogOpenAutoOrderBuilder(req,unique,'export-all');
   const invalid=unique.filter(k=>!tableSpec(k));
   if(invalid.length) return fail(res,400,'invalid table',{invalid});
 
@@ -1862,10 +1870,9 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
 
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
   const uploadKey=clean(req.query.table);
-  const auth=await gmRequireAutoOrderBuilder(req,res,[uploadKey]);
-  if(auth===false) return;
-  const spec = tableSpec(req.query.table);
+  const spec = tableSpec(uploadKey);
   if (!spec) return fail(res, 400, 'invalid table');
+  gmLogOpenAutoOrderBuilder(req,[uploadKey],'safe-update');
 
   const apply = String(req.query.apply || '').toUpperCase() === 'YES';
   const db = dbFrom(req);
