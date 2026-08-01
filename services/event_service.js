@@ -1,6 +1,8 @@
 // EVENT_SERVICE_V016_COUNTER_LIGHTWEIGHT_NO_LEDGER
 'use strict';
 
+const GM_EVENT_SERVICE_VERSION='GM_EVENT_SERVICE_V002_SCHEMA_COMPAT';
+
 const networkEngine = require('./GM_NETWORK_INCENTIVE_ENGINE');
 
 module.exports = function createEventService(deps){
@@ -97,7 +99,7 @@ module.exports = function createEventService(deps){
     const client=externalClient?clientOrPayload:await pool.connect();
     try{
       if(!externalClient) await client.query('BEGIN');
-      const r=await client.query(`WITH target AS (SELECT product_uid FROM gm_product WHERE (cardinality($1::text[])>0 AND product_uid=ANY($1::text[])) OR ($2<>'' AND $3<>'' AND mall_code=$2 AND pi_ii_vi=$3) OR ($2<>'' AND $4<>'' AND mall_code=$2 AND product_id=$4 AND ($5='' OR item_id=$5) AND ($6='' OR vendor_item_id=$6)) ORDER BY CASE WHEN product_uid=ANY($1::text[]) THEN 0 ELSE 1 END,updated_at DESC NULLS LAST LIMIT 1 FOR UPDATE) UPDATE gm_product p SET detail_view_count=COALESCE(p.detail_view_count,0)+1,view_count=COALESCE(p.view_count,0)+1,last_view_at=now(),expire_at=GREATEST(COALESCE(p.expire_at,now()),now()+INTERVAL '90 days'),updated_at=now() FROM target t WHERE p.product_uid=t.product_uid RETURNING p.product_uid,p.detail_view_count,p.view_count,p.cp_fix_code,p.cp_selected_code,p.category_code`,[id.candidates,id.mall,id.pi,id.productId,id.itemId,id.vendorItemId]);
+      const r=await client.query(`WITH target AS (SELECT product_uid FROM gm_product WHERE (cardinality($1::text[])>0 AND product_uid=ANY($1::text[])) OR ($2<>'' AND $3<>'' AND mall_code=$2 AND pi_ii_vi=$3) OR ($2<>'' AND $4<>'' AND mall_code=$2 AND product_id=$4 AND ($5='' OR item_id=$5) AND ($6='' OR vendor_item_id=$6)) ORDER BY CASE WHEN product_uid=ANY($1::text[]) THEN 0 ELSE 1 END,updated_at DESC NULLS LAST LIMIT 1 FOR UPDATE) UPDATE gm_product p SET detail_view_count=COALESCE(p.detail_view_count,0)+1,view_count=COALESCE(p.view_count,0)+1,last_view_at=now(),updated_at=now() FROM target t WHERE p.product_uid=t.product_uid RETURNING p.product_uid,p.detail_view_count,p.view_count,p.cp_fix_code,p.cp_selected_code,p.category_code`,[id.candidates,id.mall,id.pi,id.productId,id.itemId,id.vendorItemId]);
       const row=r.rows[0];
       if(!row){ if(!externalClient) await client.query('ROLLBACK'); return {updated:0,reason:'product_not_found',identity:id}; }
       const categoryCode=cleanText(row.cp_fix_code||row.cp_selected_code||row.category_code||'');
@@ -122,7 +124,7 @@ module.exports = function createEventService(deps){
     if(!uid&&!mall&&!pi){ if(!externalClient) client.release(); return {updated:0,reason:'product_key_missing'}; }
     try{
       if(!externalClient) await client.query('BEGIN');
-      const r=await client.query(`UPDATE gm_product SET cart_count=COALESCE(cart_count,0)+1,last_cart_at=now(),expire_at=GREATEST(COALESCE(expire_at,now()),now()+INTERVAL '180 days'),updated_at=now() WHERE ($1<>'' AND product_uid=$1) OR ($2<>'' AND $3<>'' AND mall_code=$2 AND pi_ii_vi=$3) RETURNING product_uid,cart_count,cp_fix_code,cp_selected_code,category_code`,[uid,mall,pi]);
+      const r=await client.query(`UPDATE gm_product SET cart_count=COALESCE(cart_count,0)+1,last_cart_at=now(),updated_at=now() WHERE ($1<>'' AND product_uid=$1) OR ($2<>'' AND $3<>'' AND mall_code=$2 AND pi_ii_vi=$3) RETURNING product_uid,cart_count,cp_fix_code,cp_selected_code,category_code`,[uid,mall,pi]);
       const p=r.rows[0];
       if(!p){ if(!externalClient) await client.query('ROLLBACK'); return {updated:0,reason:'product_not_found'}; }
       const categoryCode=cleanText(p.cp_fix_code||p.cp_selected_code||p.category_code||'');

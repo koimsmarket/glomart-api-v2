@@ -1,5 +1,7 @@
 'use strict';
 
+const GM_EVENT_QUEUE_WORKER_VERSION='GM_EVENT_QUEUE_WORKER_V002_SCHEMA_COMPAT';
+
 let started = false;
 
 function clean(v){ return v == null ? '' : String(v).trim(); }
@@ -37,7 +39,7 @@ async function claimOne(pool){
 async function loadOrder(client, orderNo){
   const o = await client.query(`SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1`, [orderNo]);
   if(!o.rowCount) throw new Error(`order_not_found:${orderNo}`);
-  const i = await client.query(`SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY id`, [orderNo]);
+  const i = await client.query(`SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY pi_ii_vi`, [orderNo]);
   return { order:o.rows[0], items:i.rows };
 }
 
@@ -132,11 +134,32 @@ async function processOne(pool, eventService, job){
     const delaySeconds = Math.min(3600, Math.pow(2, Math.min(attempts, 10)) * 5);
     await pool.query(
       `UPDATE gm_event_queue
-       SET status=$2, next_retry_at=CASE WHEN $2='FAILED' THEN next_retry_at ELSE NOW()+($3 || ' seconds')::interval END,
-           locked_at=NULL, last_error=$4, updated_at=NOW()
+       SET status=$2,
+           next_retry_at=CASE
+             WHEN $5::boolean THEN next_retry_at
+             ELSE NOW()+($3::integer * INTERVAL '1 second')
+           END,
+           locked_at=NULL,
+           last_error=$4,
+           updated_at=NOW()
        WHERE id=$1`,
-      [job.id, finalFail ? 'FAILED' : 'PENDING', String(delaySeconds), String(e && e.message || e).slice(0,4000)]
-    ).catch(updateErr=>console.error('[EVENT_QUEUE_FAIL_UPDATE]', String(updateErr && updateErr.message || updateErr)));
+      [
+        job.id,
+        finalFail ? 'FAILED' : 'PENDING',
+        Number(delaySeconds),
+        String(e && e.message || e).slice(0,4000),
+        Boolean(finalFail)
+      ]
+    ).then(()=>{
+      if(finalFail){
+        console.error('[EVENT_QUEUE_TERMINAL_FAILED]', JSON.stringify({
+          id:job.id,
+          event_type:job.event_type,
+          event_key:job.event_key,
+          attempts
+        }));
+      }
+    }).catch(updateErr=>console.error('[EVENT_QUEUE_FAIL_UPDATE]', String(updateErr && updateErr.message || updateErr)));
     console.error('[EVENT_QUEUE_FAIL]', JSON.stringify({ id:job.id, event_type:job.event_type, event_key:job.event_key, attempts, finalFail, error:String(e && e.message || e) }));
   }finally{ client.release(); }
 }
