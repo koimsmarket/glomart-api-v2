@@ -1,16 +1,8 @@
 const express = require('express');
-const fs = require('fs');
-const fsp = fs.promises;
-const os = require('os');
-const path = require('path');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V052_CLEAN_HELPER_FIX';
-console.log('[GM_BUILDER_ROUTE_V052] routes/builder.js loaded');
-
-function clean(value){
-  return String(value == null ? '' : value).trim();
-}
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V049_CAFE24_SESSION';
+console.log('[GM_BUILDER_ROUTE_V050] routes/builder.js loaded');
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -613,181 +605,120 @@ router.post('/api/gm/builder/delete-selected', express.json({ limit:'5mb' }), as
   }
 });
 
-
-// V051: build the complete CSV on local temporary storage first.
-// Only a completed file is sent to the browser. This avoids truncated downloads
-// when Cloudtype/proxy buffering interrupts a long live response stream.
-async function gmWriteFileChunk(stream,chunk){
-  if(stream.destroyed) throw new Error('temporary file stream is closed');
-  if(stream.write(chunk)) return;
-  await new Promise((resolve,reject)=>{
-    const cleanup=()=>{stream.off('drain',onDrain);stream.off('error',onError);};
-    const onDrain=()=>{cleanup();resolve();};
-    const onError=(e)=>{cleanup();reject(e);};
-    stream.once('drain',onDrain);
-    stream.once('error',onError);
-  });
-}
-async function gmEndFileStream(stream){
-  await new Promise((resolve,reject)=>{
-    stream.once('finish',resolve);
-    stream.once('error',reject);
-    stream.end();
-  });
-}
-async function gmSafeRemove(target){
-  if(!target) return;
-  await fsp.rm(target,{recursive:true,force:true}).catch(()=>{});
-}
-async function gmCreateCsvTemp({db,spec,key,limit=0,pageSize=0,requestId,tempDir}){
-  const startedAt=Date.now();
-  const safeKey=String(key||spec.table||'table').replace(/[^a-zA-Z0-9_.-]/g,'_');
-  const filename=`${spec.table}.csv`;
-  const filePath=path.join(tempDir,`${safeKey}.csv`);
-  const out=fs.createWriteStream(filePath,{flags:'wx'});
-  let client=null;
-  let transactionStarted=false;
-  let sent=0;
-
-  try{
-    client=typeof db.connect==='function' ? await db.connect() : db;
-    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    transactionStarted=true;
-
-    let cols=await getColumns(client,spec.table);
-    if(spec.table==='gm_member') cols=cols.filter(c=>!/^password_/i.test(c));
-    if(!cols.length) throw new Error(`no exportable columns: ${spec.table}`);
-
-    const pkResult=await client.query(`
-      SELECT a.attname AS column_name
-      FROM pg_index i
-      JOIN pg_attribute a
-        ON a.attrelid=i.indrelid
-       AND a.attnum=ANY(i.indkey)
-      WHERE i.indrelid=$1::regclass
-        AND i.indisprimary
-      ORDER BY array_position(i.indkey,a.attnum)
-    `,[spec.table]);
-
-    let orderCols=pkResult.rows.map(r=>String(r.column_name||'')).filter(c=>cols.includes(c));
-    if(!orderCols.length && Array.isArray(spec.key)) orderCols=spec.key.filter(c=>cols.includes(c));
-    if(!orderCols.length && Array.isArray(spec.keyAny) && Array.isArray(spec.keyAny[0])){
-      orderCols=spec.keyAny[0].filter(c=>cols.includes(c));
-    }
-    const orderSql=[...orderCols.map(c=>`${qIdent(c)} ASC NULLS FIRST`),'ctid ASC'].join(', ');
-
-    const requestedPageSize=Number(pageSize||0);
-    const defaultPageSize=spec.table==='gm_product'?250:2000;
-    const maxPageSize=spec.table==='gm_product'?500:5000;
-    const actualPageSize=Math.min(Math.max(requestedPageSize||defaultPageSize,100),maxPageSize);
-    const actualLimit=Number(limit)>0?Math.min(Math.max(Number(limit),1),200000):0;
-
-    await gmWriteFileChunk(out,'\ufeff'+cols.map(csvEscape).join(',')+'\n');
-
-    let offset=0;
-    while(true){
-      const take=actualLimit?Math.min(actualPageSize,actualLimit-sent):actualPageSize;
-      if(take<=0) break;
-      const r=await client.query(
-        `SELECT ${cols.map(qIdent).join(', ')}
-         FROM ${qIdent(spec.table)}
-         ORDER BY ${orderSql}
-         LIMIT $1 OFFSET $2`,
-        [take,offset]
-      );
-      if(!r.rows.length) break;
-
-      let page='';
-      for(const row of r.rows){
-        page+=cols.map(c=>csvEscape(row[c])).join(',')+'\n';
-        sent++;
-        if(actualLimit && sent>=actualLimit) break;
-      }
-      await gmWriteFileChunk(out,page);
-      offset+=r.rows.length;
-
-      console.log('[GM_BUILDER_TEMP_CSV_PAGE_V051]',JSON.stringify({
-        requestId,key,table:spec.table,sent,offset,pageSize:actualPageSize,
-        elapsedMs:Date.now()-startedAt
-      }));
-
-      if(r.rows.length<take || (actualLimit && sent>=actualLimit)) break;
-    }
-
-    await client.query('COMMIT');
-    transactionStarted=false;
-    await gmEndFileStream(out);
-    const stat=await fsp.stat(filePath);
-
-    console.log('[GM_BUILDER_TEMP_CSV_DONE_V051]',JSON.stringify({
-      requestId,key,table:spec.table,rows:sent,bytes:stat.size,
-      elapsedMs:Date.now()-startedAt
-    }));
-
-    return {key,table:spec.table,filename,filePath,rows:sent,bytes:stat.size};
-  }catch(e){
-    if(transactionStarted && client) await client.query('ROLLBACK').catch(()=>{});
-    if(!out.destroyed) out.destroy();
-    await fsp.unlink(filePath).catch(()=>{});
-    throw e;
-  }finally{
-    if(client && client!==db && typeof client.release==='function') client.release();
-  }
-}
-
 router.get('/api/gm/builder/export', async (req,res)=>{
   const exportKey=clean(req.query.table);
   const auth=await gmRequireAutoOrderBuilder(req,res,[exportKey]);
   if(auth===false) return;
+  const spec = tableSpec(req.query.table);
+  if (!spec) return fail(res, 400, 'invalid table');
 
-  const spec=tableSpec(exportKey);
-  if(!spec) return fail(res,400,'invalid table');
-  if(String(req.query.format||'csv').toLowerCase()!=='csv'){
-    return fail(res,400,'only csv export is supported');
-  }
+  const format = String(req.query.format || 'csv').toLowerCase();
+  if (format !== 'csv') return fail(res, 400, 'only csv export is supported');
 
-  const db=dbFrom(req);
-  const requestId=`${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
-  const tempDir=await fsp.mkdtemp(path.join(os.tmpdir(),'gm-builder-csv-'));
-  const downloadName=`${spec.table}_${Date.now()}.csv`;
+  const db = dbFrom(req);
+  const rawLimit = req.query.limit === undefined ? 0 : Number(req.query.limit || 0);
+  const limit = rawLimit > 0 ? Math.min(Math.max(rawLimit, 1), 200000) : 0;
+  const requestedPageSize = Number(req.query.pageSize || 0);
+  const defaultPageSize = spec.table === 'gm_product' ? 250 : 2000;
+  const maxPageSize = spec.table === 'gm_product' ? 500 : 5000;
+  const pageSize = Math.min(Math.max(requestedPageSize || defaultPageSize, 100), maxPageSize);
+  const startedAt = Date.now();
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+  let aborted = false;
+  let sent = 0;
+  let client = null;
+  let transactionStarted = false;
 
-  try{
-    console.log('[GM_BUILDER_EXPORT_REQUEST_V051]',JSON.stringify({
-      requestId,key:exportKey,table:spec.table,mode:'temp-file'
-    }));
+  req.on('aborted', ()=>{ aborted = true; });
+  res.on('close', ()=>{ if (!res.writableEnded) aborted = true; });
 
-    const result=await gmCreateCsvTemp({
-      db,spec,key:exportKey,
-      limit:req.query.limit,
-      pageSize:req.query.pageSize,
-      requestId,tempDir
-    });
+  try { console.log('[GM_BUILDER_EXPORT_REQUEST_V038]', JSON.stringify({ requestId, table:spec.table, key:String(req.query.table||''), format, limit, pageSize })); } catch(_) {}
 
-    res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
-    res.setHeader('X-GM-Export-Protocol','v051-temp-file');
-    res.setHeader('X-GM-Export-Request-Id',requestId);
-    res.setHeader('X-GM-Export-Rows',String(result.rows));
+  try {
+    client = typeof db.connect === 'function' ? await db.connect() : db;
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    transactionStarted = true;
 
-    return res.download(result.filePath,downloadName,async(err)=>{
-      if(err){
-        console.error('[GM_BUILDER_EXPORT_SEND_FAIL_V051]',JSON.stringify({
-          requestId,table:spec.table,detail:String(err&&err.message||err)
-        }));
-      }else{
-        console.log('[GM_BUILDER_EXPORT_DONE_V051]',JSON.stringify({
-          requestId,table:spec.table,rows:result.rows,bytes:result.bytes
-        }));
+    let cols = await getColumns(client, spec.table);
+    if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
+    if (!cols.length) throw new Error('no exportable columns');
+
+    // Use the real primary key whenever one exists. If there is no PK, use the
+    // configured logical key and ctid as the final tie breaker. The repeatable-
+    // read snapshot keeps the full export stable while OFFSET pages are read.
+    const pkResult = await client.query(`
+      SELECT a.attname AS column_name
+        FROM pg_index i
+        JOIN pg_attribute a
+          ON a.attrelid = i.indrelid
+         AND a.attnum = ANY(i.indkey)
+       WHERE i.indrelid = $1::regclass
+         AND i.indisprimary
+       ORDER BY array_position(i.indkey, a.attnum)
+    `, [spec.table]);
+    let orderCols = pkResult.rows.map(r=>String(r.column_name||'')).filter(c=>cols.includes(c));
+    if (!orderCols.length && Array.isArray(spec.key)) orderCols = spec.key.filter(c=>cols.includes(c));
+    if (!orderCols.length && Array.isArray(spec.keyAny) && Array.isArray(spec.keyAny[0])) orderCols = spec.keyAny[0].filter(c=>cols.includes(c));
+    const orderSql = [...orderCols.map(c=>`${qIdent(c)} ASC NULLS FIRST`), 'ctid ASC'].join(', ');
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${spec.table}_${Date.now()}.csv"`);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('X-GM-Export-Protocol', 'v038-abort-on-failure');
+    res.setHeader('X-GM-Export-Request-Id', requestId);
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const write = async (chunk) => {
+      if (aborted || res.destroyed) throw new Error('client disconnected');
+      if (res.write(chunk)) return;
+      await new Promise((resolve,reject)=>{
+        const onDrain=()=>{cleanup();resolve();};
+        const onClose=()=>{cleanup();reject(new Error('client disconnected'));};
+        const cleanup=()=>{res.off('drain',onDrain);res.off('close',onClose);};
+        res.once('drain',onDrain);
+        res.once('close',onClose);
+      });
+    };
+
+    await write('\ufeff' + cols.map(csvEscape).join(',') + '\n');
+
+    let offset = 0;
+    while (!aborted) {
+      const take = limit ? Math.min(pageSize, limit - sent) : pageSize;
+      if (take <= 0) break;
+      const r = await client.query(
+        `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${orderSql} LIMIT $1 OFFSET $2`,
+        [take, offset]
+      );
+      if (!r.rows.length) break;
+
+      for (const row of r.rows) {
+        await write(cols.map(c => csvEscape(row[c])).join(',') + '\n');
+        sent++;
+        if (limit && sent >= limit) break;
       }
-      await gmSafeRemove(tempDir);
-    });
-  }catch(e){
-    await gmSafeRemove(tempDir);
-    console.error('[GM_BUILDER_EXPORT_FAIL_V051]',JSON.stringify({
-      requestId,table:spec.table,detail:String(e&&e.message||e)
-    }));
-    return fail(res,500,'export failed',{
-      detail:String(e&&e.message||e),request_id:requestId
-    });
+      offset += r.rows.length;
+      try { console.log('[GM_BUILDER_EXPORT_PAGE_V038]', JSON.stringify({ requestId, table:spec.table, sent, offset, pageSize, orderCols, elapsedMs:Date.now()-startedAt })); } catch(_) {}
+      if (r.rows.length < take || (limit && sent >= limit)) break;
+    }
+
+    if (aborted) throw new Error('client disconnected');
+    await client.query('COMMIT');
+    transactionStarted = false;
+    if (!res.writableEnded) res.end();
+    try { console.log('[GM_BUILDER_EXPORT_DONE_V038]', JSON.stringify({ requestId, table:spec.table, sent, elapsedMs:Date.now()-startedAt })); } catch(_) {}
+  } catch(e) {
+    if (transactionStarted && client) await client.query('ROLLBACK').catch(()=>{});
+    transactionStarted = false;
+    try { console.error('[GM_BUILDER_EXPORT_FAIL_V038]', JSON.stringify({ requestId, table:spec.table, sent, detail:String(e && e.message || e), headersSent:res.headersSent, elapsedMs:Date.now()-startedAt })); } catch(_) {}
+    if (!res.headersSent) return fail(res, 500, 'export failed', { detail:String(e && e.message || e), request_id:requestId });
+    // Never finish a partially generated CSV as a successful response. Destroying
+    // the socket makes fetch() reject instead of saving a truncated file.
+    try { res.destroy(e instanceof Error ? e : new Error(String(e))); } catch(_) {}
+  } finally {
+    if (client && client !== db && typeof client.release === 'function') client.release();
   }
 });
 
@@ -877,176 +808,99 @@ async function exportTableCsvIntoZip({req,db,spec,key,writeZip,requestId}){
     if(client!==db && typeof client.release==='function') client.release();
   }
 }
-
-async function gmPipeFileIntoZipEntry({zipStream,filePath,entryName,offsetRef,central}){
-  const entryNameBuffer=Buffer.from(entryName,'utf8');
-  const {time,date}=zipDosDateTime();
-  const localOffset=offsetRef.value;
-  const flags=0x0808;
-  const local=Buffer.concat([
-    zipU32(0x04034b50),zipU16(20),zipU16(flags),zipU16(0),zipU16(time),zipU16(date),
-    zipU32(0),zipU32(0),zipU32(0),zipU16(entryNameBuffer.length),zipU16(0),entryNameBuffer
-  ]);
-  await gmWriteFileChunk(zipStream,local);
-  offsetRef.value+=local.length;
-
-  let crc=0xffffffff;
-  let size=0;
-  const input=fs.createReadStream(filePath);
-  for await(const chunk of input){
-    crc=zipCrcUpdate(crc,chunk);
-    size+=chunk.length;
-    await gmWriteFileChunk(zipStream,chunk);
-    offsetRef.value+=chunk.length;
-  }
-  crc=(crc^0xffffffff)>>>0;
-
-  const descriptor=Buffer.concat([
-    zipU32(0x08074b50),zipU32(crc),zipU32(size),zipU32(size)
-  ]);
-  await gmWriteFileChunk(zipStream,descriptor);
-  offsetRef.value+=descriptor.length;
-
-  central.push({entryName:entryNameBuffer,time,date,flags,crc,size,localOffset});
-  return {size,crc};
-}
-
-async function gmWriteBufferZipEntry({zipStream,buffer,entryName,offsetRef,central,tempDir}){
-  const safe=String(entryName).replace(/[^a-zA-Z0-9_.-]/g,'_');
-  const filePath=path.join(tempDir,safe);
-  await fsp.writeFile(filePath,buffer);
-  return gmPipeFileIntoZipEntry({zipStream,filePath,entryName,offsetRef,central});
-}
-
 router.get('/api/gm/builder/export-all', async (req,res)=>{
   const raw=String(req.query.tables||'').split(',').map(x=>x.trim()).filter(Boolean);
   const auth=await gmRequireAutoOrderBuilder(req,res,raw);
   if(auth===false) return;
+  const unique=[...new Set(raw)];
+  if(!unique.length) return fail(res,400,'no tables selected');
+  const invalid=unique.filter(k=>!tableSpec(k));
+  if(invalid.length) return fail(res,400,'invalid table',{invalid});
 
-  const ordered=[...new Set(raw)].filter(k=>TABLES[k]);
-  if(!ordered.length) return fail(res,400,'no valid tables selected');
-
+  // gm_product is always exported first and completes before any other table starts.
+  const ordered=[...unique.filter(k=>k==='products'),...unique.filter(k=>k!=='products')];
   const db=dbFrom(req);
+  const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
+  const filename=`glomart_db_${stamp}.zip`;
   const requestId=`${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
-  const startedAt=Date.now();
-  const tempDir=await fsp.mkdtemp(path.join(os.tmpdir(),'gm-builder-zip-'));
-  const zipPath=path.join(tempDir,`glomart_db_${Date.now()}.zip`);
-  const zipStream=fs.createWriteStream(zipPath,{flags:'wx'});
   const central=[];
-  const offsetRef={value:0};
-  const report=[];
+  let offset=0;
+  let aborted=false;
+  const startedAt=Date.now();
+  req.on('aborted',()=>{aborted=true;});
+  res.on('close',()=>{if(!res.writableEnded) aborted=true;});
+
+  const writeRaw=async(buf)=>{
+    if(aborted||res.destroyed) throw new Error('client disconnected');
+    if(!Buffer.isBuffer(buf)) buf=Buffer.from(buf);
+    offset+=buf.length;
+    if(res.write(buf)) return;
+    await new Promise((resolve,reject)=>{
+      const cleanup=()=>{res.off('drain',onDrain);res.off('close',onClose);};
+      const onDrain=()=>{cleanup();resolve();};
+      const onClose=()=>{cleanup();reject(new Error('client disconnected'));};
+      res.once('drain',onDrain); res.once('close',onClose);
+    });
+  };
 
   try{
-    console.log('[GM_BUILDER_ZIP_BUILD_START_V051]',JSON.stringify({
-      requestId,tables:ordered,mode:'temp-file'
-    }));
+    console.log('[GM_BUILDER_ZIP_START_V046]',JSON.stringify({requestId,filename,tables:ordered}));
+    res.status(200);
+    res.setHeader('Content-Type','application/zip');
+    res.setHeader('Content-Disposition',`attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
+    res.setHeader('X-Accel-Buffering','no');
+    res.setHeader('X-GM-Export-Protocol','v046-unordered-cursor-zip');
+    res.setHeader('X-GM-Export-Request-Id',requestId);
+    if(typeof res.flushHeaders==='function') res.flushHeaders();
 
     for(let i=0;i<ordered.length;i++){
       const key=ordered[i];
       const spec=tableSpec(key);
-      const tableTempDir=await fsp.mkdtemp(path.join(tempDir,`table-${i+1}-`));
-
-      try{
-        console.log('[GM_BUILDER_ZIP_TABLE_START_V051]',JSON.stringify({
-          requestId,index:i+1,total:ordered.length,key,table:spec.table
-        }));
-
-        const csv=await gmCreateCsvTemp({
-          db,spec,key,requestId:`${requestId}-${i+1}`,tempDir:tableTempDir
-        });
-        const entry=await gmPipeFileIntoZipEntry({
-          zipStream,filePath:csv.filePath,entryName:`${spec.table}.csv`,
-          offsetRef,central
-        });
-
-        report.push({
-          key,table:spec.table,status:'SUCCESS',
-          rows:csv.rows,bytes:entry.size,error:''
-        });
-        console.log('[GM_BUILDER_ZIP_TABLE_DONE_V051]',JSON.stringify({
-          requestId,key,table:spec.table,rows:csv.rows,bytes:entry.size
-        }));
-      }catch(e){
-        report.push({
-          key,table:spec&&spec.table||'',status:'FAILED',
-          rows:0,bytes:0,error:String(e&&e.message||e).slice(0,1000)
-        });
-        console.error('[GM_BUILDER_ZIP_TABLE_FAIL_V051]',JSON.stringify({
-          requestId,key,table:spec&&spec.table||'',detail:String(e&&e.message||e)
-        }));
-      }finally{
-        await gmSafeRemove(tableTempDir);
-      }
-    }
-
-    const reportCols=['key','table','status','rows','bytes','error'];
-    const reportCsv='\ufeff'+reportCols.map(csvEscape).join(',')+'\n'+
-      report.map(row=>reportCols.map(c=>csvEscape(row[c])).join(',')).join('\n')+'\n';
-    await gmWriteBufferZipEntry({
-      zipStream,buffer:Buffer.from(reportCsv,'utf8'),
-      entryName:'_export_result.csv',offsetRef,central,tempDir
-    });
-
-    const centralOffset=offsetRef.value;
-    for(const e of central){
-      const record=Buffer.concat([
-        zipU32(0x02014b50),zipU16(20),zipU16(20),zipU16(e.flags),zipU16(0),
-        zipU16(e.time),zipU16(e.date),zipU32(e.crc),zipU32(e.size),zipU32(e.size),
-        zipU16(e.entryName.length),zipU16(0),zipU16(0),zipU16(0),zipU16(0),
-        zipU32(0),zipU32(e.localOffset),e.entryName
+      const entryName=Buffer.from(`${spec.table}.csv`,'utf8');
+      const {time,date}=zipDosDateTime();
+      const localOffset=offset;
+      const flags=0x0808;
+      const local=Buffer.concat([
+        zipU32(0x04034b50),zipU16(20),zipU16(flags),zipU16(0),zipU16(time),zipU16(date),
+        zipU32(0),zipU32(0),zipU32(0),zipU16(entryName.length),zipU16(0),entryName
       ]);
-      await gmWriteFileChunk(zipStream,record);
-      offsetRef.value+=record.length;
+      await writeRaw(local);
+      let crc=0xffffffff;
+      let size=0;
+      const writeEntry=async(buf)=>{
+        if(!Buffer.isBuffer(buf)) buf=Buffer.from(buf);
+        crc=zipCrcUpdate(crc,buf);
+        size+=buf.length;
+        await writeRaw(buf);
+      };
+      console.log('[GM_BUILDER_ZIP_TABLE_START_V046]',JSON.stringify({requestId,index:i+1,total:ordered.length,key,table:spec.table,productStandalone:key==='products'}));
+      const result=await exportTableCsvIntoZip({req,db,spec,key,writeZip:writeEntry,requestId});
+      crc=(crc^0xffffffff)>>>0;
+      await writeRaw(Buffer.concat([zipU32(0x08074b50),zipU32(crc),zipU32(size),zipU32(size)]));
+      central.push({entryName,time,date,flags,crc,size,localOffset});
+      console.log('[GM_BUILDER_ZIP_TABLE_DONE_V046]',JSON.stringify({requestId,...result,size}));
     }
 
-    const centralSize=offsetRef.value-centralOffset;
-    const end=Buffer.concat([
-      zipU32(0x06054b50),zipU16(0),zipU16(0),
-      zipU16(central.length),zipU16(central.length),
+    const centralOffset=offset;
+    for(const e of central){
+      await writeRaw(Buffer.concat([
+        zipU32(0x02014b50),zipU16(20),zipU16(20),zipU16(e.flags),zipU16(0),zipU16(e.time),zipU16(e.date),
+        zipU32(e.crc),zipU32(e.size),zipU32(e.size),zipU16(e.entryName.length),zipU16(0),zipU16(0),
+        zipU16(0),zipU16(0),zipU32(0),zipU32(e.localOffset),e.entryName
+      ]));
+    }
+    const centralSize=offset-centralOffset;
+    await writeRaw(Buffer.concat([
+      zipU32(0x06054b50),zipU16(0),zipU16(0),zipU16(central.length),zipU16(central.length),
       zipU32(centralSize),zipU32(centralOffset),zipU16(0)
-    ]);
-    await gmWriteFileChunk(zipStream,end);
-    offsetRef.value+=end.length;
-    await gmEndFileStream(zipStream);
-
-    const stat=await fsp.stat(zipPath);
-    const successCount=report.filter(x=>x.status==='SUCCESS').length;
-    const failCount=report.length-successCount;
-    const filename=`glomart_db_${new Date().toISOString().replace(/[-:T]/g,'').slice(0,14)}.zip`;
-
-    console.log('[GM_BUILDER_ZIP_BUILD_DONE_V051]',JSON.stringify({
-      requestId,successCount,failCount,entries:central.length,
-      bytes:stat.size,elapsedMs:Date.now()-startedAt
-    }));
-
-    res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
-    res.setHeader('X-GM-Export-Protocol','v051-temp-file-zip');
-    res.setHeader('X-GM-Export-Request-Id',requestId);
-    res.setHeader('X-GM-Export-Success-Count',String(successCount));
-    res.setHeader('X-GM-Export-Fail-Count',String(failCount));
-
-    return res.download(zipPath,filename,async(err)=>{
-      if(err){
-        console.error('[GM_BUILDER_ZIP_SEND_FAIL_V051]',JSON.stringify({
-          requestId,detail:String(err&&err.message||err)
-        }));
-      }else{
-        console.log('[GM_BUILDER_ZIP_DONE_V051]',JSON.stringify({
-          requestId,filename,bytes:stat.size,successCount,failCount
-        }));
-      }
-      await gmSafeRemove(tempDir);
-    });
+    ]));
+    res.end();
+    console.log('[GM_BUILDER_ZIP_DONE_V046]',JSON.stringify({requestId,filename,tables:ordered.length,bytes:offset,elapsedMs:Date.now()-startedAt}));
   }catch(e){
-    if(!zipStream.destroyed) zipStream.destroy();
-    await gmSafeRemove(tempDir);
-    console.error('[GM_BUILDER_ZIP_FAIL_V051]',JSON.stringify({
-      requestId,detail:String(e&&e.message||e),
-      completed:report.length,elapsedMs:Date.now()-startedAt
-    }));
-    return fail(res,500,'zip export failed',{
-      detail:String(e&&e.message||e),request_id:requestId
-    });
+    console.error('[GM_BUILDER_ZIP_FAIL_V046]',JSON.stringify({requestId,detail:String(e&&e.message||e),headersSent:res.headersSent,tablesCompleted:central.length,elapsedMs:Date.now()-startedAt}));
+    if(!res.headersSent) return fail(res,500,'zip export failed',{detail:String(e&&e.message||e),request_id:requestId});
+    try{res.destroy(e instanceof Error?e:new Error(String(e)));}catch(_){ }
   }
 });
 

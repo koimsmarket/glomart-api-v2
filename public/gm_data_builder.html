@@ -421,7 +421,7 @@ async function exportTableToFile(table,format,directoryHandle){
 async function download(button){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
   const timed=startButtonTimer(button,`${f==='xlsx'?'Excel':'CSV'} 준비 중`);
-  log(`서버 파일 생성 후 다운로드: ${t} / ${f==='xlsx'?'Excel':'CSV'}`);
+  log(`개별 다운로드 준비 중: ${t} / ${f==='xlsx'?'Excel':'CSV'}`);
   try{
     const saved=await exportTableToFile(t,f,null);
     log(`다운로드 시작: ${saved.filename} / ${timed?timed.seconds:0}초 / ${saved.bytes.toLocaleString()} bytes`);
@@ -514,7 +514,7 @@ async function downloadAll(button){
   const selected=selectedExportTables();
   if(!selected.length){ alert('다운로드할 테이블을 하나 이상 선택하세요.'); return; }
   downloadAllRunning=true;
-  const timed=startButtonTimer(button,`DB ZIP 서버 생성 중 0/${selected.length}`);
+  const timed=startButtonTimer(button,`DB ZIP 준비 중 0/${selected.length}`);
   const ordered=[...selected.filter(x=>x==='products'),...selected.filter(x=>x!=='products')];
   const url=`${API}/api/gm/builder/export-all?tables=${encodeURIComponent(ordered.join(','))}&t=${Date.now()}`;
   const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
