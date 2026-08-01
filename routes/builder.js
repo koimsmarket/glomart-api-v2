@@ -5,8 +5,12 @@ const os = require('os');
 const path = require('path');
 const router = express.Router();
 
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V051_TEMPFILE_EXPORT';
-console.log('[GM_BUILDER_ROUTE_V051] routes/builder.js loaded');
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V052_CLEAN_HELPER_FIX';
+console.log('[GM_BUILDER_ROUTE_V052] routes/builder.js loaded');
+
+function clean(value){
+  return String(value == null ? '' : value).trim();
+}
 
 // V002 기본 원칙:
 // - UPDATE ONLY
