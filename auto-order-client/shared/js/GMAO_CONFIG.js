@@ -1,12 +1,1 @@
-(function(){
-  'use strict';
-  const defaults={
-    apiBase:'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app',
-    assetBase:'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app/auto-order-client/shared/js',
-    pollMs:5000,
-    heartbeatMs:15000,
-    mallCode:'CPKR',
-    stopBeforePayment:true
-  };
-  window.GMAO_CONFIG=Object.assign({},defaults,window.GMAO_CONFIG||{});
-})();
+(function(){'use strict';const p=window.GMAO_CONFIG||{},o=p.apiBase||location.origin;window.GMAO_CONFIG=Object.assign({version:'0.002',apiBase:o,assetBase:o+'/auto-order-client/shared/js',mallCode:'CPKR',pollMs:5000,heartbeatMs:20000,workHeartbeatMs:30000,stopBeforePayment:true},p);})();

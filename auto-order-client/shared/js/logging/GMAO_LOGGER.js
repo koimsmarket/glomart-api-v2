@@ -1,0 +1,1 @@
+(function(){'use strict';const p='[GMAO_V002]';function x(l,a){(console[l]||console.log).call(console,p,...a)}window.GMAO_LOGGER={info:(...a)=>x('log',a),warn:(...a)=>x('warn',a),error:(...a)=>x('error',a),event:(t,d)=>x('log',[t,d||{}])};})();
