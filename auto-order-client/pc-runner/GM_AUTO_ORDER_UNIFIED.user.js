@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.009
-// @description  쿠팡 PC 실행기. 작업 배정, 상품 페이지 열기, 읽기 전용 페이지 검증을 수행합니다.
+// @version      0.010
+// @description  쿠팡 PC 실행기. 상품 검증 후 옵션 선택과 수량 설정까지만 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
 // @match        https://checkout.coupang.com/*
@@ -16,12 +16,15 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.009';
+  const VERSION = '0.010';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_INSPECTOR.js?v=009';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_INSPECTOR.js?v=010';
+  const PREPARER_URL =
+    API_BASE +
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_PREPARER.js?v=010';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -29,8 +32,9 @@
     mall_code: 'CPKR'
   };
 
-  let currentJob = GM_getValue('gmao_runner_job_v009', null);
-  let lastInspection = GM_getValue('gmao_runner_inspection_v009', null);
+  let currentJob = GM_getValue('gmao_runner_job_v010', null);
+  let lastInspection = GM_getValue('gmao_runner_inspection_v010', null);
+  let lastPreparation = GM_getValue('gmao_runner_preparation_v010', null);
   let workHeartbeatTimer = null;
   let clientHeartbeatTimer = null;
 
@@ -42,10 +46,10 @@
   }
 
   function getClientId() {
-    let clientId = GM_getValue('gmao_runner_client_id_v009', '');
+    let clientId = GM_getValue('gmao_runner_client_id_v010', '');
     if (!clientId) {
       clientId = 'PC-RUNNER-' + uuid();
-      GM_setValue('gmao_runner_client_id_v009', clientId);
+      GM_setValue('gmao_runner_client_id_v010', clientId);
     }
     return clientId;
   }
@@ -73,6 +77,7 @@
       page_type: detectPageType(),
       current_work_id: currentJob ? currentJob.work_id : null,
       inspection: lastInspection || null,
+      preparation: lastPreparation || null,
       device: {
         platform: 'tampermonkey',
         userAgent: navigator.userAgent
@@ -146,6 +151,22 @@
     });
   }
 
+  function loadPreparer() {
+    if (window.GMAO_CPKR_PRODUCT_PREPARER) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = PREPARER_URL;
+      script.onload = resolve;
+      script.onerror = () => reject(
+        new Error('상품 준비 모듈을 불러오지 못했습니다.')
+      );
+      document.documentElement.appendChild(script);
+    });
+  }
+
   function payloadOf(job) {
     return job && (job.payload || job) || {};
   }
@@ -193,11 +214,11 @@
   }
 
   function ensurePanel() {
-    let panel = document.getElementById('gmao-runner-panel-v009');
+    let panel = document.getElementById('gmao-runner-panel-v010');
     if (panel) return panel;
 
     panel = document.createElement('div');
-    panel.id = 'gmao-runner-panel-v009';
+    panel.id = 'gmao-runner-panel-v010';
     panel.style.cssText = [
       'position:fixed',
       'right:12px',
@@ -215,6 +236,26 @@
 
     document.documentElement.appendChild(panel);
     return panel;
+  }
+
+  function preparationSummary() {
+    if (!lastPreparation) return '';
+
+    return [
+      '상품준비:',
+      '옵션=' +
+        (
+          lastPreparation.option_result &&
+          lastPreparation.option_result.changed
+            ? '설정'
+            : '변경없음'
+        ),
+      '수량=' +
+        (
+          lastPreparation.quantity_result &&
+          lastPreparation.quantity_result.after
+        )
+    ].join(' ');
   }
 
   function inspectionSummary() {
@@ -235,7 +276,7 @@
     panel.innerHTML = '';
 
     const title = document.createElement('div');
-    title.textContent = 'Glomart Runner V009';
+    title.textContent = 'Glomart Runner V010';
     title.style.cssText =
       'font-weight:800;font-size:14px;margin-bottom:6px';
     panel.appendChild(title);
@@ -243,7 +284,8 @@
     const status = document.createElement('div');
     status.textContent =
       message +
-      (lastInspection ? '\n' + inspectionSummary() : '');
+      (lastInspection ? '\n' + inspectionSummary() : '') +
+      (lastPreparation ? '\n' + preparationSummary() : '');
     status.style.color = error ? '#fecaca' : '#d1fae5';
     status.style.whiteSpace = 'pre-wrap';
     panel.appendChild(status);
@@ -285,6 +327,19 @@
       );
     }
 
+    if (
+      detectPageType() === 'PRODUCT' &&
+      lastInspection &&
+      !lastInspection.login_required &&
+      lastInspection.product_id_match
+    ) {
+      panel.appendChild(
+        createButton('옵션/수량 준비', () => {
+          prepareProductPage().catch(showError);
+        })
+      );
+    }
+
     panel.appendChild(
       createButton('작업 반환', () => {
         release().catch(showError);
@@ -315,9 +370,13 @@
         state: {
           phase: currentJob
             ? (
-              lastInspection
-                ? 'PRODUCT_INSPECTED'
-                : 'CLAIMED_WAITING_USER'
+              lastPreparation
+                ? 'PRODUCT_PREPARED'
+                : (
+                  lastInspection
+                    ? 'PRODUCT_INSPECTED'
+                    : 'CLAIMED_WAITING_USER'
+                )
             )
             : 'RUNNER_CONNECTED',
           page_type: detectPageType()
@@ -375,8 +434,10 @@
 
     currentJob = result.job;
     lastInspection = null;
-    GM_setValue('gmao_runner_job_v009', currentJob);
-    GM_setValue('gmao_runner_inspection_v009', null);
+    lastPreparation = null;
+    GM_setValue('gmao_runner_job_v010', currentJob);
+    GM_setValue('gmao_runner_inspection_v010', null);
+    GM_setValue('gmao_runner_preparation_v010', null);
     startWorkHeartbeat();
 
     render(
@@ -412,7 +473,7 @@
       window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect(expected);
 
     GM_setValue(
-      'gmao_runner_inspection_v009',
+      'gmao_runner_inspection_v010',
       lastInspection
     );
 
@@ -439,6 +500,55 @@
     return lastInspection;
   }
 
+  async function prepareProductPage() {
+    if (!currentJob) {
+      throw new Error('먼저 작업을 가져오세요.');
+    }
+
+    if (!lastInspection) {
+      throw new Error('먼저 상품 페이지 검사를 실행하세요.');
+    }
+
+    await loadPreparer();
+
+    const item = firstItem(currentJob);
+
+    lastPreparation =
+      await window.GMAO_CPKR_PRODUCT_PREPARER.prepare(
+        item,
+        lastInspection
+      );
+
+    GM_setValue(
+      'gmao_runner_preparation_v010',
+      lastPreparation
+    );
+
+    await loadInspector();
+
+    const refreshedInspection =
+      window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect(
+        Object.assign({}, item, {
+          product_url: productUrl(currentJob)
+        })
+      );
+
+    lastInspection = refreshedInspection;
+    GM_setValue(
+      'gmao_runner_inspection_v010',
+      refreshedInspection
+    );
+
+    await clientHeartbeat();
+
+    render(
+      '옵션/수량 준비 완료\n' +
+      '장바구니 버튼은 누르지 않았습니다.'
+    );
+
+    return lastPreparation;
+  }
+
   async function release() {
     if (!currentJob) return;
 
@@ -456,8 +566,10 @@
 
     currentJob = null;
     lastInspection = null;
-    GM_setValue('gmao_runner_job_v009', null);
-    GM_setValue('gmao_runner_inspection_v009', null);
+    lastPreparation = null;
+    GM_setValue('gmao_runner_job_v010', null);
+    GM_setValue('gmao_runner_inspection_v010', null);
+    GM_setValue('gmao_runner_preparation_v010', null);
     clearInterval(workHeartbeatTimer);
     workHeartbeatTimer = null;
 
