@@ -33,6 +33,46 @@ async function writeLog(db, work, before, after, action, message, detail) {
   );
 }
 
+
+function stripMallPrefix(value) {
+  return clean(value).replace(/^CPKR_/i, '');
+}
+function parseCpkrUid(value) {
+  const normalized = stripMallPrefix(value);
+  const match = normalized.match(/^(\d+)_(\d+)_(\d+)$/);
+  if (!match) {
+    return { ok:false, uid:normalized, product_id:'', item_id:'', vendor_item_id:'', product_url:'', error:'invalid_cpkr_uid' };
+  }
+  const productId=match[1], itemId=match[2], vendorItemId=match[3];
+  return {
+    ok:true,
+    uid:normalized,
+    product_id:productId,
+    item_id:itemId,
+    vendor_item_id:vendorItemId,
+    product_url:'https://www.coupang.com/vp/products/'+encodeURIComponent(productId)+'?itemId='+encodeURIComponent(itemId)+'&vendorItemId='+encodeURIComponent(vendorItemId),
+    error:''
+  };
+}
+function enrichCpkrItem(item) {
+  const candidates=[item&&item.pi_ii_vi,item&&item.source_uid];
+  let parsed=null;
+  for (const candidate of candidates) {
+    parsed=parseCpkrUid(candidate);
+    if (parsed.ok) break;
+  }
+  parsed=parsed||parseCpkrUid('');
+  return {
+    ...item,
+    cpkr_uid_valid:parsed.ok,
+    cpkr_uid_error:parsed.error,
+    product_id:parsed.product_id||item.product_id||'',
+    item_id:parsed.item_id||item.item_id||'',
+    vendor_item_id:parsed.vendor_item_id||item.vendor_item_id||'',
+    product_url:parsed.product_url||item.product_url||''
+  };
+}
+
 async function buildPayload(db, work) {
   const order = (
     await db.query(
@@ -51,7 +91,7 @@ async function buildPayload(db, work) {
        ORDER BY auto_order_item_id ASC`,
       [work.auto_order_no]
     )
-  ).rows;
+  ).rows.map(enrichCpkrItem);
 
   return {
     work_id: work.work_id,

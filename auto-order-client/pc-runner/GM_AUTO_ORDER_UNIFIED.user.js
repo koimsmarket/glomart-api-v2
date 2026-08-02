@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.011
-// @description  쿠팡 PC 실행기. 상품 준비 후 명시적 장바구니 담기와 검증까지 수행합니다.
+// @version      0.012
+// @description  쿠팡 PC 실행기. CPKR UID로 링크를 만들고 수동 단계 검증을 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
 // @match        https://checkout.coupang.com/*
@@ -16,18 +16,18 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.011';
+  const VERSION = '0.012';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_INSPECTOR.js?v=010';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_INSPECTOR.js?v=012';
   const PREPARER_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_PREPARER.js?v=011';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_PREPARER.js?v=012';
   const CART_MANAGER_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_CART_MANAGER.js?v=011';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CART_MANAGER.js?v=012';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -35,10 +35,10 @@
     mall_code: 'CPKR'
   };
 
-  let currentJob = GM_getValue('gmao_runner_job_v011', null);
-  let lastInspection = GM_getValue('gmao_runner_inspection_v011', null);
-  let lastPreparation = GM_getValue('gmao_runner_preparation_v011', null);
-  let lastCartAction = GM_getValue('gmao_runner_cart_v011', null);
+  let currentJob = GM_getValue('gmao_runner_job_v012', null);
+  let lastInspection = GM_getValue('gmao_runner_inspection_v012', null);
+  let lastPreparation = GM_getValue('gmao_runner_preparation_v012', null);
+  let lastCartAction = GM_getValue('gmao_runner_cart_v012', null);
   let workHeartbeatTimer = null;
   let clientHeartbeatTimer = null;
 
@@ -50,10 +50,10 @@
   }
 
   function getClientId() {
-    let clientId = GM_getValue('gmao_runner_client_id_v011', '');
+    let clientId = GM_getValue('gmao_runner_client_id_v012', '');
     if (!clientId) {
       clientId = 'PC-RUNNER-' + uuid();
-      GM_setValue('gmao_runner_client_id_v011', clientId);
+      GM_setValue('gmao_runner_client_id_v012', clientId);
     }
     return clientId;
   }
@@ -197,12 +197,43 @@
     return payload.items && payload.items[0] || {};
   }
 
+  function parseCpkrUid(value) {
+    const normalized = String(value || '')
+      .trim()
+      .replace(/^CPKR_/i, '');
+
+    const match = normalized.match(/^(\d+)_(\d+)_(\d+)$/);
+
+    if (!match) {
+      return {
+        ok: false,
+        uid: normalized,
+        product_url: '',
+        error: 'invalid_cpkr_uid'
+      };
+    }
+
+    return {
+      ok: true,
+      uid: normalized,
+      product_id: match[1],
+      item_id: match[2],
+      vendor_item_id: match[3],
+      product_url:
+        'https://www.coupang.com/vp/products/' +
+        encodeURIComponent(match[1]) +
+        '?itemId=' + encodeURIComponent(match[2]) +
+        '&vendorItemId=' + encodeURIComponent(match[3]),
+      error: ''
+    };
+  }
+
   function productUrl(job) {
     const payload = payloadOf(job);
     const order = payload.order || {};
     const item = firstItem(job);
 
-    const candidates = [
+    const directCandidates = [
       item.product_url,
       item.mall_product_url,
       item.external_product_url,
@@ -212,9 +243,18 @@
       order.external_product_url
     ];
 
-    return candidates.find(value =>
+    const direct = directCandidates.find(value =>
       /^https?:\/\//i.test(String(value || ''))
-    ) || '';
+    );
+
+    if (direct) return direct;
+
+    for (const candidate of [item.pi_ii_vi, item.source_uid]) {
+      const parsed = parseCpkrUid(candidate);
+      if (parsed.ok) return parsed.product_url;
+    }
+
+    return '';
   }
 
   function createButton(label, handler, danger) {
@@ -235,11 +275,11 @@
   }
 
   function ensurePanel() {
-    let panel = document.getElementById('gmao-runner-panel-v011');
+    let panel = document.getElementById('gmao-runner-panel-v012');
     if (panel) return panel;
 
     panel = document.createElement('div');
-    panel.id = 'gmao-runner-panel-v011';
+    panel.id = 'gmao-runner-panel-v012';
     panel.style.cssText = [
       'position:fixed',
       'right:12px',
@@ -307,7 +347,7 @@
     panel.innerHTML = '';
 
     const title = document.createElement('div');
-    title.textContent = 'Glomart Runner V011';
+    title.textContent = 'Glomart Runner V012';
     title.style.cssText =
       'font-weight:800;font-size:14px;margin-bottom:6px';
     panel.appendChild(title);
@@ -495,10 +535,10 @@
     lastInspection = null;
     lastPreparation = null;
     lastCartAction = null;
-    GM_setValue('gmao_runner_job_v011', currentJob);
-    GM_setValue('gmao_runner_inspection_v011', null);
-    GM_setValue('gmao_runner_preparation_v011', null);
-    GM_setValue('gmao_runner_cart_v011', null);
+    GM_setValue('gmao_runner_job_v012', currentJob);
+    GM_setValue('gmao_runner_inspection_v012', null);
+    GM_setValue('gmao_runner_preparation_v012', null);
+    GM_setValue('gmao_runner_cart_v012', null);
     startWorkHeartbeat();
 
     render(
@@ -506,8 +546,8 @@
       '#' + currentJob.work_id + '\n' +
       currentJob.auto_order_no + '\n' +
       (productUrl(currentJob)
-        ? '상품 URL 확인됨'
-        : '상품 URL 없음')
+        ? 'CPKR UID 링크 생성 완료'
+        : 'CPKR UID 형식 오류: 숫자_숫자_숫자 필요')
     );
 
     return currentJob;
@@ -534,7 +574,7 @@
       window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect(expected);
 
     GM_setValue(
-      'gmao_runner_inspection_v011',
+      'gmao_runner_inspection_v012',
       lastInspection
     );
 
@@ -581,7 +621,7 @@
       );
 
     GM_setValue(
-      'gmao_runner_preparation_v011',
+      'gmao_runner_preparation_v012',
       lastPreparation
     );
 
@@ -596,7 +636,7 @@
 
     lastInspection = refreshedInspection;
     GM_setValue(
-      'gmao_runner_inspection_v011',
+      'gmao_runner_inspection_v012',
       refreshedInspection
     );
 
@@ -629,7 +669,7 @@
       await window.GMAO_CPKR_CART_MANAGER.addToCart();
 
     GM_setValue(
-      'gmao_runner_cart_v011',
+      'gmao_runner_cart_v012',
       lastCartAction
     );
 
@@ -682,7 +722,7 @@
     );
 
     GM_setValue(
-      'gmao_runner_cart_v011',
+      'gmao_runner_cart_v012',
       lastCartAction
     );
 
@@ -722,10 +762,10 @@
     lastInspection = null;
     lastPreparation = null;
     lastCartAction = null;
-    GM_setValue('gmao_runner_job_v011', null);
-    GM_setValue('gmao_runner_inspection_v011', null);
-    GM_setValue('gmao_runner_preparation_v011', null);
-    GM_setValue('gmao_runner_cart_v011', null);
+    GM_setValue('gmao_runner_job_v012', null);
+    GM_setValue('gmao_runner_inspection_v012', null);
+    GM_setValue('gmao_runner_preparation_v012', null);
+    GM_setValue('gmao_runner_cart_v012', null);
     clearInterval(workHeartbeatTimer);
     workHeartbeatTimer = null;
 
