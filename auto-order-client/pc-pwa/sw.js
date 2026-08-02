@@ -1,4 +1,4 @@
-const CACHE = 'gmao-pwa-v008';
+const CACHE = 'gmao-pwa-v009';
 const ASSETS = [
   './index.html',
   './app.js',
