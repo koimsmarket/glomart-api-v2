@@ -28,7 +28,7 @@ th{background:#f8fafc}
 </head>
 <body>
 <div class="wrap">
-<h1>자동주문 클라이언트 <small>V006</small></h1>
+<h1>자동주문 클라이언트 <small>V007</small></h1>
 
 <div class="card">
   <div class="grid">
@@ -55,6 +55,25 @@ th{background:#f8fafc}
 <div class="card">
   <b>서버 상태</b>
   <div id="serverStatus" class="status">확인 중…</div>
+</div>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+    <div>
+      <h2 style="margin:0 0 8px">쿠팡 브라우저 실행기</h2>
+      <div id="runnerStatus">연결된 실행기를 확인 중입니다.</div>
+    </div>
+    <a id="runnerInstall"
+       href="../pc-runner/GM_AUTO_ORDER_UNIFIED.user.js"
+       target="_blank"
+       style="display:inline-block;padding:10px 14px;border-radius:8px;background:#1463d6;color:white;text-decoration:none;font-weight:700">
+       Tampermonkey 실행기 열기
+    </a>
+  </div>
+  <p style="color:#667085;margin-bottom:0">
+    V007에서는 쿠팡 페이지에서 실행기 등록과 heartbeat만 검증합니다.
+    주문 작업은 claim하지 않습니다.
+  </p>
 </div>
 
 <div class="card">

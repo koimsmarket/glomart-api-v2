@@ -7,7 +7,7 @@
   let claimedJob = null;
 
   function getClientId() {
-    const key = 'gmao_pwa_client_id_v006';
+    const key = 'gmao_pwa_client_id_v007';
     let value = localStorage.getItem(key);
 
     if (!value) {
@@ -26,7 +26,7 @@
       mall_account_id: $('mallAccountId').value.trim(),
       mall_code: 'CPKR',
       cpkr_ready: true,
-      app_version: '0.006',
+      app_version: '0.007',
       device: {
         platform: 'pwa',
         userAgent: navigator.userAgent
@@ -149,6 +149,34 @@
     ]);
 
     renderStatus(statusResult);
+
+    const runnerClients = (statusResult.clients || []).filter(client =>
+      client.online &&
+      client.client_type === 'PC_RUNNER' &&
+      client.admin_id === settings.admin_id &&
+      client.mall_account_id === settings.mall_account_id &&
+      client.mall_code === 'CPKR'
+    );
+
+    const runnerStatus = document.getElementById('runnerStatus');
+
+    if (runnerStatus) {
+      if (runnerClients.length) {
+        const latest = runnerClients[0];
+        runnerStatus.textContent =
+          '온라인 ' + runnerClients.length + '대 · ' +
+          (latest.page_type || 'COUPANG') +
+          ' · 마지막 연결 ' +
+          (latest.last_seen_at || '-');
+        runnerStatus.style.color = '#087443';
+        runnerStatus.style.fontWeight = '700';
+      } else {
+        runnerStatus.textContent =
+          '온라인 실행기 없음. Tampermonkey 실행기를 설치한 뒤 쿠팡 페이지를 여세요.';
+        runnerStatus.style.color = '#b42318';
+        runnerStatus.style.fontWeight = '700';
+      }
+    }
 
     const rows = readyResult.items || [];
     $('readyCount').textContent = rows.length + '건';
