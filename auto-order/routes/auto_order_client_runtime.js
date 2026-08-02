@@ -1,1 +1,138 @@
-'use strict';const express=require('express'),r=express.Router(),clients=require('../services/runtime_client_registry'),works=require('../services/runtime_work_service'),V='GM_AUTO_ORDER_CLIENT_RUNTIME_API_V003';const p=req=>req.app.locals.pool||req.app.locals.db,o=(res,d)=>res.json({ok:true,version:V,...(d||{})}),f=(res,s,e,x)=>res.status(s).json({ok:false,version:V,error:e,detail:x?String(x.message||x):undefined});r.post('/api/auto-order/runtime/register',(q,s)=>{try{return o(s,{item:clients.register(q.body||{},q.headers['user-agent']||'')})}catch(e){return f(s,400,'register_failed',e)}});r.post('/api/auto-order/runtime/heartbeat',(q,s)=>{try{return o(s,{item:clients.heartbeat(q.body||{})})}catch(e){return f(s,400,'heartbeat_failed',e)}});r.post('/api/auto-order/runtime/claim',async(q,s)=>{try{const c=clients.get(q.body&&q.body.client_id);if(!c||!c.online)return o(s,{job:null,reason:'client_offline'});if(!q.body.cpkr_ready)return o(s,{job:null,reason:'client_not_ready'});return o(s,await works.claim(p(q),q.body||{}))}catch(e){return f(s,409,'claim_failed',e)}});r.post('/api/auto-order/runtime/work/:work_id/heartbeat',async(q,s)=>{try{return o(s,{item:await works.heartbeat(p(q),q.params.work_id,q.body||{})})}catch(e){return f(s,409,'work_heartbeat_failed',e)}});r.post('/api/auto-order/runtime/work/:work_id/state',async(q,s)=>{try{return o(s,{item:await works.updateState(p(q),q.params.work_id,q.body||{})})}catch(e){return f(s,409,'state_update_failed',e)}});r.get('/api/auto-order/runtime/status',async(q,s)=>{try{return o(s,{clients:clients.list(),...(await works.status(p(q)))})}catch(e){return f(s,500,'status_failed',e)}});console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V003] route loaded');module.exports=r;
+'use strict';
+
+const express = require('express');
+const router = express.Router();
+const clients = require('../services/runtime_client_registry');
+const works = require('../services/runtime_work_service');
+
+const VERSION = 'GM_AUTO_ORDER_CLIENT_RUNTIME_API_V004';
+
+function pool(req) {
+  return req.app.locals.pool || req.app.locals.db;
+}
+function ok(res, data) {
+  return res.json({ ok: true, version: VERSION, ...(data || {}) });
+}
+function fail(res, status, error, cause) {
+  return res.status(status).json({
+    ok: false,
+    version: VERSION,
+    error,
+    detail: cause ? String(cause.message || cause) : undefined
+  });
+}
+
+router.post('/api/auto-order/runtime/register', (req, res) => {
+  try {
+    return ok(res, {
+      item: clients.register(
+        req.body || {},
+        req.headers['user-agent'] || ''
+      )
+    });
+  } catch (error) {
+    return fail(res, 400, 'register_failed', error);
+  }
+});
+
+router.post('/api/auto-order/runtime/heartbeat', (req, res) => {
+  try {
+    return ok(res, {
+      item: clients.heartbeat(req.body || {})
+    });
+  } catch (error) {
+    return fail(res, 400, 'heartbeat_failed', error);
+  }
+});
+
+router.get('/api/auto-order/runtime/ready', async (req, res) => {
+  try {
+    return ok(res, {
+      items: await works.readyList(pool(req), req.query || {})
+    });
+  } catch (error) {
+    return fail(res, 500, 'ready_list_failed', error);
+  }
+});
+
+router.post('/api/auto-order/runtime/claim', async (req, res) => {
+  try {
+    const client = clients.get(req.body && req.body.client_id);
+
+    if (!client || !client.online) {
+      return ok(res, { job: null, reason: 'client_offline' });
+    }
+    if (!req.body.cpkr_ready) {
+      return ok(res, { job: null, reason: 'client_not_ready' });
+    }
+
+    return ok(res, await works.claim(pool(req), req.body || {}));
+  } catch (error) {
+    return fail(res, 409, 'claim_failed', error);
+  }
+});
+
+router.post(
+  '/api/auto-order/runtime/work/:work_id/heartbeat',
+  async (req, res) => {
+    try {
+      return ok(res, {
+        item: await works.heartbeat(
+          pool(req),
+          req.params.work_id,
+          req.body || {}
+        )
+      });
+    } catch (error) {
+      return fail(res, 409, 'work_heartbeat_failed', error);
+    }
+  }
+);
+
+router.post(
+  '/api/auto-order/runtime/work/:work_id/release',
+  async (req, res) => {
+    try {
+      return ok(res, {
+        item: await works.release(
+          pool(req),
+          req.params.work_id,
+          req.body || {}
+        )
+      });
+    } catch (error) {
+      return fail(res, 409, 'release_failed', error);
+    }
+  }
+);
+
+router.post(
+  '/api/auto-order/runtime/work/:work_id/state',
+  async (req, res) => {
+    try {
+      return ok(res, {
+        item: await works.updateState(
+          pool(req),
+          req.params.work_id,
+          req.body || {}
+        )
+      });
+    } catch (error) {
+      return fail(res, 409, 'state_update_failed', error);
+    }
+  }
+);
+
+router.get('/api/auto-order/runtime/status', async (req, res) => {
+  try {
+    return ok(res, {
+      clients: clients.list(),
+      ...(await works.status(pool(req)))
+    });
+  } catch (error) {
+    return fail(res, 500, 'status_failed', error);
+  }
+});
+
+console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V004] route loaded');
+module.exports = router;

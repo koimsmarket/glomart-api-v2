@@ -1,1 +1,30 @@
-const C='gmao-pwa-v002';self.addEventListener('install',e=>e.waitUntil(caches.open(C).then(c=>c.addAll(['./','./index.html','./app.js','./manifest.webmanifest']))));self.addEventListener('fetch',e=>e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request))));
+const CACHE='gmao-pwa-v004';
+self.addEventListener('install',event=>{
+  event.waitUntil(
+    caches.open(CACHE).then(cache=>
+      cache.addAll([
+        './',
+        './index.html',
+        './app.js',
+        './manifest.webmanifest'
+      ])
+    )
+  );
+});
+self.addEventListener('activate',event=>{
+  event.waitUntil(
+    caches.keys().then(keys=>
+      Promise.all(
+        keys
+          .filter(key=>key!==CACHE)
+          .map(key=>caches.delete(key))
+      )
+    )
+  );
+});
+self.addEventListener('fetch',event=>{
+  event.respondWith(
+    fetch(event.request)
+      .catch(()=>caches.match(event.request))
+  );
+});

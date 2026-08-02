@@ -1,1 +1,94 @@
-<!doctype html><html lang='ko'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='manifest' href='./manifest.webmanifest'><title>Glomart 자동주문 실행기</title><style>body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;color:#172033}.wrap{max-width:880px;margin:30px auto;padding:20px}.card{background:#fff;border:1px solid #dfe4ec;border-radius:12px;padding:20px;margin-bottom:16px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}input{width:100%;box-sizing:border-box;padding:11px}button{padding:11px 16px;border:0;border-radius:8px;background:#1463d6;color:#fff;font-weight:700;margin-right:8px}pre{background:#111827;color:#d1fae5;padding:14px;border-radius:8px;min-height:120px}</style></head><body><div class='wrap'><h1>자동주문 실행기</h1><div class='card'><div class='row'><div>담당 관리자 ID<input id='adminId'></div><div>몰 계정 ID<input id='mallAccountId'></div></div><p><label><input id='ready' type='checkbox' style='width:auto'> 이 PC에서 쿠팡 주문 실행 가능</label></p><button id='save'>설정 저장</button><button id='start'>쿠팡 실행</button><button id='stop'>중지</button></div><div class='card'><pre id='status'>대기 중</pre></div><script src='../shared/js/GMAO_CONFIG.js'></script><script src='../shared/js/storage/GMAO_STORE.js'></script><script src='./app.js'></script></div></body></html>
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="manifest" href="./manifest.webmanifest">
+<title>Glomart 자동주문 클라이언트</title>
+<style>
+body{font-family:Arial,'Noto Sans KR',sans-serif;margin:0;background:#f4f6f9;color:#172033}
+.wrap{max-width:1100px;margin:24px auto;padding:18px}
+.card{background:#fff;border:1px solid #dfe4ec;border-radius:12px;padding:18px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+label{font-size:13px;font-weight:700;display:block;margin-bottom:6px}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd3df;border-radius:8px}
+button{padding:10px 14px;border:0;border-radius:8px;background:#1463d6;color:#fff;font-weight:700;margin:4px}
+button.gray{background:#667085}
+button.red{background:#c9382b}
+button:disabled{opacity:.45}
+.status{white-space:pre-wrap;background:#111827;color:#d1fae5;padding:12px;border-radius:8px;min-height:75px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:9px;border-bottom:1px solid #e4e7ec;text-align:left;vertical-align:top}
+th{background:#f8fafc}
+.mono{font-family:Consolas,monospace}
+.empty{text-align:center;color:#667085;padding:24px}
+.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#e8f1ff;color:#165dc1;font-weight:700}
+@media(max-width:800px){.grid{grid-template-columns:1fr}.wrap{padding:8px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>자동주문 클라이언트 <small>V004</small></h1>
+
+<div class="card">
+  <div class="grid">
+    <div>
+      <label>담당 관리자 ID</label>
+      <input id="adminId" placeholder="derzon">
+    </div>
+    <div>
+      <label>몰 계정 ID</label>
+      <input id="mallAccountId" placeholder="CPKR_MASTER">
+    </div>
+    <div>
+      <label>주문 몰</label>
+      <input id="mallCode" value="CPKR" readonly>
+    </div>
+  </div>
+  <p>
+    <button id="save">설정 저장</button>
+    <button id="register">클라이언트 등록</button>
+    <button id="refresh" class="gray">목록 새로고침</button>
+  </p>
+</div>
+
+<div class="card">
+  <b>서버 상태</b>
+  <div id="serverStatus" class="status">확인 중…</div>
+</div>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h2>실행대기 작업</h2>
+    <span id="readyCount" class="badge">0건</span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>작업</th><th>주문번호</th><th>상품</th>
+        <th>금액</th><th>배정</th><th>테스트</th>
+      </tr>
+    </thead>
+    <tbody id="readyBody">
+      <tr><td colspan="6" class="empty">조회 중…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>배정 테스트 결과</h2>
+  <div id="claimResult" class="status">아직 배정하지 않았습니다.</div>
+  <button id="release" class="red" disabled>테스트 배정 취소</button>
+  <p style="color:#667085">
+    V004에서는 쿠팡 주문을 실행하지 않습니다.
+    READY 조회, 클라이언트 등록, 작업 잠금 및 안전한 반환까지만 검증합니다.
+  </p>
+</div>
+
+<script src="../shared/js/GMAO_CONFIG.js"></script>
+<script src="../shared/js/logging/GMAO_LOGGER.js"></script>
+<script src="../shared/js/storage/GMAO_STORE.js"></script>
+<script src="./app.js"></script>
+</div>
+</body>
+</html>

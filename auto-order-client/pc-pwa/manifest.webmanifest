@@ -1,1 +1,8 @@
-{"name":"Glomart 자동주문 실행기","short_name":"자동주문","start_url":"./index.html","display":"standalone","background_color":"#f5f7fb","theme_color":"#172033","icons":[]}
+{
+  "name": "Glomart 자동주문 클라이언트",
+  "short_name": "Glomart 주문",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f6f9",
+  "theme_color": "#1463d6"
+}
