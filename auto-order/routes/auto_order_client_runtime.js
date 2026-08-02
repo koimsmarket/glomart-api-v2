@@ -5,7 +5,7 @@ const router = express.Router();
 const clients = require('../services/runtime_client_registry');
 const works = require('../services/runtime_work_service');
 
-const VERSION = 'GM_AUTO_ORDER_CLIENT_RUNTIME_API_V004';
+const VERSION = 'GM_AUTO_ORDER_CLIENT_RUNTIME_API_V006';
 
 function pool(req) {
   return req.app.locals.pool || req.app.locals.db;
@@ -134,5 +134,5 @@ router.get('/api/auto-order/runtime/status', async (req, res) => {
   }
 });
 
-console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V004] route loaded');
+console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V006] route loaded');
 module.exports = router;

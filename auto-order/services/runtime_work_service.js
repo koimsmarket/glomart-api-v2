@@ -132,7 +132,7 @@ async function readyList(pool, data) {
        o.mall_code,
        o.order_status,
        o.process_status,
-       o.expected_amount,
+       o.actual_payment_amount AS expected_amount,
        COALESCE(i.item_count,0)::int AS item_count,
        COALESCE(i.product_names,'') AS product_names
      FROM gm_auto_order_work w

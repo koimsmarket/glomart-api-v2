@@ -7,7 +7,7 @@
   let claimedJob = null;
 
   function getClientId() {
-    const key = 'gmao_pwa_client_id_v004';
+    const key = 'gmao_pwa_client_id_v006';
     let value = localStorage.getItem(key);
 
     if (!value) {
@@ -26,7 +26,7 @@
       mall_account_id: $('mallAccountId').value.trim(),
       mall_code: 'CPKR',
       cpkr_ready: true,
-      app_version: '0.004',
+      app_version: '0.006',
       device: {
         platform: 'pwa',
         userAgent: navigator.userAgent
