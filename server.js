@@ -141,6 +141,10 @@ app.use('/auto-order/js', express.static(path.join(GM_AUTO_ORDER_DIR, 'js'), {
 }));
 app.get('/auto-order/GM_AUTO_ORDER.user.js', gmAutoOrderSend('GM_AUTO_ORDER.user.js'));
 
+const GM_AUTO_ORDER_CLIENT_DIR=path.join(__dirname,'auto-order-client');
+app.use('/auto-order-client',express.static(GM_AUTO_ORDER_CLIENT_DIR,{fallthrough:true,index:false,maxAge:0}));
+app.get(['/auto-order-client','/auto-order-client/'],(req,res)=>res.sendFile(path.join(GM_AUTO_ORDER_CLIENT_DIR,'pc-pwa','index.html')));
+
 /* GM_HEALTH_V004_DB_RUNTIME
  * Cloudtype / UptimeRobot 운영용 health endpoint.
  * Must be registered directly in the entry file before route modules.
@@ -367,7 +371,16 @@ try {
   app.use(require('./auto-order/routes/auto_order_dashboard'));
   console.log('[GM_AUTO_ORDER_DASHBOARD_API_V012] mounted');
 } catch (e) {
-  console.error('[GM_AUTO_ORDER_DASHBOARD_API_V012] mount failed:', String(e && e.message || e));
+  console.error('[GM_AUTO_ORDER_DASHBOARD_API_V012] mount failed:', String(e && e.stack || e));
+}
+
+console.log('[GM_AUTO_ORDER_RUNTIME_BOOT_V003] mount attempt');
+try {
+  const gmAutoOrderClientRuntime = require('./auto-order/routes/auto_order_client_runtime');
+  app.use(gmAutoOrderClientRuntime);
+  console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V003] mounted');
+} catch (e) {
+  console.error('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V003] mount failed:', String(e && e.stack || e));
 }
 
 let dbReady = false;
@@ -1888,8 +1901,6 @@ app.use(require('./routes/order_history')); // GM 주문조회 전용 라우트(
 app.use(require('./routes/order_cs')); // GM 주문 취소/교환/반품/구매확정 전용 라우트
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
-app.use(require('./routes/cafe24_auth'));
-console.log('[GM_CAFE24_AUTH_V001] routes/cafe24_auth registered');
 app.use(require('./routes/builder'));
 app.use(require('./routes/network'));
 app.use(require('./routes/smartfit'));
