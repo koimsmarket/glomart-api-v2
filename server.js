@@ -143,7 +143,7 @@ app.get('/auto-order/GM_AUTO_ORDER.user.js', gmAutoOrderSend('GM_AUTO_ORDER.user
 
 const GM_AUTO_ORDER_CLIENT_DIR=path.join(__dirname,'auto-order-client');
 app.use('/auto-order-client',express.static(GM_AUTO_ORDER_CLIENT_DIR,{fallthrough:true,index:false,maxAge:0}));
-app.get(['/auto-order-client','/auto-order-client/'],(req,res)=>res.sendFile(path.join(GM_AUTO_ORDER_CLIENT_DIR,'pc-pwa','index.html')));
+app.get(['/auto-order-client','/auto-order-client/'],(req,res)=>res.redirect(302,'/auto-order-client/pc-pwa/index.html'));
 
 /* GM_HEALTH_V004_DB_RUNTIME
  * Cloudtype / UptimeRobot 운영용 health endpoint.
@@ -374,11 +374,11 @@ try {
   console.error('[GM_AUTO_ORDER_DASHBOARD_API_V012] mount failed:', String(e && e.stack || e));
 }
 
-console.log('[GM_AUTO_ORDER_RUNTIME_BOOT_V004] mount attempt');
+console.log('[GM_AUTO_ORDER_RUNTIME_BOOT_V005] mount attempt');
 try {
   const gmAutoOrderClientRuntime = require('./auto-order/routes/auto_order_client_runtime');
   app.use(gmAutoOrderClientRuntime);
-  console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V004] mounted');
+  console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V005] mounted');
 } catch (e) {
   console.error('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V004] mount failed:', String(e && e.stack || e));
 }
