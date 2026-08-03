@@ -86,35 +86,36 @@ function smartfitProductUid(raw){
 
 function smartfitBasketSnapshot(raw, fallbackMember){
   raw=raw||{};
-  const mallCode=s(raw.mall_code || 'CAFE24').toUpperCase() || 'CAFE24';
-  const piIiVi=s(raw.pi_ii_vi || raw.source_uid || '');
+  const parsed=splitProductUid(raw.product_uid || raw.productUid || '');
+  const mallCode=s(raw.mall_code || raw.mallCode || parsed.mall_code || 'CAFE24').toUpperCase() || 'CAFE24';
+  const piIiVi=s(raw.pi_ii_vi || raw.piIiVi || parsed.pi_ii_vi || raw.source_uid || raw.sourceUid || '');
   return {
-    item_role:nullableRole(raw.item_role),
-    member_id:s(raw.member_id || fallbackMember || ''),
+    item_role:nullableRole(raw.item_role || raw.itemRole || raw.role),
+    member_id:s(raw.member_id || raw.memberId || fallbackMember || ''),
     mall_code:mallCode,
     pi_ii_vi:piIiVi,
-    product_name:s(raw.product_name || ''),
-    option_name:s(raw.option_name || ''),
-    option_value:s(raw.option_value || ''),
-    quantity:Math.max(1,i(raw.quantity,1)),
+    product_name:s(raw.product_name || raw.productName || raw.mall_product_name || raw.mallProductName || raw.title || ''),
+    option_name:s(raw.option_name || raw.optionName || ''),
+    option_value:s(raw.option_value || raw.optionValue || ''),
+    quantity:Math.max(1,i(raw.quantity || raw.qty,1)),
     amount:Math.max(0,i(raw.amount!=null ? raw.amount : (raw.sale_price!=null ? raw.sale_price : raw.price),0)),
-    amount_type:s(raw.amount_type || 'unit') || 'unit',
-    delivery_type:s(raw.delivery_type || ''),
-    delivery_fee:Math.max(0,i(raw.delivery_fee,0)),
-    product_url:s(raw.product_url || ''),
-    thumb_url:s(raw.thumb_url || ''),
-    thumb_file_name:s(raw.thumb_file_name || raw.thumbFileName || raw.thumb_url || ''),
-    source_mall:s(raw.source_mall || ''),
-    source_uid:s(raw.source_uid || ''),
-    internal_product_code:s(raw.internal_product_code || ''),
-    cafe24_product_no:s(raw.cafe24_product_no || ''),
-    gm_internal_link:Math.max(0,i(raw.gm_internal_link,0)),
-    cart_item_key:s(raw.cart_item_key || ''),
-    jeju_delivery_yn:s(raw.jeju_delivery_yn || ''),
+    amount_type:s(raw.amount_type || raw.amountType || 'unit') || 'unit',
+    delivery_type:s(raw.delivery_type || raw.deliveryType || ''),
+    delivery_fee:Math.max(0,i(raw.delivery_fee!=null ? raw.delivery_fee : raw.deliveryFee,0)),
+    product_url:s(raw.product_url || raw.productUrl || raw.url || ''),
+    thumb_url:s(raw.thumb_url || raw.thumbUrl || raw.thumb_origin_url || raw.thumbOriginUrl || ''),
+    thumb_file_name:s(raw.thumb_file_name || raw.thumbFileName || raw.thumb_url || raw.thumbUrl || raw.thumb_origin_url || raw.thumbOriginUrl || ''),
+    source_mall:s(raw.source_mall || raw.sourceMall || ''),
+    source_uid:s(raw.source_uid || raw.sourceUid || ''),
+    internal_product_code:s(raw.internal_product_code || raw.internalProductCode || ''),
+    cafe24_product_no:s(raw.cafe24_product_no || raw.cafe24ProductNo || raw.product_no || raw.productNo || ''),
+    gm_internal_link:Math.max(0,i(raw.gm_internal_link!=null ? raw.gm_internal_link : raw.gmInternalLink,0)),
+    cart_item_key:s(raw.cart_item_key || raw.cartItemKey || ''),
+    jeju_delivery_yn:s(raw.jeju_delivery_yn || raw.jejuDeliveryYn || ''),
     jeju_extra_delivery_fee:(raw.jeju_extra_delivery_fee!=null || raw.jejuExtraDeliveryFee!=null)
       ? Math.max(0,i(raw.jeju_extra_delivery_fee!=null ? raw.jeju_extra_delivery_fee : raw.jejuExtraDeliveryFee,0))
       : null,
-    island_delivery_yn:s(raw.island_delivery_yn || ''),
+    island_delivery_yn:s(raw.island_delivery_yn || raw.islandDeliveryYn || ''),
     island_extra_delivery_fee:(raw.island_extra_delivery_fee!=null || raw.islandExtraDeliveryFee!=null)
       ? Math.max(0,i(raw.island_extra_delivery_fee!=null ? raw.island_extra_delivery_fee : raw.islandExtraDeliveryFee,0))
       : null
@@ -841,8 +842,8 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
 
     let items=r.rows;
     const itemMeta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
-    const itemMetaMap=new Map(itemMeta.map(x=>[s(x.mall_code||'')+'|'+s(x.pi_ii_vi||''),x]));
-    items=items.map(row=>Object.assign({},itemMetaMap.get(s(row.mall_code||'')+'|'+s(row.pi_ii_vi||''))||{},row));
+    const itemMetaMap=new Map(itemMeta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
+    items=items.map(row=>Object.assign({},itemMetaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
     if(member && collected){
       let d=[];
       try{
@@ -860,7 +861,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
         const delta=bySource.get(String(row.item_id));
         if(!delta){ out.push(row); return out; }
         if(delta.action_type==='EXCLUDE') return out;
-        if(delta.action_type==='REPLACE') out.push(Object.assign({},row,{mall_code:delta.mall_code||row.mall_code,pi_ii_vi:s(delta.pi_ii_vi||splitProductUid(delta.product_uid).pi_ii_vi||row.pi_ii_vi),quantity:Math.max(1,i(delta.quantity||row.quantity,1)),item_id:i(delta.item_id||row.item_id,0),personal_delta_yn:'T'}));
+        if(delta.action_type==='REPLACE') out.push(Object.assign({},row,{mall_code:delta.mall_code||row.mall_code,pi_ii_vi:s(delta.pi_ii_vi||splitProductUid(delta.product_uid).pi_ii_vi||row.pi_ii_vi),quantity:Math.max(1,i(delta.quantity||delta.qty||row.quantity,1)),item_id:i(delta.item_id||delta.sort_no||row.item_id,0),personal_delta_yn:'T'}));
         else out.push(row);
         return out;
       },[]);
@@ -868,7 +869,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
         const puids=adds.map(x=>x.product_uid).filter(Boolean);
         const productMap=new Map();
         if(puids.length){ const pr=await pool.query(`SELECT * FROM gm_product WHERE product_uid=ANY($1::text[])`,[puids]); pr.rows.forEach(x=>productMap.set(String(x.product_uid),x)); }
-        adds.forEach(x=>{ const p=productMap.get(String(x.product_uid))||{}; items.push({template_id:templateId,item_id:i(x.item_id||x.delta_id,0),item_role:null,member_id:member,mall_code:s(x.mall_code||splitProductUid(x.product_uid).mall_code),pi_ii_vi:s(x.pi_ii_vi||splitProductUid(x.product_uid).pi_ii_vi),product_name:s(p.product_name||p.mall_product_name),option_name:s(p.option_name),option_value:s(p.option_value),quantity:Math.max(1,i(x.quantity,1)),amount:Math.max(0,i(p.final_supply_price||p.mall_sale_price,0)),amount_type:'unit',delivery_type:s(p.delivery_type),delivery_fee:Math.max(0,i(p.delivery_fee,0)),product_url:s(p.product_url),thumb_url:s(p.thumb_origin_url),thumb_file_name:s(p.thumb_file_name||p.thumb_origin_url),source_mall:s(x.mall_code),source_uid:s(x.source_uid),internal_product_code:'',cafe24_product_no:'',gm_internal_link:0,cart_item_key:'',jeju_delivery_yn:'',jeju_extra_delivery_fee:null,island_delivery_yn:'',island_extra_delivery_fee:null,delivery_eta_text:p.delivery_eta_text,soldout_yn:p.soldout_yn,personal_delta_yn:'T'}); });
+        adds.forEach(x=>{ const p=productMap.get(String(x.product_uid))||{}; items.push({template_id:templateId,item_id:i(x.item_id||x.sort_no||x.delta_id,0),item_role:null,member_id:member,mall_code:s(x.mall_code||splitProductUid(x.product_uid).mall_code),pi_ii_vi:s(x.pi_ii_vi||splitProductUid(x.product_uid).pi_ii_vi),product_name:s(p.product_name||p.mall_product_name),option_name:s(p.option_name),option_value:s(p.option_value),quantity:Math.max(1,i(x.quantity||x.qty,1)),amount:Math.max(0,i(p.final_supply_price||p.mall_sale_price,0)),amount_type:'unit',delivery_type:s(p.delivery_type),delivery_fee:Math.max(0,i(p.delivery_fee,0)),product_url:s(p.product_url),thumb_url:s(p.thumb_origin_url),thumb_file_name:s(p.thumb_file_name||p.thumb_origin_url),source_mall:s(x.mall_code),source_uid:s(x.source_uid),internal_product_code:'',cafe24_product_no:'',gm_internal_link:0,cart_item_key:'',jeju_delivery_yn:'',jeju_extra_delivery_fee:null,island_delivery_yn:'',island_extra_delivery_fee:null,delivery_eta_text:p.delivery_eta_text,soldout_yn:p.soldout_yn,personal_delta_yn:'T'}); });
       }
       items.sort((a,b)=>(i(a.item_id,0)-i(b.item_id,0)) || String(a.item_id).localeCompare(String(b.item_id)));
     }
