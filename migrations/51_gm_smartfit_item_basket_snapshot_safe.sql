@@ -1,12 +1,8 @@
--- 50_gm_smartfit_item_basket_snapshot_rebuild.sql
--- GM_ALLOW_DESTRUCTIVE_MIGRATION
--- Development-only one-time rebuild.
--- Scope: gm_smartfit_item only. Space/template/collection tables are not touched.
--- Existing SmartFit item rows are intentionally discarded and must be imported again from basket.
+-- 51_gm_smartfit_item_basket_snapshot_safe.sql
+-- Safe operating version: no DROP/TRUNCATE/DELETE.
+-- This file becomes the retained migration after V103 has run once.
 
-DROP TABLE IF EXISTS gm_smartfit_item;
-
-CREATE TABLE gm_smartfit_item (
+CREATE TABLE IF NOT EXISTS gm_smartfit_item (
   template_id BIGINT NOT NULL REFERENCES gm_smartfit_template(template_id) ON DELETE CASCADE,
   item_id INTEGER NOT NULL CHECK (item_id > 0),
   item_role SMALLINT NULL CHECK (item_role IS NULL OR item_role > 0),
@@ -39,21 +35,21 @@ CREATE TABLE gm_smartfit_item (
   PRIMARY KEY (template_id, item_id)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_smartfit_item_template_product_v50
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_smartfit_item_template_product_v51
   ON gm_smartfit_item (template_id, mall_code, pi_ii_vi);
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_smartfit_item_template_role_v50
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_smartfit_item_template_role_v51
   ON gm_smartfit_item (template_id, item_role)
   WHERE item_role IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_member_v50
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_member_v51
   ON gm_smartfit_item (member_id);
 
-CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_cart_key_v50
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_cart_key_v51
   ON gm_smartfit_item (cart_item_key)
   WHERE COALESCE(cart_item_key,'') <> '';
 
-CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_cafe24_v50
+CREATE INDEX IF NOT EXISTS idx_gm_smartfit_item_cafe24_v51
   ON gm_smartfit_item (cafe24_product_no)
   WHERE COALESCE(cafe24_product_no,'') <> '';
 
