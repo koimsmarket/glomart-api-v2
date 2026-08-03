@@ -1,0 +1,10 @@
+VALIDATION
+
+- routes/smartfit.js: node --check passed
+- GM_BASKET_SMARTFIT.js: node --check passed
+- GM_SMARTFIT_CREATE.js: node --check passed
+- Database item order uses item_id; sort_no is not stored.
+- item_role is nullable SMALLINT.
+- product_uid and qty remain API compatibility aliases only.
+- build-cart returns the entire SmartFit basket snapshot, including delivery fields.
+- dynamic asset version convention is untouched (?v=gm_v1 remains managed by existing HTML).

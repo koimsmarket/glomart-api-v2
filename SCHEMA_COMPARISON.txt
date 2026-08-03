@@ -1,0 +1,45 @@
+SMARTFIT ITEM FINAL STRUCTURE
+
+SmartFit-owned:
+- template_id
+- item_id: template-local order (1,2,3...)
+- item_role: NULL / 1 primary / 2 secondary / 3+
+
+Copied from gm_basket using the same column names:
+- member_id
+- mall_code
+- pi_ii_vi
+- product_name
+- option_name
+- option_value
+- quantity
+- amount
+- amount_type
+- delivery_type
+- delivery_fee
+- product_url
+- thumb_url
+- thumb_file_name
+- source_mall
+- source_uid
+- internal_product_code
+- cafe24_product_no
+- gm_internal_link
+- cart_item_key
+- jeju_delivery_yn
+- jeju_extra_delivery_fee
+- island_delivery_yn
+- island_extra_delivery_fee
+
+Not copied from gm_basket:
+- guest_key
+- added_at
+- updated_at
+
+Removed from old gm_smartfit_item:
+- global BIGSERIAL item_id
+- sort_no
+- string item_role='ETC'
+- product_uid storage (returned by API as mall_code + '_' + pi_ii_vi)
+- qty storage (returned by API as compatibility alias of quantity)
+- old soft-delete/use-count/purchase-confirm columns from this item snapshot table

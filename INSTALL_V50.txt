@@ -1,0 +1,12 @@
+V50 REBUILD DEPLOYMENT
+
+1. Deploy server routes/smartfit.js.
+2. Deploy mobile files to the Cafe24 paths:
+   /module/server/GM_BASKET_SMARTFIT.js
+   /module/smartfit/GM_SMARTFIT_CREATE.js
+3. Add migrations/50_gm_smartfit_item_basket_snapshot_rebuild.sql.
+4. Restart the API once and confirm migration 50 is APPLIED.
+5. Existing gm_smartfit_item rows will be deleted. Re-import products from basket.
+6. Immediately proceed to V104 after validation.
+
+Only gm_smartfit_item is dropped. No other SmartFit table is touched.
