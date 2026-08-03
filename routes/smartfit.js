@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V083_BASKET_SNAPSHOT_ITEM';
+const VERSION = 'GM_SMARTFIT_SERVER_V084_BASKET_SCHEMA_CANONICAL';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -73,6 +73,17 @@ function splitProductUid(raw){
   const m=uid.match(/^([A-Za-z0-9]+)_(.+)$/);
   return m ? { mall_code:s(m[1]).toUpperCase(), pi_ii_vi:s(m[2]) } : { mall_code:'', pi_ii_vi:'' };
 }
+function smartfitItemKey(raw){
+  raw=raw||{};
+  return s(raw.mall_code || raw.mallCode).toUpperCase()+'|'+s(raw.pi_ii_vi || raw.piIiVi);
+}
+function smartfitProductUid(raw){
+  raw=raw||{};
+  const mall=s(raw.mall_code || raw.mallCode).toUpperCase();
+  const pi=s(raw.pi_ii_vi || raw.piIiVi);
+  return mall && pi ? mall+'_'+pi : '';
+}
+
 function smartfitBasketSnapshot(raw, fallbackMember){
   raw=raw||{};
   const parsed=splitProductUid(raw.product_uid || raw.productUid || '');
@@ -760,16 +771,11 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
     template.collection_count=lock.collection_count;
     template.is_locked=lock.is_locked;
     template._diag=lock._diag;
-    const items=await pool.query(`SELECT *,
-        (mall_code || '_' || pi_ii_vi) AS product_uid,
-        COALESCE(NULLIF(cafe24_product_no,''), split_part(pi_ii_vi,'_',1)) AS product_id,
-        quantity AS qty,
-        item_id AS sort_no
-      FROM gm_smartfit_item WHERE template_id=$1 ORDER BY item_id`,[id]);
-    const meta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
-    const metaMap=new Map(meta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
-    const mergedItems=items.rows.map(row=>Object.assign({},metaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
-    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:mergedItems });
+    const items=await pool.query(`SELECT *
+      FROM gm_smartfit_item
+      WHERE template_id=$1
+      ORDER BY item_id`,[id]);
+    ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
 });
 
@@ -798,16 +804,33 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     if(q){ params.push('%'+q+'%'); const p='$'+params.length; where.push(`((i.mall_code || '_' || i.pi_ii_vi) ILIKE ${p} OR COALESCE(i.product_name,'') ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p})`); }
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT
-        i.*,
-        (i.mall_code || '_' || i.pi_ii_vi) AS product_uid,
-        COALESCE(NULLIF(i.cafe24_product_no,''),NULLIF(p.product_id,''),split_part(i.pi_ii_vi,'_',1)) AS product_id,
-        i.quantity AS qty,
-        i.item_id AS sort_no,
+        i.template_id,
+        i.item_id,
+        i.item_role,
+        i.member_id,
+        i.mall_code,
+        i.pi_ii_vi,
         COALESCE(NULLIF(i.product_name,''),p.product_name,p.mall_product_name,'') AS product_name,
-        COALESCE(NULLIF(i.product_url,''),p.product_url,'') AS product_url,
-        COALESCE(NULLIF(i.thumb_url,''),p.thumb_origin_url,'') AS thumb_url,
+        i.option_name,
+        i.option_value,
+        i.quantity,
+        i.amount,
+        i.amount_type,
         COALESCE(NULLIF(i.delivery_type,''),p.delivery_type,'') AS delivery_type,
         COALESCE(i.delivery_fee,p.delivery_fee,0) AS delivery_fee,
+        COALESCE(NULLIF(i.product_url,''),p.product_url,'') AS product_url,
+        COALESCE(NULLIF(i.thumb_url,''),p.thumb_origin_url,'') AS thumb_url,
+        i.thumb_file_name,
+        i.source_mall,
+        i.source_uid,
+        i.internal_product_code,
+        i.cafe24_product_no,
+        i.gm_internal_link,
+        i.cart_item_key,
+        i.jeju_delivery_yn,
+        i.jeju_extra_delivery_fee,
+        i.island_delivery_yn,
+        i.island_extra_delivery_fee,
         p.delivery_eta_text,
         p.soldout_yn,
         p.updated_at AS product_updated_at
@@ -838,7 +861,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
         const delta=bySource.get(String(row.item_id));
         if(!delta){ out.push(row); return out; }
         if(delta.action_type==='EXCLUDE') return out;
-        if(delta.action_type==='REPLACE') out.push(Object.assign({},row,{mall_code:delta.mall_code||row.mall_code,product_id:delta.product_id||row.product_id,product_uid:delta.product_uid||row.product_uid,qty:delta.qty||row.qty,sort_no:delta.sort_no||row.sort_no,personal_delta_yn:'T'}));
+        if(delta.action_type==='REPLACE') out.push(Object.assign({},row,{mall_code:delta.mall_code||row.mall_code,pi_ii_vi:s(delta.pi_ii_vi||splitProductUid(delta.product_uid).pi_ii_vi||row.pi_ii_vi),quantity:Math.max(1,i(delta.quantity||delta.qty||row.quantity,1)),item_id:i(delta.item_id||delta.sort_no||row.item_id,0),personal_delta_yn:'T'}));
         else out.push(row);
         return out;
       },[]);
@@ -846,9 +869,9 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
         const puids=adds.map(x=>x.product_uid).filter(Boolean);
         const productMap=new Map();
         if(puids.length){ const pr=await pool.query(`SELECT * FROM gm_product WHERE product_uid=ANY($1::text[])`,[puids]); pr.rows.forEach(x=>productMap.set(String(x.product_uid),x)); }
-        adds.forEach(x=>{ const p=productMap.get(String(x.product_uid))||{}; items.push({item_id:'D'+x.delta_id,template_id:templateId,item_role:null,mall_code:x.mall_code,product_id:x.product_id,product_uid:x.product_uid,qty:x.qty,quantity:x.qty,sort_no:x.sort_no,product_name:p.product_name,mall_product_name:p.mall_product_name,option_name:p.option_name,option_value:p.option_value,sale_price:p.mall_sale_price,final_supply_price:p.final_supply_price,product_url:p.product_url,thumb_url:p.thumb_origin_url,delivery_type:p.delivery_type,delivery_fee:p.delivery_fee,delivery_eta_text:p.delivery_eta_text,soldout_yn:p.soldout_yn,personal_delta_yn:'T'}); });
+        adds.forEach(x=>{ const p=productMap.get(String(x.product_uid))||{}; items.push({template_id:templateId,item_id:i(x.item_id||x.sort_no||x.delta_id,0),item_role:null,member_id:member,mall_code:s(x.mall_code||splitProductUid(x.product_uid).mall_code),pi_ii_vi:s(x.pi_ii_vi||splitProductUid(x.product_uid).pi_ii_vi),product_name:s(p.product_name||p.mall_product_name),option_name:s(p.option_name),option_value:s(p.option_value),quantity:Math.max(1,i(x.quantity||x.qty,1)),amount:Math.max(0,i(p.final_supply_price||p.mall_sale_price,0)),amount_type:'unit',delivery_type:s(p.delivery_type),delivery_fee:Math.max(0,i(p.delivery_fee,0)),product_url:s(p.product_url),thumb_url:s(p.thumb_origin_url),thumb_file_name:s(p.thumb_file_name||p.thumb_origin_url),source_mall:s(x.mall_code),source_uid:s(x.source_uid),internal_product_code:'',cafe24_product_no:'',gm_internal_link:0,cart_item_key:'',jeju_delivery_yn:'',jeju_extra_delivery_fee:null,island_delivery_yn:'',island_extra_delivery_fee:null,delivery_eta_text:p.delivery_eta_text,soldout_yn:p.soldout_yn,personal_delta_yn:'T'}); });
       }
-      items.sort((a,b)=>(i(a.sort_no||a.item_id,0)-i(b.sort_no||b.item_id,0)) || String(a.item_id).localeCompare(String(b.item_id)));
+      items.sort((a,b)=>(i(a.item_id,0)-i(b.item_id,0)) || String(a.item_id).localeCompare(String(b.item_id)));
     }
     ok(res,{ items, count:items.length, template_id:templateId, limit, access:{owner,collected,public:publicReadable} });
   }catch(e){
@@ -887,12 +910,10 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
     template.collection_count=lock.collection_count;
     template.is_locked=lock.is_locked;
     template._diag=lock._diag;
-    const items=await pool.query(`SELECT *,
-        (mall_code || '_' || pi_ii_vi) AS product_uid,
-        COALESCE(NULLIF(cafe24_product_no,''), split_part(pi_ii_vi,'_',1)) AS product_id,
-        quantity AS qty,
-        item_id AS sort_no
-      FROM gm_smartfit_item WHERE template_id=$1 ORDER BY item_id`, [id]);
+    const items=await pool.query(`SELECT *
+      FROM gm_smartfit_item
+      WHERE template_id=$1
+      ORDER BY item_id`, [id]);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
 });
@@ -1085,9 +1106,7 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
         t.category_no,
         t.template_title_source,
         t.template_title_ko,
-        i.*,
-        (i.mall_code || '_' || i.pi_ii_vi) AS product_uid,
-        COALESCE(NULLIF(i.cafe24_product_no,''),split_part(i.pi_ii_vi,'_',1)) AS product_id
+        i.*
       FROM gm_smartfit_template t
       JOIN gm_smartfit_item i ON i.template_id=t.template_id
       WHERE t.template_id = ANY($1::bigint[])
@@ -1098,10 +1117,8 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
     const items=r.rows.map(row=>Object.assign({},row,{
       batch_id:batchId,
       template_title:s(row.template_title_source || row.template_title_ko),
-      original_qty:Math.max(1,i(row.quantity,1)),
-      selected_qty:Math.max(1,i(row.quantity,1)),
-      qty:Math.max(1,i(row.quantity,1)),
-      sort_no:i(row.item_id,0),
+      original_quantity:Math.max(1,i(row.quantity,1)),
+      selected_quantity:Math.max(1,i(row.quantity,1)),
       is_selected:true
     }));
     ok(res,{ batch_id:batchId, template_ids:templateIds, items, count:items.length, member_id:member, note:'candidate payload only; basket/order tables are not modified' });
