@@ -134,13 +134,9 @@ app.get('/auto-order/delivery/delivery.html', gmAutoOrderSend(path.join('deliver
 app.get('/auto-order/claim/claim.html', gmAutoOrderSend(path.join('claim', 'claim.html')));
 app.get('/auto-order/cs/cs.html', gmAutoOrderSend(path.join('cs', 'cs.html')));
 
-/* Client runner assets only. Server-side auto-order folders are not exposed. */
-app.use('/auto-order/js', express.static(path.join(GM_AUTO_ORDER_DIR, 'js'), {
-  etag: true,
-  maxAge: 0
-}));
-app.get('/auto-order/GM_AUTO_ORDER.user.js', gmAutoOrderSend('GM_AUTO_ORDER.user.js'));
-
+/* Auto-order execution assets are exposed only from /auto-order-client.
+ * Legacy /auto-order/js and /auto-order/GM_AUTO_ORDER.user.js were retired.
+ */
 const GM_AUTO_ORDER_CLIENT_DIR=path.join(__dirname,'auto-order-client');
 app.use('/auto-order-client',express.static(GM_AUTO_ORDER_CLIENT_DIR,{fallthrough:true,index:false,maxAge:0}));
 app.get(['/auto-order-client','/auto-order-client/'],(req,res)=>res.redirect(302,'/auto-order-client/pc-pwa/index.html'));
