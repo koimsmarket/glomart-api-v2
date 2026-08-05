@@ -1,5 +1,5 @@
 /*
- * GMAO_RUNNER_RUNTIME_V015_STABLE_STORAGE
+ * GMAO_RUNNER_RUNTIME_V016_PANEL_ON_DEMAND
  *
  * [공용 실행 엔진 — PC/Android 앱 동시 실행 구조]
  * 이 파일은 PC Tampermonkey 전용 코드가 아니다.
@@ -13,6 +13,11 @@
  * [안정 저장키 원칙]
  * Runtime 버전이 올라가도 작업/검사/장바구니 상태 저장키는 stable_v1을 유지한다.
  * 서버 Runtime만 교체해도 기존 작업이 사라지지 않으며, 버전별 키를 새로 만들지 않는다.
+ *
+ * [작업창 표시 원칙]
+ * 쿠팡 페이지 진입과 작업 상태 복구만으로는 작업창을 열지 않는다.
+ * 운영센터의 작업 시작 또는 사용자의 명시적 메뉴 실행 때만 작업창을 표시한다.
+ * 작업 상태와 heartbeat는 패널이 숨겨진 상태에서도 유지한다.
  *
  * [동시 실행 원칙]
  * PC 실행기와 Android 앱은 각각 고유 client_id를 사용하며,
@@ -736,23 +741,21 @@
       }, 20000);
 
       if (currentJob) {
+        // 작업 소유권과 heartbeat는 복구하지만 패널은 자동으로 열지 않는다.
+        // PC/Android 모두 운영센터 또는 사용자의 명시적 작업 시작 때만 표시한다.
         startWorkHeartbeat();
-        render(
-          '기존 작업 복구\n' +
-          '#' + currentJob.work_id + '\n' +
-          currentJob.auto_order_no
-        );
-      } else {
-        removePanel();
       }
+      removePanel();
     } catch (error) {
-      showError(error);
+      // 평상시 쿠팡 접속에서 부팅 오류만으로 작업창을 띄우지 않는다.
+      console.error('[GMAO RUNNER V016] background boot failed', error);
+      removePanel();
     }
   }
 
 
   global.GMAO_AUTO_ORDER_RUNTIME = {
-    version: '0.015',
+    version: '0.016',
     start,
     openPanel() {
       panelRequested = true;
