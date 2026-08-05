@@ -407,100 +407,8 @@ function dbFrom(req) {
   return req.app.locals.db || req.app.locals.pool;
 }
 
-const GM_AUTO_ORDER_BUILDER_KEYS = new Set([
-  'auto_orders',
-  'auto_order_items',
-  'auto_order_work',
-  'auto_order_log',
-  'auto_order_accounts'
-]);
-
-function gmSafeEqual(a,b){
-  const crypto = require('crypto');
-  const x = Buffer.from(String(a || ''));
-  const y = Buffer.from(String(b || ''));
-  return x.length === y.length && crypto.timingSafeEqual(x,y);
-}
-
-function gmRequestedBuilderKeys(req){
-  const out = [];
-  const single = clean(req.query && req.query.table);
-  if(single) out.push(single);
-  out.push(...String(req.query && req.query.tables || '').split(',').map(x=>x.trim()).filter(Boolean));
-  return [...new Set(out)];
-}
-
-function gmNeedsAutoOrderBuilderPermission(req,keys){
-  return (keys || gmRequestedBuilderKeys(req)).some(k=>GM_AUTO_ORDER_BUILDER_KEYS.has(String(k)));
-}
-
-function gmLogOpenAutoOrderBuilder(req,keys,action){
-  const tables=(keys||[]).filter(k=>GM_AUTO_ORDER_BUILDER_KEYS.has(String(k)));
-  if(!tables.length) return;
-  console.log('[GM_AUTO_ORDER_BUILDER_OPEN_ACCESS_V001]',JSON.stringify({
-    action,
-    tables,
-    path:req.originalUrl
-  }));
-}
-
-async function gmCheckAutoOrderBuilderPermission(req){
-  const db = dbFrom(req);
-  const configuredKey = String(process.env.AUTO_ORDER_BUILDER_KEY || '');
-  const suppliedKey = String(req.headers['x-gm-builder-key'] || '');
-  const adminId = clean(req.headers['x-gm-admin-id']);
-
-  if(!configuredKey) return {ok:false,status:503,error:'AUTO_ORDER_BUILDER_KEY_NOT_CONFIGURED'};
-  if(!adminId || !suppliedKey || !gmSafeEqual(configuredKey,suppliedKey)){
-    return {ok:false,status:401,error:'AUTO_ORDER_BUILDER_AUTH_REQUIRED'};
-  }
-
-  const r = await db.query(`
-    SELECT account_admin_id,admin_id,account_admin_role,
-           COALESCE(can_builder,false) AS can_builder,enabled
-    FROM gm_auto_order_account
-    WHERE lower(COALESCE(admin_id,''))=lower($1)
-      AND enabled=true
-    ORDER BY CASE upper(COALESCE(account_admin_role,''))
-      WHEN 'MASTER' THEN 1 WHEN 'DEPUTY' THEN 2 ELSE 3 END,
-      account_admin_id
-    LIMIT 1
-  `,[adminId]);
-
-  if(!r.rows.length) return {ok:false,status:403,error:'AUTO_ORDER_BUILDER_ACCOUNT_NOT_FOUND'};
-
-  const row=r.rows[0];
-  const role=String(row.account_admin_role||'').toUpperCase();
-  if(!(role==='MASTER'||row.can_builder===true)){
-    return {ok:false,status:403,error:'AUTO_ORDER_BUILDER_PERMISSION_DENIED'};
-  }
-
-  return {
-    ok:true,
-    admin_id:row.admin_id,
-    account_admin_id:row.account_admin_id,
-    role,
-    can_builder:row.can_builder===true
-  };
-}
-
-async function gmRequireAutoOrderBuilder(req,res,keys){
-  if(!gmNeedsAutoOrderBuilderPermission(req,keys)) return null;
-  try{
-    const auth=await gmCheckAutoOrderBuilderPermission(req);
-    if(!auth.ok){
-      fail(res,auth.status,auth.error);
-      return false;
-    }
-    req.gmAutoOrderBuilderAuth=auth;
-    return auth;
-  }catch(e){
-    fail(res,500,'AUTO_ORDER_BUILDER_PERMISSION_CHECK_FAILED',{
-      detail:String(e&&e.message||e)
-    });
-    return false;
-  }
-}
+// 자동주문 Builder 전용 키 인증은 제거했다.
+// 향후 Cafe24 관리자 로그인/권한 확인으로 접근제어를 통합한다.
 function ok(res, data) {
   res.json({ ok:true, version:VERSION, ...data });
 }
@@ -931,20 +839,6 @@ async function upsertObject(client, table, obj, keyCols, allowBlank=false) {
 router.get('/api/gm/builder/tables', (req,res)=>{
   ok(res, { tables:Object.keys(TABLES).map(k=>({ key:k, table:TABLES[k].table, keys:keySets(TABLES[k]) })) });
 });
-
-router.get('/api/gm/builder/auto-order-access', async (req,res)=>{
-  const auth=await gmRequireAutoOrderBuilder(req,res,['auto_orders']);
-  if(auth===false) return;
-  return ok(res,{
-    action:'auto-order-builder.access',
-    access:true,
-    admin_id:auth.admin_id,
-    role:auth.role,
-    can_builder:auth.can_builder,
-    tables:[...GM_AUTO_ORDER_BUILDER_KEYS]
-  });
-});
-
 
 router.get('/api/gm/builder/delete-list', async (req,res)=>{
   const spec = tableSpec(req.query.table);

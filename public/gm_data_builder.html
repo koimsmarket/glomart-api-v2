@@ -171,44 +171,8 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <script>
 const API = location.origin;
 
-const AUTO_ORDER_TABLE_KEYS = new Set([
-  'auto_orders','auto_order_items','auto_order_work','auto_order_log','auto_order_accounts'
-]);
-const AUTO_ORDER_BUILDER_AUTH = {
-  adminId: sessionStorage.getItem('gm_auto_order_builder_admin_id') || '',
-  key: sessionStorage.getItem('gm_auto_order_builder_key') || ''
-};
-
-function isAutoOrderTable(key){
-  return AUTO_ORDER_TABLE_KEYS.has(String(key || ''));
-}
-function builderAuthHeaders(keyOrKeys){
-  const keys=Array.isArray(keyOrKeys)?keyOrKeys:[keyOrKeys];
-  if(!keys.some(isAutoOrderTable)) return {};
-  return {
-    'X-GM-Admin-ID':AUTO_ORDER_BUILDER_AUTH.adminId,
-    'X-GM-Builder-Key':AUTO_ORDER_BUILDER_AUTH.key
-  };
-}
-function ensureAutoOrderBuilderAuth(keyOrKeys){
-  const keys=Array.isArray(keyOrKeys)?keyOrKeys:[keyOrKeys];
-  if(!keys.some(isAutoOrderTable)) return true;
-
-  if(!AUTO_ORDER_BUILDER_AUTH.adminId){
-    const adminId=prompt('자동주문 빌더 권한 관리자 ID를 입력하세요.','');
-    if(adminId===null) return false;
-    AUTO_ORDER_BUILDER_AUTH.adminId=String(adminId||'').trim();
-    sessionStorage.setItem('gm_auto_order_builder_admin_id',AUTO_ORDER_BUILDER_AUTH.adminId);
-  }
-  if(!AUTO_ORDER_BUILDER_AUTH.key){
-    const key=prompt('Cloudtype AUTO_ORDER_BUILDER_KEY 값을 입력하세요.','');
-    if(key===null) return false;
-    AUTO_ORDER_BUILDER_AUTH.key=String(key||'');
-    sessionStorage.setItem('gm_auto_order_builder_key',AUTO_ORDER_BUILDER_AUTH.key);
-  }
-  return true;
-}
-
+// 자동주문 빌더 접근권한은 향후 Cafe24 관리자 로그인으로 통합한다.
+// 현재는 별도 Cloudtype 키나 관리자 ID 입력 없이 일반 빌더 흐름을 사용한다.
 const tables = {
   products:'상품 gm_product',
   product_options:'상품 옵션 gm_product_option',
@@ -716,7 +680,7 @@ async function uploadDevOne(tableKey,file,apply,mode){
 
   const r=await fetch(url,{
     method:'POST',
-    headers:{'Content-Type':'text/csv; charset=utf-8',...builderAuthHeaders(table)},
+    headers:{'Content-Type':'text/csv; charset=utf-8'},
     body:text
   });
 
@@ -805,8 +769,7 @@ async function loadDeleteList(){
   const q=document.getElementById('delQuery').value.trim();
   const limit=document.getElementById('delLimit').value || '200';
   const url=`${API}/api/gm/builder/delete-list?table=${encodeURIComponent(table)}&q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`;
-  if(!ensureAutoOrderBuilderAuth(table)) return;
-  const r=await fetch(url,{headers:builderAuthHeaders(table)});
+  const r=await fetch(url);
   const j=await r.json();
   if(!j.ok){ log(j); return; }
   deleteRowsCache=j.rows||[];
@@ -822,7 +785,6 @@ async function loadDeleteList(){
 function toggleDeleteChecks(on){ document.querySelectorAll('.delCheck:not(:disabled)').forEach(x=>x.checked=!!on); }
 async function deleteSelectedRows(){
   const table=document.getElementById('delTable').value;
-  if(blockUnsafeAutoOrderOperation(table,'delete-selected')) return;
   const selected=[...document.querySelectorAll('.delCheck:checked')].map(ch=>deleteRowsCache[Number(ch.dataset.idx)]).filter(Boolean);
   if(!selected.length){ alert('삭제할 행을 선택하세요.'); return; }
   const x=prompt(`${selected.length}개 행을 삭제합니다. 실행하려면 DELETE SELECTED 를 입력하세요.`);
@@ -846,18 +808,6 @@ fill();
 loadDashboard(false);
 setInterval(()=>loadDashboard(false), 60000);
 
-function blockUnsafeAutoOrderOperation(table,operation){
-  if(!isAutoOrderTable(table)) return false;
-  log({
-    ok:false,
-    error:'AUTO_ORDER_UNSAFE_OPERATION_BLOCKED',
-    operation,
-    table,
-    detail:'자동주문 테이블은 안전 업데이트 영역에서만 검증/APPLY 하세요.'
-  });
-  alert('자동주문 테이블은 개발용 강제 업로드·선택 삭제가 차단됩니다. 안전 업데이트를 사용하세요.');
-  return true;
-}
 
 </script>
 </body>
