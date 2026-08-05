@@ -55,6 +55,69 @@ function isPaid(status){
 function autoOrderNo(orderNo, mall){
   return clean(orderNo) + ':' + upper(mall);
 }
+function stripIdentityPrefix(value){
+  return clean(value).replace(/^(CPKR|GMKR|CAFE24)_/i,'');
+}
+function parseCpkrUrl(value){
+  const raw=clean(value);
+  if(!raw) return null;
+  try{
+    const u=new URL(raw);
+    const m=u.pathname.match(/\/vp\/products\/(\d+)/i);
+    const productId=m&&m[1]||'';
+    const itemId=clean(u.searchParams.get('itemId'));
+    const vendorItemId=clean(u.searchParams.get('vendorItemId'));
+    if(productId&&itemId&&vendorItemId) return {productId,itemId,vendorItemId};
+  }catch(_e){}
+  return null;
+}
+function parseCpkrIdentity(row){
+  const src=row||{};
+  const candidates=[
+    src.pi_ii_vi,src.source_uid,src.product_uid,
+    [src.product_id,src.item_id,src.vendor_item_id].filter(Boolean).join('_')
+  ];
+  for(const candidate of candidates){
+    const normalized=stripIdentityPrefix(candidate);
+    const m=normalized.match(/^(\d+)_(\d+)_(\d+)$/);
+    if(m) return {ok:true,uid:normalized,product_id:m[1],item_id:m[2],vendor_item_id:m[3]};
+  }
+  for(const candidate of [src.product_url,src.source_url,src.url]){
+    const ids=parseCpkrUrl(candidate);
+    if(ids) return {ok:true,uid:[ids.productId,ids.itemId,ids.vendorItemId].join('_'),product_id:ids.productId,item_id:ids.itemId,vendor_item_id:ids.vendorItemId};
+  }
+  return {ok:false,uid:''};
+}
+async function resolvePurchaseIdentity(client,row,mall){
+  if(upper(mall)!=='CPKR') return {pi_ii_vi:clean(row.pi_ii_vi),source_uid:clean(row.source_uid||row.product_uid),source:'direct'};
+
+  let parsed=parseCpkrIdentity(row);
+  if(parsed.ok) return {pi_ii_vi:parsed.uid,source_uid:'CPKR_'+parsed.uid,source:'gm_order_item'};
+
+  const keys=[row.source_uid,row.product_uid,row.pi_ii_vi].map(clean).filter(Boolean);
+  const full=[...new Set(keys)];
+  const stripped=[...new Set(keys.map(stripIdentityPrefix).filter(Boolean))];
+  if(full.length||stripped.length){
+    const product=(await client.query(`
+      SELECT *
+        FROM gm_product
+       WHERE product_uid = ANY($1::text[])
+          OR source_uid = ANY($1::text[])
+          OR pi_ii_vi = ANY($2::text[])
+          OR internal_product_code = ANY($2::text[])
+       ORDER BY
+         CASE WHEN source_uid = ANY($1::text[]) THEN 0
+              WHEN product_uid = ANY($1::text[]) THEN 1
+              WHEN pi_ii_vi = ANY($2::text[]) THEN 2
+              ELSE 3 END,
+         updated_at DESC NULLS LAST
+       LIMIT 1
+    `,[full,stripped])).rows[0];
+    parsed=parseCpkrIdentity(product);
+    if(parsed.ok) return {pi_ii_vi:parsed.uid,source_uid:'CPKR_'+parsed.uid,source:'gm_product_link'};
+  }
+  return {pi_ii_vi:clean(row.pi_ii_vi),source_uid:clean(row.source_uid||row.product_uid),source:'unresolved'};
+}
 function itemPrice(row){
   const qty = Math.max(1,int(row.quantity,1));
   const explicit = num(row.product_amount || row.total_price || row.line_amount);
@@ -249,6 +312,7 @@ async function ingestOrder(pool, orderNo, meta){
         await client.query(`DELETE FROM gm_auto_order_item WHERE auto_order_no=$1`,[aoNo]);
         for(const row of items){
           const qty = Math.max(1,int(row.quantity,1));
+          const identity = await resolvePurchaseIdentity(client,row,mall);
           await client.query(`
             INSERT INTO gm_auto_order_item (
               auto_order_no,order_no,pi_ii_vi,mall_code,source_uid,
@@ -262,9 +326,9 @@ async function ingestOrder(pool, orderNo, meta){
           `,[
             aoNo,
             clean(orderNo),
-            clean(row.pi_ii_vi),
+            identity.pi_ii_vi,
             mall,
-            clean(row.source_uid || row.product_uid),
+            identity.source_uid,
             clean(row.product_name),
             clean(row.option_name),
             clean(row.option_value),
@@ -312,7 +376,7 @@ async function ingestOrder(pool, orderNo, meta){
       `,[
         aoNo,
         'gm_order -> control tower sync',
-        JSON.stringify({ source:meta && meta.source || 'reconcile', payment_status:order.payment_status || '', mall })
+        JSON.stringify({ source:meta && meta.source || 'reconcile', payment_status:order.payment_status || '', mall, identity_reconcile:'V007' })
       ]).catch(()=>{});
     }
 

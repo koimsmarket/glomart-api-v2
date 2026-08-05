@@ -35,7 +35,22 @@ async function writeLog(db, work, before, after, action, message, detail) {
 
 
 function stripMallPrefix(value) {
-  return clean(value).replace(/^CPKR_/i, '');
+  return clean(value).replace(/^(CPKR|GMKR|CAFE24)_/i, '');
+}
+function parseCpkrUrl(value) {
+  const raw = clean(value);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const match = url.pathname.match(/\/vp\/products\/(\d+)/i);
+    const productId = match ? match[1] : '';
+    const itemId = clean(url.searchParams.get('itemId'));
+    const vendorItemId = clean(url.searchParams.get('vendorItemId'));
+    if (productId && itemId && vendorItemId) {
+      return { product_id: productId, item_id: itemId, vendor_item_id: vendorItemId };
+    }
+  } catch (_) {}
+  return null;
 }
 function parseCpkrUid(value) {
   const normalized = stripMallPrefix(value);
@@ -54,22 +69,111 @@ function parseCpkrUid(value) {
     error:''
   };
 }
-function enrichCpkrItem(item) {
-  const candidates=[item&&item.pi_ii_vi,item&&item.source_uid];
-  let parsed=null;
-  for (const candidate of candidates) {
-    parsed=parseCpkrUid(candidate);
-    if (parsed.ok) break;
+function parseCpkrIdentity(row) {
+  const source = row || {};
+  for (const candidate of [
+    source.pi_ii_vi,
+    source.source_uid,
+    source.product_uid,
+    [source.product_id, source.item_id, source.vendor_item_id].filter(Boolean).join('_')
+  ]) {
+    const parsed = parseCpkrUid(candidate);
+    if (parsed.ok) return parsed;
   }
-  parsed=parsed||parseCpkrUid('');
+  for (const candidate of [source.product_url, source.source_url, source.mall_product_url]) {
+    const ids = parseCpkrUrl(candidate);
+    if (!ids) continue;
+    return parseCpkrUid([ids.product_id, ids.item_id, ids.vendor_item_id].join('_'));
+  }
+  return parseCpkrUid('');
+}
+async function resolveCpkrIdentity(db, item, orderNo) {
+  let parsed = parseCpkrIdentity(item);
+  if (parsed.ok) return { parsed, source: 'gm_auto_order_item' };
+
+  const original = (
+    await db.query(
+      `SELECT *
+         FROM gm_order_item
+        WHERE order_no=$1
+          AND (
+            NULLIF(pi_ii_vi,'') = NULLIF($2,'')
+            OR NULLIF(source_uid,'') = NULLIF($3,'')
+            OR (
+              NULLIF(product_name,'') = NULLIF($4,'')
+              AND COALESCE(NULLIF(option_value,''),NULLIF(option_name,''),'') = $5
+            )
+          )
+        ORDER BY
+          CASE WHEN NULLIF(pi_ii_vi,'') = NULLIF($2,'') THEN 0
+               WHEN NULLIF(source_uid,'') = NULLIF($3,'') THEN 1
+               ELSE 2 END,
+          created_at ASC NULLS LAST
+        LIMIT 1`,
+      [
+        clean(orderNo),
+        clean(item && item.pi_ii_vi),
+        clean(item && item.source_uid),
+        clean(item && item.product_name),
+        clean((item && (item.option_value || item.option_name)) || '')
+      ]
+    )
+  ).rows[0];
+
+  parsed = parseCpkrIdentity(original);
+  if (parsed.ok) return { parsed, source: 'gm_order_item' };
+
+  const keys = [
+    item && item.source_uid,
+    item && item.pi_ii_vi,
+    original && original.source_uid,
+    original && original.pi_ii_vi
+  ].map(clean).filter(Boolean);
+  const stripped = [...new Set(keys.map(stripMallPrefix).filter(Boolean))];
+  const full = [...new Set(keys)];
+
+  if (stripped.length || full.length) {
+    const product = (
+      await db.query(
+        `SELECT *
+           FROM gm_product
+          WHERE product_uid = ANY($1::text[])
+             OR source_uid = ANY($1::text[])
+             OR pi_ii_vi = ANY($2::text[])
+             OR internal_product_code = ANY($2::text[])
+          ORDER BY
+            CASE
+              WHEN source_uid = ANY($1::text[]) THEN 0
+              WHEN product_uid = ANY($1::text[]) THEN 1
+              WHEN pi_ii_vi = ANY($2::text[]) THEN 2
+              ELSE 3
+            END,
+            updated_at DESC NULLS LAST
+          LIMIT 1`,
+        [full, stripped]
+      )
+    ).rows[0];
+
+    parsed = parseCpkrIdentity(product);
+    if (parsed.ok) return { parsed, source: 'gm_product_link' };
+  }
+
+  return { parsed, source: 'unresolved' };
+}
+async function enrichCpkrItem(db, item, orderNo) {
+  const resolved = await resolveCpkrIdentity(db, item, orderNo);
+  const parsed = resolved.parsed;
   return {
     ...item,
-    cpkr_uid_valid:parsed.ok,
-    cpkr_uid_error:parsed.error,
-    product_id:parsed.product_id||item.product_id||'',
-    item_id:parsed.item_id||item.item_id||'',
-    vendor_item_id:parsed.vendor_item_id||item.vendor_item_id||'',
-    product_url:parsed.product_url||item.product_url||''
+    cpkr_uid_valid: parsed.ok,
+    cpkr_uid_error: parsed.error,
+    cpkr_identity_source: resolved.source,
+    pi_ii_vi: parsed.ok ? parsed.uid : clean(item && item.pi_ii_vi),
+    source_uid: parsed.ok ? 'CPKR_' + parsed.uid : clean(item && item.source_uid),
+    product_id: parsed.product_id || clean(item && item.product_id),
+    item_id: parsed.item_id || clean(item && item.item_id),
+    vendor_item_id: parsed.vendor_item_id || clean(item && item.vendor_item_id),
+    product_url: parsed.product_url || clean(item && item.product_url)
   };
 }
 
@@ -83,7 +187,7 @@ async function buildPayload(db, work) {
 
   if (!order) throw new Error('auto_order_not_found');
 
-  const items = (
+  const rawItems = (
     await db.query(
       `SELECT *
        FROM gm_auto_order_item
@@ -91,7 +195,11 @@ async function buildPayload(db, work) {
        ORDER BY auto_order_item_id ASC`,
       [work.auto_order_no]
     )
-  ).rows.map(enrichCpkrItem);
+  ).rows;
+  const items = [];
+  for (const item of rawItems) {
+    items.push(await enrichCpkrItem(db, item, order.order_no));
+  }
 
   return {
     work_id: work.work_id,
