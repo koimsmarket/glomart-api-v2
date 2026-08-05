@@ -592,11 +592,27 @@ async function replaceCafe24InternalItems(client, orderRow, inputItems){
   await client.query("DELETE FROM gm_order_item WHERE order_no=$1 AND (source_mall='GMKR' OR mall_code='GMKR')", [orderRow.order_no]);
   let itemCount=0;
   for(const src of inputItems || []){
-    const key=clean(itemVal(src,['cafe24_item_key','source_uid','pi_ii_vi','key'],'') || ('ITEM_'+itemCount));
-    const sourceUid=key.indexOf('GMKR_')===0?key:('GMKR_'+key);
+    /*
+     * Cafe24 내부주문 저장 원칙
+     * - mall_code='GMKR' : 고객이 Cafe24 내부상품으로 주문했다는 주문채널
+     * - source_mall/source_uid/pi_ii_vi : 실제 발주처와 PID_IID_VID
+     * ORDERFORM 수집기가 상품간략설명에서 복원한 CPKR UID를 다시 GMKR item key로 덮지 않는다.
+     */
+    const cafe24Key=clean(itemVal(src,['cafe24_item_key','key'],'') || ('ITEM_'+itemCount));
+    const rawPi=clean(itemVal(src,['pi_ii_vi','product_uid','uid'],''));
+    const rawSourceMall=clean(itemVal(src,['source_mall','sourceMall'],'')).toUpperCase();
+    const rawSourceUid=clean(itemVal(src,['source_uid','sourceUid'],'')).replace(/^CPKR_/i,'');
+    const piCandidate=(rawPi||rawSourceUid).replace(/^CPKR_/i,'');
+    const cpkrValid=/^\d+_\d+_\d+$/.test(piCandidate);
+    const pi=cpkrValid?piCandidate:(cafe24Key||rawPi);
+    const sourceMall=cpkrValid?'CPKR':'GMKR';
+    const sourceUid=cpkrValid?('CPKR_'+pi):('GMKR_'+cafe24Key);
     const qty=Math.max(1,money(itemVal(src,['quantity','qty'],1),1));
     const line=money(itemVal(src,['product_amount','amount','line_amount','customer_order_price'],0),0);
     const unit=money(itemVal(src,['customer_order_price','sale_price','price'],0),0) || (qty?Math.round(line/qty):line);
+    const productUrl=cpkrValid
+      ? ('https://www.coupang.com/vp/products/'+encodeURIComponent(pi.split('_')[0])+'?itemId='+encodeURIComponent(pi.split('_')[1])+'&vendorItemId='+encodeURIComponent(pi.split('_')[2]))
+      : normalizeUrl(itemVal(src,['product_url','url'],''));
     await client.query(`
       INSERT INTO gm_order_item (
         order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
@@ -607,13 +623,13 @@ async function replaceCafe24InternalItems(client, orderRow, inputItems){
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,
         'CAFE24',0,0,'GMKR','','',$10,$11,'','','','',
-        'READY_TO_ORDER','pending',$12,$12,$13,'GMKR',$14
+        'READY_TO_ORDER','pending',$12,$12,$13,$14,$15
       )
     `,[
-      orderRow.order_no,key,clean(itemVal(src,['product_name','name','title'],'')),
+      orderRow.order_no,pi,clean(itemVal(src,['product_name','name','title'],'')),
       clean(itemVal(src,['option_name'],'')),clean(itemVal(src,['option_value','option_text'],'')),qty,
-      unit,unit,line||(unit*qty),normalizeUrl(itemVal(src,['product_url','url'],'')),
-      clean(itemVal(src,['thumb_file_name','image','thumb_url'],'')),nowKst(),orderRow.cafe24_order_no||null,sourceUid
+      unit,unit,line||(unit*qty),productUrl,
+      clean(itemVal(src,['thumb_file_name','image','thumb_url'],'')),nowKst(),orderRow.cafe24_order_no||null,sourceMall,sourceUid
     ]);
     itemCount++;
   }
