@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const r2 = require('../services/r2');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V081_TRASH_DELETE_STRICT_VERIFY';
+const VERSION = 'GM_SMARTFIT_SERVER_V082_TRASH_DELETE_FINAL_SAFE';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -37,8 +37,9 @@ function isR2NotFound(e){
 async function deleteR2KeysVerified(keys){
   const list=Array.from(new Set((keys||[]).filter(Boolean)));
   if(!list.length) return {requested:0, verified:0};
-  const deleted=await r2.deleteKeys(list);
-  if(Number(deleted)!==list.length) throw new Error(`r2 delete count mismatch: requested=${list.length}, deleted=${deleted}`);
+  // deleteKeys() 반환형은 서비스 구현에 의존하므로 성공 개수로 판정하지 않는다.
+  // 완전삭제의 유일한 성공 기준은 삭제 후 모든 key의 HEAD가 404/NoSuchKey가 되는 것이다.
+  await r2.deleteKeys(list);
   const remained=[];
   for(const key of list){
     try{
@@ -59,6 +60,50 @@ async function deleteOptionalTemplateRows(client, tableName, templateId){
   if(!(await tableExists(client,tableName))) return 0;
   const r=await client.query(`DELETE FROM ${tableName} WHERE template_id=$1`,[templateId]);
   return r.rowCount;
+}
+async function verifyOptionalTemplateRowsZero(client, tableName, templateId){
+  if(!(await tableExists(client,tableName))) return;
+  const left=i(((await client.query(`SELECT COUNT(*)::int AS n FROM ${tableName} WHERE template_id=$1`,[templateId])).rows[0]||{}).n,0);
+  if(left!==0) throw new Error(`${tableName} delete incomplete: remained=${left}`);
+}
+async function deleteOptionalTemplateMediaRows(client, templateId){
+  if(!(await tableExists(client,'gm_smartfit_media'))) return 0;
+  const r=await client.query(`DELETE FROM gm_smartfit_media WHERE UPPER(target_type)='TEMPLATE' AND target_id=$1`,[String(templateId)]);
+  const left=i(((await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_media WHERE UPPER(target_type)='TEMPLATE' AND target_id=$1`,[String(templateId)])).rows[0]||{}).n,0);
+  if(left!==0) throw new Error(`gm_smartfit_media template delete incomplete: remained=${left}`);
+  return r.rowCount;
+}
+async function lockAndValidateTemplateComments(client, templateId){
+  if(!(await tableExists(client,'gm_smartfit_comment'))) return {rows:[], ids:[]};
+  const rows=(await client.query('SELECT * FROM gm_smartfit_comment WHERE template_id=$1 FOR UPDATE',[templateId])).rows;
+  const withImages=rows.filter(x=>i(x.image_count,0)>0);
+  if(withImages.length) throw new Error(`template comment image cleanup required before permanent delete: comments=${withImages.length}`);
+  return {rows, ids:rows.map(x=>String(x.comment_id)).filter(Boolean)};
+}
+async function deleteTemplateCommentsAndMedia(client, templateId, commentIds){
+  let commentMediaDeleted=0, commentDeleted=0;
+  if(commentIds && commentIds.length && await tableExists(client,'gm_smartfit_media')){
+    const mr=await client.query(`DELETE FROM gm_smartfit_media WHERE UPPER(target_type)='COMMENT' AND target_id = ANY($1::text[])`,[commentIds]);
+    commentMediaDeleted=mr.rowCount;
+    const left=i(((await client.query(`SELECT COUNT(*)::int AS n FROM gm_smartfit_media WHERE UPPER(target_type)='COMMENT' AND target_id = ANY($1::text[])`,[commentIds])).rows[0]||{}).n,0);
+    if(left!==0) throw new Error(`gm_smartfit_media comment delete incomplete: remained=${left}`);
+  }
+  if(await tableExists(client,'gm_smartfit_comment')){
+    const cr=await client.query('DELETE FROM gm_smartfit_comment WHERE template_id=$1',[templateId]);
+    commentDeleted=cr.rowCount;
+    await verifyOptionalTemplateRowsZero(client,'gm_smartfit_comment',templateId);
+  }
+  return {comment_deleted_count:commentDeleted, comment_media_deleted_count:commentMediaDeleted};
+}
+async function deleteSmartfitMessageQueueRows(client, templateId){
+  if(!(await tableExists(client,'gm_event_queue'))) return 0;
+  try{
+    const r=await client.query(`DELETE FROM gm_event_queue WHERE event_type='SMARTFIT_MESSAGE_SEND' AND COALESCE(payload->>'template_id','')=$1`,[String(templateId)]);
+    return r.rowCount;
+  }catch(e){
+    // 구형 gm_event_queue 스키마에서는 payload가 jsonb가 아닐 수 있으므로 실제 스키마 불일치는 삭제 실패로 처리한다.
+    throw new Error(`gm_event_queue cleanup failed: ${String(e&&e.message||e)}`);
+  }
 }
 function pad2(x){ return String(x).padStart(2,'0'); }
 function nowText(){ const d=new Date(Date.now()+9*60*60*1000); return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`; }
@@ -977,6 +1022,10 @@ router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
     const lockedItems=await client.query('SELECT item_id FROM gm_smartfit_item WHERE template_id=$1 FOR UPDATE',[templateId]);
     const expectedItems=lockedItems.rowCount;
 
+    // 이미지 삭제를 시작하기 전에 모든 DB 실패요인을 최대한 선검증한다.
+    // 댓글 이미지가 존재하면 댓글 R2까지 안전하게 정리하는 전용 로직이 필요하므로 이 단계에서 완전삭제를 차단한다.
+    const lockedComments=await lockAndValidateTemplateComments(client,templateId);
+
     // 1차: R2 이미지 전체 삭제 및 실제 부재 확인. 실패하면 이후 DB는 전혀 건드리지 않는다.
     const imageKeys=[];
     for(let imageNo=1; imageNo<=r2.RESERVED_IMAGES_PER_ID; imageNo++) imageKeys.push(r2.keyFor('template',templateId,imageNo,'image'),r2.keyFor('template',templateId,imageNo,'small'));
@@ -991,15 +1040,18 @@ router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
     if(remainedItems!==0) throw new Error(`template item delete incomplete: remained=${remainedItems}`);
 
     // 템플릿 본체보다 먼저 관련 종속 자료를 정리한다.
+    // 상품 DB 삭제가 2차이며, 아래는 템플릿 FK/참조 고아행을 남기지 않기 위한 후속 정리다.
     const deltaDeleted=await deleteOptionalTemplateRows(client,'gm_smartfit_collection_item_delta',templateId);
     const receiverDeleted=await deleteOptionalTemplateRows(client,'gm_smartfit_message_receiver',templateId);
     const collectionDeleted=await deleteOptionalTemplateRows(client,'gm_smartfit_collection',templateId);
-    for(const tableName of ['gm_smartfit_collection_item_delta','gm_smartfit_message_receiver','gm_smartfit_collection']){
-      if(await tableExists(client,tableName)){
-        const left=i(((await client.query(`SELECT COUNT(*)::int AS n FROM ${tableName} WHERE template_id=$1`,[templateId])).rows[0]||{}).n,0);
-        if(left!==0) throw new Error(`${tableName} delete incomplete: remained=${left}`);
-      }
+    const keywordDeleted=await deleteOptionalTemplateRows(client,'gm_smartfit_template_keyword',templateId);
+    const eventDeleted=await deleteOptionalTemplateRows(client,'gm_smartfit_event',templateId);
+    for(const tableName of ['gm_smartfit_collection_item_delta','gm_smartfit_message_receiver','gm_smartfit_collection','gm_smartfit_template_keyword','gm_smartfit_event']){
+      await verifyOptionalTemplateRowsZero(client,tableName,templateId);
     }
+    const templateMediaDeleted=await deleteOptionalTemplateMediaRows(client,templateId);
+    const commentResult=await deleteTemplateCommentsAndMedia(client,templateId,lockedComments.ids);
+    const messageQueueDeleted=await deleteSmartfitMessageQueueRows(client,templateId);
 
     // 3차: 마지막으로 템플릿 본체를 삭제한다.
     const deletedTemplate=await client.query('DELETE FROM gm_smartfit_template WHERE template_id=$1 RETURNING template_id',[templateId]);
@@ -1007,7 +1059,7 @@ router.post('/api/gm/smartfit/template/delete', async (req,res)=>{
     const remainedTemplate=i(((await client.query('SELECT COUNT(*)::int AS n FROM gm_smartfit_template WHERE template_id=$1',[templateId])).rows[0]||{}).n,0);
     if(remainedTemplate!==0) throw new Error(`template db delete verification failed: remained=${remainedTemplate}`);
     await client.query('COMMIT');
-    ok(res,{ deleted:true, template_id:templateId, image_deleted:true, image_key_count:imageResult.verified, item_deleted_count:itemDeletedCount, delta_deleted_count:deltaDeleted, message_receiver_deleted_count:receiverDeleted, collection_deleted_count:collectionDeleted, template_deleted:true, db_deleted:true });
+    ok(res,{ deleted:true, template_id:templateId, image_deleted:true, image_key_count:imageResult.verified, item_deleted_count:itemDeletedCount, delta_deleted_count:deltaDeleted, message_receiver_deleted_count:receiverDeleted, collection_deleted_count:collectionDeleted, keyword_deleted_count:keywordDeleted, event_deleted_count:eventDeleted, template_media_deleted_count:templateMediaDeleted, comment_deleted_count:commentResult.comment_deleted_count, comment_media_deleted_count:commentResult.comment_media_deleted_count, message_queue_deleted_count:messageQueueDeleted, template_deleted:true, db_deleted:true });
   }catch(e){
     try{await client.query('ROLLBACK');}catch(_){}
     fail(res,400,'template delete failed',{ detail:String(e.message||e), image_deleted:imageDeleted, item_deleted_count:itemDeletedCount, template_deleted:false, db_deleted:false });
