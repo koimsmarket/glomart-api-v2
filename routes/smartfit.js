@@ -5,7 +5,7 @@ const r2 = require('../services/r2');
 const createSmartfitDeleteService = require('../services/smartfit_delete_service');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V085_ITEM_SCHEMA_COMPAT_DETAIL_LOG';
+const VERSION = 'GM_SMARTFIT_SERVER_V086_COLLECTION_LOCK_OTHER_USERS_ONLY';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -74,7 +74,10 @@ async function getTemplateCollectionLock(client, templateId){
   const cols=(await client.query(`SELECT column_name FROM information_schema.columns
     WHERE table_schema='public' AND table_name='gm_smartfit_collection'
       AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
-  let sql='SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1';
+  let sql=`SELECT COUNT(*)::int AS n
+    FROM gm_smartfit_collection c
+    JOIN gm_smartfit_template t ON t.template_id=c.template_id
+    WHERE c.template_id=$1 AND c.member_id<>t.creator_member_id`;
   if(cols.indexOf('is_active')>=0) sql += " AND is_active='T'";
   if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(is_deleted,'F')<>'T'";
   const r=await client.query(sql,[id]);
@@ -481,7 +484,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         const cols=(await client.query(`SELECT column_name FROM information_schema.columns
           WHERE table_schema='public' AND table_name='gm_smartfit_collection'
             AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
-        let sql='SELECT COUNT(*)::int AS n FROM gm_smartfit_collection WHERE template_id=$1';
+        let sql=`SELECT COUNT(*)::int AS n
+          FROM gm_smartfit_collection c
+          JOIN gm_smartfit_template t ON t.template_id=c.template_id
+          WHERE c.template_id=$1 AND c.member_id<>t.creator_member_id`;
         if(cols.indexOf('is_active')>=0) sql += " AND is_active='T'";
         if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(is_deleted,'F')<>'T'";
         const cr=await client.query(sql,[templateId]);
@@ -672,7 +678,7 @@ router.post('/api/gm/smartfit/collection/add', async (req,res)=>{
       VALUES ($1,$2,CURRENT_TIMESTAMP,'T','F')
       ON CONFLICT (member_id, template_id) DO UPDATE SET is_active='T', is_deleted='F', deleted_at=NULL, deleted_by=NULL, collected_at=CURRENT_TIMESTAMP
       RETURNING *`,[member,templateId]);
-    await client.query(`UPDATE gm_smartfit_template SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=$1 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE template_id=$1`,[templateId]);
+    await client.query(`UPDATE gm_smartfit_template t SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=t.template_id AND c.member_id<>t.creator_member_id AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE t.template_id=$1`,[templateId]);
     await client.query('COMMIT');
     ok(res,{collection:r.rows[0],template_id:templateId});
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'collection add failed',{detail:String(e.message||e)}); }
@@ -687,7 +693,7 @@ router.post('/api/gm/smartfit/collection/remove', async (req,res)=>{
     await client.query('BEGIN');
     await client.query("UPDATE gm_smartfit_collection SET is_active='F', is_deleted='T', deleted_at=CURRENT_TIMESTAMP, deleted_by=$1 WHERE member_id=$1 AND template_id=$2",[member,templateId]);
     await client.query("UPDATE gm_smartfit_collection_item_delta SET is_active='F', is_deleted='T', updated_at=CURRENT_TIMESTAMP WHERE member_id=$1 AND template_id=$2",[member,templateId]);
-    await client.query(`UPDATE gm_smartfit_template SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=$1 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE template_id=$1`,[templateId]);
+    await client.query(`UPDATE gm_smartfit_template t SET collection_count=(SELECT COUNT(*) FROM gm_smartfit_collection c WHERE c.template_id=t.template_id AND c.member_id<>t.creator_member_id AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'), updated_at=CURRENT_TIMESTAMP WHERE t.template_id=$1`,[templateId]);
     await client.query('COMMIT'); ok(res,{template_id:templateId,removed:true});
   }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'collection remove failed',{detail:String(e.message||e)}); }
   finally{client.release();}
