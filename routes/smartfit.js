@@ -898,7 +898,7 @@ router.post('/api/gm/smartfit/space/trash', async (req,res)=>{
       console.log('[SMARTFIT_SPACE_TRASH]',{step:'DETACH_TEMPLATE',space_id:spaceId,expected:before,updated:detachedCount,remaining:remained,elapsed_ms:Date.now()-startedAt});
       if(remained!==0) throw new Error(`space template detach incomplete: remained=${remained}`);
     }
-    const r=await client.query("UPDATE gm_smartfit_space SET is_deleted=$1, deleted_at=CASE WHEN $1='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1='T' THEN $2 ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE space_id=$3 RETURNING *",[trash,member,spaceId]);
+    const r=await client.query("UPDATE gm_smartfit_space SET is_deleted=$1::char(1), deleted_at=CASE WHEN $1::char(1)='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1::char(1)='T' THEN $2::varchar ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE space_id=$3::bigint RETURNING *",[trash,member,spaceId]);
     await client.query('COMMIT');
     console.log('[SMARTFIT_SPACE_TRASH]',{step:'COMPLETE',space_id:spaceId,trashed:trash==='T',detached_template_count:detachedCount,elapsed_ms:Date.now()-startedAt});
     ok(res,{ space:r.rows[0], trashed:trash==='T', detached_templates:trash==='T', detached_template_count:detachedCount });
@@ -922,7 +922,7 @@ router.post('/api/gm/smartfit/template/trash', async (req,res)=>{
       const lock=await getTemplateCollectionLock(client,templateId);
       if(lock.collection_count>0) throw new Error('collected template cannot be deleted; change visibility to private');
     }
-    const r=await client.query("UPDATE gm_smartfit_template SET is_deleted=$1, deleted_at=CASE WHEN $1='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1='T' THEN $2 ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE template_id=$3 RETURNING *",[trash,member,templateId]);
+    const r=await client.query("UPDATE gm_smartfit_template SET is_deleted=$1::char(1), deleted_at=CASE WHEN $1::char(1)='T' THEN CURRENT_TIMESTAMP ELSE NULL END, deleted_by=CASE WHEN $1::char(1)='T' THEN $2::varchar ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE template_id=$3::bigint RETURNING *",[trash,member,templateId]);
     await client.query('COMMIT');
     console.log('[SMARTFIT_TEMPLATE_TRASH]',{step:'COMPLETE',template_id:templateId,trashed:trash==='T',elapsed_ms:Date.now()-startedAt});
     ok(res,{ template:r.rows[0], trashed:trash==='T' });
