@@ -5,7 +5,7 @@ const r2 = require('../services/r2');
 const createSmartfitDeleteService = require('../services/smartfit_delete_service');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V084_ITEM_SORT_ORDER_FIX';
+const VERSION = 'GM_SMARTFIT_SERVER_V085_ITEM_SCHEMA_COMPAT_DETAIL_LOG';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -80,6 +80,27 @@ async function getTemplateCollectionLock(client, templateId){
   const r=await client.query(sql,[id]);
   const count=Number((r.rows[0]||{}).n||0);
   return { collection_count:count, is_locked:count>0 };
+}
+
+async function getSmartfitItemSchema(client){
+  const rows=(await client.query(`SELECT column_name FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='gm_smartfit_item'`)).rows;
+  const cols=new Set(rows.map(x=>String(x.column_name||'')));
+  if(!cols.has('template_id') || !cols.has('item_id')) throw new Error('gm_smartfit_item schema invalid');
+  const sortCol=cols.has('sort_order')?'sort_order':(cols.has('sort_no')?'sort_no':'item_id');
+  return {cols,sortCol};
+}
+
+async function loadTemplateItemsCompat(client, templateId){
+  const schema=await getSmartfitItemSchema(client);
+  const where=['template_id=$1'];
+  if(schema.cols.has('is_active')) where.push("is_active='T'");
+  if(schema.cols.has('is_deleted')) where.push("COALESCE(is_deleted,'F')<>'T'");
+  const aliases=schema.sortCol==='item_id'
+    ? 'item_id AS sort_no, item_id AS sort_order'
+    : `${schema.sortCol} AS sort_no, ${schema.sortCol} AS sort_order`;
+  const sql=`SELECT *, ${aliases} FROM gm_smartfit_item WHERE ${where.join(' AND ')} ORDER BY ${schema.sortCol},item_id`;
+  return client.query(sql,[templateId]);
 }
 
 function getSmartfitDeleteService(){
@@ -683,12 +704,12 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
     const lock=await getTemplateCollectionLock(pool,id);
     template.collection_count=lock.collection_count;
     template.is_locked=lock.is_locked;
-    const items=await pool.query("SELECT *, sort_order AS sort_no FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_order,item_id",[id]);
+    const items=await loadTemplateItemsCompat(pool,id);
     const meta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
     const metaMap=new Map(meta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
     const mergedItems=items.rows.map(row=>Object.assign({},metaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:mergedItems });
-  }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
+  }catch(e){ console.error('[SMARTFIT_TEMPLATE_DETAIL_V085] FAIL',{code:e&&e.code,message:String(e&&e.message||e),detail:e&&e.detail,hint:e&&e.hint,stack:e&&e.stack}); fail(res,500,'template detail failed',{ detail:String(e.message||e), code:e&&e.code||'' }); }
 });
 
 router.get('/api/gm/smartfit/item/list', async (req,res)=>{
@@ -797,7 +818,7 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
     const lock=await getTemplateCollectionLock(pool,id);
     template.collection_count=lock.collection_count;
     template.is_locked=lock.is_locked;
-    const items=await pool.query("SELECT *, sort_order AS sort_no FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_order,item_id", [id,'T']);
+    const items=await loadTemplateItemsCompat(pool,id);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
 });
