@@ -5,7 +5,7 @@ const r2 = require('../services/r2');
 const createSmartfitDeleteService = require('../services/smartfit_delete_service');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V083_DELETE_SERVICE_STEP_VERIFY';
+const VERSION = 'GM_SMARTFIT_SERVER_V084_ITEM_SORT_ORDER_FIX';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -532,10 +532,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         const itemCols=(await client.query(`SELECT column_name FROM information_schema.columns
           WHERE table_schema='public' AND table_name='gm_smartfit_item'
             AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
-        let existingSql=`SELECT item_role,mall_code,product_uid,qty,sort_no FROM gm_smartfit_item WHERE template_id=$1`;
+        let existingSql=`SELECT item_role,mall_code,product_uid,qty,sort_order AS sort_no FROM gm_smartfit_item WHERE template_id=$1`;
         if(itemCols.indexOf('is_active')>=0) existingSql += " AND is_active='T'";
         if(itemCols.indexOf('is_deleted')>=0) existingSql += " AND COALESCE(is_deleted,'F')<>'T'";
-        existingSql += ' ORDER BY sort_no,item_id';
+        existingSql += ' ORDER BY sort_order,item_id';
         const existingRows=(await client.query(existingSql,[saved.template_id])).rows.map((row,idx)=>({
           item_role:s(row.item_role||'ETC')||'ETC',
           mall_code:s(row.mall_code||'CAFE24')||'CAFE24',
@@ -563,12 +563,12 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         for(const it of merged.values()){
           if(hasProductId){
             await client.query(`INSERT INTO gm_smartfit_item
-              (template_id,item_role,mall_code,product_id,product_uid,qty,sort_no)
+              (template_id,item_role,mall_code,product_id,product_uid,qty,sort_order)
               VALUES ($1,$2,$3,$4,$5,$6,$7)`,
               [saved.template_id,it.item_role,it.mall_code,it.product_id||'',it.product_uid,it.qty,it.sort_no]);
           }else{
             await client.query(`INSERT INTO gm_smartfit_item
-              (template_id,item_role,mall_code,product_uid,qty,sort_no)
+              (template_id,item_role,mall_code,product_uid,qty,sort_order)
               VALUES ($1,$2,$3,$4,$5,$6)`,
               [saved.template_id,it.item_role,it.mall_code,it.product_uid,it.qty,it.sort_no]);
           }
@@ -683,7 +683,7 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
     const lock=await getTemplateCollectionLock(pool,id);
     template.collection_count=lock.collection_count;
     template.is_locked=lock.is_locked;
-    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id",[id]);
+    const items=await pool.query("SELECT *, sort_order AS sort_no FROM gm_smartfit_item WHERE template_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_order,item_id",[id]);
     const meta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
     const metaMap=new Map(meta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
     const mergedItems=items.rows.map(row=>Object.assign({},metaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
@@ -716,7 +716,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     if(q){ params.push('%'+q+'%'); const p='$'+params.length; where.push(`(i.product_uid ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p} OR COALESCE(p.mall_product_name,'') ILIKE ${p})`); }
     params.push(limit); const lim='$'+params.length;
     const r=await pool.query(`SELECT
-        i.item_id, i.template_id, i.item_role, i.mall_code, COALESCE(p.product_id,'') AS product_id, i.product_uid, i.qty, i.sort_no,
+        i.item_id, i.template_id, i.item_role, i.mall_code, COALESCE(p.product_id,'') AS product_id, i.product_uid, i.qty, i.sort_order AS sort_no,
         p.product_name, p.mall_product_name, ''::text AS option_name, ''::text AS option_value,
         p.mall_sale_price AS sale_price, p.final_supply_price,
         p.product_url, p.thumb_origin_url AS thumb_url,
@@ -725,7 +725,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
       FROM gm_smartfit_item i
       LEFT JOIN gm_product p ON p.product_uid=i.product_uid
       WHERE ${where.join(' AND ')}
-      ORDER BY i.sort_no, i.item_id
+      ORDER BY i.sort_order, i.item_id
       LIMIT ${lim}`, params);
 
     let items=r.rows;
@@ -797,7 +797,7 @@ router.get('/api/gm/smartfit/template/:template_id', async (req,res)=>{
     const lock=await getTemplateCollectionLock(pool,id);
     template.collection_count=lock.collection_count;
     template.is_locked=lock.is_locked;
-    const items=await pool.query("SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_no,item_id", [id,'T']);
+    const items=await pool.query("SELECT *, sort_order AS sort_no FROM gm_smartfit_item WHERE template_id=$1 AND is_active=$2 AND COALESCE(is_deleted,'F')<>'T' ORDER BY sort_order,item_id", [id,'T']);
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:items.rows, media:[] });
   }catch(e){ fail(res,500,'template detail failed',{ detail:String(e.message||e) }); }
 });
@@ -958,10 +958,10 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
     const pool=db(req); const member=s(req.body?.member_id || req.body?.memberId || '');
     const templateIds=(Array.isArray(req.body?.template_ids)?req.body.template_ids:Array.isArray(req.body?.templateIds)?req.body.templateIds:[req.body?.template_id || req.body?.templateId]).map(x=>i(x,0)).filter(Boolean);
     if(!templateIds.length) return fail(res,400,'template_ids required');
-    const r=await pool.query(`SELECT t.template_id, t.creator_member_id, t.category_no, t.template_title_source, t.template_title_ko, i.item_id, i.item_role, i.mall_code, i.product_uid, i.qty, i.sort_no
+    const r=await pool.query(`SELECT t.template_id, t.creator_member_id, t.category_no, t.template_title_source, t.template_title_ko, i.item_id, i.item_role, i.mall_code, i.product_uid, i.qty, i.sort_order AS sort_no
       FROM gm_smartfit_template t JOIN gm_smartfit_item i ON i.template_id=t.template_id AND i.is_active='T' AND COALESCE(i.is_deleted,'F')<>'T'
       WHERE t.template_id = ANY($1::bigint[]) AND t.is_active='T' AND COALESCE(t.is_deleted,'F')<>'T'
-      ORDER BY array_position($1::bigint[], t.template_id), i.sort_no, i.item_id`, [templateIds]);
+      ORDER BY array_position($1::bigint[], t.template_id), i.sort_order, i.item_id`, [templateIds]);
     const batchId='SFB_'+Date.now()+'_'+Math.random().toString(16).slice(2,8);
     const items=r.rows.map(row=>({ batch_id:batchId, template_id:row.template_id, creator_member_id:row.creator_member_id, category_no:row.category_no, template_title:s(row.template_title_source || row.template_title_ko), item_id:row.item_id, item_role:row.item_role, mall_code:row.mall_code, product_uid:row.product_uid, original_qty:i(row.qty,1), selected_qty:i(row.qty,1), is_selected:true, sort_no:row.sort_no }));
     ok(res,{ batch_id:batchId, template_ids:templateIds, items, count:items.length, member_id:member, note:'candidate payload only; basket/order tables are not modified' });
