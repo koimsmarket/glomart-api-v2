@@ -5,7 +5,7 @@ const r2 = require('../services/r2');
 const createSmartfitDeleteService = require('../services/smartfit_delete_service');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V086_COLLECTION_LOCK_OTHER_USERS_ONLY';
+const VERSION = 'GM_SMARTFIT_SERVER_V087_COLLECTION_LOCK_ALIAS_FIX';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -78,8 +78,8 @@ async function getTemplateCollectionLock(client, templateId){
     FROM gm_smartfit_collection c
     JOIN gm_smartfit_template t ON t.template_id=c.template_id
     WHERE c.template_id=$1 AND c.member_id<>t.creator_member_id`;
-  if(cols.indexOf('is_active')>=0) sql += " AND is_active='T'";
-  if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(is_deleted,'F')<>'T'";
+  if(cols.indexOf('is_active')>=0) sql += " AND c.is_active='T'";
+  if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(c.is_deleted,'F')<>'T'";
   const r=await client.query(sql,[id]);
   const count=Number((r.rows[0]||{}).n||0);
   return { collection_count:count, is_locked:count>0 };
@@ -488,8 +488,8 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           FROM gm_smartfit_collection c
           JOIN gm_smartfit_template t ON t.template_id=c.template_id
           WHERE c.template_id=$1 AND c.member_id<>t.creator_member_id`;
-        if(cols.indexOf('is_active')>=0) sql += " AND is_active='T'";
-        if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(is_deleted,'F')<>'T'";
+        if(cols.indexOf('is_active')>=0) sql += " AND c.is_active='T'";
+        if(cols.indexOf('is_deleted')>=0) sql += " AND COALESCE(c.is_deleted,'F')<>'T'";
         const cr=await client.query(sql,[templateId]);
         collectedCount=Number((cr.rows[0]||{}).n||0);
         console.log('[SMARTFIT_SAVE_V139] COLLECTION_CHECK_DONE',{
