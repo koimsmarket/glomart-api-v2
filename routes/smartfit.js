@@ -930,6 +930,99 @@ router.post('/api/gm/smartfit/template/trash', async (req,res)=>{
   finally{ client.release(); }
 });
 
+
+/* GM_SMARTFIT_TRASH_FLOW_V088
+ * Collection UI compatibility routes.
+ * Permanent delete delegates to smartfit_delete_service.js so the verified
+ * R2 -> dependent rows -> root DB deletion order remains single-sourced.
+ */
+router.get('/api/gm/smartfit/trash/list', async (req,res)=>{
+  try{
+    const pool=db(req);
+    const member=s(req.query.member_id || req.query.memberId || '');
+    const type=s(req.query.target_type || req.query.targetType || req.query.type || '').toLowerCase();
+    if(!member) return fail(res,401,'login required');
+    if(type!=='space' && type!=='template') return fail(res,400,'target_type must be space or template');
+    let r;
+    if(type==='space'){
+      r=await pool.query(`SELECT * FROM gm_smartfit_space
+        WHERE owner_member_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')='T'
+        ORDER BY deleted_at DESC NULLS LAST, space_id DESC`,[member]);
+      return ok(res,{target_type:type,items:r.rows.map(x=>addImageUrls(Object.assign({},x,{title:coalesceSpaceTitle(x),author:displayAuthor(x)}),'space')),count:r.rowCount});
+    }
+    r=await pool.query(`SELECT * FROM gm_smartfit_template
+      WHERE creator_member_id=$1 AND is_active='T' AND COALESCE(is_deleted,'F')='T'
+      ORDER BY deleted_at DESC NULLS LAST, template_id DESC`,[member]);
+    ok(res,{target_type:type,items:r.rows.map(x=>addImageUrls(Object.assign({},x,{title:coalesceTitle(x),author:displayAuthor(x)}),'template')),count:r.rowCount});
+  }catch(e){ fail(res,500,'trash list failed',{detail:String(e&&e.message||e)}); }
+});
+
+router.post('/api/gm/smartfit/trash/restore', async (req,res)=>{
+  const pool=db(req); const client=await pool.connect();
+  try{
+    const b=req.body||{};
+    const member=s(b.member_id || b.memberId || '');
+    const type=s(b.target_type || b.targetType || b.type || '').toLowerCase();
+    const rawIds=Array.isArray(b.target_ids || b.targetIds) ? (b.target_ids || b.targetIds) : [b.target_id || b.targetId || b.space_id || b.template_id];
+    const ids=Array.from(new Set(rawIds.map(x=>i(x,0)).filter(Boolean)));
+    if(!member) return fail(res,401,'login required');
+    if(type!=='space' && type!=='template') return fail(res,400,'target_type must be space or template');
+    if(!ids.length) return fail(res,400,'target_ids required');
+    await client.query('BEGIN');
+    const restored=[];
+    for(const id of ids){
+      if(type==='space'){
+        const old=(await client.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 FOR UPDATE',[id])).rows[0];
+        if(!old) throw new Error(`space not found: ${id}`);
+        if(!(await isOwnerOrAdmin(client,member,old.owner_member_id||old.creator_member_id))) throw new Error('permission denied');
+        const r=await client.query("UPDATE gm_smartfit_space SET is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$1 RETURNING space_id",[id]);
+        if(r.rowCount!==1) throw new Error(`space restore failed: ${id}`);
+      }else{
+        const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[id])).rows[0];
+        if(!old) throw new Error(`template not found: ${id}`);
+        if(!(await isOwnerOrAdmin(client,member,old.creator_member_id))) throw new Error('permission denied');
+        const r=await client.query("UPDATE gm_smartfit_template SET is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE template_id=$1 RETURNING template_id",[id]);
+        if(r.rowCount!==1) throw new Error(`template restore failed: ${id}`);
+      }
+      restored.push(id);
+    }
+    await client.query('COMMIT');
+    ok(res,{restored:true,target_type:type,target_ids:restored,count:restored.length});
+  }catch(e){ try{await client.query('ROLLBACK');}catch(_){} fail(res,400,'trash restore failed',{detail:String(e&&e.message||e)}); }
+  finally{ client.release(); }
+});
+
+router.post('/api/gm/smartfit/trash/permanent-delete', async (req,res)=>{
+  const pool=db(req);
+  try{
+    const b=req.body||{};
+    const member=s(b.member_id || b.memberId || '');
+    const type=s(b.target_type || b.targetType || b.type || '').toLowerCase();
+    const rawIds=Array.isArray(b.target_ids || b.targetIds) ? (b.target_ids || b.targetIds) : [b.target_id || b.targetId || b.space_id || b.template_id];
+    const ids=Array.from(new Set(rawIds.map(x=>i(x,0)).filter(Boolean)));
+    if(!member) return fail(res,401,'login required');
+    if(type!=='space' && type!=='template') return fail(res,400,'target_type must be space or template');
+    if(!ids.length) return fail(res,400,'target_ids required');
+    const deleted=[]; const blocked=[];
+    for(const id of ids){
+      const client=await pool.connect();
+      try{
+        await client.query('BEGIN');
+        const result=type==='space'
+          ? await getSmartfitDeleteService().deleteSpace(client,member,id)
+          : await getSmartfitDeleteService().deleteTemplate(client,member,id);
+        await client.query('COMMIT');
+        deleted.push(result);
+      }catch(e){
+        try{await client.query('ROLLBACK');}catch(_){}
+        const st=(e&&e.deleteState)||{};
+        blocked.push({id,target_type:type,detail:String(e&&e.message||e),image_deleted:!!st.image_deleted,item_deleted_count:Number(st.item_deleted_count||0),db_deleted:!!st.db_deleted});
+      }finally{ client.release(); }
+    }
+    ok(res,{target_type:type,deleted,deleted_count:deleted.length,blocked,blocked_count:blocked.length});
+  }catch(e){ fail(res,400,'trash permanent delete failed',{detail:String(e&&e.message||e)}); }
+});
+
 router.post('/api/gm/smartfit/space/delete', async (req,res)=>{
   const pool=db(req); const client=await pool.connect();
   try{
