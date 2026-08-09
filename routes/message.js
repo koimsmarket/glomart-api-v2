@@ -602,4 +602,172 @@ router.post('/api/gm/message/cleanup', async (req,res)=>{
   }catch(e){ fail(res,500,'cleanup failed',{ detail:String(e.message||e) }); }
 });
 
+
+
+/* ============================================================================
+ * GM_ORDER_MESSAGE_API_V002
+ * 주문 결과 페이지에서 주문 접수 완료 후 호출하는 주문 전용 메시지 API.
+ * - gm_order_message는 주문 상태 메시지의 단기 보관소이다.
+ * - ORDER_RECEIVED는 order_no당 정확히 한 번만 생성한다.
+ * - 결과 페이지는 order_no/device_lang만 전달하고, 금액/송금정보는 서버의
+ *   gm_order 원장을 다시 읽어 구성한다. DOM 금액을 신뢰하지 않는다.
+ * - 실제 FCM 송신기는 아직 서버에 없으므로 여기서는 앱 전달 payload까지 만든다.
+ *   앱/FCM 송신부는 이 payload를 소비하고 received_yn ACK를 별도 호출한다.
+ * ============================================================================ */
+const GM_ORDER_MESSAGE_TYPES = new Set([
+  'ORDER_RECEIVED','ORDER_SHIPPED','RETURN_APPROVED','EXCHANGE_APPROVED',
+  'RETURN_COMPLETED','EXCHANGE_RESHIPPED','DIRECT'
+]);
+function validOrderDeviceLang(v){
+  const x=s(v).replace(/_/g,'-');
+  if(!x || /^(und|unknown|null|undefined|false)$/i.test(x) || x.length>35) return '';
+  return /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(x) ? x : '';
+}
+function orderMessageLangCode(v){
+  const x=validOrderDeviceLang(v).toLowerCase();
+  if(!x) return '';
+  if(/^zh-(tw|hk|mo|hant)(-|$)/.test(x)) return 'tw';
+  const b=x.split('-')[0];
+  const map={kr:'ko',fil:'tl',ko:'ko',en:'en',zh:'zh',vi:'vi',ja:'ja',th:'th',uz:'uz',ne:'ne',km:'km',id:'id',tl:'tl',mn:'mn',my:'my',kk:'kk',si:'si',ru:'ru',bn:'bn',ur:'ur',lo:'lo',hi:'hi',tr:'tr',fa:'fa',es:'es',fr:'fr'};
+  return map[b] || 'en';
+}
+const ORDER_RECEIVED_TEXT={
+  ko:{title:'주문이 접수되었습니다',no:'주문번호',at:'주문일시',amount:'결제금액',bank:'송금정보',detail:'주문 상세보기',confirm:'확인'},
+  en:{title:'Your order has been received',no:'Order number',at:'Order date',amount:'Amount',bank:'Bank transfer',detail:'View order details',confirm:'OK'},
+  zh:{title:'订单已受理',no:'订单号',at:'下单时间',amount:'支付金额',bank:'汇款信息',detail:'查看订单详情',confirm:'确认'},
+  tw:{title:'訂單已受理',no:'訂單編號',at:'訂購時間',amount:'付款金額',bank:'匯款資訊',detail:'查看訂單詳情',confirm:'確認'},
+  vi:{title:'Đơn hàng đã được tiếp nhận',no:'Mã đơn hàng',at:'Thời gian đặt hàng',amount:'Số tiền',bank:'Thông tin chuyển khoản',detail:'Xem chi tiết đơn hàng',confirm:'Xác nhận'},
+  ja:{title:'ご注文を受け付けました',no:'注文番号',at:'注文日時',amount:'お支払い金額',bank:'振込情報',detail:'注文詳細を見る',confirm:'確認'},
+  th:{title:'รับคำสั่งซื้อแล้ว',no:'หมายเลขคำสั่งซื้อ',at:'วันที่สั่งซื้อ',amount:'ยอดชำระ',bank:'ข้อมูลการโอนเงิน',detail:'ดูรายละเอียดคำสั่งซื้อ',confirm:'ตกลง'},
+  uz:{title:'Buyurtmangiz qabul qilindi',no:'Buyurtma raqami',at:'Buyurtma vaqti',amount:'To‘lov summasi',bank:'Pul o‘tkazish ma’lumoti',detail:'Buyurtma tafsilotlari',confirm:'Tasdiqlash'},
+  ne:{title:'तपाईंको अर्डर प्राप्त भयो',no:'अर्डर नम्बर',at:'अर्डर मिति',amount:'भुक्तानी रकम',bank:'बैंक ट्रान्सफर',detail:'अर्डर विवरण हेर्नुहोस्',confirm:'ठीक छ'},
+  km:{title:'ការបញ្ជាទិញរបស់អ្នកត្រូវបានទទួល',no:'លេខបញ្ជាទិញ',at:'ពេលបញ្ជាទិញ',amount:'ចំនួនទឹកប្រាក់',bank:'ព័ត៌មានផ្ទេរប្រាក់',detail:'មើលព័ត៌មានលម្អិត',confirm:'យល់ព្រម'},
+  id:{title:'Pesanan Anda telah diterima',no:'Nomor pesanan',at:'Waktu pesanan',amount:'Jumlah pembayaran',bank:'Informasi transfer',detail:'Lihat detail pesanan',confirm:'OK'},
+  tl:{title:'Natanggap na ang iyong order',no:'Order number',at:'Oras ng order',amount:'Halaga',bank:'Impormasyon sa bank transfer',detail:'Tingnan ang detalye ng order',confirm:'OK'},
+  mn:{title:'Таны захиалгыг хүлээн авлаа',no:'Захиалгын дугаар',at:'Захиалгын огноо',amount:'Төлбөрийн дүн',bank:'Шилжүүлгийн мэдээлэл',detail:'Захиалгын дэлгэрэнгүй',confirm:'OK'},
+  my:{title:'သင့်အော်ဒါကို လက်ခံရရှိပါပြီ',no:'အော်ဒါနံပါတ်',at:'အော်ဒါအချိန်',amount:'ငွေပမာဏ',bank:'ငွေလွှဲအချက်အလက်',detail:'အော်ဒါအသေးစိတ်ကြည့်ရန်',confirm:'အတည်ပြု'},
+  kk:{title:'Тапсырысыңыз қабылданды',no:'Тапсырыс нөмірі',at:'Тапсырыс уақыты',amount:'Төлем сомасы',bank:'Аударым ақпараты',detail:'Тапсырыс мәліметтері',confirm:'OK'},
+  si:{title:'ඔබගේ ඇණවුම ලැබී ඇත',no:'ඇණවුම් අංකය',at:'ඇණවුම් වේලාව',amount:'ගෙවීම් මුදල',bank:'බැංකු මාරු තොරතුරු',detail:'ඇණවුම් විස්තර බලන්න',confirm:'හරි'},
+  ru:{title:'Ваш заказ принят',no:'Номер заказа',at:'Дата заказа',amount:'Сумма оплаты',bank:'Банковский перевод',detail:'Посмотреть заказ',confirm:'ОК'},
+  bn:{title:'আপনার অর্ডার গ্রহণ করা হয়েছে',no:'অর্ডার নম্বর',at:'অর্ডারের সময়',amount:'পরিশোধের পরিমাণ',bank:'ব্যাংক ট্রান্সফার তথ্য',detail:'অর্ডারের বিস্তারিত দেখুন',confirm:'ঠিক আছে'},
+  ur:{title:'آپ کا آرڈر موصول ہو گیا ہے',no:'آرڈر نمبر',at:'آرڈر کا وقت',amount:'ادائیگی کی رقم',bank:'بینک ٹرانسفر کی معلومات',detail:'آرڈر کی تفصیل دیکھیں',confirm:'ٹھیک ہے'},
+  lo:{title:'ຮັບຄຳສັ່ງຊື້ຂອງທ່ານແລ້ວ',no:'ເລກຄຳສັ່ງຊື້',at:'ເວລາສັ່ງຊື້',amount:'ຈຳນວນເງິນ',bank:'ຂໍ້ມູນໂອນເງິນ',detail:'ເບິ່ງລາຍລະອຽດ',confirm:'ຕົກລົງ'},
+  hi:{title:'आपका ऑर्डर प्राप्त हो गया है',no:'ऑर्डर नंबर',at:'ऑर्डर का समय',amount:'भुगतान राशि',bank:'बैंक ट्रांसफर जानकारी',detail:'ऑर्डर विवरण देखें',confirm:'ठीक है'},
+  tr:{title:'Siparişiniz alındı',no:'Sipariş numarası',at:'Sipariş tarihi',amount:'Ödeme tutarı',bank:'Banka havalesi',detail:'Sipariş ayrıntıları',confirm:'Tamam'},
+  fa:{title:'سفارش شما دریافت شد',no:'شماره سفارش',at:'زمان سفارش',amount:'مبلغ پرداخت',bank:'اطلاعات انتقال بانکی',detail:'مشاهده جزئیات سفارش',confirm:'تأیید'},
+  es:{title:'Pedido recibido',no:'Número de pedido',at:'Fecha del pedido',amount:'Importe',bank:'Transferencia bancaria',detail:'Ver detalles del pedido',confirm:'Aceptar'},
+  fr:{title:'Commande reçue',no:'Numéro de commande',at:'Date de commande',amount:'Montant',bank:'Virement bancaire',detail:'Voir le détail de la commande',confirm:'OK'}
+}
+function orderMessageText(lang){ return ORDER_RECEIVED_TEXT[lang] || ORDER_RECEIVED_TEXT.en; }
+function orderMoney(v){
+  const n=Number(v||0);
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
+function orderDateText(v){
+  if(!v) return '';
+  try{
+    const d=new Date(v);
+    if(Number.isNaN(d.getTime())) return s(v);
+    const parts=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(d);
+    const m={}; parts.forEach(x=>{m[x.type]=x.value;});
+    return `${m.year}-${m.month}-${m.day} ${m.hour}:${m.minute}`;
+  }catch(e){ return s(v); }
+}
+async function resolveOrderMessageLanguage(pool,order,requested){
+  const reqLang=validOrderDeviceLang(requested);
+  if(reqLang) return {device_lang:reqLang,lang:orderMessageLangCode(reqLang),source:'REQUEST_DEVICE_LANG'};
+  const member=s(order&&order.member_id);
+  if(member){
+    try{
+      const dr=await pool.query(`SELECT device_lang FROM gm_member_device WHERE member_id=$1 AND push_enabled='Y' AND token_status='ACTIVE' AND COALESCE(device_lang,'')<>'' ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC NULLS LAST LIMIT 1`,[member]);
+      const dl=validOrderDeviceLang(dr.rows[0]&&dr.rows[0].device_lang);
+      if(dl) return {device_lang:dl,lang:orderMessageLangCode(dl),source:'MEMBER_DEVICE'};
+    }catch(_e){}
+    try{
+      const mr=await pool.query(`SELECT device_lang,language_code,cs_language FROM gm_member WHERE member_id=$1 LIMIT 1`,[member]);
+      const row=mr.rows[0]||{};
+      const dl=validOrderDeviceLang(row.device_lang);
+      if(dl) return {device_lang:dl,lang:orderMessageLangCode(dl),source:'MEMBER_DEVICE_LANG'};
+      const lc=s(row.language_code||row.cs_language).toLowerCase();
+      if(lc) return {device_lang:lc,lang:orderMessageLangCode(lc),source:'MEMBER_LANGUAGE'};
+    }catch(_e){}
+  }
+  return {device_lang:'en',lang:'en',source:'EN_FALLBACK'};
+}
+function buildOrderReceivedPayload(order,langInfo){
+  const lang=langInfo.lang||'en', t=orderMessageText(lang);
+  const orderNo=s(order.order_no);
+  const orderedAt=s(order.ordered_at_text||order.created_at_text)||orderDateText(order.ordered_at||order.created_at);
+  const amount=orderMoney(order.total_payment_price||order.expected_payment_amount||order.actual_payment_amount);
+  const currency='KRW';
+  const bankName=s(order.payment_bank_name);
+  const account=s(order.payment_account_number);
+  const depositor=s(order.depositor_name);
+  const bank=[bankName,account,depositor].filter(Boolean).join(' · ');
+  const detailUrl='/myshop/order/gm_detail.html?order_no='+encodeURIComponent(orderNo);
+  const lines=[
+    t.title,
+    `${t.no}: ${orderNo}`,
+    orderedAt?`${t.at}: ${orderedAt}`:'',
+    `${t.amount}: ${amount.toLocaleString('en-US')} ${currency}`,
+    bank?`${t.bank}: ${bank}`:'',
+    `${t.detail}: ${detailUrl}`
+  ].filter(Boolean);
+  return {
+    message_type:'ORDER_RECEIVED', title:t.title, message:lines.join('\n'),
+    order_no:orderNo, ordered_at:orderedAt, amount, currency,
+    bank_name:bankName, account_number:account, depositor_name:depositor,
+    detail_url:detailUrl, detail_label:t.detail, confirm_label:t.confirm||'OK',
+    device_lang:langInfo.device_lang, language_code:lang, language_source:langInfo.source
+  };
+}
+async function findOrderForMessage(pool,no){
+  const r=await pool.query(`SELECT *, to_char(ordered_at,'YYYY-MM-DD HH24:MI') AS ordered_at_text, to_char(created_at,'YYYY-MM-DD HH24:MI') AS created_at_text FROM gm_order WHERE order_no=$1 OR cafe24_order_no=$1 ORDER BY CASE WHEN order_no=$1 THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,[no]);
+  return r.rows[0]||null;
+}
+
+router.post('/api/gm/message/order/received', async (req,res)=>{
+  const pool=db(req), b=req.body||{};
+  if(!pool) return fail(res,500,'DB pool is not attached');
+  const requestedNo=s(b.order_no||b.orderNo||b.gm_order_no||b.cafe24_order_no);
+  if(!requestedNo) return fail(res,400,'order_no required');
+  let client=null;
+  try{
+    const order=await findOrderForMessage(pool,requestedNo);
+    if(!order) return fail(res,404,'order not found',{retryable:true,order_no:requestedNo});
+    const langInfo=await resolveOrderMessageLanguage(pool,order,b.device_lang||b.deviceLang||b.language_code||b.gm_lang);
+    const payload=buildOrderReceivedPayload(order,langInfo);
+    client=await pool.connect();
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[s(order.order_no)]);
+    let r=await client.query(`SELECT * FROM gm_order_message WHERE order_no=$1 AND message_type='ORDER_RECEIVED' ORDER BY message_seq ASC LIMIT 1`,[order.order_no]);
+    let created=false;
+    if(!r.rowCount){
+      const seqR=await client.query(`SELECT COALESCE(MAX(message_seq),0)+1 AS next_seq FROM gm_order_message WHERE order_no=$1`,[order.order_no]);
+      const seq=Number(seqR.rows[0]&&seqR.rows[0].next_seq)||1;
+      r=await client.query(`INSERT INTO gm_order_message(order_no,message_seq,message_type,direct_message,device_lang,received_yn,sent_at) VALUES($1,$2,'ORDER_RECEIVED',NULL,$3,'N',CURRENT_TIMESTAMP) RETURNING *`,[order.order_no,seq,langInfo.device_lang]);
+      created=true;
+    }
+    await client.query('COMMIT');
+    return ok(res,{action:'order-message.received',created,item:r.rows[0],app_message:payload});
+  }catch(e){
+    if(client) await client.query('ROLLBACK').catch(()=>{});
+    console.error('[GM_ORDER_MESSAGE_RECEIVED_ERROR]',String(e&&e.stack||e));
+    return fail(res,500,'order message create failed',{detail:String(e&&e.message||e)});
+  }finally{ if(client) client.release(); }
+});
+
+router.post('/api/gm/message/order/ack', async (req,res)=>{
+  try{
+    const pool=db(req), b=req.body||{};
+    const orderNo=s(b.order_no||b.orderNo), seq=Number(b.message_seq||b.messageSeq||0);
+    if(!pool) return fail(res,500,'DB pool is not attached');
+    if(!orderNo||!seq) return fail(res,400,'order_no and message_seq required');
+    const opened=yn(b.opened_yn||b.openedYn,'N')==='Y';
+    const r=await pool.query(`UPDATE gm_order_message SET received_yn='Y', opened_at=CASE WHEN $3 THEN COALESCE(opened_at,CURRENT_TIMESTAMP) ELSE opened_at END WHERE order_no=$1 AND message_seq=$2 RETURNING *`,[orderNo,seq,opened]);
+    if(!r.rowCount) return fail(res,404,'order message not found');
+    return ok(res,{action:'order-message.ack',item:r.rows[0]});
+  }catch(e){ return fail(res,500,'order message ack failed',{detail:String(e&&e.message||e)}); }
+});
+
 module.exports = router;
