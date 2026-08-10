@@ -1,6 +1,7 @@
 /* routes/order.js
  * server.js에서 분리한 주문 저장 라우터.
  * server.js 하단의 app.use(require('./routes/order')) 방식으로 로드된다.
+ * - POST /api/gm/order/allocate-no : Cafe24 주문결과 기준 서버 주문번호 발급 + gm_order 즉시 예약 (기존 gm_order만 사용)
  * - POST /api/gm/order/create : gm_order 1건 + gm_order_item N건 저장
  * - GET  /api/gm/order/get    : order_no 기준 조회
  * - POST /api/gm/order/link   : Cafe24 주문번호 연결
@@ -19,8 +20,8 @@ function enqueueAfterResponse(label, task){
   if(typeof setImmediate==='function') setImmediate(run);
   else setTimeout(run,0);
 }
-const VERSION = 'GM_ORDER_ROUTE_V044_ORDER_CREATE_DIAGNOSTIC';
-console.log('[GM_ORDER_ROUTE_V044] routes/order.js loaded');
+const VERSION = 'GM_ORDER_ROUTE_V045_SERVER_ORDER_NO_ALLOCATE';
+console.log('[GM_ORDER_ROUTE_V045] routes/order.js loaded');
 
 async function applyOrderCompletedDirect(req,orderNo,meta){
   const pool=db(req);
@@ -273,10 +274,6 @@ function nowKst(){
 function ok(res, data){ res.json(Object.assign({ ok:true, version:VERSION }, data || {})); }
 function fail(res, status, message, extra){ res.status(status).json(Object.assign({ ok:false, version:VERSION, error:message }, extra || {})); }
 function pad(n, len){ return String(n).padStart(len, '0'); }
-function autoOrderNo(){
-  const d = new Date();
-  return 'GM' + d.getFullYear() + pad(d.getMonth()+1,2) + pad(d.getDate(),2) + '-' + pad(d.getHours(),2) + pad(d.getMinutes(),2) + pad(d.getSeconds(),2) + '-' + String(Date.now()).slice(-4);
-}
 function cafe24OrderNo(raw){
   return clean(pick(raw || {}, ['cafe24_order_no','cafe24OrderNo','cafe24_order_id','cafe24OrderId','order_id','orderId','mall_order_no','mallOrderNo','internal_order_no','internalOrderNo'], '')) || null;
 }
@@ -363,7 +360,8 @@ function normalizeItems(raw){
   return [];
 }
 function buildOrderRow(raw, inputItems){
-  const orderNo = clean(raw.gm_order_no || raw.order_no) || autoOrderNo();
+  const orderNo = clean(raw.gm_order_no || raw.order_no);
+  if(!orderNo) throw new Error('order_no_required');
   const cafeNo = cafe24OrderNo(raw);
   const orderRow = {
     order_no: orderNo,
@@ -636,63 +634,194 @@ async function replaceCafe24InternalItems(client, orderRow, inputItems){
   return itemCount;
 }
 
-router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
-  try{
-    const body=req.body||{};
-    console.log('[GM_CAFE24_CONFIRM_IN_V044]',JSON.stringify({
-      order_no:clean(body.order_no||body.gm_order_no||body.cafe24_order_no||body.cafe24OrderNo),
-      cafe24_order_no:clean(body.cafe24_order_no||body.cafe24OrderNo||body.order_id||body.orderId),
-      member_id:clean(body.member_id||body.memberId),
-      guest_key:clean(body.guest_key||body.guestKey),
-      internal_item_count:Array.isArray(body.internal_items)?body.internal_items.length:0
-    }));
-  }catch(e){
-    console.error('[GM_CAFE24_CONFIRM_IN_LOG_ERROR_V042]',String(e&&e.message||e));
+
+function kstDate8(){
+  const d = new Date(Date.now() + 9*60*60*1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth()+1).padStart(2,'0');
+  const day = String(d.getUTCDate()).padStart(2,'0');
+  return String(y)+m+day;
+}
+function orderDateFromCafeNo(cafeNo){
+  const m = clean(cafeNo).match(/^(\d{8})-\d{7}$/);
+  return m ? m[1] : kstDate8();
+}
+async function allocateServerOrderNo(client, cafeNo, memberId, guestKey){
+  cafeNo=clean(cafeNo);
+  const orderDate = orderDateFromCafeNo(cafeNo);
+  const prefix = 'A';
+
+  /* 새 테이블/클라이언트 카운터 없이 기존 gm_order만 기준으로 번호를 발급한다.
+     같은 날짜 번호 발급은 이 짧은 transaction 구간에서만 직렬화한다. */
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['gm-order-seq:'+orderDate+':'+prefix]);
+
+  /* Cafe24 주문결과 재요청이면 기존 번호를 그대로 반환한다. */
+  if(cafeNo){
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['gm-order-cafe24:'+cafeNo]);
+    const already = await client.query(`
+      SELECT order_no, order_status
+        FROM gm_order
+       WHERE cafe24_order_no=$1
+       ORDER BY created_at ASC
+       LIMIT 1
+    `,[cafeNo]);
+    if(already.rows[0]){
+      return { order_no:clean(already.rows[0].order_no), existing:true, order_status:clean(already.rows[0].order_status) };
+    }
   }
+
+  const maxRow = await client.query(`
+    SELECT COALESCE(MAX(CAST(SUBSTRING(order_no FROM 11 FOR 7) AS BIGINT)),0)::bigint AS max_seq
+      FROM gm_order
+     WHERE order_no ~ ('^' || $1 || '-' || $2 || '[0-9]{7}$')
+  `,[orderDate,prefix]);
+  let nextSeq = (Number(maxRow.rows[0] && maxRow.rows[0].max_seq) || 0) + 1;
+
+  for(let attempt=0; attempt<10; attempt++){
+    const orderNo = orderDate + '-' + prefix + String(nextSeq).padStart(7,'0');
+    const now = nowKst();
+    const inserted = await client.query(`
+      INSERT INTO gm_order (
+        order_no, cafe24_order_no, member_id, guest_key,
+        orderer_name, orderer_mobile,
+        receiver_name, receiver_mobile, receiver_zipcode, receiver_address1,
+        payment_method, payment_method_display,
+        expected_payment_amount, total_product_price, total_delivery_fee, total_payment_price,
+        order_status, payment_status, shipping_status,
+        ordered_at, created_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,
+        '','',
+        '','','','',
+        'pending','pending',
+        0,0,0,0,
+        'PENDING_DETAIL','pending','pending',
+        $5,$5,$5
+      )
+      ON CONFLICT (order_no) DO NOTHING
+      RETURNING order_no
+    `,[orderNo,cafeNo||null,memberId||null,guestKey||null,now]);
+
+    if(inserted.rowCount){
+      return { order_no:orderNo, existing:false, order_status:'PENDING_DETAIL' };
+    }
+    nextSeq++;
+  }
+  throw new Error('order_no_allocate_conflict');
+}
+
+router.post('/api/gm/order/allocate-no', async (req,res)=>{
   const pool=db(req);
   if(!pool)return fail(res,500,'DB pool is not attached');
   const raw=req.body||{};
   const cafeNo=clean(raw.cafe24_order_no||raw.cafe24OrderNo||raw.order_id||raw.orderId);
-  const orderNo=clean(raw.order_no||raw.gm_order_no||cafeNo);
-  const items=Array.isArray(raw.internal_items)?raw.internal_items:normalizeItems(raw);
-  if(!cafeNo||!orderNo)return fail(res,400,'order_no/cafe24_order_no required');
-  if(!items.length)return fail(res,400,'internal_items required');
-  if(!clean(raw.member_id)&&!clean(raw.guest_key))return fail(res,400,'member_id or guest_key required');
+  const memberId=clean(raw.member_id||raw.memberId);
+  const guestKey=clean(raw.guest_key||raw.guestKey);
+  if(!cafeNo)return fail(res,400,'cafe24_order_no required');
+  if(!/^\d{8}-\d{7}$/.test(cafeNo))return fail(res,400,'invalid cafe24_order_no');
+  if(!memberId&&!guestKey)return fail(res,400,'member_id or guest_key required');
+
   const client=await pool.connect().catch(()=>null);
   if(!client)return fail(res,500,'DB client connect failed');
   try{
     await client.query('BEGIN');
-    const existing=await client.query('SELECT * FROM gm_order WHERE order_no=$1 LIMIT 1',[orderNo]);
-    const input=Object.assign({},raw,{order_no:orderNo,cafe24_order_no:cafeNo,items:items,order_status:raw.order_status||'ordered',payment_status:raw.payment_status||'pending',shipping_status:raw.shipping_status||'pending'});
-    const row=buildOrderRow(input,items);
-    if(existing.rows[0]){
-      const ex=existing.rows[0];
-      if(!row.member_id)row.member_id=ex.member_id;
-      if(!row.guest_key)row.guest_key=ex.guest_key;
-      if(!row.total_product_price)row.total_product_price=money(ex.total_product_price,0);
-      if(!row.total_delivery_fee)row.total_delivery_fee=money(ex.total_delivery_fee,0);
-      if(!row.total_payment_price)row.total_payment_price=money(ex.total_payment_price,0);
-      if(!row.expected_payment_amount)row.expected_payment_amount=row.total_payment_price;
+    const allocated=await allocateServerOrderNo(client,cafeNo,memberId,guestKey);
+    await client.query('COMMIT');
+    console.log('[GM_ORDER_ALLOCATE_NO_OK]',JSON.stringify({cafe24_order_no:cafeNo,order_no:allocated.order_no,existing:allocated.existing,status:allocated.order_status}));
+    ok(res,{action:'order.allocate-no',cafe24_order_no:cafeNo,order_no:allocated.order_no,existing:allocated.existing,order_status:allocated.order_status});
+  }catch(e){
+    await client.query('ROLLBACK').catch(()=>{});
+    console.error('[GM_ORDER_ALLOCATE_NO_ERROR]',String(e&&e.message||e));
+    fail(res,500,'order_no allocate failed',{detail:String(e&&e.message||e)});
+  }finally{client.release();}
+});
+
+router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
+  const pool=db(req);
+  if(!pool)return fail(res,500,'DB pool is not attached');
+  const raw=req.body||{};
+  const cafeNo=clean(raw.cafe24_order_no||raw.cafe24OrderNo||raw.order_id||raw.orderId);
+  const orderNo=clean(raw.order_no||raw.gm_order_no);
+  const items=Array.isArray(raw.items)?raw.items:(Array.isArray(raw.internal_items)?raw.internal_items:normalizeItems(raw));
+  if(!cafeNo||!orderNo)return fail(res,400,'order_no/cafe24_order_no required');
+  if(!items.length)return fail(res,400,'items required');
+  if(!clean(raw.member_id)&&!clean(raw.guest_key))return fail(res,400,'member_id or guest_key required');
+
+  const client=await pool.connect().catch(()=>null);
+  if(!client)return fail(res,500,'DB client connect failed');
+  try{
+    await client.query('BEGIN');
+    const existing=await client.query(`
+      SELECT *
+        FROM gm_order
+       WHERE order_no=$1
+       FOR UPDATE
+    `,[orderNo]);
+    if(!existing.rows[0]){
+      await client.query('ROLLBACK');
+      return fail(res,404,'allocated order_no not found',{order_no:orderNo});
     }
+    const ex=existing.rows[0];
+    const status=clean(ex.order_status).toUpperCase();
+    if(status!=='PENDING_DETAIL'){
+      await client.query('ROLLBACK');
+      if(clean(ex.cafe24_order_no)===cafeNo){
+        return ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,existing:true,item_count:0,basket_deleted:0});
+      }
+      return fail(res,409,'order already completed',{order_no:orderNo,order_status:ex.order_status||null});
+    }
+    if(clean(ex.cafe24_order_no)&&clean(ex.cafe24_order_no)!==cafeNo){
+      await client.query('ROLLBACK');
+      return fail(res,409,'cafe24_order_no mismatch',{order_no:orderNo});
+    }
+
+    const input=Object.assign({},raw,{
+      order_no:orderNo,
+      gm_order_no:orderNo,
+      cafe24_order_no:cafeNo,
+      items:items,
+      order_status:raw.order_status||'ordered',
+      payment_status:raw.payment_status||'pending',
+      shipping_status:raw.shipping_status||'pending'
+    });
+    const row=buildOrderRow(input,items);
+    if(!row.member_id)row.member_id=ex.member_id;
+    if(!row.guest_key)row.guest_key=ex.guest_key;
+
     const action=await upsertOrder(client,row);
-    const itemCount=await replaceCafe24InternalItems(client,row,items);
-    await client.query('UPDATE gm_order_item SET cafe24_order_no=$2, updated_at=$3 WHERE order_no=$1',[orderNo,cafeNo,nowKst()]);
-    /* 주문 확정 후 이번 주문에 포함된 외부상품만 gm_basket에서 삭제한다.
-       회원의 다른 장바구니 상품까지 지우지 않도록 order_item의 mall_code + pi_ii_vi로 정확히 제한한다. */
+    const itemResult=await replaceOrderItems(client,row,items);
+
+    await client.query(`
+      UPDATE gm_order_item
+         SET cafe24_order_no=$2, updated_at=$3
+       WHERE order_no=$1
+         AND mall_code='GMKR'
+    `,[orderNo,cafeNo,nowKst()]);
+
     const basketCleanup=await client.query(`
       DELETE FROM gm_basket b
       USING gm_order_item oi
       WHERE oi.order_no=$1
-        AND COALESCE(oi.source_mall,oi.mall_code,'') <> 'GMKR'
+        AND oi.mall_code <> 'GMKR'
         AND b.mall_code=oi.mall_code
         AND b.pi_ii_vi=oi.pi_ii_vi
         AND (($2<>'' AND b.member_id=$2) OR ($3<>'' AND b.guest_key=$3))
       RETURNING b.mall_code,b.pi_ii_vi
     `,[orderNo,clean(row.member_id),clean(row.guest_key)]);
     const basketDeleted=basketCleanup.rowCount||0;
+
     await client.query('COMMIT');
-    console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({order_no:orderNo,cafe24_order_no:cafeNo,items:itemCount,action,basket_deleted:basketDeleted}));
-    ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,item_count:itemCount,order_action:action,basket_deleted:basketDeleted});
+    console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({
+      order_no:orderNo,cafe24_order_no:cafeNo,items:itemResult.itemCount,action,basket_deleted:basketDeleted
+    }));
+    ok(res,{
+      action:'order.cafe24-confirm',
+      order_no:orderNo,
+      cafe24_order_no:cafeNo,
+      item_count:itemResult.itemCount,
+      order_action:action,
+      basket_deleted:basketDeleted
+    });
     orderCompletedAfterResponse(req,orderNo,{ source:'cafe24-confirm', order_mode:clean(raw.order_mode||'internal').toLowerCase() });
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
@@ -705,7 +834,7 @@ router.post('/api/gm/order/create', async (req, res) => {
   try{
     const body=req.body||{};
     const items=normalizeItems(body);
-    console.log('[GM_ORDER_CREATE_IN_V044]',JSON.stringify({
+    console.log('[GM_ORDER_CREATE_IN_V045]',JSON.stringify({
       order_no:clean(body.order_no||body.gm_order_no||body.orderNo),
       member_id:clean(body.member_id||body.memberId),
       guest_key:clean(body.guest_key||body.guestKey),
@@ -714,7 +843,7 @@ router.post('/api/gm/order/create', async (req, res) => {
       mall_codes:items.map(x=>clean(itemVal(x,['mall_code','mallCode','source_mall','sourceMall'],'')).toUpperCase()).filter(Boolean).slice(0,20)
     }));
   }catch(e){
-    console.error('[GM_ORDER_CREATE_IN_LOG_ERROR_V042]',String(e&&e.message||e));
+    console.error('[GM_ORDER_CREATE_IN_LOG_ERROR_V045]',String(e&&e.message||e));
   }
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
@@ -724,9 +853,39 @@ router.post('/api/gm/order/create', async (req, res) => {
   const client = await pool.connect().catch(()=>null);
   if(!client) return fail(res, 500, 'DB client connect failed');
   try{
-    const orderRow = buildOrderRow(raw, inputItems);
     const orderMode=clean(raw.order_mode||raw.orderMode||'external').toLowerCase();
+    let suppliedOrderNo=clean(raw.gm_order_no||raw.order_no);
     await client.query('BEGIN');
+
+    /* 외부 단독 주문은 이 저장 transaction 안에서 서버가 번호를 발급한다.
+       INTERNAL/MIXED는 Cafe24 주문결과의 /allocate-no에서 먼저 예약된 번호만 사용한다. */
+    if(!suppliedOrderNo){
+      if(orderMode==='mixed'||orderMode==='internal'){
+        await client.query('ROLLBACK');
+        return fail(res,400,'order_no required after cafe24 result allocation');
+      }
+      const allocated=await allocateServerOrderNo(
+        client,'',
+        clean(raw.member_id||raw.memberId),
+        clean(raw.guest_key||raw.guestKey)
+      );
+      suppliedOrderNo=allocated.order_no;
+      raw.order_no=suppliedOrderNo;
+      raw.gm_order_no=suppliedOrderNo;
+    }
+
+    const orderRow = buildOrderRow(raw, inputItems);
+
+    /* 기존 완료 주문 덮어쓰기는 금지하고, 서버가 만든 PENDING_DETAIL row만 완성한다. */
+    const existingCreate=await client.query('SELECT order_status,cafe24_order_no FROM gm_order WHERE order_no=$1 FOR UPDATE',[orderRow.order_no]);
+    if(existingCreate.rows[0]){
+      const existingStatus=clean(existingCreate.rows[0].order_status).toUpperCase();
+      if(existingStatus!=='PENDING_DETAIL'){
+        await client.query('ROLLBACK');
+        return fail(res,409,'order_no already exists',{order_no:orderRow.order_no,order_status:existingCreate.rows[0].order_status||null});
+      }
+    }
+
     const orderAction = await upsertOrder(client, orderRow);
     const itemResult = await replaceOrderItems(client, orderRow, inputItems);
 
