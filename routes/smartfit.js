@@ -326,7 +326,10 @@ router.get('/api/gm/smartfit/space/list', async (req,res)=>{
     if(mine && member){ params.push(member); where.push(`sp.owner_member_id=$${params.length}`); }
     else { where.push(`sp.visibility='public'`); where.push(`COALESCE(sp.search_visible,'T')='T'`); }
     params.push(limit); const lim='$'+params.length;
-    const r=await pool.query(`SELECT sp.*, m.member_name, m.member_nickname FROM gm_smartfit_space sp LEFT JOIN gm_member m ON m.member_id=sp.owner_member_id WHERE ${where.join(' AND ')} ORDER BY sp.updated_at DESC LIMIT ${lim}`, params);
+    const r=await pool.query(`SELECT sp.*, m.member_name, m.member_nickname,
+      (SELECT COUNT(*)::int FROM gm_smartfit_template t WHERE t.space_id=sp.space_id AND t.is_active='T' AND COALESCE(t.is_deleted,'F')<>'T') AS template_count,
+      (SELECT COUNT(*)::int FROM gm_smartfit_item it JOIN gm_smartfit_template t2 ON t2.template_id=it.template_id WHERE t2.space_id=sp.space_id AND t2.is_active='T' AND COALESCE(t2.is_deleted,'F')<>'T' AND COALESCE(it.is_deleted,'F')<>'T') AS product_count
+      FROM gm_smartfit_space sp LEFT JOIN gm_member m ON m.member_id=sp.owner_member_id WHERE ${where.join(' AND ')} ORDER BY sp.updated_at DESC LIMIT ${lim}`, params);
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceSpaceTitle(x), author:displayAuthor(x) }),'space')), count:r.rowCount });
   }catch(e){ fail(res,500,'space list failed',{ detail:String(e.message||e) }); }
 });
@@ -349,19 +352,21 @@ router.post('/api/gm/smartfit/space/save', async (req,res)=>{
     const nick=s(b.author_nickname || b.authorNickname || '') || await memberNickname(client, member);
     const desc=validateDescription(b.space_description || b.description || b.space_desc || '');
     const links=normalizeLinks(b);
-    const visibility=visibilityOf(b.visibility || b.is_public || 'private','private');
+    const visibilityProvided=Object.prototype.hasOwnProperty.call(b,'visibility') || Object.prototype.hasOwnProperty.call(b,'is_public');
     await client.query('BEGIN');
     let saved;
     if(spaceId){
       const old=(await client.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 FOR UPDATE',[spaceId])).rows[0];
       if(!old) throw new Error('space not found');
       if(!(await isOwnerOrAdmin(client, member, old.owner_member_id || old.creator_member_id))) throw new Error('permission denied');
+      const visibility=visibilityProvided ? visibilityOf(b.visibility || b.is_public,'private') : visibilityOf(old.visibility,'private');
       const r=await client.query(`UPDATE gm_smartfit_space SET source_lang=$1, space_title_source=$2, space_title_ko=$3, author_nickname=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, visibility=$14, search_visible=$15,
         is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$16 RETURNING *`,
         [sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),imageCount(old.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility),spaceId]);
       saved=r.rows[0];
     }else{
+      const visibility=visibilityProvided ? visibilityOf(b.visibility || b.is_public,'private') : 'private';
       const r=await client.query(`INSERT INTO gm_smartfit_space (creator_member_id, owner_member_id, source_lang, space_title_source, space_title_ko, author_nickname, category_no, image_count,
         link01, link02, link03, link04, link05, link06, description, visibility, search_visible)
         VALUES ($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
