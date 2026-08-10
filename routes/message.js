@@ -705,16 +705,15 @@ function buildOrderReceivedPayload(order,langInfo){
   const depositor=s(order.depositor_name);
   const bank=[bankName,account,depositor].filter(Boolean).join(' · ');
   const detailUrl='/myshop/order/gm_detail.html?order_no='+encodeURIComponent(orderNo);
+  const amountText=lang==='ko' ? `${amount.toLocaleString('en-US')}원` : `${amount.toLocaleString('en-US')} ${currency}`;
   const lines=[
-    t.title,
     `${t.no}: ${orderNo}`,
     orderedAt?`${t.at}: ${orderedAt}`:'',
-    `${t.amount}: ${amount.toLocaleString('en-US')} ${currency}`,
-    bank?`${t.bank}: ${bank}`:'',
-    `${t.detail}: ${detailUrl}`
+    `${t.amount}: ${amountText}`,
+    bank?`${t.bank}: ${bank}`:''
   ].filter(Boolean);
   return {
-    message_type:'ORDER_RECEIVED', title:t.title, message:lines.join('\n'),
+    message_type:'ORDER_RECEIVED', title:t.title, message:lines.join('\n'), notification_text:lines.join('\n'),
     order_no:orderNo, ordered_at:orderedAt, amount, currency,
     bank_name:bankName, account_number:account, depositor_name:depositor,
     detail_url:detailUrl, detail_label:t.detail, confirm_label:t.confirm||'OK',
@@ -768,6 +767,98 @@ router.post('/api/gm/message/order/ack', async (req,res)=>{
     if(!r.rowCount) return fail(res,404,'order message not found');
     return ok(res,{action:'order-message.ack',item:r.rows[0]});
   }catch(e){ return fail(res,500,'order message ack failed',{detail:String(e&&e.message||e)}); }
+});
+
+
+/* ============================================================================
+ * GM_ORDER_MESSAGE_INBOX_V001
+ * 주문 알림함: Android 알림 권한과 무관하게 gm_order_message를 조회한다.
+ * unread 기준은 opened_at IS NULL. 상단 알림을 지워도 서버 이력은 남는다.
+ * ============================================================================ */
+function orderInboxMember(v){ return s(v).slice(0,100); }
+async function orderInboxRowPayload(pool,row){
+  const order = row || {};
+  const langInfo = {
+    device_lang: validOrderDeviceLang(order.device_lang) || 'en',
+    lang: orderMessageLangCode(order.device_lang || 'en'),
+    source: 'MESSAGE_SAVED_LANG'
+  };
+  if(s(order.message_type).toUpperCase()==='ORDER_RECEIVED') return buildOrderReceivedPayload(order,langInfo);
+  const detailUrl='/myshop/order/gm_detail.html?order_no='+encodeURIComponent(s(order.order_no));
+  const direct=s(order.direct_message);
+  return {
+    message_type:s(order.message_type).toUpperCase(),
+    title:direct || s(order.message_type).replace(/_/g,' '),
+    message:direct,
+    notification_text:direct,
+    order_no:s(order.order_no),
+    detail_url:detailUrl,
+    device_lang:langInfo.device_lang,
+    language_code:langInfo.lang,
+    language_source:langInfo.source
+  };
+}
+
+router.get('/api/gm/message/order/unread-count', async (req,res)=>{
+  try{
+    const pool=db(req), member=orderInboxMember(req.query.member_id||req.query.memberId);
+    if(!pool) return fail(res,500,'DB pool is not attached');
+    if(!member) return fail(res,400,'member_id required');
+    const r=await pool.query(`SELECT COUNT(*)::int AS unread_count
+      FROM gm_order_message m
+      JOIN gm_order o ON o.order_no=m.order_no
+      WHERE o.member_id=$1 AND m.opened_at IS NULL`,[member]);
+    return ok(res,{action:'order-message.unread-count',member_id:member,unread_count:Number(r.rows[0]?.unread_count||0)});
+  }catch(e){ return fail(res,500,'order message unread count failed',{detail:String(e&&e.message||e)}); }
+});
+
+router.get('/api/gm/message/order/list', async (req,res)=>{
+  try{
+    const pool=db(req), member=orderInboxMember(req.query.member_id||req.query.memberId);
+    if(!pool) return fail(res,500,'DB pool is not attached');
+    if(!member) return fail(res,400,'member_id required');
+    const limit=Math.min(100,Math.max(1,Number(req.query.limit||50)||50));
+    const r=await pool.query(`SELECT m.order_no,m.message_seq,m.message_type,m.direct_message,m.device_lang,
+      m.received_yn,m.sent_at,m.opened_at,
+      o.member_id,o.cafe24_order_no,o.ordered_at,o.created_at,
+      o.total_payment_price,o.expected_payment_amount,o.actual_payment_amount,
+      o.payment_bank_name,o.payment_account_number,o.depositor_name,
+      to_char(o.ordered_at,'YYYY-MM-DD HH24:MI') AS ordered_at_text,
+      to_char(o.created_at,'YYYY-MM-DD HH24:MI') AS created_at_text
+      FROM gm_order_message m
+      JOIN gm_order o ON o.order_no=m.order_no
+      WHERE o.member_id=$1 AND m.opened_at IS NULL
+      ORDER BY COALESCE(m.sent_at,o.ordered_at,o.created_at) DESC,m.message_seq DESC
+      LIMIT $2`,[member,limit]);
+    const items=[];
+    for(const row of r.rows){
+      const p=await orderInboxRowPayload(pool,row);
+      items.push({
+        order_no:row.order_no,message_seq:Number(row.message_seq||0),message_type:row.message_type,
+        device_lang:row.device_lang,received_yn:row.received_yn,sent_at:row.sent_at,opened_at:row.opened_at,
+        opened_yn:row.opened_at?'Y':'N',app_message:p
+      });
+    }
+    const c=await pool.query(`SELECT COUNT(*)::int AS unread_count
+      FROM gm_order_message m JOIN gm_order o ON o.order_no=m.order_no
+      WHERE o.member_id=$1 AND m.opened_at IS NULL`,[member]);
+    return ok(res,{action:'order-message.list',member_id:member,unread_count:Number(c.rows[0]?.unread_count||0),items});
+  }catch(e){ return fail(res,500,'order message list failed',{detail:String(e&&e.message||e)}); }
+});
+
+router.post('/api/gm/message/order/read', async (req,res)=>{
+  try{
+    const pool=db(req), b=req.body||{};
+    const member=orderInboxMember(b.member_id||b.memberId), orderNo=s(b.order_no||b.orderNo), seq=Number(b.message_seq||b.messageSeq||0);
+    if(!pool) return fail(res,500,'DB pool is not attached');
+    if(!member||!orderNo||!seq) return fail(res,400,'member_id, order_no and message_seq required');
+    const r=await pool.query(`UPDATE gm_order_message m SET received_yn='Y',opened_at=COALESCE(m.opened_at,CURRENT_TIMESTAMP)
+      FROM gm_order o
+      WHERE m.order_no=$1 AND m.message_seq=$2 AND o.order_no=m.order_no AND o.member_id=$3
+      RETURNING m.*`,[orderNo,seq,member]);
+    if(!r.rowCount) return fail(res,404,'order message not found');
+    return ok(res,{action:'order-message.read',item:r.rows[0]});
+  }catch(e){ return fail(res,500,'order message read failed',{detail:String(e&&e.message||e)}); }
 });
 
 module.exports = router;
