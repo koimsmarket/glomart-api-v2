@@ -326,10 +326,7 @@ router.get('/api/gm/smartfit/space/list', async (req,res)=>{
     if(mine && member){ params.push(member); where.push(`sp.owner_member_id=$${params.length}`); }
     else { where.push(`sp.visibility='public'`); where.push(`COALESCE(sp.search_visible,'T')='T'`); }
     params.push(limit); const lim='$'+params.length;
-    const r=await pool.query(`SELECT sp.*, m.member_name, m.member_nickname,
-      (SELECT COUNT(*)::int FROM gm_smartfit_template t WHERE t.space_id=sp.space_id AND t.is_active='T' AND COALESCE(t.is_deleted,'F')<>'T') AS template_count,
-      (SELECT COUNT(*)::int FROM gm_smartfit_item it JOIN gm_smartfit_template t2 ON t2.template_id=it.template_id WHERE t2.space_id=sp.space_id AND t2.is_active='T' AND COALESCE(t2.is_deleted,'F')<>'T' AND COALESCE(it.is_deleted,'F')<>'T') AS product_count
-      FROM gm_smartfit_space sp LEFT JOIN gm_member m ON m.member_id=sp.owner_member_id WHERE ${where.join(' AND ')} ORDER BY sp.updated_at DESC LIMIT ${lim}`, params);
+    const r=await pool.query(`SELECT sp.*, m.member_name, m.member_nickname FROM gm_smartfit_space sp LEFT JOIN gm_member m ON m.member_id=sp.owner_member_id WHERE ${where.join(' AND ')} ORDER BY sp.updated_at DESC LIMIT ${lim}`, params);
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceSpaceTitle(x), author:displayAuthor(x) }),'space')), count:r.rowCount });
   }catch(e){ fail(res,500,'space list failed',{ detail:String(e.message||e) }); }
 });
@@ -352,21 +349,19 @@ router.post('/api/gm/smartfit/space/save', async (req,res)=>{
     const nick=s(b.author_nickname || b.authorNickname || '') || await memberNickname(client, member);
     const desc=validateDescription(b.space_description || b.description || b.space_desc || '');
     const links=normalizeLinks(b);
-    const visibilityProvided=Object.prototype.hasOwnProperty.call(b,'visibility') || Object.prototype.hasOwnProperty.call(b,'is_public');
+    const visibility=visibilityOf(b.visibility || b.is_public || 'private','private');
     await client.query('BEGIN');
     let saved;
     if(spaceId){
       const old=(await client.query('SELECT * FROM gm_smartfit_space WHERE space_id=$1 FOR UPDATE',[spaceId])).rows[0];
       if(!old) throw new Error('space not found');
       if(!(await isOwnerOrAdmin(client, member, old.owner_member_id || old.creator_member_id))) throw new Error('permission denied');
-      const visibility=visibilityProvided ? visibilityOf(b.visibility || b.is_public,'private') : visibilityOf(old.visibility,'private');
       const r=await client.query(`UPDATE gm_smartfit_space SET source_lang=$1, space_title_source=$2, space_title_ko=$3, author_nickname=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, visibility=$14, search_visible=$15,
         is_deleted='F', deleted_at=NULL, deleted_by=NULL, updated_at=CURRENT_TIMESTAMP WHERE space_id=$16 RETURNING *`,
         [sourceLang,title,s(b.title_ko || b.space_title_ko || ''),nick,s(b.category_no || b.category_code || 'ENTIRE'),imageCount(old.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,visibility,publicVisibility(visibility),spaceId]);
       saved=r.rows[0];
     }else{
-      const visibility=visibilityProvided ? visibilityOf(b.visibility || b.is_public,'private') : 'private';
       const r=await client.query(`INSERT INTO gm_smartfit_space (creator_member_id, owner_member_id, source_lang, space_title_source, space_title_ko, author_nickname, category_no, image_count,
         link01, link02, link03, link04, link05, link06, description, visibility, search_visible)
         VALUES ($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
@@ -419,14 +414,6 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
       importedWhere.push(`c.is_active='T'`);
       importedWhere.push(`COALESCE(c.is_deleted,'F')<>'T'`);
       importedWhere.push(`t.creator_member_id<>$${importedParams.length}`);
-      /*
-       * 별도 관계 테이블/컬럼을 만들지 않는 현재 구조에서는 퍼온 템플릿에
-       * 사용자 개인의 space_id를 저장할 곳이 없다. 원본 템플릿의 t.space_id를
-       * 그대로 사용하면 작성자의 공간이 다른 사용자에게 섞이므로 금지한다.
-       * 따라서 퍼온 템플릿은 내 목록에서 '공간 없음'으로만 취급한다.
-       */
-      if(spaceId !== null){ importedWhere.push(`1=0`); }
-      /* root(공간 없음) 또는 전체에서는 imported를 유지한다. */
       importedParams.push(limit);
       const imported=(await pool.query(`${selectSql}, 'IMPORTED'::text AS list_type, c.collected_at${joinSql}
         INNER JOIN gm_smartfit_collection c ON c.template_id=t.template_id
@@ -450,7 +437,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
 });
 
 router.post('/api/gm/smartfit/template/save', async (req,res)=>{
-  console.log('[SMARTFIT_SAVE_DB] TEMPLATE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
+  console.log('[SMARTFIT_SAVE_DB] TEMPLATE_START', { member_id:s((req.body||{}).member_id || (req.body||{}).memberId), space_id:s((req.body||{}).space_id || ''), title:s((req.body||{}).template_title_source || (req.body||{}).template_title || (req.body||{}).title) });
   const pool=db(req); const client=await pool.connect();
   try{
     const b=req.body||{}; const member=s(b.member_id || b.memberId || b.creator_member_id || b.creatorMemberId);
@@ -462,6 +449,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     const desc=validateDescription(b.template_description || b.description || b.template_desc || '');
     const links=normalizeLinks(b);
     const visibility=visibilityOf(b.visibility || b.is_public || 'private','private');
+    const spaceIdValue=nullableId(b.space_id || b.spaceId);
     const searchSource=s(b.search_source || b.search || '');
     const keywordCount=searchSource ? searchSource.split(',').map(x=>s(x)).filter(Boolean).slice(0,10).length : 0;
     /*
@@ -477,6 +465,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     console.log('[SMARTFIT_SAVE_V136] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0, has_product_id:hasProductId });
     await client.query('BEGIN');
     console.log('[SMARTFIT_SAVE_V136] STEP1_BEGIN');
+    await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
     let productLocked=false;
     if(templateId){
@@ -513,17 +502,16 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       productLocked=collectedCount>0;
       console.log('[SMARTFIT_SAVE_V141] PRODUCT_LOCK_STATUS',{template_id:templateId,product_locked:productLocked,collected_count:collectedCount});
       console.log('[SMARTFIT_SAVE_V136] STEP3_TEMPLATE_UPDATE', { template_id:templateId, collected_count:collectedCount });
-      const preservedSpaceId=nullableId(old.space_id);
       const r=await client.query(`UPDATE gm_smartfit_template SET space_id=$1, source_lang=$2, template_title_source=$3, template_title_ko=$4, category_no=$5, image_count=$6,
         link01=$7, link02=$8, link03=$9, link04=$10, link05=$11, link06=$12, description=$13, search_source=$14, search_ko=$15, keyword_count=$16, content_json=$17::jsonb,
         visibility=$18, search_visible=$19, is_deleted='F', updated_at=CURRENT_TIMESTAMP WHERE template_id=$20 RETURNING *`,
-        [preservedSpaceId,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(old.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
+        [spaceIdValue,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),imageCount(old.image_count),links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility),templateId]);
       saved=r.rows[0];
     }else{
       const r=await client.query(`INSERT INTO gm_smartfit_template (space_id, creator_member_id, source_lang, template_title_source, template_title_ko, category_no, image_count,
         link01, link02, link03, link04, link05, link06, description, search_source, search_ko, keyword_count, content_json, visibility, search_visible)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20) RETURNING *`,
-        [null,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),0,links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
+        [spaceIdValue,member,sourceLang,title,s(b.title_ko || b.template_title_ko || ''),s(b.category_no || b.category_code || 'ENTIRE'),0,links.link01,links.link02,links.link03,links.link04,links.link05,links.link06,desc,searchSource,s(b.search_ko || ''),keywordCount,JSON.stringify(b.content_json || b.contentJson || b.content || {}),visibility,publicVisibility(visibility)]);
       saved=r.rows[0];
     }
     let savedItemCount=0;
