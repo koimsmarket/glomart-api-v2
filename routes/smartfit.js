@@ -1089,15 +1089,15 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
 });
 
 
-/* SmartFit creator message V068
- * Page load reads only precalculated relation assets.
- * Exact recipient expansion runs only when the creator presses send.
+/* SmartFit creator message V100
+ * Permanent storage is one state row per template.
+ * gm_smartfit_message_receiver is temporary queue work only and is deleted after app-message creation.
+ * Additional sends are ALWAYS night queue. Relation total >= 10,000 is classified as paid target;
+ * billing calculation is intentionally not implemented yet.
  */
-function smartfitImmediateMax(){
-  return Math.max(1, i(process.env.SMARTFIT_MESSAGE_IMMEDIATE_MAX || 10000, 10000));
-}
+function smartfitPaidRelationLimit(){ return Math.max(1, i(process.env.SMARTFIT_MESSAGE_PAID_RELATION_LIMIT || 10000,10000)); }
 async function assertTemplateCreator(pool, templateId, memberId){
-  const row=(await pool.query(`SELECT template_id,creator_member_id,template_title_source,template_title_ko,visibility,is_active,is_deleted
+  const row=(await pool.query(`SELECT template_id,space_id,creator_member_id,template_title_source,template_title_ko,visibility,is_active,is_deleted
     FROM gm_smartfit_template WHERE template_id=$1 LIMIT 1`,[templateId])).rows[0];
   if(!row) throw new Error('template not found');
   if(!(await isOwnerOrAdmin(pool,memberId,row.creator_member_id))) throw new Error('permission denied');
@@ -1110,212 +1110,201 @@ function nextNightKstSql(){
     ELSE (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul')::date + 1) + TIME '02:15') AT TIME ZONE 'Asia/Seoul'
   END`;
 }
+function relationCounts(row){
+  row=row||{};
+  const a=[];
+  for(let d=1;d<=5;d++) a.push(Number(row[`up_${d}_count`]||0)+Number(row[`down_${d}_count`]||0));
+  return a;
+}
+async function smartfitMessageAssets(pool, template, member){
+  let relation={};
+  try{ relation=(await pool.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[member])).rows[0]||{}; }catch(_e){}
+  const rel=relationCounts(relation); const relationTotal=rel.reduce((a,b)=>a+b,0);
+  let subs={total_count:0,outside_relation_count:0,relation_1_count:0,relation_2_count:0,relation_3_count:0,relation_4_count:0,relation_5_count:0};
+  if(template.space_id){
+    try{
+      subs=(await pool.query(`SELECT COUNT(*)::bigint AS total_count,
+        COUNT(*) FILTER (WHERE relation_depth=0)::bigint AS outside_relation_count,
+        COUNT(*) FILTER (WHERE relation_depth=1)::bigint AS relation_1_count,
+        COUNT(*) FILTER (WHERE relation_depth=2)::bigint AS relation_2_count,
+        COUNT(*) FILTER (WHERE relation_depth=3)::bigint AS relation_3_count,
+        COUNT(*) FILTER (WHERE relation_depth=4)::bigint AS relation_4_count,
+        COUNT(*) FILTER (WHERE relation_depth=5)::bigint AS relation_5_count
+        FROM gm_smartfit_space_subscriber WHERE space_no=$1::text AND active_yn='Y'`,[template.space_id])).rows[0]||subs;
+    }catch(_e){}
+  }
+  return {relation,relation_counts:rel,relation_total:relationTotal,subscribers:{
+    total_count:Number(subs.total_count||0),outside_relation_count:Number(subs.outside_relation_count||0),
+    relation_1_count:Number(subs.relation_1_count||0),relation_2_count:Number(subs.relation_2_count||0),relation_3_count:Number(subs.relation_3_count||0),relation_4_count:Number(subs.relation_4_count||0),relation_5_count:Number(subs.relation_5_count||0)
+  }};
+}
+async function templateMessageState(pool,templateId,creator){
+  await pool.query(`INSERT INTO gm_smartfit_template_message_state(template_id,creator_member_id) VALUES($1,$2)
+    ON CONFLICT(template_id) DO UPDATE SET creator_member_id=EXCLUDED.creator_member_id`,[templateId,creator]);
+  return (await pool.query(`SELECT * FROM gm_smartfit_template_message_state WHERE template_id=$1 LIMIT 1`,[templateId])).rows[0]||{};
+}
 
-
-/* Creator-level message preference.
- * No row means receive. An N row blocks every message from that creator.
- * Re-allowing removes the reject row; template collection/subscription is untouched.
- */
+/* Creator-level message preference: N blocks messages from this creator. */
 router.get('/api/gm/smartfit/creator/message/preference', async (req,res)=>{
   try{
     const pool=db(req); const member=s(req.query.member_id||req.query.memberId); const creator=s(req.query.creator_member_id||req.query.creatorMemberId);
-    if(!member) return fail(res,401,'login required');
-    if(!creator) return fail(res,400,'creator_member_id required');
+    if(!member) return fail(res,401,'login required'); if(!creator) return fail(res,400,'creator_member_id required');
     const row=(await pool.query(`SELECT message_accept_yn FROM gm_smartfit_subscribe WHERE member_id=$1 AND creator_member_id=$2 LIMIT 1`,[member,creator])).rows[0];
-    ok(res,{member_id:member,creator_member_id:creator,message_receive_yn:row&&row.message_accept_yn==='N'?'N':'Y',message_accept_yn:row&&row.message_accept_yn==='N'?'N':'Y',reject_record_yn:row&&row.message_accept_yn==='N'?'Y':'N'});
+    ok(res,{member_id:member,creator_member_id:creator,message_receive_yn:row&&row.message_accept_yn==='N'?'N':'Y',message_accept_yn:row&&row.message_accept_yn==='N'?'N':'Y'});
   }catch(e){ fail(res,500,'message preference failed',{detail:String(e.message||e)}); }
 });
-
 router.post('/api/gm/smartfit/creator/message/reject', async (req,res)=>{
   try{
-    const pool=db(req),b=req.body||{}; const member=s(b.member_id||b.memberId); const creator=s(b.creator_member_id||b.creatorMemberId);
-    if(!member) return fail(res,401,'login required');
-    if(!creator) return fail(res,400,'creator_member_id required');
-    if(member===creator) return fail(res,400,'self creator is not allowed');
-    const r=await pool.query(`INSERT INTO gm_smartfit_subscribe(member_id,creator_member_id,message_accept_yn)
-      VALUES($1,$2,'N')
-      ON CONFLICT(member_id,creator_member_id) DO UPDATE SET message_accept_yn='N'
-      RETURNING member_id,creator_member_id,message_accept_yn`,[member,creator]);
-    ok(res,{item:r.rows[0],message_receive_yn:'N',message_accept_yn:'N'});
+    const pool=db(req),b=req.body||{}; const member=s(b.member_id||b.memberId),creator=s(b.creator_member_id||b.creatorMemberId);
+    if(!member) return fail(res,401,'login required'); if(!creator) return fail(res,400,'creator_member_id required'); if(member===creator) return fail(res,400,'self creator is not allowed');
+    const r=await pool.query(`INSERT INTO gm_smartfit_subscribe(member_id,creator_member_id,message_accept_yn) VALUES($1,$2,'N')
+      ON CONFLICT(member_id,creator_member_id) DO UPDATE SET message_accept_yn='N' RETURNING *`,[member,creator]);
+    ok(res,{item:r.rows[0],message_receive_yn:'N'});
   }catch(e){ fail(res,500,'message reject failed',{detail:String(e.message||e)}); }
 });
-
 router.post('/api/gm/smartfit/creator/message/allow', async (req,res)=>{
   try{
-    const pool=db(req),b=req.body||{}; const member=s(b.member_id||b.memberId); const creator=s(b.creator_member_id||b.creatorMemberId);
-    if(!member) return fail(res,401,'login required');
-    if(!creator) return fail(res,400,'creator_member_id required');
+    const pool=db(req),b=req.body||{}; const member=s(b.member_id||b.memberId),creator=s(b.creator_member_id||b.creatorMemberId);
+    if(!member) return fail(res,401,'login required'); if(!creator) return fail(res,400,'creator_member_id required');
     const r=await pool.query(`DELETE FROM gm_smartfit_subscribe WHERE member_id=$1 AND creator_member_id=$2 AND message_accept_yn='N'`,[member,creator]);
-    ok(res,{deleted:r.rowCount,message_receive_yn:'Y',message_accept_yn:'Y'});
+    ok(res,{deleted:r.rowCount,message_receive_yn:'Y'});
   }catch(e){ fail(res,500,'message allow failed',{detail:String(e.message||e)}); }
 });
 
 router.get('/api/gm/smartfit/template/message/summary', async (req,res)=>{
-  const pool=db(req);
-  const templateId=i(req.query.template_id||req.query.templateId,0);
-  const member=s(req.query.member_id||req.query.memberId);
-  if(!member) return fail(res,401,'login required');
-  if(!templateId) return fail(res,400,'template_id required');
-
+  const pool=db(req), templateId=i(req.query.template_id||req.query.templateId,0), member=s(req.query.member_id||req.query.memberId);
+  if(!member) return fail(res,401,'login required'); if(!templateId) return fail(res,400,'template_id required');
   try{
     const template=await assertTemplateCreator(pool,templateId,member);
-    if(visibilityOf(template.visibility||template.search_visible,'private')!=='public') return fail(res,409,'public template required for message');
-    const warnings=[];
-    let relation={};
-    let sub={total_count:0,accept_count:0,reject_count:0};
-    let sent={registered_count:0,sent_count:0,read_count:0,queued_count:0,failed_count:0,last_serial_no:0};
-
-    /* These are summary assets only. A missing/pending optional asset must never
-       block the template edit screen or message composer. */
-    try{
-      relation=(await pool.query(`SELECT * FROM gm_member_relation_count WHERE member_id=$1 LIMIT 1`,[member])).rows[0]||{};
-    }catch(assetError){
-      warnings.push('relation_asset_unavailable');
-      console.warn('[SMARTFIT_MESSAGE_SUMMARY_RELATION_SKIP]',{template_id:templateId,member_id:member,code:assetError&&assetError.code,detail:String(assetError&&assetError.message||assetError)});
-    }
-
-    try{
-      sub=(await pool.query(`WITH collectors AS (
-          SELECT DISTINCT c.member_id
-          FROM gm_smartfit_collection c
-          JOIN gm_smartfit_template t ON t.template_id=c.template_id
-          WHERE t.creator_member_id=$1
-            AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
-            AND c.member_id<>$1
-        )
-        SELECT COUNT(*)::bigint AS total_count,
-          COUNT(*) FILTER (WHERE NOT EXISTS (
-            SELECT 1 FROM gm_smartfit_subscribe r
-            WHERE r.member_id=c.member_id
-              AND r.creator_member_id=$1
-              AND r.message_accept_yn='N'
-          ))::bigint AS accept_count,
-          COUNT(*) FILTER (WHERE EXISTS (
-            SELECT 1 FROM gm_smartfit_subscribe r
-            WHERE r.member_id=c.member_id
-              AND r.creator_member_id=$1
-              AND r.message_accept_yn='N'
-          ))::bigint AS reject_count
-        FROM collectors c`,[member])).rows[0]||sub;
-    }catch(assetError){
-      warnings.push('subscriber_asset_unavailable');
-      console.warn('[SMARTFIT_MESSAGE_SUMMARY_SUBSCRIBER_SKIP]',{template_id:templateId,member_id:member,code:assetError&&assetError.code,detail:String(assetError&&assetError.message||assetError)});
-    }
-
-    try{
-      sent=(await pool.query(`SELECT COUNT(*)::bigint AS registered_count,
-        COUNT(*) FILTER (WHERE send_status IN ('SENT','READ'))::bigint AS sent_count,
-        COUNT(*) FILTER (WHERE send_status='READ' OR read_at IS NOT NULL)::bigint AS read_count,
-        COUNT(*) FILTER (WHERE send_status IN ('QUEUED','QUEUED_NIGHT','PROCESSING'))::bigint AS queued_count,
-        COUNT(*) FILTER (WHERE send_status='FAILED')::bigint AS failed_count,
-        COALESCE(MAX(serial_no),0)::int AS last_serial_no
-        FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0]||sent;
-    }catch(assetError){
-      warnings.push('delivery_asset_unavailable');
-      console.warn('[SMARTFIT_MESSAGE_SUMMARY_DELIVERY_SKIP]',{template_id:templateId,member_id:member,code:assetError&&assetError.code,detail:String(assetError&&assetError.message||assetError)});
-    }
-
-    const upTotal=Number(relation.up_total_count||0);
-    const downTotal=Number(relation.down_total_count||0);
-    const subscribers=Number(sub.accept_count||0);
-    return ok(res,{template,relation:{
-      up_1_count:Number(relation.up_1_count||0),up_2_count:Number(relation.up_2_count||0),up_3_count:Number(relation.up_3_count||0),up_4_count:Number(relation.up_4_count||0),up_5_count:Number(relation.up_5_count||0),up_total_count:upTotal,
-      down_1_count:Number(relation.down_1_count||0),down_2_count:Number(relation.down_2_count||0),down_3_count:Number(relation.down_3_count||0),down_4_count:Number(relation.down_4_count||0),down_5_count:Number(relation.down_5_count||0),down_total_count:downTotal,
-      calculated_yn:s(relation.calculated_yn||'F'),message_accept_relation_depth:i(relation.message_accept_relation_depth,5)
-    },subscribe:{total_count:Number(sub.total_count||0),accept_count:subscribers,reject_count:Number(sub.reject_count||0)},delivery:{
-      registered_count:Number(sent.registered_count||0),sent_count:Number(sent.sent_count||0),read_count:Number(sent.read_count||0),queued_count:Number(sent.queued_count||0),failed_count:Number(sent.failed_count||0),last_serial_no:Number(sent.last_serial_no||0),
-      asset_total:upTotal+downTotal+subscribers,immediate_max:smartfitImmediateMax()
-    },summary_degraded_yn:warnings.length?'Y':'N',warnings});
+    const assets=await smartfitMessageAssets(pool,template,member);
+    const st=await templateMessageState(pool,templateId,member);
+    const current=assets.relation_counts;
+    const last=[1,2,3,4,5].map(d=>Number(st[`last_relation_${d}_count`]||0));
+    const newly=current.map((n,idx)=>Math.max(0,n-last[idx]));
+    const lastSent=[1,2,3,4,5].map(d=>Number(st[`last_sent_relation_${d}_count`]||0));
+    const paidLimit=smartfitPaidRelationLimit();
+    const paid=assets.relation_total>=paidLimit;
+    const sub=assets.subscribers;
+    const relationSubscriber=[1,2,3,4,5].map(d=>Number(sub[`relation_${d}_count`]||0));
+    const hasSent=!!st.last_sent_at;
+    const newRelationTotal=newly.reduce((a,b)=>a+b,0);
+    const lastOutsideSubscriber=Number(st.last_outside_subscriber_count||0);
+    const newOutsideSubscriber=Math.max(0,Number(sub.outside_relation_count||0)-lastOutsideSubscriber);
+    const firstTargetCount=assets.relation_total+Number(sub.outside_relation_count||0);
+    const newTargetCount=hasSent?(newRelationTotal+newOutsideSubscriber):firstTargetCount;
+    const isPublic=visibilityOf(template.visibility||template.search_visible,'private')==='public';
+    ok(res,{template,relation:{
+      relation_1_count:current[0],relation_2_count:current[1],relation_3_count:current[2],relation_4_count:current[3],relation_5_count:current[4],relation_total_count:assets.relation_total,
+      new_relation_1_count:newly[0],new_relation_2_count:newly[1],new_relation_3_count:newly[2],new_relation_4_count:newly[3],new_relation_5_count:newly[4],new_relation_total_count:newRelationTotal
+    },subscribe:{total_count:sub.total_count,outside_relation_count:sub.outside_relation_count,
+      relation_1_count:relationSubscriber[0],relation_2_count:relationSubscriber[1],relation_3_count:relationSubscriber[2],relation_4_count:relationSubscriber[3],relation_5_count:relationSubscriber[4],
+      last_outside_relation_count:lastOutsideSubscriber,new_outside_relation_count:newOutsideSubscriber
+    },delivery:{
+      last_sent_at:st.last_sent_at||null,last_serial_no:Number(st.send_serial||0),
+      sent_relation_1_count:lastSent[0],sent_relation_2_count:lastSent[1],sent_relation_3_count:lastSent[2],sent_relation_4_count:lastSent[3],sent_relation_5_count:lastSent[4],
+      sent_subscriber_count:Number(st.last_sent_subscriber_count||0),sent_total_count:Number(st.last_sent_total_count||0),
+      has_sent_yn:hasSent?'Y':'N',send_mode:hasSent?(newTargetCount>0?'ADDITIONAL':'NONE'):'FIRST',
+      first_target_count:firstTargetCount,new_target_count:newTargetCount,
+      additional_send_yn:(hasSent&&newTargetCount>0)?'Y':'N',
+      public_yn:isPublic?'Y':'N',paid_target_yn:paid?'Y':'N',paid_relation_limit:paidLimit,billing_ready_yn:'N',pending_yn:st.pending_serial_no?'Y':'N'
+    }});
   }catch(e){
-    const message=String(e&&e.message||e);
-    console.error('[SMARTFIT_MESSAGE_SUMMARY_FAIL]',{template_id:templateId,member_id:member,code:e&&e.code,detail:message});
-    if(message==='template not found') return fail(res,404,'template not found');
-    if(message==='permission denied') return fail(res,403,'permission denied');
-    return fail(res,500,'template message summary failed',{detail:message,code:s(e&&e.code)});
+    const message=String(e&&e.message||e); if(message==='template not found')return fail(res,404,message); if(message==='permission denied')return fail(res,403,message);
+    fail(res,500,'template message summary failed',{detail:message});
   }
 });
 
-router.post('/api/gm/smartfit/template/message/send', express.json({limit:'64kb'}), async (req,res)=>{
-  const pool=db(req); const client=await pool.connect();
+function langKey(v){
+  const x=s(v).toLowerCase().replace('_','-'); if(!x)return 'ko'; if(x.startsWith('zh-tw')||x.startsWith('zh-hk')||x.startsWith('zh-mo'))return 'tw'; if(x.startsWith('zh'))return 'zh'; return x.split('-')[0]||'ko';
+}
+router.post('/api/gm/smartfit/template/message/send', express.json({limit:'96kb'}), async (req,res)=>{
+  const pool=db(req), client=await pool.connect();
   try{
-    const b=req.body||{}; const templateId=i(b.template_id||b.templateId,0); const member=s(b.member_id||b.memberId); const message=s(b.message);
-    if(!member) return fail(res,401,'login required');
-    if(!templateId) return fail(res,400,'template_id required');
-    if(!message) return fail(res,400,'message required');
-    if(message.length>2000) return fail(res,400,'message too long');
+    const b=req.body||{},templateId=i(b.template_id||b.templateId,0),member=s(b.member_id||b.memberId),message=s(b.message);
+    if(!member)return fail(res,401,'login required'); if(!templateId)return fail(res,400,'template_id required'); if(!message)return fail(res,400,'message required');
     const template=await assertTemplateCreator(client,templateId,member);
     if(visibilityOf(template.visibility||template.search_visible,'private')!=='public') return fail(res,409,'public template required for message');
     await client.query('BEGIN');
-    const serial=Number((await client.query(`SELECT COALESCE(MAX(serial_no),0)+1 AS serial_no FROM gm_smartfit_message_receiver WHERE template_id=$1`,[templateId])).rows[0].serial_no||1);
-    /* Network is expanded only here. The recursive graph walks recommender edges in both directions,
-       keeps the nearest 1~5 depth, and applies each receiver's accepted depth. Subscribers are UNIONed. */
+    const assets=await smartfitMessageAssets(client,template,member);
+    const paidLimit=smartfitPaidRelationLimit();
+    if(assets.relation_total>=paidLimit){
+      await client.query(`INSERT INTO gm_smartfit_template_message_state(template_id,creator_member_id,paid_target_yn,updated_at) VALUES($1,$2,'Y',CURRENT_TIMESTAMP)
+        ON CONFLICT(template_id) DO UPDATE SET paid_target_yn='Y',updated_at=CURRENT_TIMESTAMP`,[templateId,member]);
+      await client.query('COMMIT');
+      return res.status(402).json({ok:false,error:'paid target',code:'SMARTFIT_MESSAGE_PAID_TARGET',relation_total_count:assets.relation_total,paid_relation_limit:paidLimit,billing_ready_yn:'N'});
+    }
+    const st=await templateMessageState(client,templateId,member);
+    if(st.pending_serial_no){await client.query('ROLLBACK');return fail(res,409,'message send already pending',{pending_serial_no:Number(st.pending_serial_no)});}
+    const isAdditional=!!st.last_sent_at;
+    const serial=Number(st.send_serial||0)+1;
+    const titleMap=(b.title_translations&&typeof b.title_translations==='object')?b.title_translations:{};
+    const messageMap=(b.message_translations&&typeof b.message_translations==='object')?b.message_translations:{};
+    const sourceTitle=s(template.template_title_source||template.template_title_ko||'SmartFit');
+
     const candidates=await client.query(`WITH RECURSIVE network(member_id,relation_depth,path) AS (
         SELECT $1::varchar,0,ARRAY[$1::varchar]
         UNION ALL
         SELECT edge.member_id,n.relation_depth+1,n.path||edge.member_id
-        FROM network n
-        CROSS JOIN LATERAL (
+        FROM network n CROSS JOIN LATERAL (
           SELECT m.member_id FROM gm_member m WHERE m.recommender_id=n.member_id
-          UNION
-          SELECT m.recommender_id AS member_id FROM gm_member m WHERE m.member_id=n.member_id AND COALESCE(m.recommender_id,'')<>''
+          UNION SELECT m.recommender_id FROM gm_member m WHERE m.member_id=n.member_id AND COALESCE(m.recommender_id,'')<>''
         ) edge
         WHERE n.relation_depth<5 AND NOT edge.member_id=ANY(n.path)
-      ), relation_targets AS (
-        SELECT member_id,MIN(relation_depth)::smallint AS relation_depth
-        FROM network WHERE relation_depth BETWEEN 1 AND 5 AND member_id<>$1
-        GROUP BY member_id
-      ), accepted_relations AS (
-        SELECT r.member_id,r.relation_depth
-        FROM relation_targets r
-        LEFT JOIN gm_member_relation_count c ON c.member_id=r.member_id
-        WHERE r.relation_depth<=COALESCE(c.message_accept_relation_depth,5)
-      ), subscribers AS (
-        SELECT DISTINCT c.member_id,NULL::smallint AS relation_depth
-        FROM gm_smartfit_collection c
-        JOIN gm_smartfit_template ct ON ct.template_id=c.template_id
-        WHERE ct.creator_member_id=$1
-          AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
-          AND c.member_id<>$1
-          AND NOT EXISTS (
-            SELECT 1 FROM gm_smartfit_subscribe reject_state
-            WHERE reject_state.member_id=c.member_id
-              AND reject_state.creator_member_id=$1
-              AND reject_state.message_accept_yn='N'
-          )
+      ), rel AS (
+        SELECT member_id,MIN(relation_depth)::smallint relation_depth FROM network
+        WHERE relation_depth BETWEEN 1 AND 5 AND member_id<>$1 GROUP BY member_id
+      ), accepted_rel AS (
+        SELECT r.member_id,r.relation_depth,'RELATION'::varchar AS source_type
+        FROM rel r JOIN gm_member m ON m.member_id=r.member_id
+        LEFT JOIN gm_member_relation_count rc ON rc.member_id=r.member_id
+        WHERE r.relation_depth<=COALESCE(rc.message_accept_relation_depth,5)
+          AND ($4::timestamp IS NULL OR COALESCE(m.recommender_updated_at,m.created_at)>$4::timestamp)
+          AND COALESCE(m.allow_message_share,'Y')='Y'
+          AND NOT EXISTS(SELECT 1 FROM gm_smartfit_subscribe x WHERE x.member_id=r.member_id AND x.creator_member_id=$1 AND x.message_accept_yn='N')
+      ), subs AS (
+        SELECT s.member_id,NULL::smallint AS relation_depth,'SUBSCRIBER'::varchar AS source_type
+        FROM gm_smartfit_space_subscriber s JOIN gm_member m ON m.member_id=s.member_id
+        WHERE $3::bigint IS NOT NULL AND s.space_no=$3::text AND s.active_yn='Y' AND s.relation_depth=0
+          AND ($4::timestamp IS NULL OR s.subscribed_at>$4::timestamp)
+          AND COALESCE(m.allow_message_share,'Y')='Y'
+          AND NOT EXISTS(SELECT 1 FROM gm_smartfit_subscribe x WHERE x.member_id=s.member_id AND x.creator_member_id=$1 AND x.message_accept_yn='N')
       ), merged AS (
-        SELECT member_id,MIN(relation_depth) FILTER (WHERE relation_depth IS NOT NULL)::smallint AS relation_depth
-        FROM (SELECT * FROM accepted_relations UNION ALL SELECT * FROM subscribers) x
-        GROUP BY member_id
+        SELECT DISTINCT ON(member_id) member_id,relation_depth,source_type FROM (SELECT * FROM accepted_rel UNION ALL SELECT * FROM subs) z
+        ORDER BY member_id, CASE WHEN source_type='RELATION' THEN 0 ELSE 1 END, relation_depth NULLS LAST
       )
-      SELECT m.member_id,m.relation_depth,
-        COALESCE((SELECT d.device_lang FROM gm_member_device d WHERE d.member_id=m.member_id AND d.push_enabled='Y' AND d.token_status='ACTIVE' ORDER BY d.last_seen_at DESC LIMIT 1),gm.language_code,'') AS device_lang
-      FROM merged m LEFT JOIN gm_member gm ON gm.member_id=m.member_id
-      LEFT JOIN gm_smartfit_message_receiver old ON old.template_id=$2 AND old.receiver_member_id=m.member_id
-      WHERE old.message_no IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM gm_smartfit_subscribe reject_state
-          WHERE reject_state.member_id=m.member_id
-            AND reject_state.creator_member_id=$1
-            AND reject_state.message_accept_yn='N'
-        )`,[member,templateId]);
-    const immediateMax=smartfitImmediateMax(); const night=candidates.rowCount>immediateMax;
+      SELECT z.member_id,z.relation_depth,z.source_type,
+        COALESCE((SELECT d.device_lang FROM gm_member_device d WHERE d.member_id=z.member_id AND d.push_enabled='Y' AND d.token_status='ACTIVE' ORDER BY d.last_seen_at DESC LIMIT 1),m.language_code,'ko') AS device_lang
+      FROM merged z LEFT JOIN gm_member m ON m.member_id=z.member_id`,[member,templateId,template.space_id||null,st.last_sent_at||null]);
+
     let inserted=0;
     for(const row of candidates.rows){
-      const ir=await client.query(`INSERT INTO gm_smartfit_message_receiver(serial_no,template_id,receiver_member_id,device_lang,relation_depth,message,send_status)
-        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(template_id,receiver_member_id) DO NOTHING`,[serial,templateId,row.member_id,s(row.device_lang).slice(0,10),row.relation_depth,message,night?'QUEUED_NIGHT':'QUEUED']);
+      const lk=langKey(row.device_lang); const localizedTitle=s(titleMap[lk]||titleMap.ko||sourceTitle); const localizedMessage=s(messageMap[lk]||messageMap.ko||message);
+      const ir=await client.query(`INSERT INTO gm_smartfit_message_receiver(serial_no,template_id,receiver_member_id,device_lang,relation_depth,title,message,source_type,send_status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(template_id,receiver_member_id) DO UPDATE SET serial_no=EXCLUDED.serial_no,device_lang=EXCLUDED.device_lang,relation_depth=EXCLUDED.relation_depth,title=EXCLUDED.title,message=EXCLUDED.message,source_type=EXCLUDED.source_type,send_status=EXCLUDED.send_status,sent_at=NULL,read_at=NULL,failed_reason=NULL
+        RETURNING message_no`,[serial,templateId,row.member_id,s(row.device_lang).slice(0,10),row.relation_depth,localizedTitle,localizedMessage,row.source_type,isAdditional?'QUEUED_NIGHT':'QUEUED']);
       inserted+=ir.rowCount;
     }
+    const rel=assets.relation_counts, sub=assets.subscribers;
+    await client.query(`INSERT INTO gm_smartfit_template_message_state(template_id,creator_member_id,send_serial,pending_serial_no,pending_started_at,
+      pending_relation_1_count,pending_relation_2_count,pending_relation_3_count,pending_relation_4_count,pending_relation_5_count,pending_outside_subscriber_count,
+      pending_sent_relation_1_count,pending_sent_relation_2_count,pending_sent_relation_3_count,pending_sent_relation_4_count,pending_sent_relation_5_count,pending_sent_subscriber_count,pending_sent_total_count,paid_target_yn,updated_at)
+      VALUES($1,$2,$3,$3,CURRENT_TIMESTAMP,$4,$5,$6,$7,$8,$9,0,0,0,0,0,0,0,'N',CURRENT_TIMESTAMP)
+      ON CONFLICT(template_id) DO UPDATE SET creator_member_id=EXCLUDED.creator_member_id,send_serial=EXCLUDED.send_serial,pending_serial_no=EXCLUDED.pending_serial_no,pending_started_at=CURRENT_TIMESTAMP,
+      pending_relation_1_count=EXCLUDED.pending_relation_1_count,pending_relation_2_count=EXCLUDED.pending_relation_2_count,pending_relation_3_count=EXCLUDED.pending_relation_3_count,pending_relation_4_count=EXCLUDED.pending_relation_4_count,pending_relation_5_count=EXCLUDED.pending_relation_5_count,pending_outside_subscriber_count=EXCLUDED.pending_outside_subscriber_count,
+      pending_sent_relation_1_count=0,pending_sent_relation_2_count=0,pending_sent_relation_3_count=0,pending_sent_relation_4_count=0,pending_sent_relation_5_count=0,pending_sent_subscriber_count=0,pending_sent_total_count=0,paid_target_yn='N',updated_at=CURRENT_TIMESTAMP`,
+      [templateId,member,serial,rel[0],rel[1],rel[2],rel[3],rel[4],sub.outside_relation_count]);
     if(inserted>0){
       const eventKey=`SMARTFIT_MESSAGE_SEND:${templateId}:${serial}`;
-      const nextSql=night?nextNightKstSql():'CURRENT_TIMESTAMP';
+      const nextSql=isAdditional?nextNightKstSql():'CURRENT_TIMESTAMP';
       await client.query(`INSERT INTO gm_event_queue(event_type,event_key,payload,status,next_retry_at,created_at,updated_at)
-        VALUES('SMARTFIT_MESSAGE_SEND',$1,$2::jsonb,'PENDING',${nextSql},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-        ON CONFLICT(event_key) DO NOTHING`,[eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,template_title:s(template.template_title_source||template.template_title_ko)})]);
+        VALUES('SMARTFIT_MESSAGE_SEND',$1,$2::jsonb,'PENDING',${nextSql},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(event_key) DO NOTHING`,
+        [eventKey,JSON.stringify({template_id:templateId,serial_no:serial,creator_member_id:member,additional_send_yn:isAdditional?'Y':'N'})]);
+    }else{
+      await client.query(`UPDATE gm_smartfit_template_message_state SET pending_serial_no=NULL,pending_started_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE template_id=$1`,[templateId]);
     }
     await client.query('COMMIT');
-    ok(res,{template_id:templateId,serial_no:serial,candidate_count:candidates.rowCount,new_receiver_count:inserted,queued_count:inserted,night_queue:night,scheduled_mode:night?'NIGHT_KST_0215':'IMMEDIATE',immediate_max:immediateMax,status:inserted?(night?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
-  }catch(e){ try{await client.query('ROLLBACK');}catch(_e){} fail(res,400,'template message send failed',{detail:String(e.message||e)}); }
-  finally{client.release();}
+    ok(res,{template_id:templateId,serial_no:serial,candidate_count:candidates.rowCount,new_receiver_count:inserted,queued_count:inserted,night_queue:isAdditional,scheduled_mode:isAdditional?'NIGHT_KST_0215':'IMMEDIATE',additional_send_yn:isAdditional?'Y':'N',paid_target_yn:'N',status:inserted?(isAdditional?'QUEUED_NIGHT':'QUEUED'):'NO_NEW_RECEIVER'});
+  }catch(e){try{await client.query('ROLLBACK');}catch(_e){} fail(res,400,'template message send failed',{detail:String(e.message||e)});}finally{client.release();}
 });
 
 module.exports = router;
