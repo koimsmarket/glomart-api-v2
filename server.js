@@ -1891,6 +1891,8 @@ app.use(require('./routes/barcode'));
 console.log('[GM_BARCODE_ROUTE_V001] routes/barcode registered');
 app.use(require('./routes/image_vector'));
 console.log('[GM_IMAGE_VECTOR_ROUTE_V001] routes/image_vector registered');
+app.use(require('./routes/address_map'));
+console.log('[GM_ORDER_MAP_ADDRESS_ROUTE_V001] routes/address_map registered');
 app.use(require('./routes/smartfit_vector'));
 console.log('[GM_SMARTFIT_VECTOR_ROUTE_V001] routes/smartfit_vector registered');
 app.use(require('./routes/product'));
