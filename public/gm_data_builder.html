@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GM Safe Update Builder V044</title>
+<title>GM Safe Update Builder V042</title>
 <style>
 body{font-family:Arial,"Noto Sans KR",sans-serif;background:#f5f6f8;margin:0;color:#222}
 .wrap{max-width:1180px;margin:24px auto;background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
@@ -26,10 +26,10 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </style>
 </head>
 <body>
-<div id="gmBuilderVersion" style="display:none">GM_DATA_BUILDER_UI_V048_AUTO_ORDER_TABLES</div>
 <div class="wrap">
-<h1>GM Safe Update Builder V044</h1>
+<h1>GM Safe Update Builder V042</h1>
 <div class="sub">Excel·CSV 다운로드 / 안전 업데이트 / 운영 상태 모니터링</div>
+<div class="small" style="margin-bottom:12px">Vector 테이블 업로드는 DB 다운로드값 그대로 사용하세요. vector_image는 PostgreSQL REAL[] 문자열({0.1,0.2,...}) 또는 Excel/CSV의 동일 문자열 형식으로 업로드할 수 있습니다.</div>
 
 <div class="statusBox">
   <div class="statusHead">
@@ -61,12 +61,6 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 </div>
 
 <div class="warning">
-<b>자동주문 빌더 권한</b><br>
-자동주문 5개 테이블은 활성 MASTER 또는 빌더 권한이 부여된 계정만 다운로드·업로드할 수 있습니다.<br>
-대시보드의 자동주문 데이터 빌더와 이 전체 DB 빌더는 동일한 서버 API와 권한 정책을 사용합니다.
-</div>
-
-<div class="warning">
 <b>안전 정책</b><br>
 일반 업로드는 UPDATE ONLY 입니다. 기준키가 DB에 없으면 SKIP 됩니다.<br>
 빈칸은 기본값 컬럼 외에는 기존 DB 값을 유지합니다.<br>
@@ -82,11 +76,11 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
     <select id="format"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV</option></select>
     <div class="buttonRow">
       <button onclick="download(this)">개별 다운로드</button>
-      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 DB ZIP 다운로드</button>
+      <button id="downloadAllBtn" class="gray" onclick="downloadAll(this)">선택 5개조 개별 다운로드</button>
     </div>
     <div class="exportPick">
-      <div class="exportPickHead"><b>ZIP에 포함할 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
-      <div class="small">기본값은 전부 선택입니다. 선택한 테이블은 CSV 파일로 하나의 ZIP에 들어갑니다. 상품 gm_product는 ZIP 안에서 단독으로 먼저 생성되고, 완료된 뒤 나머지 테이블을 순차 생성합니다.</div>
+      <div class="exportPickHead"><b>5개 조로 나누어 받을 테이블</b><span class="exportPickActions"><button type="button" class="gray" onclick="setAllExportChecks(true)">전체 선택</button><button type="button" class="gray" onclick="setAllExportChecks(false)">전체 해제</button></span></div>
+      <div class="small">기본값은 전부 선택입니다. 상품 gm_product는 다른 테이블과 동시에 실행하지 않고 단독으로 먼저 완료한 뒤, 나머지 테이블을 순차 다운로드합니다.</div>
       <div id="exportTableChecks" class="exportPickList"></div>
     </div>
   </div>
@@ -170,22 +164,13 @@ pre{background:#111;color:#eee;border-radius:10px;padding:14px;white-space:pre-w
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const API = location.origin;
-
-// 자동주문 빌더 접근권한은 향후 Cafe24 관리자 로그인으로 통합한다.
-// 현재는 별도 Cloudtype 키나 관리자 ID 입력 없이 일반 빌더 흐름을 사용한다.
 const tables = {
   products:'상품 gm_product',
   product_options:'상품 옵션 gm_product_option',
+  product_image_vector:'상품 이미지 Vector gm_product_image_vector',
   cart:'장바구니 gm_basket',
   orders:'주문 gm_order',
   order_items:'주문상품 gm_order_item',
-
-  auto_orders:'자동주문 주문서 gm_auto_order',
-  auto_order_items:'자동주문 주문상품 gm_auto_order_item',
-  auto_order_work:'자동주문 작업큐 gm_auto_order_work',
-  auto_order_log:'자동주문 처리이력 gm_auto_order_log',
-  auto_order_accounts:'자동주문 실행계정 gm_auto_order_account',
-
   supplier:'공급사 gm_supplier',
   cs:'CS gm_cs',
   cs_messages:'CS 메시지 gm_cs_message',
@@ -209,6 +194,8 @@ const tables = {
   keyword_relation:'연관검색어 gm_keyword_relation', keyword_translate:'외국어검색어 gm_keyword_translate',
   smartfit_space:'SmartFit 공간 gm_smartfit_space',
   smartfit_template:'SmartFit Template gm_smartfit_template',
+  smartfit_template_vector:'SmartFit Template Vector gm_smartfit_template_vector',
+  smartfit_space_vector:'SmartFit Space Vector gm_smartfit_space_vector',
   smartfit_item:'SmartFit Item gm_smartfit_item',
   smartfit_collection:'SmartFit 컬렉션 gm_smartfit_collection',
   smartfit_category:'SmartFit 카테고리 gm_smartfit_category',
@@ -242,12 +229,12 @@ const tables = {
   dashboard_snapshot:'대시보드 스냅샷 gm_dashboard_snapshot'
 };
 const tableNameMap = {
-  gm_product_option:'product_options', gm_product:'products', gm_product_archive:'product_archive',
+  gm_product_image_vector:'product_image_vector', gm_product_option:'product_options', gm_product:'products', gm_product_archive:'product_archive',
   gm_category:'category', gm_category_keyword:'category_keyword',
   gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',
   gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
   gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_keyword_relation:'keyword_relation', gm_keyword_translate:'keyword_translate',
-  gm_smartfit_space:'smartfit_space', gm_smartfit_template:'smartfit_template', gm_smartfit_item:'smartfit_item', gm_smartfit_collection:'smartfit_collection', gm_smartfit_category:'smartfit_category',
+  gm_smartfit_space_vector:'smartfit_space_vector', gm_smartfit_template_vector:'smartfit_template_vector', gm_smartfit_space:'smartfit_space', gm_smartfit_template:'smartfit_template', gm_smartfit_item:'smartfit_item', gm_smartfit_collection:'smartfit_collection', gm_smartfit_category:'smartfit_category',
   gm_category_dynamic:'category_dynamic', gm_product_interest:'product_interest', gm_product_upsert_queue:'product_upsert_queue', gm_sales_aggregate_event:'sales_aggregate_event',
   gm_member_ledger:'member_ledger', gm_member_payment_info:'member_payment_info', gm_member_device:'member_device', gm_member_relation_count:'member_relation_count', gm_guest_member_link:'guest_member_link',
   gm_network_incentive_rate:'network_incentive_rate', gm_network_payment_snapshot:'network_payment_snapshot',
@@ -289,7 +276,7 @@ async function loadDashboard(save){
     if(!j.ok){ log(j); return; }
     const cur=j.current||{}, counts=cur.counts||{}, diff=cur.diff_from_previous||{}, q=cur.queue||{}, db=cur.db_size||{};
     document.getElementById('statusTime').textContent = `현재 조회: ${cur.server_time||cur.snapshot_at||''}` + (j.previous&&j.previous.snapshot_at ? ` / 직전 스냅샷: ${j.previous.snapshot_at}` : '');
-    const order=['gm_smartfit_space','gm_smartfit_template','gm_smartfit_item','gm_smartfit_collection','gm_smartfit_category','gm_product','gm_product_option','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_keyword_relation','gm_keyword_translate','gm_search_log','gm_dashboard_snapshot'];
+    const order=['gm_smartfit_space','gm_smartfit_space_vector','gm_smartfit_template','gm_smartfit_template_vector','gm_smartfit_item','gm_smartfit_collection','gm_smartfit_category','gm_product','gm_product_image_vector','gm_product_option','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_keyword_relation','gm_keyword_translate','gm_search_log','gm_dashboard_snapshot'];
     document.getElementById('tableStatus').innerHTML = order.map(t=>`<tr><td>${t}</td><td class="num">${fmt(counts[t])}</td><td class="num">${diffHtml(diff[t])}</td></tr>`).join('');
     document.getElementById('queueStatus').innerHTML = `
       <tr><th>pending</th><td class="num">${fmt(q.pending)}</td></tr>
@@ -509,54 +496,39 @@ async function downloadAll(button){
   if(downloadAllRunning) return;
   const selected=selectedExportTables();
   if(!selected.length){ alert('다운로드할 테이블을 하나 이상 선택하세요.'); return; }
+
   downloadAllRunning=true;
-  const timed=startButtonTimer(button,`DB ZIP 준비 중 0/${selected.length}`);
-  const ordered=[...selected.filter(x=>x==='products'),...selected.filter(x=>x!=='products')];
-  const url=`${API}/api/gm/builder/export-all?tables=${encodeURIComponent(ordered.join(','))}&t=${Date.now()}`;
-  const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
-  const filename=`glomart_db_${stamp}.zip`;
+  const f=document.getElementById('format').value;
+  const groups=splitIntoFiveGroups(selected);
+  const total=selected.length;
+  const timed=startButtonTimer(button,`${groups.length}개조 0/${total} 준비 중`);
+  const shared={started:0,completed:0,total,results:[]};
+  let directoryHandle=null;
+
   try{
-    log(`${ordered.length}개 테이블을 ZIP 하나로 생성합니다. gm_product는 첫 번째로 단독 생성되며 완료 전에는 다른 테이블을 시작하지 않습니다.`);
-    if(window.isSecureContext && typeof window.showSaveFilePicker==='function'){
-      const handle=await window.showSaveFilePicker({
-        suggestedName:filename,
-        types:[{description:'ZIP archive',accept:{'application/zip':['.zip']}}]
-      });
-      const response=await fetch(url,{method:'GET',cache:'no-store'});
-      if(!response.ok){
-        const text=await response.text().catch(()=>String(response.status));
-        throw new Error(`HTTP ${response.status} ${text.slice(0,500)}`);
-      }
-      if(!response.body) throw new Error('ZIP 스트림을 받을 수 없습니다.');
-      const writable=await handle.createWritable();
-      const reader=response.body.getReader();
-      let bytes=0;
-      try{
-        while(true){
-          const {done,value}=await reader.read();
-          if(done) break;
-          if(value&&value.byteLength){ await writable.write(value); bytes+=value.byteLength; }
-        }
-        await writable.close();
-      }catch(e){
-        try{await writable.abort();}catch(_){ }
-        throw e;
-      }
-      const saved=await handle.getFile();
-      if(saved.size!==bytes) throw new Error(`ZIP 저장 크기 불일치 (${saved.size}/${bytes})`);
-      log(`DB ZIP 저장 완료: ${saved.name} / ${saved.size.toLocaleString()} bytes / ${timed?timed.seconds:0}초`);
+    directoryHandle=await chooseDownloadDirectory();
+    if(directoryHandle){
+      log(`저장 폴더가 선택되었습니다. 각 파일은 디스크 기록과 크기 확인이 끝난 뒤 다음 파일을 시작합니다.`);
     }else{
-      const a=document.createElement('a');
-      a.href=url;
-      a.download=filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      log(`DB ZIP 다운로드를 시작했습니다: ${filename}\n브라우저 다운로드 완료 여부는 다운로드 목록에서 확인하세요.`);
+      log(`이 브라우저는 폴더 직접 저장을 지원하지 않습니다. 브라우저의 '여러 파일 다운로드 허용'이 필요합니다.`);
     }
-  }catch(e){
-    if(e&&e.name==='AbortError') log('DB ZIP 저장이 취소되었습니다.');
-    else log(`DB ZIP 다운로드 오류: ${String(e&&e.message||e)}`);
+    log(`${total}개 테이블을 ${groups.length}개 조로 실행합니다. gm_product는 다른 다운로드와 겹치지 않게 단독 실행하고, 저장 완료가 확인된 뒤 다음 조를 시작합니다.`+(f==='xlsx'&&selected.includes('products')?' 상품은 메모리 멈춤 방지를 위해 CSV로 저장됩니다.':''));
+    const groupStatus=[];
+    // 중요: gm_product가 포함된 1번 조부터 시작하며, 각 조를 반드시 await합니다.
+    // 따라서 상품 다운로드 중에는 다른 테이블 요청이 한 건도 실행되지 않습니다.
+    for(let gi=0; gi<groups.length; gi++){
+      try{
+        await runExportGroup(groups[gi],gi,groups.length,f,timed,shared,directoryHandle);
+        groupStatus.push({group:gi+1,status:'fulfilled'});
+      }catch(e){
+        groupStatus.push({group:gi+1,status:'rejected',error:String(e&&e.message||e)});
+      }
+      if(gi<groups.length-1) await sleep(1000);
+    }
+    const okCount=shared.results.filter(x=>x.ok).length;
+    const fail=shared.results.filter(x=>!x.ok);
+    log({action:'selected-export-product-standalone-stream-save-v041',selected:total,processed:shared.results.length,groups:groups.length,success:okCount,failed:fail.length,seconds:timed?timed.seconds:0,group_status:groupStatus,failures:fail});
+    if(fail.length) alert(`다운로드 종료: 성공 ${okCount}개, 실패 ${fail.length}개\n실패한 테이블만 다시 선택해 재실행하세요.`);
   }finally{
     downloadAllRunning=false;
     stopButtonTimer(timed);
@@ -576,11 +548,11 @@ function inferTableFromFileName(name){
   const mappedNames=Object.keys(tableNameMap).sort((a,b)=>b.length-a.length);
   for(const dbName of mappedNames){ if(n.indexOf(dbName.toLowerCase())>=0) return tableNameMap[dbName]; }
   const pairs=[
-    ['gm_smartfit_collection','smartfit_collection'],['gm_smartfit_template','smartfit_template'],['gm_smartfit_category','smartfit_category'],['gm_smartfit_space','smartfit_space'],['gm_smartfit_item','smartfit_item'],
+    ['gm_smartfit_template_vector','smartfit_template_vector'],['gm_smartfit_space_vector','smartfit_space_vector'],['gm_smartfit_collection','smartfit_collection'],['gm_smartfit_template','smartfit_template'],['gm_smartfit_category','smartfit_category'],['gm_smartfit_space','smartfit_space'],['gm_smartfit_item','smartfit_item'],
     ['gm_dashboard_snapshot','dashboard_snapshot'],['gm_keyword_relation','keyword_relation'],['gm_keyword_translate','keyword_translate'],['gm_search_log','search_log'],
     ['gm_search_keyword_stat','search_keyword_stat'],['gm_category_search_stat','category_search_stat'],['gm_category_search_monthly','category_search_monthly'],['gm_category_search_yearly','category_search_yearly'],['gm_product_sales_monthly','product_sales_monthly'],['gm_product_sales_yearly','product_sales_yearly'],['gm_product_country_sales_monthly','product_country_sales_monthly'],['gm_product_country_sales_yearly','product_country_sales_yearly'],['gm_category_sales_monthly','category_sales_monthly'],['gm_category_sales_yearly','category_sales_yearly'],['gm_category_country_sales_monthly','category_country_sales_monthly'],['gm_category_country_sales_yearly','category_country_sales_yearly'],
     ['gm_category_keyword','category_keyword'],['gm_category','category'],
-    ['gm_product_option','product_options'],['gm_product_archive','product_archive'],['gm_order_item','order_items'],['gm_cs_message','cs_messages'],
+    ['gm_product_image_vector','product_image_vector'],['gm_product_option','product_options'],['gm_product_archive','product_archive'],['gm_order_item','order_items'],['gm_cs_message','cs_messages'],
     ['gm_member_address','member_address'],['gm_member','member'],['gm_product','products'],['gm_basket','cart'],['gm_order','orders'],['gm_supplier','supplier'],['gm_cs','cs']
   ];
   for(const [needle,key] of pairs){ if(n.indexOf(needle)>=0) return key; }
@@ -669,59 +641,9 @@ function downloadCafe24MemberExport(){ location.href = `${API}/api/gm/builder/ca
 async function uploadDevOne(tableKey,file,apply,mode){
   const text=await readCsvText(file);
   const url=`${API}/api/gm/builder/dev-overwrite?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}${apply?'&confirm=DEV%20FILE%20RESTORE':''}`;
-
-  log({
-    action:'dev-file-restore-start',
-    table:tableKey,
-    apply,
-    file:file.name,
-    bytes:text.length
-  });
-
-  const r=await fetch(url,{
-    method:'POST',
-    headers:{'Content-Type':'text/csv; charset=utf-8'},
-    body:text
-  });
-
-  const blob=await r.blob();
-  const responseText=await blob.text();
-
-  // 결과 CSV는 기존처럼 다운로드하되, 화면 로그에도 내용을 보인다.
-  const outBlob=new Blob([responseText],{type:'text/csv;charset=utf-8'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(outBlob);
-  a.download=(apply?'dev_file_restore':'dev_dryrun')+'_'+tableKey+'_'+Date.now()+'.csv';
-  a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-
-  const preview=responseText.split(/\r?\n/).slice(0,25).join('\n');
-
-  log({
-    action:'dev-file-restore-result',
-    table:tableKey,
-    apply,
-    status:r.status,
-    ok:r.ok,
-    file:file.name,
-    response_preview:preview
-  });
-
-  if(!r.ok){
-    alert(
-      '복원 실패\\n\\n'+
-      '대상: '+tableKey+'\\n'+
-      'HTTP: '+r.status+'\\n\\n'+
-      preview
-    );
-    throw new Error('DEV FILE RESTORE failed: HTTP '+r.status);
-  }
-
-  if(apply){
-    alert('복원 요청이 정상 처리되었습니다.\\n대상: '+tableKey+'\\n\\n결과는 화면 로그와 다운로드 CSV에서 확인하세요.');
-  }
-
-  return {status:r.status,ok:r.ok,responseText};
+  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+  await downloadCsvResponse(r,(apply?'dev_file_restore':'dev_dryrun')+'_'+tableKey+'_'+Date.now()+'.csv');
+  log({action:'dev-file-restore', table:tableKey, apply, status:r.status, file:file.name});
 }
 async function devOverwrite(apply,button){
   const f=document.getElementById('devFile').files[0];
@@ -807,8 +729,6 @@ function applyAll(button){ sendAll(true,button); }
 fill();
 loadDashboard(false);
 setInterval(()=>loadDashboard(false), 60000);
-
-
 </script>
 </body>
 </html>
