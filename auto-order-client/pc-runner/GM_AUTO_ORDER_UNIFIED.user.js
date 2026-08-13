@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.017
-// @description  쿠팡 PC 실행기. 상품 상세 진입 후 PUID 검증과 주문수량 준비를 자동 수행합니다.
+// @version      0.018
+// @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
 // @match        https://checkout.coupang.com/*
@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.017';
+  const VERSION = '0.018';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -150,64 +150,100 @@
     });
   }
 
-  function loadInspector() {
-    if (window.GMAO_CPKR_PRODUCT_INSPECTOR) {
-      return Promise.resolve();
+  const moduleLoadPromises = new Map();
+
+  function loadModuleIntoRunner(url, ready, label) {
+    if (ready()) return Promise.resolve();
+
+    if (moduleLoadPromises.has(url)) {
+      return moduleLoadPromises.get(url);
     }
 
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = INSPECTOR_URL;
-      script.onload = resolve;
-      script.onerror = () => reject(
-        new Error('상품 검사 모듈을 불러오지 못했습니다.')
-      );
-      document.documentElement.appendChild(script);
+    const promise = new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        timeout: 15000,
+        onload(response) {
+          if (response.status < 200 || response.status >= 300) {
+            reject(new Error(label + ' 모듈 HTTP_' + response.status));
+            return;
+          }
+
+          try {
+            /*
+             * IMPORTANT:
+             * <script src=...>로 주입하면 쿠팡 page context에 모듈이 생성되고,
+             * Tampermonkey userscript sandbox의 window에서는 보이지 않을 수 있다.
+             * 따라서 코드를 GM_xmlhttpRequest로 읽은 뒤 현재 Runner sandbox에서 실행한다.
+             */
+            const runModule = new Function(
+              'window',
+              'globalThis',
+              response.responseText + '\n//# sourceURL=' + url
+            );
+            runModule(window, globalThis);
+          } catch (error) {
+            reject(new Error(label + ' 모듈 실행 실패: ' + error.message));
+            return;
+          }
+
+          if (!ready()) {
+            reject(new Error(label + ' 모듈 로드 후 API가 생성되지 않았습니다.'));
+            return;
+          }
+
+          resolve();
+        },
+        onerror() {
+          reject(new Error(label + ' 모듈 네트워크 오류'));
+        },
+        ontimeout() {
+          reject(new Error(label + ' 모듈 로드 시간 초과'));
+        }
+      });
     });
+
+    moduleLoadPromises.set(url, promise);
+    promise.catch(() => moduleLoadPromises.delete(url));
+    return promise;
+  }
+
+  function loadInspector() {
+    return loadModuleIntoRunner(
+      INSPECTOR_URL,
+      () => Boolean(
+        window.GMAO_CPKR_PRODUCT_INSPECTOR &&
+        typeof window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect === 'function'
+      ),
+      '상품 검사'
+    );
   }
 
   function loadPreparer() {
-    if (window.GMAO_CPKR_PRODUCT_PREPARER) {
-      return Promise.resolve();
-    }
-
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = PREPARER_URL;
-      script.onload = resolve;
-      script.onerror = () => reject(
-        new Error('상품 준비 모듈을 불러오지 못했습니다.')
-      );
-      document.documentElement.appendChild(script);
-    });
+    return loadModuleIntoRunner(
+      PREPARER_URL,
+      () => Boolean(
+        window.GMAO_CPKR_PRODUCT_PREPARER &&
+        typeof window.GMAO_CPKR_PRODUCT_PREPARER.prepare === 'function'
+      ),
+      '상품 준비'
+    );
   }
 
   function loadCartManager() {
-    if (window.GMAO_CPKR_CART_MANAGER) {
-      return Promise.resolve();
-    }
-
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = CART_MANAGER_URL;
-      script.onload = resolve;
-      script.onerror = () => reject(
-        new Error('장바구니 모듈을 불러오지 못했습니다.')
-      );
-      document.documentElement.appendChild(script);
-    });
+    return loadModuleIntoRunner(
+      CART_MANAGER_URL,
+      () => Boolean(
+        window.GMAO_CPKR_CART_MANAGER &&
+        typeof window.GMAO_CPKR_CART_MANAGER.inspectCart === 'function'
+      ),
+      '장바구니 관리'
+    );
   }
 
-
   function loadExternal(url, ready, label) {
-    if (ready()) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = url;
-      script.onload = resolve;
-      script.onerror = () => reject(new Error(label + ' 모듈을 불러오지 못했습니다.'));
-      document.documentElement.appendChild(script);
-    });
+    return loadModuleIntoRunner(url, ready, label);
   }
 
   function loadUtil() {
