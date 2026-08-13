@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.018
+// @version      0.020
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.018';
+  const VERSION = '0.020';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -419,7 +419,7 @@
     panel.innerHTML = '';
 
     const title = document.createElement('div');
-    title.textContent = 'Glomart Runner V017';
+    title.textContent = 'Glomart Runner V' + VERSION.replace(/^0\./, '');
     title.style.cssText =
       'font-weight:800;font-size:14px;margin-bottom:6px';
     panel.appendChild(title);
@@ -533,7 +533,8 @@
     'work_not_found',
     'work_lock_invalid',
     'work_lock_invalid_or_expired',
-    'work_not_running'
+    'work_not_running',
+    'work_cancelled_by_customer'
   ]);
 
   function errorCode(error) {
@@ -561,6 +562,15 @@
     if (isStaleWorkError(error)) {
       const code = errorCode(error);
       clearLocalWork();
+      if (code === 'work_cancelled_by_customer') {
+        render(
+          '고객 주문취소 확인\n' +
+          '자동주문을 즉시 중단하고 현재 작업을 비웠습니다.\n' +
+          'Runner는 새 작업을 받을 수 있는 상태로 복귀했습니다.',
+          true
+        );
+        return;
+      }
       render(
         '서버에서 기존 작업 잠금이 종료된 것을 확인했습니다.\n' +
         'Runner의 오래된 작업을 자동 정리했습니다.\n' +
@@ -627,13 +637,32 @@
     );
   }
 
+  async function assertOrderStillActive(phase) {
+    /*
+     * [CUSTOMER CANCEL / FINAL ORDER GUARD / 중요: 삭제 금지]
+     * 자동주문은 쿠팡의 다음 중요 액션을 누르기 직전에 서버 DB를 재확인한다.
+     * 고객취소가 들어왔으면 heartbeat가 work_cancelled_by_customer를 반환하고
+     * 현재 Runner 작업을 즉시 비운다. 취소 후 장바구니/주문서/최종주문 진행 금지.
+     *
+     * 향후 실제 FULL_AUTO 최종 주문 버튼을 구현할 때도 클릭 바로 직전에
+     * assertOrderStillActive('BEFORE_FINAL_ORDER')를 반드시 호출해야 한다.
+     */
+    try {
+      await workHeartbeat();
+      return true;
+    } catch (error) {
+      handleWorkHeartbeatError(error);
+      throw error;
+    }
+  }
+
   function startWorkHeartbeat() {
     clearInterval(workHeartbeatTimer);
     if (!currentJob) return;
 
     workHeartbeatTimer = setInterval(() => {
       workHeartbeat().catch(handleWorkHeartbeatError);
-    }, 30000);
+    }, 5000);
   }
 
   async function claim() {
@@ -698,6 +727,45 @@
     return currentJob;
   }
 
+  function detectCoupangLoginState() {
+    // Current Coupang desktop header exposes a real logout anchor only when
+    // the browser session is authenticated. Do not infer login state from
+    // href/HTML containing the word "login" because logout URLs also live
+    // under login.coupang.com.
+    const logout = document.querySelector(
+      'a.logout-link, a[title="로그아웃"]'
+    );
+    if (logout) {
+      return { logged_in: true, source: 'logout_link' };
+    }
+
+    const anchors = Array.from(document.querySelectorAll('a'));
+    const logoutText = anchors.some((a) =>
+      String(a.textContent || '').trim() === '로그아웃'
+    );
+    if (logoutText) {
+      return { logged_in: true, source: 'logout_text' };
+    }
+
+    const loginText = anchors.some((a) =>
+      String(a.textContent || '').trim() === '로그인'
+    );
+    if (loginText) {
+      return { logged_in: false, source: 'login_link' };
+    }
+
+    return { logged_in: null, source: 'unknown' };
+  }
+
+  function normalizeInspectionLogin(inspection) {
+    if (!inspection || typeof inspection !== 'object') return inspection;
+    const state = detectCoupangLoginState();
+    inspection.login_dom_state = state.source;
+    if (state.logged_in === true) inspection.login_required = false;
+    if (state.logged_in === false) inspection.login_required = true;
+    return inspection;
+  }
+
   async function inspectProductPage() {
     if (!currentJob) {
       throw new Error('먼저 작업을 가져오세요.');
@@ -715,8 +783,9 @@
       { product_url: productUrl(currentJob) }
     );
 
-    lastInspection =
-      window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect(expected);
+    lastInspection = normalizeInspectionLogin(
+      window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect(expected)
+    );
 
     GM_setValue(
       'gmao_runner_inspection_v013',
@@ -851,6 +920,7 @@
       throw new Error('쿠팡 상품 상세 페이지에서 실행하세요.');
     }
 
+    await assertOrderStillActive('BEFORE_ADD_TO_CART');
     await loadCartManager();
 
     lastCartAction =
@@ -937,6 +1007,7 @@
     if (!lastCartAction || !lastCartAction.ok || lastCartAction.method !== 'cart-inspection') {
       throw new Error('먼저 장바구니 검증을 완료하세요.');
     }
+    await assertOrderStillActive('BEFORE_CHECKOUT');
     await loadCartFlow();
     const payload = payloadOf(currentJob);
     await window.CPKR_CART.verifyAndOrder(payload.items || [], payload);
@@ -952,6 +1023,8 @@
       throw new Error('Glomart 배송지 payload가 불완전합니다.');
     }
 
+    /* 결제 직전 단계 진입 전에도 반드시 최신 취소상태를 확인한다. */
+    await assertOrderStillActive('BEFORE_CHECKOUT_FILL');
     await loadCheckout();
     const checkoutOrder = Object.assign({}, payload.order || {}, {
       receiver,

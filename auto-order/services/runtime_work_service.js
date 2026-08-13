@@ -281,6 +281,10 @@ async function readyList(pool, data) {
     upper(w.work_status)='READY'
     AND upper(w.work_type)='ORDER'
     AND upper(o.mall_code)=$1
+    /* [CANCEL GUARD] 고객 취소 주문은 READY 목록에도 다시 노출하지 않는다. */
+    AND upper(COALESCE(g.customer_status,'')) <> 'CANCEL_COMPLETED'
+    AND upper(COALESCE(g.seller_status,'')) <> 'CANCELLED'
+    AND upper(COALESCE(g.order_status,'')) <> 'CANCELLED'
   `;
 
   if (adminId) {
@@ -314,6 +318,8 @@ async function readyList(pool, data) {
      FROM gm_auto_order_work w
      JOIN gm_auto_order o
        ON o.auto_order_no=w.auto_order_no
+     JOIN gm_order g
+       ON g.order_no=o.order_no
      LEFT JOIN (
        SELECT
          auto_order_no,
@@ -358,7 +364,13 @@ async function claim(pool, data) {
        FROM gm_auto_order_work w
        JOIN gm_auto_order o
          ON o.auto_order_no=w.auto_order_no
+       JOIN gm_order g
+         ON g.order_no=o.order_no
        WHERE upper(w.work_status)='READY'
+         /* [CANCEL GUARD] claim 직전에도 gm_order 취소 여부를 다시 확인한다. */
+         AND upper(COALESCE(g.customer_status,'')) <> 'CANCEL_COMPLETED'
+         AND upper(COALESCE(g.seller_status,'')) <> 'CANCELLED'
+         AND upper(COALESCE(g.order_status,'')) <> 'CANCELLED'
          AND upper(w.work_type)='ORDER'
          AND w.admin_id=$1
          AND w.mall_account_id=$2
@@ -431,30 +443,87 @@ async function claim(pool, data) {
 }
 
 async function heartbeat(pool, workId, data) {
-  const result = await pool.query(
-    `UPDATE gm_auto_order_work
-     SET lock_expires_at=now()+($5::int * interval '1 second'),
-         updated_at=now()
-     WHERE work_id=$1
-       AND lock_token=$2
-       AND lock_admin_id=$3
-       AND lock_mall_account_id=$4
-       AND upper(work_status)='RUNNING'
-     RETURNING *`,
-    [
-      Number(workId),
-      clean(data.lock_token),
-      clean(data.admin_id),
-      clean(data.mall_account_id),
-      LOCK_SECONDS
-    ]
-  );
+  /*
+   * [FINAL ORDER CANCEL GUARD]
+   * heartbeat는 lock 연장뿐 아니라 "이 주문을 계속 진행해도 되는가"를 확인하는 실행 허가점이다.
+   * gm_order에 고객취소가 들어오면 work를 즉시 CANCELLED로 바꾸고 lock을 끊는다.
+   * Runner는 장바구니/주문서/최종 주문 직전에 이 heartbeat를 호출해야 한다.
+   */
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
 
-  if (!result.rows.length) {
-    throw new Error('work_lock_invalid_or_expired');
+    const current = (
+      await db.query(
+        `SELECT
+           w.*,
+           g.customer_status AS gm_customer_status,
+           g.seller_status AS gm_seller_status,
+           g.order_status AS gm_order_status
+         FROM gm_auto_order_work w
+         JOIN gm_auto_order a ON a.auto_order_no=w.auto_order_no
+         JOIN gm_order g ON g.order_no=a.order_no
+         WHERE w.work_id=$1
+         FOR UPDATE OF w`,
+        [Number(workId)]
+      )
+    ).rows[0];
+
+    if (!current) throw new Error('work_not_found');
+    if (
+      clean(current.lock_token) !== clean(data.lock_token) ||
+      clean(current.lock_admin_id) !== clean(data.admin_id) ||
+      clean(current.lock_mall_account_id) !== clean(data.mall_account_id)
+    ) {
+      throw new Error('work_lock_invalid_or_expired');
+    }
+
+    const cancelled =
+      upper(current.gm_customer_status) === 'CANCEL_COMPLETED' ||
+      upper(current.gm_seller_status) === 'CANCELLED' ||
+      upper(current.gm_order_status) === 'CANCELLED';
+
+    if (cancelled) {
+      await db.query(
+        `UPDATE gm_auto_order_work
+         SET work_status='CANCELLED',
+             lock_token=NULL,
+             lock_admin_id=NULL,
+             lock_mall_account_id=NULL,
+             lock_at=NULL,
+             lock_expires_at=NULL,
+             error_code='CUSTOMER_CANCELLED',
+             error_message='Glomart 주문 취소 확인: Runner 진행 금지',
+             updated_at=now()
+         WHERE work_id=$1`,
+        [Number(workId)]
+      );
+      await db.query('COMMIT');
+      throw new Error('work_cancelled_by_customer');
+    }
+
+    if (upper(current.work_status) !== 'RUNNING') {
+      throw new Error('work_lock_invalid_or_expired');
+    }
+
+    const result = await db.query(
+      `UPDATE gm_auto_order_work
+       SET lock_expires_at=now()+($2::int * interval '1 second'),
+           updated_at=now()
+       WHERE work_id=$1
+       RETURNING *`,
+      [Number(workId), LOCK_SECONDS]
+    );
+
+    await db.query('COMMIT');
+    return result.rows[0];
+  } catch (error) {
+    if (error && error.message === 'work_cancelled_by_customer') throw error;
+    await db.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    db.release();
   }
-
-  return result.rows[0];
 }
 
 async function release(pool, workId, data) {

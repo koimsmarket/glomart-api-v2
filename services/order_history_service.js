@@ -1,11 +1,11 @@
 /* services/order_history_service.js
- * GM_ORDER_HISTORY_SERVICE_V004
+ * GM_ORDER_HISTORY_SERVICE_V005_AUTO_ORDER_CANCEL_GUARD
  * 주문 생성/저장 로직과 분리된 주문조회 + 외부주문 CS 상태 서비스.
  * Cafe24 내부주문의 실제 CS 처리는 Cafe24 원본 액션 브리지에 맡긴다.
  */
 'use strict';
 
-const VERSION = 'GM_ORDER_HISTORY_SERVICE_V004';
+const VERSION = 'GM_ORDER_HISTORY_SERVICE_V005_AUTO_ORDER_CANCEL_GUARD';
 
 function text(v){ return String(v == null ? '' : v).trim(); }
 function upper(v){ return text(v).toUpperCase(); }
@@ -285,6 +285,48 @@ async function action(pool, options){
       throw new Error('unsupported_action');
     }
     await client.query(sql, params);
+
+    /*
+     * [AUTO-ORDER CANCEL GUARD]
+     * 고객 direct_cancel은 gm_order만 취소하고 끝내면 안 된다.
+     * 이미 Runner가 잡은 자동주문 work도 같은 DB 트랜잭션에서 즉시 CANCELLED 처리하고
+     * lock을 제거한다. 따라서 취소가 확정된 뒤 Runner가 다음 주문 단계로 진행할 수 없다.
+     *
+     * Runner 역시 장바구니/주문서/최종 주문 직전에 heartbeat로 gm_order 취소상태를
+     * 다시 확인한다. CS 즉시중단 + Runner 직전확인의 이중 방어를 유지한다.
+     */
+    if(actionName === 'direct_cancel'){
+      await client.query(
+        `UPDATE gm_auto_order
+         SET cancel_status='CANCELLED',
+             process_status='CANCELLED',
+             order_status=CASE
+               WHEN NULLIF(TRIM(COALESCE(mall_order_no,'')),'') IS NULL THEN 'CANCELLED'
+               ELSE order_status
+             END,
+             updated_at=NOW()
+         WHERE order_no=$1`,
+        [orderNo]
+      );
+      await client.query(
+        `UPDATE gm_auto_order_work w
+         SET work_status='CANCELLED',
+             lock_token=NULL,
+             lock_admin_id=NULL,
+             lock_mall_account_id=NULL,
+             lock_at=NULL,
+             lock_expires_at=NULL,
+             error_code='CUSTOMER_CANCELLED',
+             error_message='Glomart 주문이 고객에 의해 취소되어 자동주문 작업을 즉시 중단함',
+             updated_at=NOW()
+         FROM gm_auto_order a
+         WHERE a.auto_order_no=w.auto_order_no
+           AND a.order_no=$1
+           AND UPPER(COALESCE(w.work_status,'')) NOT IN ('COMPLETED','CANCELLED')`,
+        [orderNo]
+      );
+    }
+
     const updatedRows = (await client.query(`SELECT * FROM gm_order WHERE member_id=$1 AND order_no=$2 LIMIT 1`, [memberId, orderNo])).rows;
     const updated = normalizeOrder(updatedRows[0], itemRows);
     await client.query('COMMIT');

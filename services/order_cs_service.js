@@ -1,6 +1,6 @@
-/* services/order_cs_service.js | GM_ORDER_CS_SERVICE_V002 */
+/* services/order_cs_service.js | GM_ORDER_CS_SERVICE_V003_AUTO_ORDER_CANCEL_GUARD */
 'use strict';
-const history=require('./order_history_service');const VERSION='GM_ORDER_CS_SERVICE_V002';
+const history=require('./order_history_service');const VERSION='GM_ORDER_CS_SERVICE_V003_AUTO_ORDER_CANCEL_GUARD';
 function text(v){return String(v==null?'':v).trim();}
 function cafe24Url(action,cafeNo){const base='/myshop/order/';if(action==='detail')return base+'detail.html?order_id='+encodeURIComponent(cafeNo);if(action.indexOf('exchange')===0)return base+'exchange.html?order_id='+encodeURIComponent(cafeNo);if(action.indexOf('return')===0)return base+'return.html?order_id='+encodeURIComponent(cafeNo);return base+'cancel.html?order_id='+encodeURIComponent(cafeNo);}
 function allowed(order,action){const a=order.actions||{};return {direct_cancel:a.direct_cancel,cancel_request:a.cancel_request,cancel_withdraw:a.cancel_withdraw,exchange_request:a.exchange_request,exchange_withdraw:a.exchange_withdraw,return_request:a.return_request,return_withdraw:a.return_withdraw,purchase_confirm:a.purchase_confirm,shipping_trace:a.shipping_trace}[action]===true;}
@@ -29,6 +29,12 @@ async function action(pool,input){
   }else if(act==='purchase_confirm'){
     sql=`UPDATE gm_order SET customer_status='PURCHASE_CONFIRMED',purchase_confirmed_yn='Y',purchase_confirmed_at=$3,updated_at=$3 WHERE member_id=$1 AND order_no=$2 RETURNING order_no`;params=[memberId,orderNo,now];
   }else throw new Error('unsupported_action');
-  const r=await pool.query(sql,params);if(!r.rowCount)throw new Error('order_not_found');return {version:VERSION,order_no:orderNo,action:act,ok:true};
+  const r=await pool.query(sql,params);if(!r.rowCount)throw new Error('order_not_found');
+  /* [AUTO-ORDER CANCEL GUARD] 라우트 우선순위가 바뀌어도 direct_cancel은 work까지 즉시 중단한다. */
+  if(act==='direct_cancel'){
+    await pool.query(`UPDATE gm_auto_order SET cancel_status='CANCELLED',process_status='CANCELLED',updated_at=now() WHERE order_no=$1`,[orderNo]);
+    await pool.query(`UPDATE gm_auto_order_work w SET work_status='CANCELLED',lock_token=NULL,lock_admin_id=NULL,lock_mall_account_id=NULL,lock_at=NULL,lock_expires_at=NULL,error_code='CUSTOMER_CANCELLED',error_message='Glomart 주문이 고객에 의해 취소되어 자동주문 작업을 즉시 중단함',updated_at=now() FROM gm_auto_order a WHERE a.auto_order_no=w.auto_order_no AND a.order_no=$1 AND upper(COALESCE(w.work_status,'')) NOT IN ('COMPLETED','CANCELLED')`,[orderNo]);
+  }
+  return {version:VERSION,order_no:orderNo,action:act,ok:true};
 }
 module.exports={VERSION,action};
