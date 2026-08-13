@@ -366,10 +366,19 @@
       throw new Error('주문 상품과 현재 상품이 다릅니다.');
     }
 
+    if (inspection.puid_match === false) {
+      throw new Error('PUID(productId/itemId/vendorItemId)가 주문 상품과 다릅니다.');
+    }
+
+    // PUID 직링크가 이미 정확한 옵션 SKU를 지정하므로 옵션 DOM은 건드리지 않는다.
+    // 자동 변경은 수량에만 허용한다.
     const optionText = expectedOption(item);
     const quantity = expectedQuantity(item);
-    const match = findOptionMatch(optionText);
-    const optionResult = await selectOption(match);
+    const optionResult = {
+      changed: false,
+      reason: 'puid_direct_link_option_locked',
+      expected: optionText
+    };
     const quantityResult = await setQuantity(quantity);
 
     return {

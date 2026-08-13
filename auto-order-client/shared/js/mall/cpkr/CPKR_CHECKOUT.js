@@ -31,8 +31,9 @@
     memoInput() {
       return U.qsAll('textarea,input').find(i => U.visible(i) && /배송.*메모|요청|memo|message/.test((i.placeholder || '') + ' ' + (i.name || '') + ' ' + (i.id || '')));
     },
-    saveAddressButton() {
-      return U.findButtonByText(['저장', '선택', '확인', '완료', '사용']);
+    addressApplyButtons() {
+      return U.qsAll('button,a,div[role="button"]')
+        .filter(el => U.visible(el) && /선택|확인|완료|사용|적용|저장/.test(U.txt(el)));
     },
     paymentTarget(text) {
       if (!text) return null;
@@ -75,8 +76,31 @@
     if (recv && (receiver.name || receiver.receiver_name)) U.input(recv, receiver.name || receiver.receiver_name, '수령인');
     const phone = DOM.phoneInput();
     if (phone && receiver.phone) U.input(phone, receiver.phone, '연락처');
-    const save = DOM.saveAddressButton();
-    if (save) U.click(save, '배송지 저장/확인');
+    // 고객 배송지가 쿠팡 계정의 기본/최근 저장 배송지로 남는 것을 막는다.
+    // '저장/기본 배송지/주소록/다음에도 사용' 성격의 선택지는 자동으로 절대 켜지 않는다.
+    for (const label of U.qsAll('label')) {
+      const t = U.txt(label);
+      if (!/저장|기본\s*배송지|주소록|다음에도/.test(t)) continue;
+      const checkbox = label.querySelector('input[type="checkbox"],input[type="radio"]');
+      if (checkbox && checkbox.checked) {
+        U.click(label, '배송지 저장 옵션 해제');
+        await U.tick();
+      }
+    }
+
+    const buttons = DOM.addressApplyButtons();
+    const unsafe = buttons.find(el => /저장|기본\s*배송지|주소록|다음에도/.test(U.txt(el)));
+    const safe = buttons.find(el => {
+      const t = U.txt(el).replace(/\s+/g, ' ').trim();
+      return /^(이\s*배송지\s*사용|배송지로\s*사용|이\s*주소\s*사용|선택|적용)$/.test(t);
+    });
+
+    if (!safe) {
+      if (unsafe) unsafe.style.outline = '4px solid #f59e0b';
+      throw new Error('ADDRESS_ONE_TIME_APPLY_NOT_CONFIRMED: 저장 없는 일회성 배송지 사용 버튼이 확인되지 않아 자동 진행을 중단했습니다.');
+    }
+
+    U.click(safe, '저장 없는 일회성 배송지 적용');
     await U.sleep(300);
   }
 

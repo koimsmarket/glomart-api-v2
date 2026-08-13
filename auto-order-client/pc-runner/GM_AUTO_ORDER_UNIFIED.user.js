@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.012
+// @version      0.013
 // @description  쿠팡 PC 실행기. CPKR UID로 링크를 만들고 수동 단계 검증을 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -16,18 +16,27 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.012';
+  const VERSION = '0.013';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_INSPECTOR.js?v=012';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_INSPECTOR.js?v=013';
   const PREPARER_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_PREPARER.js?v=012';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_PREPARER.js?v=013';
   const CART_MANAGER_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_CART_MANAGER.js?v=012';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CART_MANAGER.js?v=013';
+  const UTIL_URL =
+    API_BASE +
+    '/auto-order-client/shared/js/GM_AUTO_ORDER_UTIL.js?v=013';
+  const CART_URL =
+    API_BASE +
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=013';
+  const CHECKOUT_URL =
+    API_BASE +
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=013';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -35,10 +44,10 @@
     mall_code: 'CPKR'
   };
 
-  let currentJob = GM_getValue('gmao_runner_job_v012', null);
-  let lastInspection = GM_getValue('gmao_runner_inspection_v012', null);
-  let lastPreparation = GM_getValue('gmao_runner_preparation_v012', null);
-  let lastCartAction = GM_getValue('gmao_runner_cart_v012', null);
+  let currentJob = GM_getValue('gmao_runner_job_v013', null);
+  let lastInspection = GM_getValue('gmao_runner_inspection_v013', null);
+  let lastPreparation = GM_getValue('gmao_runner_preparation_v013', null);
+  let lastCartAction = GM_getValue('gmao_runner_cart_v013', null);
   let workHeartbeatTimer = null;
   let clientHeartbeatTimer = null;
 
@@ -50,10 +59,10 @@
   }
 
   function getClientId() {
-    let clientId = GM_getValue('gmao_runner_client_id_v012', '');
+    let clientId = GM_getValue('gmao_runner_client_id_v013', '');
     if (!clientId) {
       clientId = 'PC-RUNNER-' + uuid();
-      GM_setValue('gmao_runner_client_id_v012', clientId);
+      GM_setValue('gmao_runner_client_id_v013', clientId);
     }
     return clientId;
   }
@@ -188,6 +197,32 @@
     });
   }
 
+
+  function loadExternal(url, ready, label) {
+    if (ready()) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = url;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(label + ' 모듈을 불러오지 못했습니다.'));
+      document.documentElement.appendChild(script);
+    });
+  }
+
+  function loadUtil() {
+    return loadExternal(UTIL_URL, () => Boolean(window.GMAO_UTIL), '공용 유틸');
+  }
+
+  async function loadCartFlow() {
+    await loadUtil();
+    return loadExternal(CART_URL, () => Boolean(window.CPKR_CART), '쿠팡 장바구니 주문');
+  }
+
+  async function loadCheckout() {
+    await loadUtil();
+    return loadExternal(CHECKOUT_URL, () => Boolean(window.CPKR_CHECKOUT), '쿠팡 주문서');
+  }
+
   function payloadOf(job) {
     return job && (job.payload || job) || {};
   }
@@ -275,11 +310,11 @@
   }
 
   function ensurePanel() {
-    let panel = document.getElementById('gmao-runner-panel-v012');
+    let panel = document.getElementById('gmao-runner-panel-v013');
     if (panel) return panel;
 
     panel = document.createElement('div');
-    panel.id = 'gmao-runner-panel-v012';
+    panel.id = 'gmao-runner-panel-v013';
     panel.style.cssText = [
       'position:fixed',
       'right:12px',
@@ -335,7 +370,7 @@
     return [
       '페이지검사:',
       '로그인=' + (lastInspection.login_required ? '필요' : '정상'),
-      '상품일치=' + (lastInspection.product_id_match ? '예' : '아니오'),
+      'PUID일치=' + (lastInspection.puid_match ? '예' : '아니오'),
       '옵션후보=' + lastInspection.option_control_count,
       '수량=' + (lastInspection.quantity_control_found ? '확인' : '없음'),
       '장바구니=' + (lastInspection.cart_button_found ? '확인' : '없음')
@@ -347,7 +382,7 @@
     panel.innerHTML = '';
 
     const title = document.createElement('div');
-    title.textContent = 'Glomart Runner V012';
+    title.textContent = 'Glomart Runner V013';
     title.style.cssText =
       'font-weight:800;font-size:14px;margin-bottom:6px';
     panel.appendChild(title);
@@ -403,10 +438,10 @@
       detectPageType() === 'PRODUCT' &&
       lastInspection &&
       !lastInspection.login_required &&
-      lastInspection.product_id_match
+      lastInspection.puid_match
     ) {
       panel.appendChild(
-        createButton('옵션/수량 준비', () => {
+        createButton('PUID 확인/수량 준비', () => {
           prepareProductPage().catch(showError);
         })
       );
@@ -431,6 +466,21 @@
       panel.appendChild(
         createButton('장바구니 검증', () => {
           inspectCurrentCart().catch(showError);
+        })
+      );
+      if (lastCartAction && lastCartAction.ok && lastCartAction.method === 'cart-inspection') {
+        panel.appendChild(
+          createButton('쿠팡 구매하기', () => {
+            goCheckout().catch(showError);
+          })
+        );
+      }
+    }
+
+    if (detectPageType() === 'CHECKOUT' && currentJob) {
+      panel.appendChild(
+        createButton('일회성 배송지 적용 · 결제직전 정지', () => {
+          fillCheckoutAndStop().catch(showError);
         })
       );
     }
@@ -535,10 +585,10 @@
     lastInspection = null;
     lastPreparation = null;
     lastCartAction = null;
-    GM_setValue('gmao_runner_job_v012', currentJob);
-    GM_setValue('gmao_runner_inspection_v012', null);
-    GM_setValue('gmao_runner_preparation_v012', null);
-    GM_setValue('gmao_runner_cart_v012', null);
+    GM_setValue('gmao_runner_job_v013', currentJob);
+    GM_setValue('gmao_runner_inspection_v013', null);
+    GM_setValue('gmao_runner_preparation_v013', null);
+    GM_setValue('gmao_runner_cart_v013', null);
     startWorkHeartbeat();
 
     render(
@@ -574,7 +624,7 @@
       window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect(expected);
 
     GM_setValue(
-      'gmao_runner_inspection_v012',
+      'gmao_runner_inspection_v013',
       lastInspection
     );
 
@@ -585,9 +635,9 @@
       return lastInspection;
     }
 
-    if (!lastInspection.product_id_match) {
+    if (!lastInspection.puid_match) {
       render(
-        '상품 페이지 검사 완료\n주문 상품과 현재 상품이 다릅니다.',
+        '상품 페이지 검사 완료\nPUID(productId/itemId/vendorItemId)가 주문값과 다릅니다.',
         true
       );
       return lastInspection;
@@ -621,7 +671,7 @@
       );
 
     GM_setValue(
-      'gmao_runner_preparation_v012',
+      'gmao_runner_preparation_v013',
       lastPreparation
     );
 
@@ -636,15 +686,15 @@
 
     lastInspection = refreshedInspection;
     GM_setValue(
-      'gmao_runner_inspection_v012',
+      'gmao_runner_inspection_v013',
       refreshedInspection
     );
 
     await clientHeartbeat();
 
     render(
-      '옵션/수량 준비 완료\n' +
-      '장바구니 버튼은 누르지 않았습니다.'
+      'PUID 확인/수량 준비 완료\n' +
+      '옵션은 변경하지 않았고 수량만 확인/조정했습니다.'
     );
 
     return lastPreparation;
@@ -669,7 +719,7 @@
       await window.GMAO_CPKR_CART_MANAGER.addToCart();
 
     GM_setValue(
-      'gmao_runner_cart_v012',
+      'gmao_runner_cart_v013',
       lastCartAction
     );
 
@@ -722,7 +772,7 @@
     );
 
     GM_setValue(
-      'gmao_runner_cart_v012',
+      'gmao_runner_cart_v013',
       lastCartAction
     );
 
@@ -741,6 +791,56 @@
     );
 
     return inspection;
+  }
+
+  async function goCheckout() {
+    if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
+    if (detectPageType() !== 'CART') throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
+    if (!lastCartAction || !lastCartAction.ok || lastCartAction.method !== 'cart-inspection') {
+      throw new Error('먼저 장바구니 검증을 완료하세요.');
+    }
+    await loadCartFlow();
+    const payload = payloadOf(currentJob);
+    await window.CPKR_CART.verifyAndOrder(payload.items || [], payload);
+  }
+
+  async function fillCheckoutAndStop() {
+    if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
+    if (detectPageType() !== 'CHECKOUT') throw new Error('쿠팡 주문/결제 페이지에서 실행하세요.');
+
+    const payload = payloadOf(currentJob);
+    const receiver = payload.receiver || {};
+    if (!receiver.name || !receiver.phone || !receiver.zipcode || !receiver.road_address) {
+      throw new Error('Glomart 배송지 payload가 불완전합니다.');
+    }
+
+    await loadCheckout();
+    const checkoutOrder = Object.assign({}, payload.order || {}, {
+      receiver,
+      shipping: receiver,
+      address: receiver
+    });
+    const result = await window.CPKR_CHECKOUT.fillAndStop(checkoutOrder);
+
+    await request(
+      '/api/auto-order/runtime/work/' + encodeURIComponent(currentJob.work_id) + '/state',
+      'POST',
+      settings({
+        lock_token: currentJob.lock_token,
+        status: 'STOPPED_BEFORE_PAYMENT',
+        detail: {
+          phase: 'CHECKOUT_STOPPED_BEFORE_PAYMENT',
+          message: '일회성 배송지 적용 후 결제하기 직전 정지',
+          address_persisted: false
+        }
+      })
+    );
+
+    clearInterval(workHeartbeatTimer);
+    GM_setValue('gmao_runner_job_v013', null);
+    currentJob = null;
+    render('결제하기 직전 정지 완료\n배송지 저장 버튼은 누르지 않았습니다.\n최종 결제는 사람이 확인 후 진행하세요.');
+    return result;
   }
 
   async function release() {
@@ -762,10 +862,10 @@
     lastInspection = null;
     lastPreparation = null;
     lastCartAction = null;
-    GM_setValue('gmao_runner_job_v012', null);
-    GM_setValue('gmao_runner_inspection_v012', null);
-    GM_setValue('gmao_runner_preparation_v012', null);
-    GM_setValue('gmao_runner_cart_v012', null);
+    GM_setValue('gmao_runner_job_v013', null);
+    GM_setValue('gmao_runner_inspection_v013', null);
+    GM_setValue('gmao_runner_preparation_v013', null);
+    GM_setValue('gmao_runner_cart_v013', null);
     clearInterval(workHeartbeatTimer);
     workHeartbeatTimer = null;
 

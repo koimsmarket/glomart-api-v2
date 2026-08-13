@@ -201,6 +201,33 @@ async function buildPayload(db, work) {
     items.push(await enrichCpkrItem(db, item, order.order_no));
   }
 
+  const gmOrder = (
+    await db.query(
+      `SELECT
+         receiver_name, receiver_phone, receiver_mobile, receiver_safe_phone,
+         receiver_zipcode, receiver_address1, receiver_address2, delivery_memo
+       FROM gm_order
+       WHERE order_no=$1
+       LIMIT 1`,
+      [order.order_no]
+    )
+  ).rows[0] || {};
+
+  const receiver = {
+    name: clean(gmOrder.receiver_name),
+    receiver_name: clean(gmOrder.receiver_name),
+    phone: clean(gmOrder.receiver_mobile || gmOrder.receiver_phone),
+    mobile: clean(gmOrder.receiver_mobile),
+    safe_phone: clean(gmOrder.receiver_safe_phone),
+    zipcode: clean(gmOrder.receiver_zipcode),
+    road_address: clean(gmOrder.receiver_address1),
+    address: clean(gmOrder.receiver_address1),
+    detail_address: clean(gmOrder.receiver_address2),
+    memo: clean(gmOrder.delivery_memo),
+    persist_address: false,
+    set_default_address: false
+  };
+
   return {
     work_id: work.work_id,
     auto_order_no: work.auto_order_no,
@@ -209,6 +236,7 @@ async function buildPayload(db, work) {
     mode: order.mode || 'SEMI_AUTO',
     stop_before_payment: upper(order.mode || 'SEMI_AUTO') !== 'FULL_AUTO',
     order,
+    receiver,
     items
   };
 }

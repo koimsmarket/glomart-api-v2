@@ -59,9 +59,22 @@
     );
   }
 
+  function identityFromUrl(value) {
+    try {
+      const u = new URL(String(value || ''), location.origin);
+      const m = u.pathname.match(/\/vp\/products\/(\d+)/);
+      return {
+        product_id: m ? m[1] : '',
+        item_id: u.searchParams.get('itemId') || '',
+        vendor_item_id: u.searchParams.get('vendorItemId') || ''
+      };
+    } catch (_) {
+      return { product_id: '', item_id: '', vendor_item_id: '' };
+    }
+  }
+
   function productIdFromUrl(value) {
-    const match = String(value || '').match(/\/vp\/products\/(\d+)/);
-    return match ? match[1] : '';
+    return identityFromUrl(value).product_id;
   }
 
   function inspect(expected) {
@@ -106,13 +119,20 @@
       return value && value.length < 250;
     });
 
-    const currentProductId = productIdFromUrl(location.href);
-    const expectedProductId = productIdFromUrl(
+    const currentIdentity = identityFromUrl(location.href);
+    const expectedIdentity = identityFromUrl(
       expected.product_url ||
       expected.mall_product_url ||
       expected.external_product_url ||
       ''
     );
+    const currentProductId = currentIdentity.product_id;
+    const expectedProductId = expected.product_id || expectedIdentity.product_id;
+    const expectedItemId = String(expected.item_id || expectedIdentity.item_id || '');
+    const expectedVendorItemId = String(expected.vendor_item_id || expectedIdentity.vendor_item_id || '');
+    const productIdMatch = !expectedProductId || currentProductId === String(expectedProductId);
+    const itemIdMatch = !expectedItemId || currentIdentity.item_id === expectedItemId;
+    const vendorItemIdMatch = !expectedVendorItemId || currentIdentity.vendor_item_id === expectedVendorItemId;
 
     const title =
       titleNode && titleNode.tagName === 'META'
@@ -132,9 +152,15 @@
       login_required: detectLoginRequired(),
       url: location.href,
       current_product_id: currentProductId,
-      expected_product_id: expectedProductId,
-      product_id_match:
-        !expectedProductId || currentProductId === expectedProductId,
+      current_item_id: currentIdentity.item_id,
+      current_vendor_item_id: currentIdentity.vendor_item_id,
+      expected_product_id: String(expectedProductId || ''),
+      expected_item_id: expectedItemId,
+      expected_vendor_item_id: expectedVendorItemId,
+      product_id_match: productIdMatch,
+      item_id_match: itemIdMatch,
+      vendor_item_id_match: vendorItemIdMatch,
+      puid_match: productIdMatch && itemIdMatch && vendorItemIdMatch,
       title,
       price_text: text(priceNode),
       quantity_control_found: Boolean(quantityNode),
@@ -154,6 +180,7 @@
 
   window.GMAO_CPKR_PRODUCT_INSPECTOR = {
     inspect,
-    productIdFromUrl
+    productIdFromUrl,
+    identityFromUrl
   };
 })();
