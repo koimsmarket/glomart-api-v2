@@ -1,4 +1,4 @@
-/* GM_ORDER_MAP_ADDRESS_ROUTE_V001
+/* GM_ORDER_MAP_ADDRESS_ROUTE_V002
  * Google Maps is used only to let the user find/select a coordinate.
  * This server route converts that WGS84 coordinate with Kakao Local API
  * and returns the Korean road/lot address used by the order form.
@@ -14,8 +14,17 @@ function coord(v){ const n=Number(v); return Number.isFinite(n) ? n : null; }
 function inKorea(lat,lng){ return lat>=32.5 && lat<=39.8 && lng>=123.5 && lng<=132.5; }
 
 router.get('/api/gm/address-map/config',(req,res)=>{
-  const key=C(process.env.GOOGLE_MAPS_BROWSER_KEY || process.env.GOOGLE_MAPS_API_KEY || '');
-  return res.json({ok:true,google_maps_browser_key:key,enabled:!!key,region:'KR'});
+  const googleKey=C(process.env.GOOGLE_MAPS_BROWSER_KEY || process.env.GOOGLE_MAPS_API_KEY || '');
+  const kakaoJsKey=C(process.env.KAKAO_MAP_JAVASCRIPT_KEY || process.env.KAKAO_JAVASCRIPT_KEY || '');
+  return res.json({
+    ok:true,
+    google_maps_browser_key:googleKey,
+    google_enabled:!!googleKey,
+    kakao_maps_javascript_key:kakaoJsKey,
+    kakao_enabled:!!kakaoJsKey,
+    enabled:!!(googleKey||kakaoJsKey),
+    region:'KR'
+  });
 });
 
 router.get('/api/gm/address-map/kakao',async(req,res)=>{

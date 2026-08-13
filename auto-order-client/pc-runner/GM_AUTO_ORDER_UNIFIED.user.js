@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.013
+// @version      0.016
 // @description  쿠팡 PC 실행기. CPKR UID로 링크를 만들고 수동 단계 검증을 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.013';
+  const VERSION = '0.016';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -382,7 +382,7 @@
     panel.innerHTML = '';
 
     const title = document.createElement('div');
-    title.textContent = 'Glomart Runner V013';
+    title.textContent = 'Glomart Runner V016';
     title.style.cssText =
       'font-weight:800;font-size:14px;margin-bottom:6px';
     panel.appendChild(title);
@@ -492,6 +492,48 @@
     );
   }
 
+  const STALE_WORK_ERRORS = new Set([
+    'work_not_found',
+    'work_lock_invalid',
+    'work_lock_invalid_or_expired',
+    'work_not_running'
+  ]);
+
+  function errorCode(error) {
+    return String(error && error.message || error || '').trim();
+  }
+
+  function isStaleWorkError(error) {
+    return STALE_WORK_ERRORS.has(errorCode(error));
+  }
+
+  function clearLocalWork() {
+    currentJob = null;
+    lastInspection = null;
+    lastPreparation = null;
+    lastCartAction = null;
+    GM_setValue('gmao_runner_job_v013', null);
+    GM_setValue('gmao_runner_inspection_v013', null);
+    GM_setValue('gmao_runner_preparation_v013', null);
+    GM_setValue('gmao_runner_cart_v013', null);
+    clearInterval(workHeartbeatTimer);
+    workHeartbeatTimer = null;
+  }
+
+  function handleWorkHeartbeatError(error) {
+    if (isStaleWorkError(error)) {
+      const code = errorCode(error);
+      clearLocalWork();
+      render(
+        '서버에서 기존 작업 잠금이 종료된 것을 확인했습니다.\n' +
+        'Runner의 오래된 작업을 자동 정리했습니다.\n' +
+        code + '\n새 작업 가져오기가 가능합니다.'
+      );
+      return;
+    }
+    showError(error);
+  }
+
   function showError(error) {
     render(
       '오류\n' + String(error && error.message || error),
@@ -553,16 +595,28 @@
     if (!currentJob) return;
 
     workHeartbeatTimer = setInterval(() => {
-      workHeartbeat().catch(showError);
+      workHeartbeat().catch(handleWorkHeartbeatError);
     }, 30000);
   }
 
   async function claim() {
     if (currentJob) {
-      render(
-        '이미 작업을 보유 중입니다.\n작업 #' + currentJob.work_id
-      );
-      return currentJob;
+      try {
+        await workHeartbeat();
+        render(
+          '이미 유효한 작업을 보유 중입니다.\n작업 #' + currentJob.work_id
+        );
+        return currentJob;
+      } catch (error) {
+        if (!isStaleWorkError(error)) throw error;
+
+        const staleCode = errorCode(error);
+        clearLocalWork();
+        render(
+          '기존 로컬 작업이 서버에서 이미 종료되었습니다.\n' +
+          staleCode + '\n새 작업을 다시 요청합니다…'
+        );
+      }
     }
 
     render('작업 배정 요청 중…');
@@ -848,28 +902,30 @@
 
     const job = currentJob;
 
-    await request(
-      '/api/auto-order/runtime/work/' +
-      encodeURIComponent(job.work_id) +
-      '/release',
-      'POST',
-      settings({
-        lock_token: job.lock_token
-      })
-    );
+    try {
+      await request(
+        '/api/auto-order/runtime/work/' +
+        encodeURIComponent(job.work_id) +
+        '/release',
+        'POST',
+        settings({
+          lock_token: job.lock_token
+        })
+      );
 
-    currentJob = null;
-    lastInspection = null;
-    lastPreparation = null;
-    lastCartAction = null;
-    GM_setValue('gmao_runner_job_v013', null);
-    GM_setValue('gmao_runner_inspection_v013', null);
-    GM_setValue('gmao_runner_preparation_v013', null);
-    GM_setValue('gmao_runner_cart_v013', null);
-    clearInterval(workHeartbeatTimer);
-    workHeartbeatTimer = null;
+      clearLocalWork();
+      render('작업을 서버 READY 상태로 반환했고 Runner도 비웠습니다.');
+    } catch (error) {
+      if (!isStaleWorkError(error)) throw error;
 
-    render('작업을 READY 상태로 반환했습니다.');
+      const staleCode = errorCode(error);
+      clearLocalWork();
+      render(
+        '서버에서는 이 작업이 이미 반환/종료된 상태입니다.\n' +
+        'Runner에 남아 있던 오래된 작업만 정리했습니다.\n' +
+        staleCode + '\n새 작업 가져오기가 가능합니다.'
+      );
+    }
   }
 
   async function start() {
@@ -882,12 +938,27 @@
       }, 20000);
 
       if (currentJob) {
-        startWorkHeartbeat();
-        render(
-          '기존 작업 복구\n' +
-          '#' + currentJob.work_id + '\n' +
-          currentJob.auto_order_no
-        );
+        try {
+          await workHeartbeat();
+          startWorkHeartbeat();
+          render(
+            '기존 작업 복구 완료\n' +
+            '#' + currentJob.work_id + '\n' +
+            currentJob.auto_order_no
+          );
+        } catch (error) {
+          if (isStaleWorkError(error)) {
+            const staleCode = errorCode(error);
+            clearLocalWork();
+            render(
+              '기존 로컬 작업은 서버에서 더 이상 유효하지 않습니다.\n' +
+              staleCode + '\n자동 정리 완료 · 새 작업 배정 대기'
+            );
+          } else {
+            startWorkHeartbeat();
+            showError(error);
+          }
+        }
       } else {
         render('온라인\n수동 작업 배정 대기');
       }
