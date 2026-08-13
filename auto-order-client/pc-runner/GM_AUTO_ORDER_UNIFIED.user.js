@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.016
-// @description  쿠팡 PC 실행기. CPKR UID로 링크를 만들고 수동 단계 검증을 수행합니다.
+// @version      0.017
+// @description  쿠팡 PC 실행기. 상품 상세 진입 후 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
 // @match        https://checkout.coupang.com/*
@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.016';
+  const VERSION = '0.017';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -50,6 +50,7 @@
   let lastCartAction = GM_getValue('gmao_runner_cart_v013', null);
   let workHeartbeatTimer = null;
   let clientHeartbeatTimer = null;
+  let autoProductFlowRunning = false;
 
   function uuid() {
     if (crypto && typeof crypto.randomUUID === 'function') {
@@ -382,7 +383,7 @@
     panel.innerHTML = '';
 
     const title = document.createElement('div');
-    title.textContent = 'Glomart Runner V016';
+    title.textContent = 'Glomart Runner V017';
     title.style.cssText =
       'font-weight:800;font-size:14px;margin-bottom:6px';
     panel.appendChild(title);
@@ -654,6 +655,10 @@
         : 'CPKR UID 형식 오류: 숫자_숫자_숫자 필요')
     );
 
+    if (detectPageType() === 'PRODUCT') {
+      setTimeout(() => { autoInspectAndPrepareProductPage(); }, 700);
+    }
+
     return currentJob;
   }
 
@@ -752,6 +757,49 @@
     );
 
     return lastPreparation;
+  }
+
+
+
+  async function autoInspectAndPrepareProductPage() {
+    if (autoProductFlowRunning) return;
+    if (!currentJob || detectPageType() !== 'PRODUCT') return;
+
+    autoProductFlowRunning = true;
+    try {
+      render('상품 페이지 자동 확인 중…\nPUID 검증 후 주문수량만 확인/조정합니다.');
+
+      const inspection = await inspectProductPage();
+
+      if (!inspection || inspection.login_required) return;
+      if (!inspection.puid_match) return;
+
+      const preparation = await prepareProductPage();
+      const qtyResult = preparation && preparation.quantity_result || {};
+      const requestedQty = Number(firstItem(currentJob).qty || firstItem(currentJob).quantity || 1);
+      const actualQty = Number(qtyResult.after || 0);
+
+      if (actualQty && requestedQty > 0 && actualQty !== requestedQty) {
+        render(
+          '자동 상품 준비 확인 필요\n' +
+          'PUID는 일치하지만 주문수량 설정 결과가 다릅니다.\n' +
+          '주문수량=' + requestedQty + ' / 화면수량=' + actualQty,
+          true
+        );
+        return;
+      }
+
+      render(
+        '자동 상품 준비 완료\n' +
+        'PUID 일치 · 옵션 변경 없음 · 주문수량=' +
+        (actualQty || requestedQty) + '\n' +
+        '다음 단계: 장바구니 담기 테스트'
+      );
+    } catch (error) {
+      showError(error);
+    } finally {
+      autoProductFlowRunning = false;
+    }
   }
 
   async function addCurrentItemToCart() {
@@ -946,6 +994,9 @@
             '#' + currentJob.work_id + '\n' +
             currentJob.auto_order_no
           );
+          if (detectPageType() === 'PRODUCT') {
+            setTimeout(() => { autoInspectAndPrepareProductPage(); }, 700);
+          }
         } catch (error) {
           if (isStaleWorkError(error)) {
             const staleCode = errorCode(error);
