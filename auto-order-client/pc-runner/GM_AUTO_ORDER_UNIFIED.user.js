@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.024
+// @version      0.025
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.024';
+  const VERSION = '0.025';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -179,12 +179,39 @@
              * Tampermonkey userscript sandbox의 window에서는 보이지 않을 수 있다.
              * 따라서 코드를 GM_xmlhttpRequest로 읽은 뒤 현재 Runner sandbox에서 실행한다.
              */
+            /*
+             * V025: 외부 CPKR 모듈은 Tampermonkey sandbox 안에서 실행된다.
+             * 모듈이 new MouseEvent(type, { view: window, ... })를 사용하면
+             * sandbox의 window proxy는 native UIEvent.view(Window)로 변환되지 않아
+             * "Failed to convert value to 'Window'" 오류가 발생한다.
+             *
+             * 개별 CPKR 모듈의 클릭 코드를 임의로 수정하지 않고, 모듈 실행 스코프에
+             * 안전한 MouseEvent 생성자를 주입한다. view는 클릭 동작에 필수값이 아니므로
+             * 제거하고 실제 page document의 native MouseEvent로 생성한다.
+             * 이 보호막은 CHECKOUT뿐 아니라 동적으로 로드되는 모든 CPKR 모듈에 적용한다.
+             */
+            const pageView = document && document.defaultView;
+            const NativeMouseEvent =
+              pageView && typeof pageView.MouseEvent === 'function'
+                ? pageView.MouseEvent
+                : MouseEvent;
+
+            function SafeMouseEvent(type, init) {
+              const safeInit = Object.assign({}, init || {});
+              if (Object.prototype.hasOwnProperty.call(safeInit, 'view')) {
+                delete safeInit.view;
+              }
+              return new NativeMouseEvent(type, safeInit);
+            }
+            SafeMouseEvent.prototype = NativeMouseEvent.prototype;
+
             const runModule = new Function(
               'window',
               'globalThis',
+              'MouseEvent',
               response.responseText + '\n//# sourceURL=' + url
             );
-            runModule(window, globalThis);
+            runModule(window, globalThis, SafeMouseEvent);
           } catch (error) {
             reject(new Error(label + ' 모듈 실행 실패: ' + error.message));
             return;
