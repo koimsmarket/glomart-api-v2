@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '015';
+  const VERSION = '016';
 
   function docs() {
     const out = [document];
@@ -56,7 +56,18 @@
       return buttonByText('배송지 변경');
     },
     addressForm() {
-      return all('form._addressBookSaveForm,form.addressBookSaveForm').find(visible) || null;
+      const forms = all('form._addressBookSaveForm,form.addressBookSaveForm');
+      // 쿠팡 배송지 modal의 form 자체는 layout box가 0으로 계산될 수 있다.
+      // form의 visible()만으로 버리지 말고, 실제 보이는 입력/버튼 자식이 있으면 유효한 폼으로 인정한다.
+      for (const form of forms) {
+        if (visible(form)) return form;
+        const child = form.querySelector(
+          '#addressbookRecipient,input[name="recipientName"],a.addressBookZipcodeTrigger,' +
+          'button.addressbook__button--save,button._addressBookFormSubmit'
+        );
+        if (child && visible(child)) return form;
+      }
+      return forms[0] || null;
     },
     recipientInput() {
       return firstVisible('#addressbookRecipient,input[name="recipientName"]');
