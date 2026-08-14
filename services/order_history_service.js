@@ -5,7 +5,10 @@
  */
 'use strict';
 
-const VERSION = 'GM_ORDER_HISTORY_SERVICE_V005_AUTO_ORDER_CANCEL_GUARD';
+const refundBank=require('./GM_ORDER_REFUND_BANK');
+const refundDeposit=require('./GM_ORDER_REFUND_DEPOSIT');
+
+const VERSION = 'GM_ORDER_HISTORY_SERVICE_V006_CANCEL_REFUND_DEPOSIT';
 
 function text(v){ return String(v == null ? '' : v).trim(); }
 function upper(v){ return text(v).toUpperCase(); }
@@ -157,6 +160,8 @@ function normalizeOrder(order, items){
     cs_withdrawn_at: order.cs_withdrawn_at || null,
     cancel_requested_at: order.cancel_requested_at || null,
     cancel_completed_at: order.cancel_completed_at || null,
+    refund_method: text(order.refund_method),
+    refund_status: text(order.refund_status || 'NONE'),
     refund_amount: int(order.refund_amount, 0),
     refund_completed_at: order.refund_completed_at || null,
     purchase_confirmed_yn: text(order.purchase_confirmed_yn),
@@ -222,7 +227,19 @@ async function detail(pool, options){
   const orderRows = (await pool.query(`SELECT * FROM gm_order WHERE member_id=$1 AND order_no=$2 LIMIT 1`, [memberId, orderNo])).rows;
   if(!orderRows.length) throw new Error('order_not_found');
   const itemRows = (await pool.query(`SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC`, [orderNo])).rows;
-  return normalizeOrder(orderRows[0], itemRows);
+  const out=normalizeOrder(orderRows[0], itemRows);
+  const member=(await pool.query(
+    `SELECT refund_bank_name,refund_account_no,refund_account_holder
+       FROM gm_member WHERE member_id=$1 LIMIT 1`,
+    [memberId]
+  )).rows[0] || {};
+  // Refund account is member master data only; never copied into gm_order.
+  out.refund_account={
+    bank_name:text(member.refund_bank_name),
+    account_no:text(member.refund_account_no),
+    account_holder:text(member.refund_account_holder)
+  };
+  return out;
 }
 
 function assertAllowed(order, actionName){
@@ -237,6 +254,7 @@ async function action(pool, options){
   const actionName = text(options && options.action);
   const reasonCode = text(options && options.reason_code);
   const reasonText = text(options && options.reason_text);
+  const refundMethod = upper(options && options.refund_method);
   if(!memberId) throw new Error('member_id_required');
   if(!orderNo) throw new Error('order_no_required');
   if(!actionName) throw new Error('action_required');
@@ -257,6 +275,21 @@ async function action(pool, options){
       const tracking = normalized.items.find((x) => text(x.tracking_number)) || {};
       await client.query('COMMIT');
       return { action:actionName, order:normalized, carrier_name:text(tracking.carrier_name), tracking_number:text(tracking.tracking_number), tracking_url:'' };
+    }
+
+    let refundResult=null;
+    let refundAmount=0;
+    if(actionName === 'direct_cancel'){
+      const payStatus=upper(rows[0].payment_status);
+      const paid=['PAID','OVERPAID','PAYMENT_COMPLETE','PAYMENT_COMPLETED','COMPLETED','COMPLETE','DONE','SUCCESS','SETTLED'].includes(payStatus);
+      if(paid){
+        refundAmount=Math.max(
+          int(rows[0].actual_payment_amount,0),
+          int(rows[0].expected_payment_amount,0),
+          int(rows[0].total_payment_price,0)
+        );
+        if(refundAmount>0 && !['BANK','DEPOSIT'].includes(refundMethod)) throw new Error('refund_method_required');
+      }
     }
 
     let sql = '';
@@ -327,10 +360,25 @@ async function action(pool, options){
       );
     }
 
+    /*
+     * [CANCEL REFUND ROUTING]
+     * BANK: validate gm_member.refund_* and leave refund_status=PENDING.
+     *       No fake gm_bank_transaction OUT row is created.
+     * DEPOSIT: update gm_deposit_balance + gm_deposit_transaction in this
+     *          same DB transaction and mark refund completed.
+     */
+    if(actionName === 'direct_cancel' && refundAmount>0){
+      if(refundMethod === 'BANK'){
+        refundResult=await refundBank.prepare(client,{member_id:memberId,order_no:orderNo,amount:refundAmount});
+      }else if(refundMethod === 'DEPOSIT'){
+        refundResult=await refundDeposit.apply(client,{member_id:memberId,order_no:orderNo,amount:refundAmount});
+      }
+    }
+
     const updatedRows = (await client.query(`SELECT * FROM gm_order WHERE member_id=$1 AND order_no=$2 LIMIT 1`, [memberId, orderNo])).rows;
     const updated = normalizeOrder(updatedRows[0], itemRows);
     await client.query('COMMIT');
-    return { action:actionName, order:updated };
+    return { action:actionName, order:updated, refund:refundResult };
   }catch(error){
     try{ await client.query('ROLLBACK'); }catch(_){}
     throw error;
