@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.023
+// @version      0.024
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.023';
+  const VERSION = '0.024';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -488,14 +488,28 @@
 
     if (
       detectPageType() === 'PRODUCT' &&
-      lastPreparation &&
-      !lastCartAction
+      lastPreparation
     ) {
-      panel.appendChild(
-        createButton('장바구니 담기', () => {
-          addCurrentItemToCart().catch(showError);
-        })
-      );
+      /*
+       * V024 PRODUCT RETURN STATE
+       * 장바구니 담기 후 상품페이지로 다시 돌아오면 lastCartAction이 남아 있다.
+       * 기존 코드는 !lastCartAction 조건 때문에 모든 다음 단계 버튼을 숨겼다.
+       * 이미 담기 성공 이력이 있으면 중복 담기하지 말고 장바구니로 복귀시키고,
+       * 담기 이력이 없거나 실패했으면 기존 장바구니 담기 버튼을 다시 제공한다.
+       */
+      if (lastCartAction && lastCartAction.ok) {
+        panel.appendChild(
+          createButton('장바구니 열기 · 주문 계속', () => {
+            openCurrentCart().catch(showError);
+          })
+        );
+      } else {
+        panel.appendChild(
+          createButton('장바구니 담기', () => {
+            addCurrentItemToCart().catch(showError);
+          })
+        );
+      }
     }
 
     if (
@@ -958,6 +972,29 @@
 
     return lastCartAction;
   }
+
+  async function openCurrentCart() {
+    if (!currentJob) {
+      throw new Error('먼저 작업을 가져오세요.');
+    }
+
+    await assertOrderStillActive('BEFORE_OPEN_CART');
+    await loadCartManager();
+
+    render('기존 장바구니 작업을 이어서 진행합니다.\n장바구니에서 주문 상품을 다시 검증하세요.');
+
+    if (
+      window.GMAO_CPKR_CART_MANAGER &&
+      typeof window.GMAO_CPKR_CART_MANAGER.openCart === 'function'
+    ) {
+      window.GMAO_CPKR_CART_MANAGER.openCart();
+      return true;
+    }
+
+    location.href = 'https://cart.coupang.com/cartView.pang';
+    return true;
+  }
+
 
   async function inspectCurrentCart() {
     if (!currentJob) {
