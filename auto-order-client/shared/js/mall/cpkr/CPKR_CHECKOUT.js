@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '014';
+  const VERSION = '015';
 
   function docs() {
     const out = [document];
@@ -56,7 +56,7 @@
       return buttonByText('배송지 변경');
     },
     addressForm() {
-      return all('form.addressBookSaveForm').find(visible) || null;
+      return all('form._addressBookSaveForm,form.addressBookSaveForm').find(visible) || null;
     },
     recipientInput() {
       return firstVisible('#addressbookRecipient,input[name="recipientName"]');
