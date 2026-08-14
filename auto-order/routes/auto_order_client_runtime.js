@@ -4,8 +4,9 @@ const express = require('express');
 const router = express.Router();
 const clients = require('../services/runtime_client_registry');
 const works = require('../services/runtime_work_service');
+const accounts = require('../services/account_service');
 
-const VERSION = 'GM_AUTO_ORDER_CLIENT_RUNTIME_API_V012';
+const VERSION = 'GM_AUTO_ORDER_CLIENT_RUNTIME_API_V013_STEPUP_AUTH';
 
 function pool(req) {
   return req.app.locals.pool || req.app.locals.db;
@@ -123,6 +124,22 @@ router.post(
   }
 );
 
+
+/*
+ * [STEP-UP AUTH CREDENTIAL]
+ * 현재 RUNNING 작업의 lock_token/admin/mall_account가 모두 일치할 때만
+ * 해당 실행계정의 복호화된 비밀번호를 Runner에 1회 응답한다.
+ * 비밀번호는 로그에 절대 기록하지 않는다.
+ */
+router.post('/api/auto-order/runtime/work/:work_id/credential', async (req,res)=>{
+  try{
+    const credential=await accounts.credentialForLockedWork(pool(req),req.params.work_id,req.body||{});
+    return ok(res,{credential});
+  }catch(error){
+    return fail(res,403,'credential_access_failed',error);
+  }
+});
+
 router.get('/api/auto-order/runtime/status', async (req, res) => {
   try {
     return ok(res, {
@@ -134,5 +151,5 @@ router.get('/api/auto-order/runtime/status', async (req, res) => {
   }
 });
 
-console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V012] route loaded');
+console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V013_STEPUP_AUTH] route loaded');
 module.exports = router;

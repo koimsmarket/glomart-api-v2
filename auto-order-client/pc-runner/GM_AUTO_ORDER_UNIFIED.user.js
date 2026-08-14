@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.020
+// @version      0.023
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
 // @match        https://checkout.coupang.com/*
+// @match        https://login.coupang.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -16,7 +17,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.020';
+  const VERSION = '0.023';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -71,6 +72,7 @@
   function detectPageType() {
     if (location.hostname === 'cart.coupang.com') return 'CART';
     if (location.hostname === 'checkout.coupang.com') return 'CHECKOUT';
+    if (location.hostname === 'login.coupang.com') return 'AUTH';
     if (/\/vp\/products\//.test(location.pathname)) return 'PRODUCT';
     return 'COUPANG';
   }
@@ -505,9 +507,9 @@
           inspectCurrentCart().catch(showError);
         })
       );
-      if (lastCartAction && lastCartAction.ok && lastCartAction.method === 'cart-inspection') {
+      if (lastCartAction && lastCartAction.ok) {
         panel.appendChild(
-          createButton('쿠팡 구매하기', () => {
+          createButton('주문/결제 진행', () => {
             goCheckout().catch(showError);
           })
         );
@@ -722,6 +724,9 @@
 
     if (detectPageType() === 'PRODUCT') {
       setTimeout(() => { autoInspectAndPrepareProductPage(); }, 700);
+    }
+    if (detectPageType() === 'AUTH') {
+      setTimeout(() => { autoStepupAuth().catch(showError); }, 450);
     }
 
     return currentJob;
@@ -1002,15 +1007,118 @@
   }
 
   async function goCheckout() {
+    /*
+     * V021: 장바구니 검증 성공 여부는 ok=true만 기준으로 한다.
+     * CPKR 모듈/메시지 경로에 따라 method 값이 cart-inspection 이외로 보존될 수 있으므로
+     * method 문자열 때문에 정상 검증 후 주문/결제 버튼이 사라지지 않게 한다.
+     * 다음 단계 클릭 직전의 고객취소 DB 재확인(BEFORE_CHECKOUT)은 반드시 유지한다.
+     */
     if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
     if (detectPageType() !== 'CART') throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
-    if (!lastCartAction || !lastCartAction.ok || lastCartAction.method !== 'cart-inspection') {
+    if (!lastCartAction || !lastCartAction.ok) {
       throw new Error('먼저 장바구니 검증을 완료하세요.');
     }
     await assertOrderStillActive('BEFORE_CHECKOUT');
-    await loadCartFlow();
-    const payload = payloadOf(currentJob);
-    await window.CPKR_CART.verifyAndOrder(payload.items || [], payload);
+
+    /*
+     * V022: 쿠팡 주문/결제 이동은 실제 DOM 버튼의 native click을 사용한다.
+     * Tampermonkey sandbox에서 synthetic MouseEvent(view=window)를 만들면
+     * Window 변환 오류가 날 수 있으므로 CPKR_CART.verifyAndOrder()의
+     * 합성 클릭 경로는 이 단계에서 사용하지 않는다.
+     * 장바구니 검증/선택상태는 직전 inspectCart 결과를 그대로 신뢰한다.
+     */
+    const button =
+      document.querySelector('a.goPayment[data-pay-role="button"]') ||
+      document.querySelector('a.goPayment') ||
+      document.querySelector('[data-pay-role="button"]');
+
+    if (!button) {
+      throw new Error('쿠팡 주문/결제 진행 버튼을 찾지 못했습니다.');
+    }
+
+    render('주문/결제 페이지로 이동합니다.');
+
+    if (typeof button.click === 'function') {
+      button.click();
+      return;
+    }
+
+    const href = button.getAttribute && button.getAttribute('href');
+    if (href) {
+      location.href = new URL(href, location.href).href;
+      return;
+    }
+
+    throw new Error('쿠팡 주문/결제 버튼을 실행할 수 없습니다.');
+  }
+
+
+  function nativeInputValue(input, value) {
+    const proto = input instanceof HTMLInputElement ? HTMLInputElement.prototype : null;
+    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(input, String(value == null ? '' : value));
+    else input.value = String(value == null ? '' : value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function fetchLockedCredential() {
+    if (!currentJob) throw new Error('추가인증용 현재 작업이 없습니다.');
+    const result = await request(
+      '/api/auto-order/runtime/work/' + encodeURIComponent(currentJob.work_id) + '/credential',
+      'POST',
+      settings({ lock_token: currentJob.lock_token })
+    );
+    const c = result && result.credential || {};
+    if (!c.password) throw new Error('CPKR_MASTER 비밀번호가 컨트롤타워에 등록되지 않았습니다.');
+    return c;
+  }
+
+  function findPasswordMethodButton() {
+    const all = Array.from(document.querySelectorAll('button,a,[role="button"],div'));
+    return all.find(el => {
+      if (!el || !el.getBoundingClientRect) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+      const t = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      return /비밀번호\s*확인/.test(t) && t.length < 80;
+    }) || null;
+  }
+
+  async function autoStepupAuth() {
+    if (!currentJob || detectPageType() !== 'AUTH') return false;
+
+    // 인증방법 선택 화면이면 "비밀번호 확인"을 자동 선택한다.
+    const pwdInput = document.querySelector('#auth-password-input,input[name="password"][type="password"]');
+    if (!pwdInput) {
+      const methodButton = findPasswordMethodButton();
+      if (methodButton) {
+        GM_setValue('gmao_runner_auth_status_v023', { state: 'PASSWORD_METHOD_SELECTED', ts: Date.now() });
+        render('쿠팡 추가인증 감지\n비밀번호 확인 방식을 선택합니다.');
+        methodButton.click();
+        return true;
+      }
+      return false;
+    }
+
+    await assertOrderStillActive('BEFORE_STEPUP_AUTH');
+    let credential = await fetchLockedCredential();
+    GM_setValue('gmao_runner_auth_status_v023', { state: 'PASSWORD_FILLING', ts: Date.now() });
+    render('쿠팡 추가인증 감지\nCPKR_MASTER 비밀번호를 자동 입력합니다.');
+
+    nativeInputValue(pwdInput, credential.password);
+    credential.password = '';
+    await new Promise(resolve => setTimeout(resolve, 250));
+
+    const submit = document.querySelector('button[type="submit"].authentication-password__submit-btn,button[type="submit"]');
+    if (!submit) throw new Error('쿠팡 추가인증 계속하기 버튼을 찾지 못했습니다.');
+    if (submit.disabled) {
+      pwdInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a' }));
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    GM_setValue('gmao_runner_auth_status_v023', { state: 'PASSWORD_SUBMITTED', ts: Date.now() });
+    submit.click();
+    return true;
   }
 
   async function fillCheckoutAndStop() {
@@ -1105,6 +1213,9 @@
           );
           if (detectPageType() === 'PRODUCT') {
             setTimeout(() => { autoInspectAndPrepareProductPage(); }, 700);
+          }
+          if (detectPageType() === 'AUTH') {
+            setTimeout(() => { autoStepupAuth().catch(showError); }, 450);
           }
         } catch (error) {
           if (isStaleWorkError(error)) {
