@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '016';
+  const VERSION = '017';
 
   function docs() {
     const out = [document];
@@ -69,8 +69,9 @@
       }
       return forms[0] || null;
     },
-    recipientInput() {
-      return firstVisible('#addressbookRecipient,input[name="recipientName"]');
+    recipientInput(form) {
+      const el = form && form.querySelector('#addressbookRecipient,input[name="recipientName"]');
+      return el || firstVisible('#addressbookRecipient,input[name="recipientName"]');
     },
     zipcodeTrigger() {
       return firstVisible('a.addressBookZipcodeTrigger,[title="우편번호 찾기"],a[href*="zipcode"]');
@@ -85,17 +86,20 @@
       return all('[data-result-item-road],._zipcodeResultSendTrigger,.zipcode__result-item--road')
         .filter(visible);
     },
-    detailInput() {
-      return firstVisible('#addressbookAddressDetail,input[name="addressDetail"]');
+    detailInput(form) {
+      const el = form && form.querySelector('#addressbookAddressDetail,input[name="addressDetail"]');
+      return el || firstVisible('#addressbookAddressDetail,input[name="addressDetail"]');
     },
-    phoneInput() {
-      return firstVisible('#addressBookCellphone,input[name="recipientCellphone"]');
+    phoneInput(form) {
+      const el = form && form.querySelector('#addressBookCellphone,input[name="recipientCellphone"]');
+      return el || firstVisible('#addressBookCellphone,input[name="recipientCellphone"]');
     },
     deliveryPreferenceTrigger() {
       return firstVisible('.addressBookDeliveryPreferencesTrigger,[title="배송 요청사항"]');
     },
-    saveButton() {
-      return firstVisible('button._addressBookFormSubmit,button.addressbook__button--save');
+    saveButton(form) {
+      const el = form && form.querySelector('button._addressBookFormSubmit,button.addressbook__button--save');
+      return el || firstVisible('button._addressBookFormSubmit,button.addressbook__button--save');
     },
     defaultCheckbox() {
       const labels = all('label').filter(el => visible(el) && /기본\s*배송지/.test(txt(el)));
@@ -146,10 +150,12 @@
     return U.waitFor(() => DOM.addressForm(), { timeout: 10000, label: '신규 배송지 form' });
   }
 
-  async function selectRoadAddress(receiver) {
+  async function selectRoadAddress(receiver, progress) {
+    progress && progress('우편번호 찾기 열기');
     const trigger = await U.waitFor(() => DOM.zipcodeTrigger(), { timeout: 8000, label: '우편번호 찾기' });
     U.click(trigger, '우편번호 찾기');
 
+    progress && progress('우편번호 검색창 확인');
     const input = await U.waitFor(() => DOM.zipcodeSearchInput(), { timeout: 10000, label: '우편번호 검색 input' });
     const query = conciseRoadQuery(receiver);
     if (!query) throw new Error('CHECKOUT_ADDRESS_QUERY_EMPTY');
@@ -158,6 +164,7 @@
 
     const search = DOM.zipcodeSearchButton();
     if (!search) throw new Error('CHECKOUT_ZIPCODE_SEARCH_BUTTON_NOT_FOUND');
+    progress && progress('우편번호 검색: ' + query);
     U.click(search, '우편번호 검색');
 
     const rows = await U.waitFor(() => {
@@ -169,9 +176,13 @@
     if (!picked) {
       throw new Error('CHECKOUT_ADDRESS_EXACT_MATCH_NOT_FOUND: ' + roadAddressOf(receiver) + ' [' + zipcodeOf(receiver) + ']');
     }
+    progress && progress('도로명주소 선택');
     U.click(picked, '도로명주소 선택');
 
-    await U.waitFor(() => DOM.addressForm() && DOM.detailInput(), { timeout: 10000, label: '주소 선택 후 배송지 form 복귀' });
+    await U.waitFor(() => {
+      const form = DOM.addressForm();
+      return form && DOM.detailInput(form) ? form : null;
+    }, { timeout: 10000, label: '주소 선택 후 배송지 form 복귀' });
   }
 
   function ensureDefaultAddressOff() {
@@ -183,44 +194,55 @@
     if (hidden && String(hidden.value).toLowerCase() !== 'false') hidden.value = 'false';
   }
 
-  async function fillAddress(receiver) {
-    await openAddressForm();
+  async function fillAddress(receiver, progress) {
+    progress && progress('신규 배송지 폼 확인');
+    let form = await openAddressForm();
 
-    const recv = await U.waitFor(() => DOM.recipientInput(), { timeout: 8000, label: '받는 사람' });
+    progress && progress('수령인 입력');
+    const recv = await U.waitFor(() => DOM.recipientInput(form), { timeout: 8000, label: '받는 사람' });
     U.input(recv, receiver.name || receiver.receiver_name || '', '수령인');
 
-    await selectRoadAddress(receiver);
+    await selectRoadAddress(receiver, progress);
 
-    const detail = await U.waitFor(() => DOM.detailInput(), { timeout: 5000, label: '상세주소' });
+    progress && progress('주소 선택 후 폼 복귀');
+    form = await U.waitFor(() => DOM.addressForm(), { timeout: 10000, label: '배송지 form 복귀' });
+
+    progress && progress('상세주소 입력');
+    const detail = await U.waitFor(() => DOM.detailInput(form), { timeout: 5000, label: '상세주소' });
     U.input(detail, receiver.detail_address || receiver.detailAddress || '', '상세주소');
 
-    const phone = await U.waitFor(() => DOM.phoneInput(), { timeout: 5000, label: '휴대폰 번호' });
+    progress && progress('휴대폰 번호 입력');
+    const phone = await U.waitFor(() => DOM.phoneInput(form), { timeout: 5000, label: '휴대폰 번호' });
     U.input(phone, receiver.phone || receiver.mobile || '', '연락처');
 
+    progress && progress('기본배송지 미선택 확인');
     ensureDefaultAddressOff();
     await U.tick();
 
-    const save = await U.waitFor(() => DOM.saveButton(), { timeout: 5000, label: '배송지 저장' });
+    progress && progress('배송지 저장/적용');
+    const save = await U.waitFor(() => DOM.saveButton(form), { timeout: 5000, label: '배송지 저장' });
     if (U.isDisabled(save)) throw new Error('CHECKOUT_ADDRESS_SAVE_DISABLED');
     U.click(save, '배송지 저장/적용');
 
     await U.waitFor(() => {
-      const form = DOM.addressForm();
+      const activeForm = DOM.addressForm();
       const bodyText = U.norm(document.body && document.body.textContent || '');
-      return !form || !/선택해\s*주세요/.test(bodyText);
+      return !activeForm || !/선택해\s*주세요/.test(bodyText);
     }, { timeout: 12000, label: '배송지 적용 완료' });
 
+    progress && progress('배송지 적용 완료');
     return { ok: true, address_persisted: true, default_address: false };
   }
 
   const MOD = {
     VERSION,
-    async fillAndStop(order) {
+    async fillAndStop(order, options) {
+      const progress = options && typeof options.onProgress === 'function' ? options.onProgress : null;
       if (!/checkout\.coupang\.com/.test(location.hostname)) throw new Error('not checkout page');
       await U.waitFor(() => DOM.payButton() || DOM.addressChangeButton(), { timeout: 12000, label: 'checkout ready' });
       const receiver = receiverOf(order);
       let addressResult = null;
-      if (roadAddressOf(receiver)) addressResult = await fillAddress(receiver);
+      if (roadAddressOf(receiver)) addressResult = await fillAddress(receiver, progress);
 
       /*
        * 결제수단/결제버튼 자동 클릭은 아직 하지 않는다.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.028
+// @version      0.029
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.028';
+  const VERSION = '0.029';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -37,7 +37,7 @@
     '/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=013';
   const CHECKOUT_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=016';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=017';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -1203,7 +1203,11 @@
       shipping: receiver,
       address: receiver
     });
-    const result = await window.CPKR_CHECKOUT.fillAndStop(checkoutOrder);
+    const result = await window.CPKR_CHECKOUT.fillAndStop(checkoutOrder, {
+      onProgress: function (phase) {
+        render('배송지 자동입력 진행\n' + phase);
+      }
+    });
 
     await request(
       '/api/auto-order/runtime/work/' + encodeURIComponent(currentJob.work_id) + '/state',
