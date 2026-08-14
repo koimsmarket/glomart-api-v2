@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '017';
+  const VERSION = '018';
 
   function docs() {
     const out = [document];
@@ -56,18 +56,23 @@
       return buttonByText('배송지 변경');
     },
     addressForm() {
-      const forms = all('form._addressBookSaveForm,form.addressBookSaveForm');
-      // 쿠팡 배송지 modal의 form 자체는 layout box가 0으로 계산될 수 있다.
-      // form의 visible()만으로 버리지 말고, 실제 보이는 입력/버튼 자식이 있으면 유효한 폼으로 인정한다.
+      // form 클래스명에 의존하지 않는다. 현재 열린 신규 배송지의 수령인 input을 기준으로
+      // 실제 소속 form을 역으로 확정한다. 쿠팡이 form class를 바꿔도 이 필드가 유지되면 동작한다.
+      const recipient = all('#addressbookRecipient,input[name="recipientName"]')
+        .find(el => visible(el));
+      if (recipient) {
+        const owner = recipient.closest && recipient.closest('form');
+        if (owner) return owner;
+      }
+      const forms = all('form._addressBookSaveForm,form.addressBookSaveForm,form[action*="addressbook/save"]');
       for (const form of forms) {
-        if (visible(form)) return form;
         const child = form.querySelector(
           '#addressbookRecipient,input[name="recipientName"],a.addressBookZipcodeTrigger,' +
           'button.addressbook__button--save,button._addressBookFormSubmit'
         );
         if (child && visible(child)) return form;
       }
-      return forms[0] || null;
+      return null;
     },
     recipientInput(form) {
       const el = form && form.querySelector('#addressbookRecipient,input[name="recipientName"]');
@@ -112,6 +117,24 @@
     payButton() { return buttonByText('결제하기'); }
   };
 
+  function setNativeValue(el, value, label) {
+    if (!el) throw new Error('CHECKOUT_INPUT_NOT_FOUND: ' + label);
+    const v = String(value == null ? '' : value);
+    const win = el.ownerDocument && el.ownerDocument.defaultView;
+    const proto = win && win.HTMLInputElement && win.HTMLInputElement.prototype;
+    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && typeof desc.set === 'function') desc.set.call(el, v);
+    else el.value = v;
+    const EventCtor = win && win.Event ? win.Event : Event;
+    el.dispatchEvent(new EventCtor('input', { bubbles: true }));
+    el.dispatchEvent(new EventCtor('change', { bubbles: true }));
+    try { el.focus(); el.blur(); } catch (_) {}
+    if (U.norm(el.value) !== U.norm(v)) {
+      throw new Error('CHECKOUT_INPUT_VALUE_NOT_APPLIED: ' + label);
+    }
+    return el.value;
+  }
+
   function receiverOf(order) { return order.receiver || order.shipping || order.address || {}; }
   function roadAddressOf(r) { return U.norm(r.road_address || r.roadAddress || r.address || ''); }
   function zipcodeOf(r) { return U.digits(r.zipcode || r.zip || r.postcode || ''); }
@@ -147,7 +170,11 @@
     if (form) return form;
     const btn = await U.waitFor(() => DOM.addressChangeButton(), { timeout: 10000, label: '배송지 변경' });
     U.click(btn, '배송지 변경');
-    return U.waitFor(() => DOM.addressForm(), { timeout: 10000, label: '신규 배송지 form' });
+    // form 자체가 아니라 실제 보이는 수령인 필드가 생성되는 것을 기준으로 기다린다.
+    const recipient = await U.waitFor(() => {
+      return all('#addressbookRecipient,input[name="recipientName"]').find(el => visible(el)) || null;
+    }, { timeout: 10000, label: '신규 배송지 수령인 input' });
+    return (recipient.closest && recipient.closest('form')) || DOM.addressForm();
   }
 
   async function selectRoadAddress(receiver, progress) {
@@ -200,7 +227,8 @@
 
     progress && progress('수령인 입력');
     const recv = await U.waitFor(() => DOM.recipientInput(form), { timeout: 8000, label: '받는 사람' });
-    U.input(recv, receiver.name || receiver.receiver_name || '', '수령인');
+    setNativeValue(recv, receiver.name || receiver.receiver_name || '', '수령인');
+    progress && progress('수령인 입력 확인: ' + U.norm(recv.value));
 
     await selectRoadAddress(receiver, progress);
 
