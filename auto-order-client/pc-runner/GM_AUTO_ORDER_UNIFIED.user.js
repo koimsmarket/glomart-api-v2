@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.025
+// @version      0.026
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.025';
+  const VERSION = '0.026';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -37,7 +37,7 @@
     '/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=013';
   const CHECKOUT_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=013';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=014';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -559,7 +559,7 @@
 
     if (detectPageType() === 'CHECKOUT' && currentJob) {
       panel.appendChild(
-        createButton('일회성 배송지 적용 · 결제직전 정지', () => {
+        createButton('배송지 입력·저장 · 결제직전 정지', () => {
           fillCheckoutAndStop().catch(showError);
         })
       );
@@ -1213,8 +1213,9 @@
         status: 'STOPPED_BEFORE_PAYMENT',
         detail: {
           phase: 'CHECKOUT_STOPPED_BEFORE_PAYMENT',
-          message: '일회성 배송지 적용 후 결제하기 직전 정지',
-          address_persisted: false
+          message: '신규 배송지 저장/적용 후 결제하기 직전 정지',
+          address_persisted: true,
+          default_address: false
         }
       })
     );
@@ -1222,7 +1223,7 @@
     clearInterval(workHeartbeatTimer);
     GM_setValue('gmao_runner_job_v013', null);
     currentJob = null;
-    render('결제하기 직전 정지 완료\n배송지 저장 버튼은 누르지 않았습니다.\n최종 결제는 사람이 확인 후 진행하세요.');
+    render('결제하기 직전 정지 완료\n신규 배송지는 저장/적용했고 기본 배송지로는 지정하지 않았습니다.\n최종 결제는 사람이 확인 후 진행하세요.');
     return result;
   }
 
