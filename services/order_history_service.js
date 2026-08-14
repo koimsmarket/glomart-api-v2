@@ -1,5 +1,5 @@
 /* services/order_history_service.js
- * GM_ORDER_HISTORY_SERVICE_V005_AUTO_ORDER_CANCEL_GUARD
+ * GM_ORDER_HISTORY_SERVICE_V008_PAID_ONLY_REFUND
  * 주문 생성/저장 로직과 분리된 주문조회 + 외부주문 CS 상태 서비스.
  * Cafe24 내부주문의 실제 CS 처리는 Cafe24 원본 액션 브리지에 맡긴다.
  */
@@ -8,7 +8,7 @@
 const refundBank=require('./GM_ORDER_REFUND_BANK');
 const refundDeposit=require('./GM_ORDER_REFUND_DEPOSIT');
 
-const VERSION = 'GM_ORDER_HISTORY_SERVICE_V006_CANCEL_REFUND_DEPOSIT';
+const VERSION = 'GM_ORDER_HISTORY_SERVICE_V008_PAID_ONLY_REFUND';
 
 function text(v){ return String(v == null ? '' : v).trim(); }
 function upper(v){ return text(v).toUpperCase(); }
@@ -279,12 +279,16 @@ async function action(pool, options){
 
     let refundResult=null;
     let refundAmount=0;
+    let paidForRefund=false;
     if(actionName === 'direct_cancel'){
       const payStatus=upper(rows[0].payment_status);
-      const paid=['PAID','OVERPAID','PAYMENT_COMPLETE','PAYMENT_COMPLETED','COMPLETED','COMPLETE','DONE','SUCCESS','SETTLED'].includes(payStatus);
-      if(paid){
-        refundAmount=Math.max(
-          int(rows[0].actual_payment_amount,0),
+      // 환불/예치금 전환은 결제 완료 주문에 한해서만 허용한다. 부분입금(PARTIALLY_PAID)은 취소만 한다.
+      paidForRefund=['PAID','OVERPAID','PAYMENT_COMPLETE','PAYMENT_COMPLETED','COMPLETED','COMPLETE','DONE','SUCCESS','SETTLED'].includes(payStatus);
+      if(paidForRefund){
+        // Refund only money actually received. Older rows may have PAID status but actual_payment_amount=0,
+        // so expected/total is used only as a legacy fallback in that case.
+        const actualPaid=Math.max(0,int(rows[0].actual_payment_amount,0));
+        refundAmount=actualPaid>0?actualPaid:Math.max(
           int(rows[0].expected_payment_amount,0),
           int(rows[0].total_payment_price,0)
         );
@@ -318,6 +322,24 @@ async function action(pool, options){
       throw new Error('unsupported_action');
     }
     await client.query(sql, params);
+
+    /*
+     * [PAID-ONLY REFUND GUARD]
+     * 미결제/입금대기/부분입금 주문은 취소만 한다.
+     * 환불방법을 만들거나 예치금으로 전환하지 않으며, 환불 상태도 NONE으로 명확히 정리한다.
+     */
+    if(actionName === 'direct_cancel' && !paidForRefund){
+      await client.query(
+        `UPDATE gm_order
+            SET refund_method=NULL,
+                refund_status='NONE',
+                refund_amount=0,
+                refund_completed_at=NULL,
+                updated_at=NOW()
+          WHERE member_id=$1 AND order_no=$2`,
+        [memberId,orderNo]
+      );
+    }
 
     /*
      * [AUTO-ORDER CANCEL GUARD]
