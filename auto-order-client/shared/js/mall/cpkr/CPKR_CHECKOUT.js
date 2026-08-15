@@ -334,8 +334,22 @@
       );
     } catch (_) {}
 
-    U.input(detail, detailValue, '상세주소');
+    setNativeValue(detail, detailValue, '상세주소');
     progress && progress('상세주소 입력 확인: ' + U.norm(detail.value));
+
+    try {
+      const __gmSaveAfter =
+        document.querySelector('button.addressbook__button--save') ||
+        document.querySelector('.addressbook__button--save');
+      gmPublishAddressDiag(
+        gmAddressDiagSnapshot(
+          receiver || {},
+          detailValue,
+          detail,
+          __gmSaveAfter
+        )
+      );
+    } catch (_) {}
 
     progress && progress('휴대폰 번호 입력');
     const phone = await U.waitFor(() => DOM.phoneInput(form), { timeout: 5000, label: '휴대폰 번호' });
