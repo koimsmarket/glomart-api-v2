@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '019';
+  const VERSION = '020';
 
   function docs() {
     const out = [document];
@@ -58,7 +58,7 @@
     addressForm() {
       // form 클래스명에 의존하지 않는다. 현재 열린 신규 배송지의 수령인 input을 기준으로
       // 실제 소속 form을 역으로 확정한다. 쿠팡이 form class를 바꿔도 이 필드가 유지되면 동작한다.
-      const recipient = all('#addressbookRecipient,input[name="recipientName"]')
+      const recipient = all('#addressBookRecipient,#addressbookRecipient,input[name="recipientName"]')
         .find(el => el && el.isConnected && String(el.type || '').toLowerCase() !== 'hidden');
       if (recipient) {
         const owner = recipient.closest && recipient.closest('form');
@@ -67,7 +67,7 @@
       const forms = all('form._addressBookSaveForm,form.addressBookSaveForm,form[action*="addressbook/save"]');
       for (const form of forms) {
         const child = form.querySelector(
-          '#addressbookRecipient,input[name="recipientName"],a.addressBookZipcodeTrigger,' +
+          '#addressBookRecipient,#addressbookRecipient,input[name="recipientName"],a.addressBookZipcodeTrigger,' +
           'button.addressbook__button--save,button._addressBookFormSubmit'
         );
         if (child && visible(child)) return form;
@@ -75,8 +75,8 @@
       return null;
     },
     recipientInput(form) {
-      const el = form && form.querySelector('#addressbookRecipient,input[name="recipientName"]');
-      return el || firstVisible('#addressbookRecipient,input[name="recipientName"]');
+      const el = form && form.querySelector('#addressBookRecipient,#addressbookRecipient,input[name="recipientName"]');
+      return el || firstVisible('#addressBookRecipient,#addressbookRecipient,input[name="recipientName"]');
     },
     zipcodeTrigger() {
       return firstVisible('a.addressBookZipcodeTrigger,[title="우편번호 찾기"],a[href*="zipcode"]');
@@ -92,8 +92,8 @@
         .filter(visible);
     },
     detailInput(form) {
-      const el = form && form.querySelector('#addressbookAddressDetail,input[name="addressDetail"]');
-      return el || firstVisible('#addressbookAddressDetail,input[name="addressDetail"]');
+      const el = form && form.querySelector('#addressBookAddressDetail,#addressbookAddressDetail,input[name="addressDetail"]');
+      return el || firstVisible('#addressBookAddressDetail,#addressbookAddressDetail,input[name="addressDetail"]');
     },
     phoneInput(form) {
       const el = form && form.querySelector('#addressBookCellphone,input[name="recipientCellphone"]');
@@ -173,7 +173,7 @@
     // 쿠팡 신규 배송지의 수령인 input은 화면에 보이더라도 rect/offset 계산이 0으로 잡히는 경우가 있다.
     // 따라서 visible()로 거르지 않고, 실제 DOM에 연결된 non-hidden input 존재 자체를 기준으로 한다.
     const recipient = await U.waitFor(() => {
-      return all('#addressbookRecipient,input[name="recipientName"]')
+      return all('#addressBookRecipient,#addressbookRecipient,input[name="recipientName"]')
         .find(el => el && el.isConnected && String(el.type || '').toLowerCase() !== 'hidden') || null;
     }, { timeout: 10000, label: '신규 배송지 수령인 input' });
     return (recipient.closest && recipient.closest('form')) || DOM.addressForm();
