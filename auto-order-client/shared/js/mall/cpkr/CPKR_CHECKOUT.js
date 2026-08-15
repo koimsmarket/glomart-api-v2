@@ -299,6 +299,83 @@
     if (hidden && String(hidden.value).toLowerCase() !== 'false') hidden.value = 'false';
   }
 
+
+  async function waitAddressFormStable(progress) {
+    let lastForm = null;
+    let lastDetail = null;
+    let lastPhone = null;
+    let stableSince = 0;
+
+    const stableForm = await U.waitFor(() => {
+      const form = DOM.addressForm();
+      if (!form || !form.isConnected) {
+        lastForm = lastDetail = lastPhone = null;
+        stableSince = 0;
+        return null;
+      }
+
+      const detail = DOM.detailInput(form);
+      const phone = DOM.phoneInput(form);
+      if (!detail || !phone || !detail.isConnected || !phone.isConnected) {
+        lastForm = lastDetail = lastPhone = null;
+        stableSince = 0;
+        return null;
+      }
+
+      const now = Date.now();
+      if (form !== lastForm || detail !== lastDetail || phone !== lastPhone) {
+        lastForm = form;
+        lastDetail = detail;
+        lastPhone = phone;
+        stableSince = now;
+        return null;
+      }
+
+      if (!stableSince) stableSince = now;
+      return (now - stableSince >= 900) ? form : null;
+    }, { timeout: 12000, label: '주소 선택 후 배송지 form 안정화' });
+
+    progress && progress('배송지 form 안정화 완료');
+    return stableForm;
+  }
+
+  function commitTextWithKeyup(el, value, label) {
+    if (!el) throw new Error('CHECKOUT_INPUT_NOT_FOUND: ' + label);
+    const v = String(value == null ? '' : value);
+    const win = el.ownerDocument && el.ownerDocument.defaultView;
+    const proto = win && win.HTMLInputElement && win.HTMLInputElement.prototype;
+    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+
+    try { el.focus(); } catch (_) {}
+
+    if (desc && typeof desc.set === 'function') desc.set.call(el, v);
+    else el.value = v;
+
+    const EventCtor = win && win.Event ? win.Event : Event;
+    try {
+      const InputEventCtor = win && win.InputEvent ? win.InputEvent : InputEvent;
+      el.dispatchEvent(new InputEventCtor('input', {
+        bubbles: true,
+        inputType: 'insertText',
+        data: v
+      }));
+    } catch (_) {
+      el.dispatchEvent(new EventCtor('input', { bubbles: true }));
+    }
+
+    try {
+      const KeyboardEventCtor = win && win.KeyboardEvent ? win.KeyboardEvent : KeyboardEvent;
+      el.dispatchEvent(new KeyboardEventCtor('keyup', {
+        bubbles: true,
+        key: v.slice(-1) || ' ',
+        code: ''
+      }));
+    } catch (_) {}
+
+    el.dispatchEvent(new EventCtor('change', { bubbles: true }));
+    try { el.blur(); } catch (_) {}
+  }
+
   async function fillAddress(receiver, progress) {
     progress && progress('신규 배송지 폼 확인');
     let form = await openAddressForm();
@@ -310,96 +387,69 @@
 
     const selectedAddress = await selectRoadAddress(receiver, progress);
 
-    progress && progress('주소 선택 후 폼 복귀');
-    form = await U.waitFor(() => DOM.addressForm(), { timeout: 10000, label: '배송지 form 복귀' });
+    progress && progress('주소 선택 후 폼 복귀/안정화 대기');
+    form = await waitAddressFormStable(progress);
+
+    // 주소검색 결과를 선택하면 쿠팡이 배송지 form을 한 번 다시 그릴 수 있다.
+    // 따라서 안정화가 끝난 뒤 수령인/상세주소/전화번호를 최종 입력한다.
+    progress && progress('수령인 최종 입력');
+    const recvFinal = await U.waitFor(() => DOM.recipientInput(form), { timeout: 5000, label: '받는 사람 최종 input' });
+    setNativeValue(recvFinal, receiver.name || receiver.receiver_name || '', '수령인');
 
     progress && progress('상세주소 입력');
-    const detail = await U.waitFor(() => DOM.detailInput(form), { timeout: 5000, label: '상세주소' });
+    let detail = await U.waitFor(() => DOM.detailInput(form), { timeout: 5000, label: '상세주소' });
     const detailValue = detailAddressOf(receiver, selectedAddress && selectedAddress.selectedRoad);
 
-    try {
-      const __gmDetailInputNow =
-        document.querySelector('#addressbookAddressDetail') ||
-        document.querySelector('input[name="addressDetail"]');
-      const __gmSaveNow =
-        document.querySelector('button.addressbook__button--save') ||
-        document.querySelector('.addressbook__button--save');
-      gmPublishAddressDiag(
-        gmAddressDiagSnapshot(
-          receiver || {},
-          detailValue,
-          __gmDetailInputNow,
-          __gmSaveNow
-        )
-      );
-    } catch (_) {}
+    commitTextWithKeyup(detail, detailValue, '상세주소');
+    await U.sleep(500);
 
-    try {
-      detail.focus();
+    // 반드시 현재 DOM을 다시 조회한다. 재렌더링 전 노드의 value는 성공 판정에 사용하지 않는다.
+    form = DOM.addressForm() || form;
+    detail = DOM.detailInput(form);
+    progress && progress('상세주소 입력 확인: ' + U.norm(detail && detail.value));
 
-      const __gmSetter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value'
-      ) && Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value'
-      ).set;
-
-      if (__gmSetter) {
-        __gmSetter.call(detail, detailValue);
-      } else {
-        detail.value = detailValue;
-      }
-
-      try {
-        detail.dispatchEvent(new InputEvent('input', {
-          bubbles: true,
-          inputType: 'insertText',
-          data: detailValue
-        }));
-      } catch (_) {
-        detail.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-
-      try {
-        detail.dispatchEvent(new KeyboardEvent('keyup', {
-          bubbles: true,
-          key: String(detailValue || '').slice(-1) || ' ',
-          code: ''
-        }));
-      } catch (_) {}
-
-      detail.dispatchEvent(new Event('change', { bubbles: true }));
-      detail.blur();
-    } catch (_) {
-      setNativeValue(detail, detailValue, '상세주소');
+    if (!detail || U.norm(detail.value) !== U.norm(detailValue)) {
+      // 주소 form이 한 번 더 교체된 경우 1회만 안정화 후 재입력한다.
+      progress && progress('상세주소 재렌더링 감지 - 1회 재입력');
+      form = await waitAddressFormStable(progress);
+      detail = await U.waitFor(() => DOM.detailInput(form), { timeout: 5000, label: '상세주소 재입력' });
+      commitTextWithKeyup(detail, detailValue, '상세주소');
+      await U.sleep(500);
+      form = DOM.addressForm() || form;
+      detail = DOM.detailInput(form);
     }
 
-    await U.sleep(250);
+    progress && progress('휴대폰 번호 입력');
+    let phone = await U.waitFor(() => DOM.phoneInput(form), { timeout: 5000, label: '휴대폰 번호' });
+    const phoneValue = receiver.phone || receiver.mobile || receiver.receiver_mobile || '';
+    setNativeValue(phone, phoneValue, '연락처');
+    await U.sleep(400);
 
-    progress && progress('상세주소 입력 확인: ' + U.norm(detail.value));
+    form = DOM.addressForm() || form;
+    detail = DOM.detailInput(form);
+    phone = DOM.phoneInput(form);
 
     try {
       const __gmSaveAfter =
         document.querySelector('button.addressbook__button--save') ||
         document.querySelector('.addressbook__button--save');
-      gmPublishAddressDiag(
-        gmAddressDiagSnapshot(
-          receiver || {},
-          detailValue,
-          detail,
-          __gmSaveAfter
-        )
+      const __gmDiag = gmAddressDiagSnapshot(
+        receiver || {},
+        detailValue,
+        detail,
+        __gmSaveAfter
       );
+      __gmDiag.phoneInputFound = !!phone;
+      __gmDiag.phoneInputValue = phone ? String(phone.value || '') : null;
+      gmPublishAddressDiag(__gmDiag);
     } catch (_) {}
 
-    if (U.norm(detail.value) !== U.norm(detailValue)) {
+    if (!detail || U.norm(detail.value) !== U.norm(detailValue)) {
       throw new Error('CHECKOUT_ADDRESS_DETAIL_NOT_COMMITTED');
     }
-
-    progress && progress('휴대폰 번호 입력');
-    const phone = await U.waitFor(() => DOM.phoneInput(form), { timeout: 5000, label: '휴대폰 번호' });
-    U.input(phone, receiver.phone || receiver.mobile || '', '연락처');
+    if (!phone || U.digits(phone.value) !== U.digits(phoneValue)) {
+      throw new Error('CHECKOUT_ADDRESS_PHONE_NOT_COMMITTED');
+    }
 
     progress && progress('기본배송지 미선택 확인');
     ensureDefaultAddressOff();
