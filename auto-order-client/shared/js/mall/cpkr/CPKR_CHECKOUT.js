@@ -88,8 +88,8 @@
       return firstVisible('button.zipcodeSearchTrigger,button.zipcode__button--search') || buttonByText('검색');
     },
     roadResults() {
-      return all('[data-result-item-road],._zipcodeResultSendTrigger,.zipcode__result-item--road')
-        .filter(visible);
+      return all('[data-result],[data-result-item-road],._zipcodeResultSendTrigger,.zipcode__result-item--road')
+        .filter(el => el && el.isConnected && visible(el));
     },
     detailInput(form) {
       const el = form && form.querySelector('#addressBookAddressDetail,#addressbookAddressDetail,input[name="addressDetail"]');
@@ -148,21 +148,46 @@
   }
 
   function resultData(el) {
-    const holder = el.closest && el.closest('[data-result-item-road]') || el;
-    const raw = holder && holder.getAttribute && holder.getAttribute('data-result-item-road');
+    const holder = (el.closest && el.closest('[data-result],[data-result-item-road]')) || el;
+    const raw = holder && holder.getAttribute && (holder.getAttribute('data-result') || holder.getAttribute('data-result-item-road'));
     if (!raw) return {};
     try { return JSON.parse(raw); } catch (_) { return {}; }
   }
 
+  function normalizeRoadForMatch(v) {
+    return U.norm(v).replace(/^경기도\s+/, '경기 ').replace(/\s+/g, ' ').trim();
+  }
+
   function resultMatches(el, r) {
-    const targetRoad = roadAddressOf(r);
+    const targetRoad = normalizeRoadForMatch(roadAddressOf(r));
     const targetZip = zipcodeOf(r);
+    const query = normalizeRoadForMatch(conciseRoadQuery(r));
     const data = resultData(el);
-    const road = U.norm(data.roadAddress || data.road_address || txt(el));
+    const road = normalizeRoadForMatch(data.roadAddress || data.road_address || txt(el));
     const zip = U.digits(data.zipcode || txt(el));
-    if (targetRoad && (road === targetRoad || targetRoad.includes(road) || road.includes(targetRoad))) return true;
-    if (targetZip && zip.includes(targetZip)) return true;
+
+    // 쿠팡 검색결과는 아파트명/동호수 같은 상세주소를 포함하지 않는다.
+    // 우편번호 + 검색한 도로명/건물번호를 기본주소 매칭 기준으로 사용한다.
+    if (targetZip && zip && targetZip === zip && query && road.includes(query)) return true;
+    if (query && road.includes(query)) return true;
+    if (targetZip && zip && targetZip === zip && targetRoad && targetRoad.includes(road)) return true;
     return false;
+  }
+
+  function detailAddressOf(r, selectedRoad) {
+    const explicit = U.norm(r.detail_address || r.detailAddress || r.address_detail || r.addressDetail || '');
+    if (explicit) return explicit;
+    const full = U.norm(r.road_address || r.roadAddress || r.address || '');
+    const base = U.norm(selectedRoad || '');
+    if (!full || !base) return '';
+    const variants = [base, base.replace(/^경기도\s+/, '경기 '), base.replace(/^경기\s+/, '경기도 ')];
+    for (const v of variants) {
+      if (v && full.startsWith(v)) return U.norm(full.slice(v.length));
+    }
+    const q = U.norm(conciseRoadQuery(r));
+    const idx = q ? full.indexOf(q) : -1;
+    if (idx >= 0) return U.norm(full.slice(idx + q.length));
+    return '';
   }
 
   async function openAddressForm() {
@@ -203,15 +228,18 @@
 
     const picked = rows.find(el => resultMatches(el, receiver));
     if (!picked) {
-      throw new Error('CHECKOUT_ADDRESS_EXACT_MATCH_NOT_FOUND: ' + roadAddressOf(receiver) + ' [' + zipcodeOf(receiver) + ']');
+      throw new Error('CHECKOUT_ADDRESS_BASE_MATCH_NOT_FOUND: ' + conciseRoadQuery(receiver) + ' [' + zipcodeOf(receiver) + ']');
     }
-    progress && progress('도로명주소 선택');
+    const selected = resultData(picked);
+    const selectedRoad = U.norm(selected.roadAddress || selected.road_address || txt(picked));
+    progress && progress('도로명주소 선택: ' + selectedRoad);
     U.click(picked, '도로명주소 선택');
 
     await U.waitFor(() => {
       const form = DOM.addressForm();
       return form && DOM.detailInput(form) ? form : null;
     }, { timeout: 10000, label: '주소 선택 후 배송지 form 복귀' });
+    return { selectedRoad, zipcode: U.digits(selected.zipcode || '') };
   }
 
   function ensureDefaultAddressOff() {
@@ -232,14 +260,16 @@
     setNativeValue(recv, receiver.name || receiver.receiver_name || '', '수령인');
     progress && progress('수령인 입력 확인: ' + U.norm(recv.value));
 
-    await selectRoadAddress(receiver, progress);
+    const selectedAddress = await selectRoadAddress(receiver, progress);
 
     progress && progress('주소 선택 후 폼 복귀');
     form = await U.waitFor(() => DOM.addressForm(), { timeout: 10000, label: '배송지 form 복귀' });
 
     progress && progress('상세주소 입력');
     const detail = await U.waitFor(() => DOM.detailInput(form), { timeout: 5000, label: '상세주소' });
-    U.input(detail, receiver.detail_address || receiver.detailAddress || '', '상세주소');
+    const detailValue = detailAddressOf(receiver, selectedAddress && selectedAddress.selectedRoad);
+    U.input(detail, detailValue, '상세주소');
+    progress && progress('상세주소 입력 확인: ' + U.norm(detail.value));
 
     progress && progress('휴대폰 번호 입력');
     const phone = await U.waitFor(() => DOM.phoneInput(form), { timeout: 5000, label: '휴대폰 번호' });
