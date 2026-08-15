@@ -174,8 +174,56 @@
     return false;
   }
 
+
+  function gmAddressDiagSnapshot(receiver, detailValue, detailInput, saveButton) {
+    try {
+      const r = receiver || {};
+      return {
+        raddr1: r.raddr1 ?? null,
+        raddr2: r.raddr2 ?? null,
+        address1: r.address1 ?? null,
+        address2: r.address2 ?? null,
+        receiver_address2: r.receiver_address2 ?? null,
+        receiverAddress2: r.receiverAddress2 ?? null,
+        detailAddressOf: detailValue ?? '',
+        detailInputFound: !!detailInput,
+        detailInputValue: detailInput ? String(detailInput.value || '') : null,
+        saveDisabled:
+          !!saveButton &&
+          (
+            saveButton.disabled === true ||
+            saveButton.getAttribute('aria-disabled') === 'true' ||
+            saveButton.classList.contains('addressbook__button--disabled')
+          )
+      };
+    } catch (e) {
+      return { diag_error: String(e && e.message || e) };
+    }
+  }
+
+  function gmPublishAddressDiag(diag) {
+    try { window.__GM_ADDRESS_DEBUG__ = diag; } catch (_) {}
+    try {
+      window.postMessage(
+        { type: 'GM_AUTO_ORDER_ADDRESS_DEBUG', payload: diag },
+        '*'
+      );
+    } catch (_) {}
+    try { console.log('[GM_AUTO_ORDER_ADDRESS_DEBUG]', diag); } catch (_) {}
+  }
+
   function detailAddressOf(r, selectedRoad) {
-    const explicit = U.norm(r.detail_address || r.detailAddress || r.address_detail || r.addressDetail || '');
+    const explicit = U.norm(
+      r.raddr2 ||
+      r.address2 ||
+      r.receiver_address2 ||
+      r.receiverAddress2 ||
+      r.detail_address ||
+      r.detailAddress ||
+      r.address_detail ||
+      r.addressDetail ||
+      ''
+    );
     if (explicit) return explicit;
     const full = U.norm(r.road_address || r.roadAddress || r.address || '');
     const base = U.norm(selectedRoad || '');
@@ -268,6 +316,24 @@
     progress && progress('상세주소 입력');
     const detail = await U.waitFor(() => DOM.detailInput(form), { timeout: 5000, label: '상세주소' });
     const detailValue = detailAddressOf(receiver, selectedAddress && selectedAddress.selectedRoad);
+
+    try {
+      const __gmDetailInputNow =
+        document.querySelector('#addressbookAddressDetail') ||
+        document.querySelector('input[name="addressDetail"]');
+      const __gmSaveNow =
+        document.querySelector('button.addressbook__button--save') ||
+        document.querySelector('.addressbook__button--save');
+      gmPublishAddressDiag(
+        gmAddressDiagSnapshot(
+          receiver || {},
+          detailValue,
+          __gmDetailInputNow,
+          __gmSaveNow
+        )
+      );
+    } catch (_) {}
+
     U.input(detail, detailValue, '상세주소');
     progress && progress('상세주소 입력 확인: ' + U.norm(detail.value));
 
