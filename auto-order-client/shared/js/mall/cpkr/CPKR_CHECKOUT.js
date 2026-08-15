@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '020';
+  const VERSION = '021';
 
   function docs() {
     const out = [document];
@@ -266,13 +266,28 @@
 
   const MOD = {
     VERSION,
+    async fillAddressOnly(receiver, progress) {
+      if (!/id\.coupang\.com/.test(location.hostname)) throw new Error('not address iframe');
+      return fillAddress(receiver || {}, progress);
+    },
     async fillAndStop(order, options) {
       const progress = options && typeof options.onProgress === 'function' ? options.onProgress : null;
       if (!/checkout\.coupang\.com/.test(location.hostname)) throw new Error('not checkout page');
       await U.waitFor(() => DOM.payButton() || DOM.addressChangeButton(), { timeout: 12000, label: 'checkout ready' });
       const receiver = receiverOf(order);
       let addressResult = null;
-      if (roadAddressOf(receiver)) addressResult = await fillAddress(receiver, progress);
+      if (roadAddressOf(receiver)) {
+        if (options && typeof options.waitForAddressBridge === 'function') {
+          progress && progress('배송지 변경 열기');
+          const change = await U.waitFor(() => DOM.addressChangeButton(), { timeout: 10000, label: '배송지 변경' });
+          U.click(change, '배송지 변경');
+          progress && progress('id.coupang.com 배송지 iframe 처리 대기');
+          addressResult = await options.waitForAddressBridge();
+          progress && progress('배송지 iframe 처리 완료');
+        } else {
+          addressResult = await fillAddress(receiver, progress);
+        }
+      }
 
       /*
        * 결제수단/결제버튼 자동 클릭은 아직 하지 않는다.

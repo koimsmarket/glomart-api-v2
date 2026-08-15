@@ -7,6 +7,7 @@
 // @match        https://cart.coupang.com/*
 // @match        https://checkout.coupang.com/*
 // @match        https://login.coupang.com/*
+// @match        https://id.coupang.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -17,7 +18,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.032';
+  const VERSION = '0.033';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -37,7 +38,7 @@
     '/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=013';
   const CHECKOUT_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=020';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=021';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -52,6 +53,14 @@
   let workHeartbeatTimer = null;
   let clientHeartbeatTimer = null;
   let autoProductFlowRunning = false;
+
+  /*
+   * V033 CROSS-ORIGIN ADDRESS BRIDGE
+   * checkout.coupang.com 부모 문서에서는 id.coupang.com/addressbook iframe 내부 DOM에
+   * same-origin 정책상 접근할 수 없다. 같은 Tampermonkey 스크립트를 id.coupang.com에도
+   * 실행하고 GM storage를 통해 배송지 payload/진행상태만 전달한다.
+   */
+  const ADDRESS_BRIDGE_KEY = 'gmao_cpkr_address_bridge_v033';
 
   function uuid() {
     if (crypto && typeof crypto.randomUUID === 'function') {
@@ -73,6 +82,7 @@
     if (location.hostname === 'cart.coupang.com') return 'CART';
     if (location.hostname === 'checkout.coupang.com') return 'CHECKOUT';
     if (location.hostname === 'login.coupang.com') return 'AUTH';
+    if (location.hostname === 'id.coupang.com') return 'ADDRESS';
     if (/\/vp\/products\//.test(location.pathname)) return 'PRODUCT';
     return 'COUPANG';
   }
@@ -1185,6 +1195,69 @@
     return true;
   }
 
+  function setAddressBridge(value) {
+    GM_setValue(ADDRESS_BRIDGE_KEY, Object.assign({ ts: Date.now() }, value || {}));
+  }
+
+  function getAddressBridge() {
+    return GM_getValue(ADDRESS_BRIDGE_KEY, null);
+  }
+
+  async function waitAddressBridgeDone(workId, timeoutMs) {
+    const started = Date.now();
+    const timeout = timeoutMs || 90000;
+    while (Date.now() - started < timeout) {
+      const state = getAddressBridge();
+      if (state && String(state.work_id) === String(workId)) {
+        if (state.state === 'DONE') return state;
+        if (state.state === 'ERROR') throw new Error(state.error || 'ADDRESS_BRIDGE_ERROR');
+        if (state.phase) render('배송지 iframe 자동입력 진행\n' + state.phase);
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw new Error('ADDRESS_BRIDGE_TIMEOUT');
+  }
+
+  async function runAddressIframeBridge() {
+    if (location.hostname !== 'id.coupang.com') return false;
+    /* 추가인증 등 다른 id.coupang.com iframe에는 절대 배송지 자동입력을 실행하지 않는다. */
+    if (!/^\/addressbook\//.test(location.pathname)) return true;
+
+    /* 배송지 iframe이 먼저 열린 상태에서 부모가 나중에 버튼을 눌러 REQUESTED를 기록할 수 있다.
+     * 따라서 1회 조회 후 종료하지 않고 이 frame 안에서 요청을 기다린다. */
+    let bridge = null;
+    const waitStarted = Date.now();
+    while (Date.now() - waitStarted < 300000) {
+      const candidate = getAddressBridge();
+      if (candidate && candidate.state === 'REQUESTED' && candidate.receiver) {
+        bridge = candidate;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (!bridge) return true;
+
+    try {
+      await loadCheckout();
+      setAddressBridge(Object.assign({}, bridge, { state: 'RUNNING', phase: '배송지 iframe 진입 확인' }));
+      const result = await window.CPKR_CHECKOUT.fillAddressOnly(bridge.receiver, function (phase) {
+        setAddressBridge(Object.assign({}, bridge, { state: 'RUNNING', phase: phase }));
+      });
+      setAddressBridge(Object.assign({}, bridge, {
+        state: 'DONE',
+        phase: '배송지 저장/적용 완료',
+        result: result || { ok: true }
+      }));
+    } catch (error) {
+      setAddressBridge(Object.assign({}, bridge, {
+        state: 'ERROR',
+        phase: '배송지 iframe 처리 실패',
+        error: String(error && error.message || error)
+      }));
+    }
+    return true;
+  }
+
   async function fillCheckoutAndStop() {
     if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
     if (detectPageType() !== 'CHECKOUT') throw new Error('쿠팡 주문/결제 페이지에서 실행하세요.');
@@ -1197,6 +1270,15 @@
 
     /* 결제 직전 단계 진입 전에도 반드시 최신 취소상태를 확인한다. */
     await assertOrderStillActive('BEFORE_CHECKOUT_FILL');
+
+    setAddressBridge({
+      state: 'REQUESTED',
+      phase: '배송지 iframe 대기',
+      work_id: currentJob.work_id,
+      auto_order_no: currentJob.auto_order_no,
+      receiver: receiver
+    });
+
     await loadCheckout();
     const checkoutOrder = Object.assign({}, payload.order || {}, {
       receiver,
@@ -1206,6 +1288,9 @@
     const result = await window.CPKR_CHECKOUT.fillAndStop(checkoutOrder, {
       onProgress: function (phase) {
         render('배송지 자동입력 진행\n' + phase);
+      },
+      waitForAddressBridge: function () {
+        return waitAddressBridgeDone(currentJob.work_id, 90000);
       }
     });
 
@@ -1264,6 +1349,12 @@
 
   async function start() {
     try {
+      /* id.coupang.com 배송지 iframe은 PC Runner 등록/heartbeat를 중복 실행하지 않는다. */
+      if (location.hostname === 'id.coupang.com') {
+        await runAddressIframeBridge();
+        return;
+      }
+
       await register();
       await clientHeartbeat();
 
