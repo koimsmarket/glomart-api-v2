@@ -458,7 +458,8 @@
     progress && progress('배송지 저장/적용');
     const save = await U.waitFor(() => DOM.saveButton(form), { timeout: 5000, label: '배송지 저장' });
     if (U.isDisabled(save)) throw new Error('CHECKOUT_ADDRESS_SAVE_DISABLED');
-    U.click(save, '배송지 저장/적용');
+    // 쿠팡 배송지 저장 버튼은 합성 U.click()보다 native DOM click()에 정상 반응한다.
+    save.click();
 
     await U.waitFor(() => {
       const activeForm = DOM.addressForm();
