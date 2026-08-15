@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '018';
+  const VERSION = '019';
 
   function docs() {
     const out = [document];
@@ -59,7 +59,7 @@
       // form 클래스명에 의존하지 않는다. 현재 열린 신규 배송지의 수령인 input을 기준으로
       // 실제 소속 form을 역으로 확정한다. 쿠팡이 form class를 바꿔도 이 필드가 유지되면 동작한다.
       const recipient = all('#addressbookRecipient,input[name="recipientName"]')
-        .find(el => visible(el));
+        .find(el => el && el.isConnected && String(el.type || '').toLowerCase() !== 'hidden');
       if (recipient) {
         const owner = recipient.closest && recipient.closest('form');
         if (owner) return owner;
@@ -170,9 +170,11 @@
     if (form) return form;
     const btn = await U.waitFor(() => DOM.addressChangeButton(), { timeout: 10000, label: '배송지 변경' });
     U.click(btn, '배송지 변경');
-    // form 자체가 아니라 실제 보이는 수령인 필드가 생성되는 것을 기준으로 기다린다.
+    // 쿠팡 신규 배송지의 수령인 input은 화면에 보이더라도 rect/offset 계산이 0으로 잡히는 경우가 있다.
+    // 따라서 visible()로 거르지 않고, 실제 DOM에 연결된 non-hidden input 존재 자체를 기준으로 한다.
     const recipient = await U.waitFor(() => {
-      return all('#addressbookRecipient,input[name="recipientName"]').find(el => visible(el)) || null;
+      return all('#addressbookRecipient,input[name="recipientName"]')
+        .find(el => el && el.isConnected && String(el.type || '').toLowerCase() !== 'hidden') || null;
     }, { timeout: 10000, label: '신규 배송지 수령인 input' });
     return (recipient.closest && recipient.closest('form')) || DOM.addressForm();
   }
