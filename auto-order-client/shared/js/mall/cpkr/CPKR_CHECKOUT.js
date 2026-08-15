@@ -334,7 +334,49 @@
       );
     } catch (_) {}
 
-    setNativeValue(detail, detailValue, '상세주소');
+    try {
+      detail.focus();
+
+      const __gmSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value'
+      ) && Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value'
+      ).set;
+
+      if (__gmSetter) {
+        __gmSetter.call(detail, detailValue);
+      } else {
+        detail.value = detailValue;
+      }
+
+      try {
+        detail.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertText',
+          data: detailValue
+        }));
+      } catch (_) {
+        detail.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      try {
+        detail.dispatchEvent(new KeyboardEvent('keyup', {
+          bubbles: true,
+          key: String(detailValue || '').slice(-1) || ' ',
+          code: ''
+        }));
+      } catch (_) {}
+
+      detail.dispatchEvent(new Event('change', { bubbles: true }));
+      detail.blur();
+    } catch (_) {
+      setNativeValue(detail, detailValue, '상세주소');
+    }
+
+    await U.sleep(250);
+
     progress && progress('상세주소 입력 확인: ' + U.norm(detail.value));
 
     try {
@@ -350,6 +392,10 @@
         )
       );
     } catch (_) {}
+
+    if (U.norm(detail.value) !== U.norm(detailValue)) {
+      throw new Error('CHECKOUT_ADDRESS_DETAIL_NOT_COMMITTED');
+    }
 
     progress && progress('휴대폰 번호 입력');
     const phone = await U.waitFor(() => DOM.phoneInput(form), { timeout: 5000, label: '휴대폰 번호' });
