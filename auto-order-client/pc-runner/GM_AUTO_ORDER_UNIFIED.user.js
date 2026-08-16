@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.043
+// @version      0.044
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.043';
+  const VERSION = '0.044';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -1091,42 +1091,102 @@
   function cpkrIdentityFromItem(item) {
     item = item || {};
 
-    const directPid = String(
-      item.product_id || item.productId || item.pid || ''
-    ).replace(/\D/g, '');
+    function digits(v) {
+      return String(v == null ? '' : v).replace(/\D/g, '');
+    }
 
-    const directIid = String(
-      item.item_id || item.itemId || item.iid || ''
-    ).replace(/\D/g, '');
+    function parseUrlIdentity(raw) {
+      const value = String(raw || '').trim();
+      if (!value) return null;
+      try {
+        const u = new URL(value, location.href);
+        const pm = u.pathname.match(/\/vp\/products\/(\d+)/i);
+        const pid = pm ? pm[1] : '';
+        const iid = digits(u.searchParams.get('itemId'));
+        const vid = digits(u.searchParams.get('vendorItemId'));
+        if (pid && vid) {
+          return {
+            puid: pid && iid && vid ? [pid, iid, vid].join('_') : '',
+            pid, iid, vid
+          };
+        }
+      } catch (_) {}
+      return null;
+    }
 
-    const directVid = String(
-      item.vendor_item_id || item.vendorItemId ||
-      item.vendor_id || item.vendorId || item.vid || ''
-    ).replace(/\D/g, '');
+    function parseLooseUid(raw) {
+      const value = String(raw || '').trim();
+      if (!value) return null;
 
+      // First keep the established exact parser.
+      const exact = parseCpkrUid(value);
+      if (exact && exact.ok) {
+        return {
+          puid: [
+            exact.product_id,
+            exact.item_id,
+            exact.vendor_item_id
+          ].join('_'),
+          pid: String(exact.product_id),
+          iid: String(exact.item_id),
+          vid: String(exact.vendor_item_id)
+        };
+      }
+
+      // Accept stored forms such as CPKR:PID_IID_VID, PID-IID-VID,
+      // or strings containing one three-number PUID sequence.
+      const m = value.match(/(?:^|[^\d])(\d{6,})[_:\-\/](\d{6,})[_:\-\/](\d{6,})(?:[^\d]|$)/);
+      if (m) {
+        return {
+          puid: [m[1], m[2], m[3]].join('_'),
+          pid: m[1],
+          iid: m[2],
+          vid: m[3]
+        };
+      }
+      return null;
+    }
+
+    // 1. Explicit PUID-like fields first.
     const uidCandidates = [
       item.puid,
+      item.PUID,
       item.product_uid,
+      item.productUid,
       item.pi_ii_vi,
+      item.piIiVi,
       item.source_uid,
-      item.mall_uid
+      item.sourceUid,
+      item.mall_uid,
+      item.mallUid,
+      item.coupang_uid,
+      item.cpkr_uid
     ];
 
     for (const raw of uidCandidates) {
-      const parsed = parseCpkrUid(raw);
-      if (parsed && parsed.ok) {
-        return {
-          puid: [
-            parsed.product_id,
-            parsed.item_id,
-            parsed.vendor_item_id
-          ].join('_'),
-          pid: String(parsed.product_id),
-          iid: String(parsed.item_id),
-          vid: String(parsed.vendor_item_id)
-        };
-      }
+      const parsed = parseLooseUid(raw);
+      if (parsed) return parsed;
     }
+
+    // 2. Explicit PID / IID / VID columns.
+    const directPid = digits(
+      item.product_id || item.productId || item.pid ||
+      item.mall_product_id || item.mallProductId ||
+      item.source_product_id || item.sourceProductId
+    );
+
+    const directIid = digits(
+      item.item_id || item.itemId || item.iid ||
+      item.mall_item_id || item.mallItemId ||
+      item.source_item_id || item.sourceItemId
+    );
+
+    const directVid = digits(
+      item.vendor_item_id || item.vendorItemId ||
+      item.vendor_id || item.vendorId || item.vid ||
+      item.mall_vendor_item_id || item.mallVendorItemId ||
+      item.source_vendor_item_id || item.sourceVendorItemId
+    );
 
     if (directPid && directVid) {
       return {
@@ -1139,17 +1199,59 @@
       };
     }
 
+    // 3. Product URL fields — Coupang cart URLs often expose PID + vendorItemId
+    // even when itemId is omitted.
+    const urlCandidates = [
+      item.product_url,
+      item.productUrl,
+      item.mall_product_url,
+      item.mallProductUrl,
+      item.external_product_url,
+      item.externalProductUrl,
+      item.source_url,
+      item.sourceUrl,
+      item.url,
+      item.link
+    ];
+
+    for (const raw of urlCandidates) {
+      const parsed = parseUrlIdentity(raw);
+      if (parsed) return parsed;
+    }
+
+    // 4. Common nested source/mall/product objects, but only known ID/url fields.
+    const nested = [
+      item.source,
+      item.mall,
+      item.product,
+      item.external,
+      item.cpkr,
+      item.coupang
+    ].filter(x => x && typeof x === 'object');
+
+    for (const obj of nested) {
+      const nestedResult = cpkrIdentityFromItem(obj);
+      if (nestedResult && nestedResult.pid && nestedResult.vid) {
+        return nestedResult;
+      }
+    }
+
     return { puid: '', pid: directPid, iid: directIid, vid: directVid };
   }
 
   function cpkrIdentityFromCartRow(row) {
     if (!row) return { puid: '', pid: '', iid: '', vid: '' };
 
+    function digits(v) {
+      return String(v == null ? '' : v).replace(/\D/g, '');
+    }
+
     const links = Array.from(row.querySelectorAll('a[href*="/vp/products/"]'));
     let href = '';
     for (const a of links) {
-      if (/\/vp\/products\/\d+/i.test(a.href || '')) {
-        href = a.href || '';
+      const raw = a.getAttribute('href') || a.href || '';
+      if (/\/vp\/products\/\d+/i.test(raw)) {
+        href = raw;
         break;
       }
     }
@@ -1164,20 +1266,46 @@
 
       try {
         const u = new URL(href, location.href);
-        iid = String(u.searchParams.get('itemId') || '').replace(/\D/g, '');
-        vid = String(u.searchParams.get('vendorItemId') || '').replace(/\D/g, '');
-      } catch (_) {}
+        iid = digits(u.searchParams.get('itemId'));
+        vid = digits(u.searchParams.get('vendorItemId'));
+      } catch (_) {
+        const im = href.match(/[?&]itemId=(\d+)/i);
+        const vm = href.match(/[?&]vendorItemId=(\d+)/i);
+        if (im) iid = im[1];
+        if (vm) vid = vm[1];
+      }
     }
 
-    // DOM data attributes are useful as a fallback, but not treated as PID/VID
-    // unless their meaning is explicit.
+    if (!pid) {
+      const pNode = row.querySelector('[data-product-id],[data-productid]');
+      if (pNode) {
+        pid = digits(
+          pNode.getAttribute('data-product-id') ||
+          pNode.getAttribute('data-productid')
+        );
+      }
+    }
+
+    if (!iid) {
+      const iNode = row.querySelector('[data-item-id],[data-itemid]');
+      if (iNode) {
+        iid = digits(
+          iNode.getAttribute('data-item-id') ||
+          iNode.getAttribute('data-itemid')
+        );
+      }
+    }
+
     if (!vid) {
-      const vNode = row.querySelector('[data-vendor-item-id],[data-vendoritemid]');
+      const vNode = row.querySelector(
+        '[data-vendor-item-id],[data-vendoritemid],[data-vendor-id]'
+      );
       if (vNode) {
-        vid = String(
+        vid = digits(
           vNode.getAttribute('data-vendor-item-id') ||
-          vNode.getAttribute('data-vendoritemid') || ''
-        ).replace(/\D/g, '');
+          vNode.getAttribute('data-vendoritemid') ||
+          vNode.getAttribute('data-vendor-id')
+        );
       }
     }
 
@@ -1335,6 +1463,24 @@
     };
   }
 
+  function cartIdentityDiagnostic(plan) {
+    const targetText = plan.targets.map(t =>
+      '#' + (t.index + 1) +
+      '[PUID=' + (t.identity.puid || '-') +
+      ',PID=' + (t.identity.pid || '-') +
+      ',VID=' + (t.identity.vid || '-') + ']'
+    ).join(' ');
+
+    const cartText = plan.rows.slice(0, 10).map((r, i) =>
+      '#' + (i + 1) +
+      '[PUID=' + (r.identity.puid || '-') +
+      ',PID=' + (r.identity.pid || '-') +
+      ',VID=' + (r.identity.vid || '-') + ']'
+    ).join(' ');
+
+    return 'TARGET ' + targetText + ' / CART ' + cartText;
+  }
+
   async function normalizeCurrentCart(job) {
     let plan = buildCartPlan(job);
 
@@ -1342,17 +1488,30 @@
       throw new Error('우리 주문서 아이템이 없습니다.');
     }
 
+    // 안전 순서:
+    // 우리 주문상품이 모두 먼저 매칭되기 전에는 기존 장바구니 상품을 1건도 삭제하지 않는다.
+    const missingBeforeDelete = plan.targets.filter(t => t.rows.length === 0);
+    if (missingBeforeDelete.length) {
+      throw new Error(
+        'CART_ORDER_ITEM_MISSING: 우리 주문서 상품 ' +
+        missingBeforeDelete.map(t => t.index + 1).join(',') +
+        '번 매칭 실패. 삭제하지 않고 중단. ' +
+        cartIdentityDiagnostic(plan)
+      );
+    }
+
     // 동일 주문상품이 여러 장바구니 행으로 나뉘어 있으면,
-    // 주문상품을 임의 삭제하지 않는다는 원칙 때문에 자동 삭제하지 않고 중단한다.
+    // 주문상품을 임의 삭제하지 않고 중단한다.
     const duplicates = plan.targets.filter(t => t.rows.length > 1);
     if (duplicates.length) {
       throw new Error(
         'CART_MATCH_DUPLICATE: 동일 주문상품이 장바구니 여러 행에 존재합니다. ' +
-        '주문상품은 자동 삭제하지 않고 중단합니다.'
+        '주문상품은 자동 삭제하지 않고 중단합니다. ' +
+        cartIdentityDiagnostic(plan)
       );
     }
 
-    // 주문서에 없는 기존 장바구니 상품만 삭제.
+    // 모든 주문상품 매칭이 확인된 후에만 주문서에 없는 기존 장바구니 상품을 삭제.
     for (const extra of plan.unmatchedRows) {
       const del = rowDeleteButton(extra.row);
       if (!del) {
@@ -1377,9 +1536,10 @@
     const missing = plan.targets.filter(t => t.rows.length === 0);
     if (missing.length) {
       throw new Error(
-        'CART_ORDER_ITEM_MISSING: 우리 주문서 상품 ' +
+        'CART_ORDER_ITEM_MISSING_AFTER_DELETE: 우리 주문서 상품 ' +
         missing.map(t => t.index + 1).join(',') +
-        '번이 장바구니에 없습니다.'
+        '번이 정리 후 사라졌습니다. ' +
+        cartIdentityDiagnostic(plan)
       );
     }
 
