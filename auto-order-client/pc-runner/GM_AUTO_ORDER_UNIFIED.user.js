@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.044
+// @version      0.048
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.044';
+  const VERSION = '0.048';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -67,6 +67,15 @@
   const CHECKOUT_URL =
     API_BASE +
     '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=029';
+  const CART_CLEAR_URL =
+    API_BASE +
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CART_CLEAR.js?v=047';
+  const PRODUCT_ORDER_URL =
+    API_BASE +
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT_ORDER.js?v=001';
+  const CART_COMPARE_URL =
+    API_BASE +
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CART_COMPARE.js?v=001';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -89,6 +98,29 @@
    * 실행하고 GM storage를 통해 배송지 payload/진행상태만 전달한다.
    */
   const ADDRESS_BRIDGE_KEY = 'gmao_cpkr_address_bridge_v033';
+
+  const FLOW_KEY = 'gmao_cpkr_flow_v047';
+  const FLOW = Object.freeze({
+    BATCH_CART_SCAN: 'BATCH_CART_SCAN',
+    BATCH_CART_CLEAR: 'BATCH_CART_CLEAR',
+    ORDER_START: 'ORDER_START',
+    SINGLE_PRODUCT: 'SINGLE_PRODUCT',
+    MULTI_ADD_ITEMS: 'MULTI_ADD_ITEMS',
+    MULTI_CART_SNAPSHOT: 'MULTI_CART_SNAPSHOT',
+    MULTI_CART_APPLY: 'MULTI_CART_APPLY',
+    MULTI_CART_CHECKOUT: 'MULTI_CART_CHECKOUT',
+    CHECKOUT: 'CHECKOUT',
+    STOPPED_BEFORE_PAYMENT: 'STOPPED_BEFORE_PAYMENT',
+    FAILED_SKIP: 'FAILED_SKIP'
+  });
+
+  function flowGet(){ return GM_getValue(FLOW_KEY, null); }
+  function flowSet(patch){
+    const next=Object.assign({},flowGet()||{},patch||{},{updated_at:Date.now()});
+    GM_setValue(FLOW_KEY,next); return next;
+  }
+  function flowClear(){ GM_setValue(FLOW_KEY,null); }
+  function orderItemCount(job){ const p=payloadOf(job), items=Array.isArray(p.items)?p.items:[]; return items.length; }
 
   function uuid() {
     if (crypto && typeof crypto.randomUUID === 'function') {
@@ -325,6 +357,20 @@
   async function loadCheckout() {
     await loadUtil();
     return loadExternal(CHECKOUT_URL, () => Boolean(window.CPKR_CHECKOUT), '쿠팡 주문서');
+  }
+
+
+  function loadCartClear() {
+    return loadExternal(CART_CLEAR_URL, () => Boolean(window.CPKR_CART_CLEAR), '장바구니 청소');
+  }
+
+  async function loadProductOrder() {
+    await loadCartManager();
+    return loadExternal(PRODUCT_ORDER_URL, () => Boolean(window.CPKR_PRODUCT_ORDER), '상품 주문 액션');
+  }
+
+  function loadCartCompare() {
+    return loadExternal(CART_COMPARE_URL, () => Boolean(window.CPKR_CART_COMPARE), '다건 장바구니 비교');
   }
 
   function payloadOf(job) {
@@ -992,49 +1038,15 @@
   }
 
   async function addCurrentItemToCart() {
-    if (!currentJob) {
-      throw new Error('먼저 작업을 가져오세요.');
-    }
-
-    if (!lastPreparation) {
-      throw new Error('먼저 옵션/수량 준비를 실행하세요.');
-    }
-
-    if (detectPageType() !== 'PRODUCT') {
-      throw new Error('쿠팡 상품 상세 페이지에서 실행하세요.');
-    }
-
+    if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
+    if (!lastPreparation) throw new Error('먼저 옵션/수량 준비를 실행하세요.');
+    if (detectPageType() !== 'PRODUCT') throw new Error('쿠팡 상품 상세 페이지에서 실행하세요.');
     await assertOrderStillActive('BEFORE_ADD_TO_CART');
-    await loadCartManager();
-
-    lastCartAction =
-      await window.GMAO_CPKR_CART_MANAGER.addToCart();
-
-    GM_setValue(
-      'gmao_runner_cart_v013',
-      lastCartAction
-    );
-
+    await loadProductOrder();
+    lastCartAction = await window.CPKR_PRODUCT_ORDER.addToCart();
+    GM_setValue('gmao_runner_cart_v013', lastCartAction);
     await clientHeartbeat();
-
-    render(
-      '장바구니 담기 실행 완료\n' +
-      (
-        lastCartAction.ok
-          ? '쿠팡 확인 신호가 감지되었습니다.'
-          : '버튼은 클릭했지만 확인 신호는 감지되지 않았습니다.'
-      )
-    );
-
-    if (
-      detectPageType() !== 'CART' &&
-      window.confirm(
-        '장바구니 페이지로 이동하여 담긴 상품을 검증할까요?'
-      )
-    ) {
-      window.GMAO_CPKR_CART_MANAGER.openCart();
-    }
-
+    render('장바구니 담기 실행 완료\n' + (lastCartAction.ok ? '쿠팡 확인 신호가 감지되었습니다.' : '확인 신호를 확인하지 못했습니다.'));
     return lastCartAction;
   }
 
@@ -1239,483 +1251,115 @@
     return { puid: '', pid: directPid, iid: directIid, vid: directVid };
   }
 
-  function cpkrIdentityFromCartRow(row) {
-    if (!row) return { puid: '', pid: '', iid: '', vid: '' };
+  /*
+   * V048: cart DOM implementation moved to server modules.
+   * - CPKR_CART_CLEAR.js: batch-start snapshot / clear
+   * - CPKR_CART_COMPARE.js: multi-order snapshot / compare / adjustment / checkout
+   * Runner owns only orchestration and state.
+   */
 
-    function digits(v) {
-      return String(v == null ? '' : v).replace(/\D/g, '');
-    }
-
-    const links = Array.from(row.querySelectorAll('a[href*="/vp/products/"]'));
-    let href = '';
-    for (const a of links) {
-      const raw = a.getAttribute('href') || a.href || '';
-      if (/\/vp\/products\/\d+/i.test(raw)) {
-        href = raw;
-        break;
-      }
-    }
-
-    let pid = '';
-    let iid = '';
-    let vid = '';
-
-    if (href) {
-      const pm = href.match(/\/vp\/products\/(\d+)/i);
-      if (pm) pid = pm[1];
-
-      try {
-        const u = new URL(href, location.href);
-        iid = digits(u.searchParams.get('itemId'));
-        vid = digits(u.searchParams.get('vendorItemId'));
-      } catch (_) {
-        const im = href.match(/[?&]itemId=(\d+)/i);
-        const vm = href.match(/[?&]vendorItemId=(\d+)/i);
-        if (im) iid = im[1];
-        if (vm) vid = vm[1];
-      }
-    }
-
-    if (!pid) {
-      const pNode = row.querySelector('[data-product-id],[data-productid]');
-      if (pNode) {
-        pid = digits(
-          pNode.getAttribute('data-product-id') ||
-          pNode.getAttribute('data-productid')
-        );
-      }
-    }
-
-    if (!iid) {
-      const iNode = row.querySelector('[data-item-id],[data-itemid]');
-      if (iNode) {
-        iid = digits(
-          iNode.getAttribute('data-item-id') ||
-          iNode.getAttribute('data-itemid')
-        );
-      }
-    }
-
-    if (!vid) {
-      const vNode = row.querySelector(
-        '[data-vendor-item-id],[data-vendoritemid],[data-vendor-id]'
-      );
-      if (vNode) {
-        vid = digits(
-          vNode.getAttribute('data-vendor-item-id') ||
-          vNode.getAttribute('data-vendoritemid') ||
-          vNode.getAttribute('data-vendor-id')
-        );
-      }
-    }
-
-    return {
-      puid: pid && iid && vid ? [pid, iid, vid].join('_') : '',
-      pid,
-      iid,
-      vid
-    };
+  async function batchCartSnapshot() {
+    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
+    await loadCartClear();
+    const snap = window.CPKR_CART_CLEAR.snapshot();
+    flowSet({stage: snap.length ? FLOW.BATCH_CART_CLEAR : FLOW.ORDER_START, batch_cart_snapshot:snap});
+    return snap;
   }
 
-  function sameCpkrItem(target, cart) {
-    if (!target || !cart) return false;
-
-    // 1순위: 완전한 PUID(PID_IID_VID) 일치.
-    if (target.puid && cart.puid && target.puid === cart.puid) {
-      return true;
-    }
-
-    // 2순위: 사용자가 확정한 일반 규칙 — PID + VID 일치.
-    if (target.pid && target.vid && cart.pid && cart.vid) {
-      return target.pid === cart.pid && target.vid === cart.vid;
-    }
-
-    return false;
+  async function batchCartClear() {
+    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
+    await loadCartClear();
+    const r = await window.CPKR_CART_CLEAR.clearAll();
+    flowSet({stage:FLOW.ORDER_START,batch_cart_cleared:true});
+    return r;
   }
 
-  function cartRows() {
-    const candidates = Array.from(
-      document.querySelectorAll(
-        '[data-item][data-type="VENDOR"],' +
-        '[data-item][data-vendor-id],' +
-        '[data-item]'
-      )
-    );
-
-    return candidates.filter((row) => {
-      if (!row.querySelector('a[href*="/vp/products/"]')) return false;
-      if (!row.querySelector('input.cart-quantity-input, input[class*="quantity"]')) return false;
-      return true;
-    });
+  async function multiCartSnapshotAndPlan() {
+    if (!currentJob) throw new Error('현재 주문이 없습니다.');
+    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
+    await loadCartCompare();
+    const snap=window.CPKR_CART_COMPARE.snapshot();
+    const plan=window.CPKR_CART_COMPARE.compare(jobItems(currentJob),snap);
+    flowSet({stage:plan.ok?FLOW.MULTI_CART_CHECKOUT:FLOW.MULTI_CART_APPLY,cart_snapshot:snap,cart_plan:plan});
+    return plan;
   }
 
-  function rowQuantityInput(row) {
-    return row && (
-      row.querySelector('input.cart-quantity-input') ||
-      row.querySelector('input[class*="quantity"][type="text"]') ||
-      row.querySelector('input[class*="quantity"]')
-    );
+  async function multiCartApplyStoredPlan() {
+    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
+    await loadCartCompare();
+    const f=flowGet()||{}, plan=f.cart_plan;
+    if(!plan) throw new Error('저장된 장바구니 비교 결과가 없습니다.');
+    const r=await window.CPKR_CART_COMPARE.applyPlan(plan);
+    flowSet({stage:(r.missing&&r.missing.length)?FLOW.MULTI_ADD_ITEMS:FLOW.MULTI_CART_CHECKOUT,missing_items:r.missing||[]});
+    return r;
   }
 
-  function rowQuantity(row) {
-    const input = rowQuantityInput(row);
-    return input ? Math.max(1, Math.floor(num(input.value, 1))) : 1;
+  async function multiCartCheckout() {
+    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
+    await assertOrderStillActive('BEFORE_MULTI_CART_CHECKOUT');
+    await loadCartCompare();
+    flowSet({stage:FLOW.CHECKOUT});
+    return window.CPKR_CART_COMPARE.selectAllAndCheckout();
   }
 
-  function rowDeleteButton(row) {
-    if (!row) return null;
-
-    const all = Array.from(row.querySelectorAll('button,a,[role="button"],div,span'));
-    return all.find((el) => {
-      const txt = String(el.textContent || '').trim();
-      if (txt !== '삭제') return false;
-      const tag = (el.tagName || '').toUpperCase();
-      return tag === 'BUTTON' || tag === 'A' ||
-        el.getAttribute('role') === 'button' ||
-        typeof el.onclick === 'function' ||
-        getComputedStyle(el).cursor === 'pointer';
-    }) || null;
+  async function singleBuyNow() {
+    if (!currentJob) throw new Error('현재 주문이 없습니다.');
+    if (detectPageType() !== 'PRODUCT') throw new Error('상품 상세 페이지에서 실행하세요.');
+    await assertOrderStillActive('BEFORE_BUY_NOW');
+    await loadProductOrder();
+    flowSet({stage:FLOW.CHECKOUT,item_count:1});
+    return window.CPKR_PRODUCT_ORDER.buyNow();
   }
-
-  function setNativeInputValue(input, value) {
-    if (!input) return false;
-    const next = String(value);
-
-    try { input.focus(); } catch (_) {}
-
-    let setter = null;
-    try {
-      setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value'
-      ).set;
-    } catch (_) {}
-
-    if (setter) setter.call(input, next);
-    else input.value = next;
-
-    input.dispatchEvent(new InputEvent('input', {
-      bubbles: true,
-      inputType: 'insertText',
-      data: next
-    }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-    try { input.blur(); } catch (_) {}
-
-    return true;
-  }
-
-  function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  async function waitForQuantity(row, expected, timeoutMs) {
-    const deadline = Date.now() + (timeoutMs || 3500);
-    while (Date.now() < deadline) {
-      const input = rowQuantityInput(row);
-      if (input && Math.floor(num(input.value, 0)) === expected) return true;
-      await sleep(120);
-    }
-    return false;
-  }
-
-  async function waitForRowGone(row, timeoutMs) {
-    const deadline = Date.now() + (timeoutMs || 4000);
-    while (Date.now() < deadline) {
-      if (!document.documentElement.contains(row)) return true;
-      await sleep(120);
-    }
-    return false;
-  }
-
-  function buildCartPlan(job) {
-    const items = jobItems(job);
-    const targets = items.map((item, index) => ({
-      index,
-      item,
-      identity: cpkrIdentityFromItem(item),
-      qty: itemQty(item),
-      rows: []
-    }));
-
-    const rows = cartRows().map((row, index) => ({
-      index,
-      row,
-      identity: cpkrIdentityFromCartRow(row),
-      qty: rowQuantity(row),
-      matchedTarget: null
-    }));
-
-    for (const cr of rows) {
-      for (const target of targets) {
-        if (sameCpkrItem(target.identity, cr.identity)) {
-          cr.matchedTarget = target;
-          target.rows.push(cr);
-          break;
-        }
-      }
-    }
-
-    return {
-      targets,
-      rows,
-      unmatchedRows: rows.filter(x => !x.matchedTarget)
-    };
-  }
-
-  function cartIdentityDiagnostic(plan) {
-    const targetText = plan.targets.map(t =>
-      '#' + (t.index + 1) +
-      '[PUID=' + (t.identity.puid || '-') +
-      ',PID=' + (t.identity.pid || '-') +
-      ',VID=' + (t.identity.vid || '-') + ']'
-    ).join(' ');
-
-    const cartText = plan.rows.slice(0, 10).map((r, i) =>
-      '#' + (i + 1) +
-      '[PUID=' + (r.identity.puid || '-') +
-      ',PID=' + (r.identity.pid || '-') +
-      ',VID=' + (r.identity.vid || '-') + ']'
-    ).join(' ');
-
-    return 'TARGET ' + targetText + ' / CART ' + cartText;
-  }
-
-  async function normalizeCurrentCart(job) {
-    let plan = buildCartPlan(job);
-
-    if (!plan.targets.length) {
-      throw new Error('우리 주문서 아이템이 없습니다.');
-    }
-
-    // 안전 순서:
-    // 우리 주문상품이 모두 먼저 매칭되기 전에는 기존 장바구니 상품을 1건도 삭제하지 않는다.
-    const missingBeforeDelete = plan.targets.filter(t => t.rows.length === 0);
-    if (missingBeforeDelete.length) {
-      throw new Error(
-        'CART_ORDER_ITEM_MISSING: 우리 주문서 상품 ' +
-        missingBeforeDelete.map(t => t.index + 1).join(',') +
-        '번 매칭 실패. 삭제하지 않고 중단. ' +
-        cartIdentityDiagnostic(plan)
-      );
-    }
-
-    // 동일 주문상품이 여러 장바구니 행으로 나뉘어 있으면,
-    // 주문상품을 임의 삭제하지 않고 중단한다.
-    const duplicates = plan.targets.filter(t => t.rows.length > 1);
-    if (duplicates.length) {
-      throw new Error(
-        'CART_MATCH_DUPLICATE: 동일 주문상품이 장바구니 여러 행에 존재합니다. ' +
-        '주문상품은 자동 삭제하지 않고 중단합니다. ' +
-        cartIdentityDiagnostic(plan)
-      );
-    }
-
-    // 모든 주문상품 매칭이 확인된 후에만 주문서에 없는 기존 장바구니 상품을 삭제.
-    for (const extra of plan.unmatchedRows) {
-      const del = rowDeleteButton(extra.row);
-      if (!del) {
-        throw new Error(
-          'CART_EXTRA_DELETE_NOT_FOUND: 주문서에 없는 장바구니 상품의 삭제 버튼을 찾지 못했습니다.'
-        );
-      }
-
-      if (typeof del.click === 'function') del.click();
-      else del.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-
-      if (!(await waitForRowGone(extra.row, 4500))) {
-        throw new Error('CART_EXTRA_DELETE_TIMEOUT: 기존 장바구니 상품 삭제가 반영되지 않았습니다.');
-      }
-      await sleep(180);
-    }
-
-    // 삭제 후 DOM을 다시 읽는다.
-    plan = buildCartPlan(job);
-
-    // 모든 주문상품이 있어야 한다.
-    const missing = plan.targets.filter(t => t.rows.length === 0);
-    if (missing.length) {
-      throw new Error(
-        'CART_ORDER_ITEM_MISSING_AFTER_DELETE: 우리 주문서 상품 ' +
-        missing.map(t => t.index + 1).join(',') +
-        '번이 정리 후 사라졌습니다. ' +
-        cartIdentityDiagnostic(plan)
-      );
-    }
-
-    // 매칭 상품은 삭제하지 않고 수량 input만 목표 주문수량으로 직접 입력.
-    for (const target of plan.targets) {
-      const cr = target.rows[0];
-      const currentQty = rowQuantity(cr.row);
-
-      if (currentQty !== target.qty) {
-        const input = rowQuantityInput(cr.row);
-        if (!input) {
-          throw new Error('CART_QTY_INPUT_NOT_FOUND: 수량 입력창을 찾지 못했습니다.');
-        }
-
-        setNativeInputValue(input, target.qty);
-
-        if (!(await waitForQuantity(cr.row, target.qty, 4000))) {
-          throw new Error(
-            'CART_QTY_UPDATE_TIMEOUT: 수량 ' +
-            currentQty + ' → ' + target.qty +
-            ' 직접 입력이 반영되지 않았습니다.'
-          );
-        }
-
-        await sleep(180);
-      }
-    }
-
-    // 최종 재검증
-    plan = buildCartPlan(job);
-
-    if (plan.unmatchedRows.length) {
-      throw new Error('CART_EXTRA_REMAIN: 주문서에 없는 상품이 장바구니에 남아 있습니다.');
-    }
-
-    for (const target of plan.targets) {
-      if (target.rows.length !== 1) {
-        throw new Error('CART_FINAL_MATCH_ERROR: 주문상품 매칭 행 개수가 올바르지 않습니다.');
-      }
-      const actual = rowQuantity(target.rows[0].row);
-      if (actual !== target.qty) {
-        throw new Error(
-          'CART_FINAL_QTY_MISMATCH: 주문수량=' +
-          target.qty + ', 장바구니수량=' + actual
-        );
-      }
-    }
-
-    return {
-      ok: true,
-      target_count: plan.targets.length,
-      removed_count: 0, // 최종 상태에는 미매칭이 0
-      items: plan.targets.map(t => ({
-        index: t.index,
-        puid: t.identity.puid,
-        pid: t.identity.pid,
-        vid: t.identity.vid,
-        quantity: t.qty
-      }))
-    };
-  }
-
 
   async function inspectCurrentCart() {
-    if (!currentJob) {
-      throw new Error('먼저 작업을 가져오세요.');
-    }
+    if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
+    if (detectPageType() !== 'CART') throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
 
-    if (detectPageType() !== 'CART') {
-      throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
-    }
+    await assertOrderStillActive('BEFORE_CART_COMPARE');
+    await loadCartCompare();
 
-    await assertOrderStillActive('BEFORE_CART_NORMALIZE');
-    await loadCartManager();
-
-    render(
-      '장바구니 정리 중\n' +
-      '우리 주문서 상품은 유지하고, 미매칭 상품만 삭제한 뒤 수량을 직접 맞춥니다.'
-    );
-
-    const normalization = await normalizeCurrentCart(currentJob);
-    const items = jobItems(currentJob);
-    const inspections = [];
-
-    // 기존 CPKR_CART_MANAGER의 검증도 모든 주문아이템에 대해 수행한다.
-    for (const item of items) {
-      const result = window.GMAO_CPKR_CART_MANAGER.inspectCart(item);
-      inspections.push(result);
-      if (!result || !result.ok) {
-        lastCartAction = {
-          ok: false,
-          method: 'cart-normalize-inspection',
-          normalization,
-          inspections
-        };
-        GM_setValue('gmao_runner_cart_v013', lastCartAction);
-        await clientHeartbeat();
-
-        render(
-          '장바구니 검증 실패\n' +
-          '정리 후 주문상품 중 확인되지 않는 항목이 있습니다.',
-          true
-        );
-        return lastCartAction;
-      }
-    }
+    const snapshot = window.CPKR_CART_COMPARE.snapshot();
+    const plan = window.CPKR_CART_COMPARE.compare(jobItems(currentJob), snapshot);
 
     lastCartAction = {
-      ok: true,
-      method: 'cart-normalize-inspection',
-      normalization,
-      inspections
+      ok: !!plan.ok,
+      method: 'cart-compare-module',
+      snapshot,
+      plan
     };
-
-    GM_setValue(
-      'gmao_runner_cart_v013',
-      lastCartAction
-    );
-
+    GM_setValue('gmao_runner_cart_v013', lastCartAction);
     await clientHeartbeat();
 
+    flowSet({
+      stage: plan.ok ? FLOW.MULTI_CART_CHECKOUT : FLOW.MULTI_CART_APPLY,
+      cart_snapshot: snapshot,
+      cart_plan: plan
+    });
+
     render(
-      '장바구니 정리·검증 완료\n' +
-      '주문상품=' + normalization.target_count +
-      '개 · 미매칭 상품=0 · 주문수량 일치'
+      (plan.ok ? '장바구니 비교 완료' : '장바구니 차이 확인') + '\n' +
+      '주문상품=' + plan.target_count +
+      ' · 장바구니=' + plan.cart_count +
+      ' · 누락=' + plan.missing.length +
+      ' · 추가=' + plan.extra.length +
+      ' · 수량차이=' + plan.qty_mismatch.length,
+      !plan.ok
     );
 
     return lastCartAction;
   }
 
   async function goCheckout() {
-    /*
-     * V021: 장바구니 검증 성공 여부는 ok=true만 기준으로 한다.
-     * CPKR 모듈/메시지 경로에 따라 method 값이 cart-inspection 이외로 보존될 수 있으므로
-     * method 문자열 때문에 정상 검증 후 주문/결제 버튼이 사라지지 않게 한다.
-     * 다음 단계 클릭 직전의 고객취소 DB 재확인(BEFORE_CHECKOUT)은 반드시 유지한다.
-     */
     if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
     if (detectPageType() !== 'CART') throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
-    if (!lastCartAction || !lastCartAction.ok) {
-      throw new Error('먼저 장바구니 검증을 완료하세요.');
-    }
+    if (!lastCartAction || !lastCartAction.ok) throw new Error('먼저 장바구니 검증을 완료하세요.');
+
     await assertOrderStillActive('BEFORE_CHECKOUT');
-
-    /*
-     * V022: 쿠팡 주문/결제 이동은 실제 DOM 버튼의 native click을 사용한다.
-     * Tampermonkey sandbox에서 synthetic MouseEvent(view=window)를 만들면
-     * Window 변환 오류가 날 수 있으므로 CPKR_CART.verifyAndOrder()의
-     * 합성 클릭 경로는 이 단계에서 사용하지 않는다.
-     * 장바구니 검증/선택상태는 직전 inspectCart 결과를 그대로 신뢰한다.
-     */
-    const button =
-      document.querySelector('a.goPayment[data-pay-role="button"]') ||
-      document.querySelector('a.goPayment') ||
-      document.querySelector('[data-pay-role="button"]');
-
-    if (!button) {
-      throw new Error('쿠팡 주문/결제 진행 버튼을 찾지 못했습니다.');
-    }
-
+    await loadCartCompare();
+    flowSet({ stage: FLOW.CHECKOUT });
     render('주문/결제 페이지로 이동합니다.');
-
-    if (typeof button.click === 'function') {
-      button.click();
-      return;
-    }
-
-    const href = button.getAttribute && button.getAttribute('href');
-    if (href) {
-      location.href = new URL(href, location.href).href;
-      return;
-    }
-
-    throw new Error('쿠팡 주문/결제 버튼을 실행할 수 없습니다.');
+    return window.CPKR_CART_COMPARE.selectAllAndCheckout();
   }
-
 
   function nativeInputValue(input, value) {
     const proto = input instanceof HTMLInputElement ? HTMLInputElement.prototype : null;
