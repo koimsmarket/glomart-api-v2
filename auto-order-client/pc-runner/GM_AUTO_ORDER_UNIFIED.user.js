@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.042
+// @version      0.043
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.042';
+  const VERSION = '0.043';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -1061,6 +1061,388 @@
   }
 
 
+
+  function jobItems(job) {
+    const payload = payloadOf(job);
+    return Array.isArray(payload.items) ? payload.items.filter(Boolean) : [];
+  }
+
+  function num(v, fallback) {
+    const n = Number(String(v == null ? '' : v).replace(/[^\d.-]/g, ''));
+    return Number.isFinite(n) ? n : (fallback == null ? 0 : fallback);
+  }
+
+  function itemQty(item) {
+    const candidates = [
+      item && item.quantity,
+      item && item.qty,
+      item && item.order_qty,
+      item && item.order_quantity,
+      item && item.product_qty,
+      item && item.count
+    ];
+    for (const v of candidates) {
+      const n = num(v, 0);
+      if (n > 0) return Math.floor(n);
+    }
+    return 1;
+  }
+
+  function cpkrIdentityFromItem(item) {
+    item = item || {};
+
+    const directPid = String(
+      item.product_id || item.productId || item.pid || ''
+    ).replace(/\D/g, '');
+
+    const directIid = String(
+      item.item_id || item.itemId || item.iid || ''
+    ).replace(/\D/g, '');
+
+    const directVid = String(
+      item.vendor_item_id || item.vendorItemId ||
+      item.vendor_id || item.vendorId || item.vid || ''
+    ).replace(/\D/g, '');
+
+    const uidCandidates = [
+      item.puid,
+      item.product_uid,
+      item.pi_ii_vi,
+      item.source_uid,
+      item.mall_uid
+    ];
+
+    for (const raw of uidCandidates) {
+      const parsed = parseCpkrUid(raw);
+      if (parsed && parsed.ok) {
+        return {
+          puid: [
+            parsed.product_id,
+            parsed.item_id,
+            parsed.vendor_item_id
+          ].join('_'),
+          pid: String(parsed.product_id),
+          iid: String(parsed.item_id),
+          vid: String(parsed.vendor_item_id)
+        };
+      }
+    }
+
+    if (directPid && directVid) {
+      return {
+        puid: directPid && directIid && directVid
+          ? [directPid, directIid, directVid].join('_')
+          : '',
+        pid: directPid,
+        iid: directIid,
+        vid: directVid
+      };
+    }
+
+    return { puid: '', pid: directPid, iid: directIid, vid: directVid };
+  }
+
+  function cpkrIdentityFromCartRow(row) {
+    if (!row) return { puid: '', pid: '', iid: '', vid: '' };
+
+    const links = Array.from(row.querySelectorAll('a[href*="/vp/products/"]'));
+    let href = '';
+    for (const a of links) {
+      if (/\/vp\/products\/\d+/i.test(a.href || '')) {
+        href = a.href || '';
+        break;
+      }
+    }
+
+    let pid = '';
+    let iid = '';
+    let vid = '';
+
+    if (href) {
+      const pm = href.match(/\/vp\/products\/(\d+)/i);
+      if (pm) pid = pm[1];
+
+      try {
+        const u = new URL(href, location.href);
+        iid = String(u.searchParams.get('itemId') || '').replace(/\D/g, '');
+        vid = String(u.searchParams.get('vendorItemId') || '').replace(/\D/g, '');
+      } catch (_) {}
+    }
+
+    // DOM data attributes are useful as a fallback, but not treated as PID/VID
+    // unless their meaning is explicit.
+    if (!vid) {
+      const vNode = row.querySelector('[data-vendor-item-id],[data-vendoritemid]');
+      if (vNode) {
+        vid = String(
+          vNode.getAttribute('data-vendor-item-id') ||
+          vNode.getAttribute('data-vendoritemid') || ''
+        ).replace(/\D/g, '');
+      }
+    }
+
+    return {
+      puid: pid && iid && vid ? [pid, iid, vid].join('_') : '',
+      pid,
+      iid,
+      vid
+    };
+  }
+
+  function sameCpkrItem(target, cart) {
+    if (!target || !cart) return false;
+
+    // 1순위: 완전한 PUID(PID_IID_VID) 일치.
+    if (target.puid && cart.puid && target.puid === cart.puid) {
+      return true;
+    }
+
+    // 2순위: 사용자가 확정한 일반 규칙 — PID + VID 일치.
+    if (target.pid && target.vid && cart.pid && cart.vid) {
+      return target.pid === cart.pid && target.vid === cart.vid;
+    }
+
+    return false;
+  }
+
+  function cartRows() {
+    const candidates = Array.from(
+      document.querySelectorAll(
+        '[data-item][data-type="VENDOR"],' +
+        '[data-item][data-vendor-id],' +
+        '[data-item]'
+      )
+    );
+
+    return candidates.filter((row) => {
+      if (!row.querySelector('a[href*="/vp/products/"]')) return false;
+      if (!row.querySelector('input.cart-quantity-input, input[class*="quantity"]')) return false;
+      return true;
+    });
+  }
+
+  function rowQuantityInput(row) {
+    return row && (
+      row.querySelector('input.cart-quantity-input') ||
+      row.querySelector('input[class*="quantity"][type="text"]') ||
+      row.querySelector('input[class*="quantity"]')
+    );
+  }
+
+  function rowQuantity(row) {
+    const input = rowQuantityInput(row);
+    return input ? Math.max(1, Math.floor(num(input.value, 1))) : 1;
+  }
+
+  function rowDeleteButton(row) {
+    if (!row) return null;
+
+    const all = Array.from(row.querySelectorAll('button,a,[role="button"],div,span'));
+    return all.find((el) => {
+      const txt = String(el.textContent || '').trim();
+      if (txt !== '삭제') return false;
+      const tag = (el.tagName || '').toUpperCase();
+      return tag === 'BUTTON' || tag === 'A' ||
+        el.getAttribute('role') === 'button' ||
+        typeof el.onclick === 'function' ||
+        getComputedStyle(el).cursor === 'pointer';
+    }) || null;
+  }
+
+  function setNativeInputValue(input, value) {
+    if (!input) return false;
+    const next = String(value);
+
+    try { input.focus(); } catch (_) {}
+
+    let setter = null;
+    try {
+      setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value'
+      ).set;
+    } catch (_) {}
+
+    if (setter) setter.call(input, next);
+    else input.value = next;
+
+    input.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      inputType: 'insertText',
+      data: next
+    }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    try { input.blur(); } catch (_) {}
+
+    return true;
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForQuantity(row, expected, timeoutMs) {
+    const deadline = Date.now() + (timeoutMs || 3500);
+    while (Date.now() < deadline) {
+      const input = rowQuantityInput(row);
+      if (input && Math.floor(num(input.value, 0)) === expected) return true;
+      await sleep(120);
+    }
+    return false;
+  }
+
+  async function waitForRowGone(row, timeoutMs) {
+    const deadline = Date.now() + (timeoutMs || 4000);
+    while (Date.now() < deadline) {
+      if (!document.documentElement.contains(row)) return true;
+      await sleep(120);
+    }
+    return false;
+  }
+
+  function buildCartPlan(job) {
+    const items = jobItems(job);
+    const targets = items.map((item, index) => ({
+      index,
+      item,
+      identity: cpkrIdentityFromItem(item),
+      qty: itemQty(item),
+      rows: []
+    }));
+
+    const rows = cartRows().map((row, index) => ({
+      index,
+      row,
+      identity: cpkrIdentityFromCartRow(row),
+      qty: rowQuantity(row),
+      matchedTarget: null
+    }));
+
+    for (const cr of rows) {
+      for (const target of targets) {
+        if (sameCpkrItem(target.identity, cr.identity)) {
+          cr.matchedTarget = target;
+          target.rows.push(cr);
+          break;
+        }
+      }
+    }
+
+    return {
+      targets,
+      rows,
+      unmatchedRows: rows.filter(x => !x.matchedTarget)
+    };
+  }
+
+  async function normalizeCurrentCart(job) {
+    let plan = buildCartPlan(job);
+
+    if (!plan.targets.length) {
+      throw new Error('우리 주문서 아이템이 없습니다.');
+    }
+
+    // 동일 주문상품이 여러 장바구니 행으로 나뉘어 있으면,
+    // 주문상품을 임의 삭제하지 않는다는 원칙 때문에 자동 삭제하지 않고 중단한다.
+    const duplicates = plan.targets.filter(t => t.rows.length > 1);
+    if (duplicates.length) {
+      throw new Error(
+        'CART_MATCH_DUPLICATE: 동일 주문상품이 장바구니 여러 행에 존재합니다. ' +
+        '주문상품은 자동 삭제하지 않고 중단합니다.'
+      );
+    }
+
+    // 주문서에 없는 기존 장바구니 상품만 삭제.
+    for (const extra of plan.unmatchedRows) {
+      const del = rowDeleteButton(extra.row);
+      if (!del) {
+        throw new Error(
+          'CART_EXTRA_DELETE_NOT_FOUND: 주문서에 없는 장바구니 상품의 삭제 버튼을 찾지 못했습니다.'
+        );
+      }
+
+      if (typeof del.click === 'function') del.click();
+      else del.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+      if (!(await waitForRowGone(extra.row, 4500))) {
+        throw new Error('CART_EXTRA_DELETE_TIMEOUT: 기존 장바구니 상품 삭제가 반영되지 않았습니다.');
+      }
+      await sleep(180);
+    }
+
+    // 삭제 후 DOM을 다시 읽는다.
+    plan = buildCartPlan(job);
+
+    // 모든 주문상품이 있어야 한다.
+    const missing = plan.targets.filter(t => t.rows.length === 0);
+    if (missing.length) {
+      throw new Error(
+        'CART_ORDER_ITEM_MISSING: 우리 주문서 상품 ' +
+        missing.map(t => t.index + 1).join(',') +
+        '번이 장바구니에 없습니다.'
+      );
+    }
+
+    // 매칭 상품은 삭제하지 않고 수량 input만 목표 주문수량으로 직접 입력.
+    for (const target of plan.targets) {
+      const cr = target.rows[0];
+      const currentQty = rowQuantity(cr.row);
+
+      if (currentQty !== target.qty) {
+        const input = rowQuantityInput(cr.row);
+        if (!input) {
+          throw new Error('CART_QTY_INPUT_NOT_FOUND: 수량 입력창을 찾지 못했습니다.');
+        }
+
+        setNativeInputValue(input, target.qty);
+
+        if (!(await waitForQuantity(cr.row, target.qty, 4000))) {
+          throw new Error(
+            'CART_QTY_UPDATE_TIMEOUT: 수량 ' +
+            currentQty + ' → ' + target.qty +
+            ' 직접 입력이 반영되지 않았습니다.'
+          );
+        }
+
+        await sleep(180);
+      }
+    }
+
+    // 최종 재검증
+    plan = buildCartPlan(job);
+
+    if (plan.unmatchedRows.length) {
+      throw new Error('CART_EXTRA_REMAIN: 주문서에 없는 상품이 장바구니에 남아 있습니다.');
+    }
+
+    for (const target of plan.targets) {
+      if (target.rows.length !== 1) {
+        throw new Error('CART_FINAL_MATCH_ERROR: 주문상품 매칭 행 개수가 올바르지 않습니다.');
+      }
+      const actual = rowQuantity(target.rows[0].row);
+      if (actual !== target.qty) {
+        throw new Error(
+          'CART_FINAL_QTY_MISMATCH: 주문수량=' +
+          target.qty + ', 장바구니수량=' + actual
+        );
+      }
+    }
+
+    return {
+      ok: true,
+      target_count: plan.targets.length,
+      removed_count: 0, // 최종 상태에는 미매칭이 0
+      items: plan.targets.map(t => ({
+        index: t.index,
+        puid: t.identity.puid,
+        pid: t.identity.pid,
+        vid: t.identity.vid,
+        quantity: t.qty
+      }))
+    };
+  }
+
+
   async function inspectCurrentCart() {
     if (!currentJob) {
       throw new Error('먼저 작업을 가져오세요.');
@@ -1070,21 +1452,47 @@
       throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
     }
 
+    await assertOrderStillActive('BEFORE_CART_NORMALIZE');
     await loadCartManager();
 
-    const item = firstItem(currentJob);
-    const inspection =
-      window.GMAO_CPKR_CART_MANAGER.inspectCart(item);
-
-    lastCartAction = Object.assign(
-      {},
-      lastCartAction || {},
-      {
-        ok: inspection.ok,
-        method: 'cart-inspection',
-        inspection
-      }
+    render(
+      '장바구니 정리 중\n' +
+      '우리 주문서 상품은 유지하고, 미매칭 상품만 삭제한 뒤 수량을 직접 맞춥니다.'
     );
+
+    const normalization = await normalizeCurrentCart(currentJob);
+    const items = jobItems(currentJob);
+    const inspections = [];
+
+    // 기존 CPKR_CART_MANAGER의 검증도 모든 주문아이템에 대해 수행한다.
+    for (const item of items) {
+      const result = window.GMAO_CPKR_CART_MANAGER.inspectCart(item);
+      inspections.push(result);
+      if (!result || !result.ok) {
+        lastCartAction = {
+          ok: false,
+          method: 'cart-normalize-inspection',
+          normalization,
+          inspections
+        };
+        GM_setValue('gmao_runner_cart_v013', lastCartAction);
+        await clientHeartbeat();
+
+        render(
+          '장바구니 검증 실패\n' +
+          '정리 후 주문상품 중 확인되지 않는 항목이 있습니다.',
+          true
+        );
+        return lastCartAction;
+      }
+    }
+
+    lastCartAction = {
+      ok: true,
+      method: 'cart-normalize-inspection',
+      normalization,
+      inspections
+    };
 
     GM_setValue(
       'gmao_runner_cart_v013',
@@ -1093,19 +1501,13 @@
 
     await clientHeartbeat();
 
-    if (!inspection.ok) {
-      render(
-        '장바구니 검증 실패\n주문 상품을 찾지 못했습니다.',
-        true
-      );
-      return inspection;
-    }
-
     render(
-      '장바구니 검증 완료\n주문 상품이 확인되었습니다.'
+      '장바구니 정리·검증 완료\n' +
+      '주문상품=' + normalization.target_count +
+      '개 · 미매칭 상품=0 · 주문수량 일치'
     );
 
-    return inspection;
+    return lastCartAction;
   }
 
   async function goCheckout() {
