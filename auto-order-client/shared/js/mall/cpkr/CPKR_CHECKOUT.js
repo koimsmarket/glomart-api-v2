@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '021';
+  const VERSION = '022';
 
   function docs() {
     const out = [document];
@@ -54,6 +54,17 @@
   const DOM = {
     addressChangeButton() {
       return buttonByText('배송지 변경');
+    },
+    checkoutAddressSection() {
+      return firstVisible('#deliveryAddress,[data-testid=\"delivery-address\"]') ||
+        all('#deliveryAddress').find(el => el && el.isConnected) || null;
+    },
+    addressAddButton() {
+      return buttonByText('배송지 추가');
+    },
+    addressCards() {
+      return all('form.address-card__form,form[class*=\"address-card\"],div[class*=\"address-card\"]')
+        .filter(el => el && el.isConnected && /수정|선택/.test(txt(el)));
     },
     addressForm() {
       // form 클래스명에 의존하지 않는다. 현재 열린 신규 배송지의 수령인 input을 기준으로
@@ -175,6 +186,92 @@
   }
 
 
+  function compactAddress(v) {
+    return U.norm(v)
+      .replace(/\([^)]*\)/g, ' ')
+      .replace(/^경기도\s+/g, '경기 ')
+      .replace(/[\s,·._()\[\]{}-]+/g, '')
+      .trim();
+  }
+
+  function explicitDetailOf(r) {
+    return U.norm(
+      r.raddr2 || r.address2 || r.receiver_address2 || r.receiverAddress2 ||
+      r.detail_address || r.detailAddress || r.address_detail || r.addressDetail || ''
+    );
+  }
+
+  function checkoutAddressSnapshot() {
+    const section = DOM.checkoutAddressSection();
+    const text = U.norm(section && section.textContent || '');
+    const hasAddress = !!text && !/선택해\s*주세요|배송지를\s*선택/.test(text) &&
+      /(?:대로|로|길)\s*\d/.test(text);
+    return { exists: !!section, has_address: hasAddress, text };
+  }
+
+  function addressTextMatchesReceiver(text, r) {
+    const t = compactAddress(text || '');
+    if (!t) return false;
+    const q = compactAddress(conciseRoadQuery(r));
+    if (!q || !t.includes(q)) return false;
+    const detail = compactAddress(explicitDetailOf(r));
+    if (detail && !t.includes(detail)) return false;
+    return true;
+  }
+
+  function inspectCheckoutAddress(receiver) {
+    const snap = checkoutAddressSnapshot();
+    if (!snap.has_address) {
+      return { branch: 'EMPTY', action: 'ADD', same: false, current_text: snap.text };
+    }
+    const same = addressTextMatchesReceiver(snap.text, receiver || {});
+    return {
+      branch: same ? 'SAME' : 'DIFFERENT',
+      action: same ? 'KEEP' : 'EDIT',
+      same,
+      current_text: snap.text
+    };
+  }
+
+  function cardRoadKey(text) {
+    const t = U.norm(text || '');
+    const m = t.match(/([가-힣A-Za-z0-9·._-]+(?:대로|로|길)\s*\d+(?:-\d+)?)/);
+    return compactAddress(m ? m[1] : '');
+  }
+
+  function findAddressCardByCurrentText(currentText) {
+    const cards = DOM.addressCards();
+    if (!cards.length) return null;
+    const key = cardRoadKey(currentText);
+    if (key) {
+      const hit = cards.find(card => compactAddress(txt(card)).includes(key));
+      if (hit) return hit;
+    }
+    const phone = U.digits(currentText || '');
+    if (phone.length >= 8) {
+      const tail = phone.slice(-8);
+      const hit = cards.find(card => U.digits(txt(card)).includes(tail));
+      if (hit) return hit;
+    }
+    return cards.length === 1 ? cards[0] : null;
+  }
+
+  function findAddressCardForReceiver(receiver) {
+    return DOM.addressCards().find(card => addressTextMatchesReceiver(txt(card), receiver || {})) || null;
+  }
+
+  function cardButton(card, label) {
+    if (!card) return null;
+    const els = Array.from(card.querySelectorAll('button,a,[role="button"],span'));
+    for (const el of els) {
+      if (!visible(el) || U.norm(el.textContent) !== label) continue;
+      const btn = el.closest && el.closest('button,a,[role="button"]');
+      return btn && visible(btn) ? btn : el;
+    }
+    return null;
+  }
+
+
   function gmAddressDiagSnapshot(receiver, detailValue, detailInput, saveButton) {
     try {
       const r = receiver || {};
@@ -238,17 +335,34 @@
     return '';
   }
 
-  async function openAddressForm() {
+  async function openAddressForm(mode, currentAddressText, progress) {
     let form = DOM.addressForm();
     if (form) return form;
-    const btn = await U.waitFor(() => DOM.addressChangeButton(), { timeout: 10000, label: '배송지 변경' });
-    U.click(btn, '배송지 변경');
-    // 쿠팡 신규 배송지의 수령인 input은 화면에 보이더라도 rect/offset 계산이 0으로 잡히는 경우가 있다.
-    // 따라서 visible()로 거르지 않고, 실제 DOM에 연결된 non-hidden input 존재 자체를 기준으로 한다.
+
+    const action = String(mode || 'ADD').toUpperCase();
+    if (action === 'EDIT') {
+      progress && progress('현재 배송지 카드 확인');
+      const card = await U.waitFor(() => findAddressCardByCurrentText(currentAddressText), {
+        timeout: 10000,
+        label: '현재 배송지 카드'
+      });
+      const edit = cardButton(card, '수정');
+      if (!edit) throw new Error('CHECKOUT_ADDRESS_EDIT_BUTTON_NOT_FOUND');
+      progress && progress('현재 배송지 수정 열기');
+      U.click(edit, '배송지 수정');
+    } else {
+      progress && progress('배송지 추가 열기');
+      const add = await U.waitFor(() => DOM.addressAddButton(), {
+        timeout: 10000,
+        label: '배송지 추가'
+      });
+      U.click(add, '배송지 추가');
+    }
+
     const recipient = await U.waitFor(() => {
       return all('#addressBookRecipient,#addressbookRecipient,input[name="recipientName"]')
         .find(el => el && el.isConnected && String(el.type || '').toLowerCase() !== 'hidden') || null;
-    }, { timeout: 10000, label: '신규 배송지 수령인 input' });
+    }, { timeout: 10000, label: action === 'EDIT' ? '수정 배송지 수령인 input' : '신규 배송지 수령인 input' });
     return (recipient.closest && recipient.closest('form')) || DOM.addressForm();
   }
 
@@ -376,9 +490,10 @@
     try { el.blur(); } catch (_) {}
   }
 
-  async function fillAddress(receiver, progress) {
-    progress && progress('신규 배송지 폼 확인');
-    let form = await openAddressForm();
+  async function fillAddress(receiver, progress, options) {
+    const action = String(options && options.action || 'ADD').toUpperCase();
+    progress && progress(action === 'EDIT' ? '배송지 수정 폼 확인' : '신규 배송지 폼 확인');
+    let form = await openAddressForm(action, options && options.current_address_text || '', progress);
 
     progress && progress('수령인 입력');
     const recv = await U.waitFor(() => DOM.recipientInput(form), { timeout: 8000, label: '받는 사람' });
@@ -467,15 +582,37 @@
       return !activeForm || !/선택해\s*주세요/.test(bodyText);
     }, { timeout: 12000, label: '배송지 적용 완료' });
 
+    progress && progress('저장된 배송지 카드 확인');
+    let selectedCard = null;
+    try {
+      selectedCard = await U.waitFor(() => findAddressCardForReceiver(receiver), {
+        timeout: 8000,
+        label: '저장된 배송지 카드'
+      });
+    } catch (_) {
+      selectedCard = findAddressCardForReceiver(receiver);
+    }
+    if (selectedCard) {
+      const select = cardButton(selectedCard, '선택');
+      if (select && visible(select)) {
+        progress && progress('저장된 배송지 선택');
+        U.click(select, '배송지 선택');
+        await U.sleep(500);
+      }
+    }
+
     progress && progress('배송지 적용 완료');
-    return { ok: true, address_persisted: true, default_address: false };
+    return { ok: true, action: action, address_persisted: true, default_address: false, selected: !!selectedCard };
   }
 
   const MOD = {
     VERSION,
-    async fillAddressOnly(receiver, progress) {
+    async fillAddressOnly(receiver, progress, options) {
       if (!/id\.coupang\.com/.test(location.hostname)) throw new Error('not address iframe');
-      return fillAddress(receiver || {}, progress);
+      return fillAddress(receiver || {}, progress, options || {});
+    },
+    inspectAddress(order) {
+      return inspectCheckoutAddress(receiverOf(order || {}));
     },
     async fillAndStop(order, options) {
       const progress = options && typeof options.onProgress === 'function' ? options.onProgress : null;
@@ -483,17 +620,30 @@
       await U.waitFor(() => DOM.payButton() || DOM.addressChangeButton(), { timeout: 12000, label: 'checkout ready' });
       const receiver = receiverOf(order);
       let addressResult = null;
+      const addressPlan = options && options.addressPlan ? options.addressPlan : inspectCheckoutAddress(receiver);
+      progress && progress('배송지 분기: ' + addressPlan.branch);
       if (roadAddressOf(receiver)) {
-        if (options && typeof options.waitForAddressBridge === 'function') {
-          progress && progress('배송지 변경 열기');
+        if (addressPlan.action === 'KEEP') {
+          progress && progress('현재 배송지와 주문 배송지 일치 - 변경 없음');
+          addressResult = { ok: true, action: 'KEEP', matched: true, address_persisted: false };
+        } else if (options && typeof options.waitForAddressBridge === 'function') {
+          progress && progress(addressPlan.action === 'EDIT' ? '배송지 변경 후 수정' : '배송지 없음 - 추가');
           const change = await U.waitFor(() => DOM.addressChangeButton(), { timeout: 10000, label: '배송지 변경' });
           U.click(change, '배송지 변경');
           progress && progress('id.coupang.com 배송지 iframe 처리 대기');
-          addressResult = await options.waitForAddressBridge();
+          addressResult = await options.waitForAddressBridge(addressPlan);
           progress && progress('배송지 iframe 처리 완료');
         } else {
-          addressResult = await fillAddress(receiver, progress);
+          addressResult = await fillAddress(receiver, progress, addressPlan);
         }
+      }
+
+      if (roadAddressOf(receiver)) {
+        await U.waitFor(() => {
+          const verify = inspectCheckoutAddress(receiver);
+          return verify.action === 'KEEP' ? verify : null;
+        }, { timeout: 12000, label: '주문서 배송지 최종 일치 확인' });
+        progress && progress('주문서 배송지 최종 일치 확인');
       }
 
       /*

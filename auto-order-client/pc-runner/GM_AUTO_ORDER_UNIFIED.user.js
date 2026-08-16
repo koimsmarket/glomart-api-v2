@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.040
+// @version      0.042
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.040';
+  const VERSION = '0.042';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -66,7 +66,7 @@
     '/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=013';
   const CHECKOUT_URL =
     API_BASE +
-    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=028';
+    '/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=029';
 
   const DEFAULTS = {
     admin_id: 'derzon',
@@ -1270,6 +1270,9 @@
       setAddressBridge(Object.assign({}, bridge, { state: 'RUNNING', phase: '배송지 iframe 진입 확인' }));
       const result = await window.CPKR_CHECKOUT.fillAddressOnly(bridge.receiver, function (phase) {
         setAddressBridge(Object.assign({}, bridge, { state: 'RUNNING', phase: phase }));
+      }, {
+        action: bridge.action || 'ADD',
+        current_address_text: bridge.current_address_text || ''
       });
       setAddressBridge(Object.assign({}, bridge, {
         state: 'DONE',
@@ -1296,31 +1299,61 @@
       throw new Error('Glomart 배송지 payload가 불완전합니다.');
     }
 
-    /* 결제 직전 단계 진입 전에도 반드시 최신 취소상태를 확인한다. */
     await assertOrderStillActive('BEFORE_CHECKOUT_FILL');
-
-    setAddressBridge({
-      state: 'REQUESTED',
-      phase: '배송지 iframe 대기',
-      work_id: currentJob.work_id,
-      auto_order_no: currentJob.auto_order_no,
-      receiver: receiver
-    });
-
     await loadCheckout();
+
     const checkoutOrder = Object.assign({}, payload.order || {}, {
       receiver,
       shipping: receiver,
       address: receiver
     });
+
+    const addressPlan = window.CPKR_CHECKOUT.inspectAddress(checkoutOrder);
+    const branchLabel = addressPlan.branch === 'EMPTY'
+      ? '1/3 배송지 없음 → 추가'
+      : addressPlan.branch === 'SAME'
+        ? '2/3 배송지 일치 → 그대로 진행'
+        : '3/3 배송지 다름 → 현재 배송지 수정';
+    render('배송지 분기 확인\n' + branchLabel);
+
+    if (addressPlan.action !== 'KEEP') {
+      setAddressBridge({
+        state: 'REQUESTED',
+        phase: addressPlan.action === 'EDIT' ? '현재 배송지 수정 대기' : '신규 배송지 추가 대기',
+        work_id: currentJob.work_id,
+        auto_order_no: currentJob.auto_order_no,
+        action: addressPlan.action,
+        current_address_text: addressPlan.current_text || '',
+        receiver: receiver
+      });
+    } else {
+      setAddressBridge({
+        state: 'SKIPPED',
+        phase: '현재 배송지와 주문 배송지 일치',
+        work_id: currentJob.work_id,
+        auto_order_no: currentJob.auto_order_no,
+        action: 'KEEP',
+        receiver: receiver
+      });
+    }
+
     const result = await window.CPKR_CHECKOUT.fillAndStop(checkoutOrder, {
+      addressPlan: addressPlan,
       onProgress: function (phase) {
-        render('배송지 자동입력 진행\n' + phase);
+        render('배송지 처리 진행\n' + branchLabel + '\n' + phase);
       },
       waitForAddressBridge: function () {
         return waitAddressBridgeDone(currentJob.work_id, 90000);
       }
     });
+
+    const action = result && result.address_result && result.address_result.action || addressPlan.action;
+    const persisted = action === 'ADD' || action === 'EDIT';
+    const message = action === 'KEEP'
+      ? '기존 배송지 일치 확인 후 결제하기 직전 정지'
+      : (action === 'EDIT'
+          ? '기존 배송지를 주문 배송지로 수정/선택 후 결제하기 직전 정지'
+          : '배송지 신규 추가/선택 후 결제하기 직전 정지');
 
     await request(
       '/api/auto-order/runtime/work/' + encodeURIComponent(currentJob.work_id) + '/state',
@@ -1330,8 +1363,10 @@
         status: 'STOPPED_BEFORE_PAYMENT',
         detail: {
           phase: 'CHECKOUT_STOPPED_BEFORE_PAYMENT',
-          message: '신규 배송지 저장/적용 후 결제하기 직전 정지',
-          address_persisted: true,
+          message: message,
+          address_branch: addressPlan.branch,
+          address_action: action,
+          address_persisted: persisted,
           default_address: false
         }
       })
@@ -1340,7 +1375,7 @@
     clearInterval(workHeartbeatTimer);
     GM_setValue('gmao_runner_job_v013', null);
     currentJob = null;
-    render('결제하기 직전 정지 완료\n신규 배송지는 저장/적용했고 기본 배송지로는 지정하지 않았습니다.\n최종 결제는 사람이 확인 후 진행하세요.');
+    render('결제하기 직전 정지 완료\n' + message + '\n최종 결제는 사람이 확인 후 진행하세요.');
     return result;
   }
 
