@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.051
+// @version      0.054
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.051';
+  const VERSION = '0.054';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -99,8 +99,8 @@
    */
   const ADDRESS_BRIDGE_KEY = 'gmao_cpkr_address_bridge_v033';
 
-  const FLOW_KEY = 'gmao_cpkr_flow_v051';
-  const BATCH_SESSION_KEY = 'gmao_cpkr_batch_session_v051';
+  const FLOW_KEY = 'gmao_cpkr_flow_v054';
+  const BATCH_SESSION_KEY = 'gmao_cpkr_batch_session_v054';
   const BLANK_GATE_MS = 850;
 
   const FLOW = Object.freeze({
@@ -478,6 +478,29 @@
     GM_setValue('gmao_runner_inspection_v013', null);
     GM_setValue('gmao_runner_preparation_v013', null);
     GM_setValue('gmao_runner_cart_v013', null);
+  }
+
+  function headerCartCount() {
+    const node = document.querySelector('#headerCartCount');
+    if (!node) return null;
+    const raw = String(node.textContent || '').replace(/[^0-9]/g, '');
+    if (!raw) return 0;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function currentOrderItem(job) {
+    const items = jobItems(job);
+    if (!items.length) return {};
+    const flow = flowGet() || {};
+    const index = flow.stage === FLOW.MULTI_ADD_ITEMS
+      ? Math.max(0, Number(flow.item_index || 0))
+      : 0;
+    return items[index] || items[0] || {};
+  }
+
+  function currentProductUrl(job) {
+    return productUrlForItem(currentOrderItem(job), job);
   }
 
   function directCartUrl() {
@@ -870,11 +893,11 @@
 
     flowSet({
       work_id: currentJob.work_id,
-      stage: batchSessionReady() ? FLOW.ORDER_START : FLOW.BATCH_CART_SCAN,
+      stage: FLOW.BATCH_CART_SCAN,
       item_count: orderItemCount(currentJob),
       item_index: 0,
       batch_cart_snapshot: null,
-      batch_cart_cleared: batchSessionReady(),
+      batch_cart_cleared: false,
       cart_snapshot: null,
       cart_plan: null,
       correction_pass: 0
@@ -884,9 +907,7 @@
       '작업 배정 완료\n' +
       '#' + currentJob.work_id + '\n' +
       currentJob.auto_order_no + '\n' +
-      (batchSessionReady()
-        ? '연속 작업 세션 유지 · 장바구니 재검사 없이 주문 시작'
-        : '연속 작업 최초 1회 · 장바구니 확인/청소 시작')
+      '쿠팡 헤더 장바구니 숫자 확인 후 필요할 때만 청소 시작'
     );
 
     setTimeout(() => { orchestrateCurrentFlow().catch(showError); }, 300);
@@ -942,11 +963,11 @@
 
     await loadInspector();
 
-    const item = firstItem(currentJob);
+    const item = currentOrderItem(currentJob);
     const expected = Object.assign(
       {},
       item,
-      { product_url: productUrl(currentJob) }
+      { product_url: currentProductUrl(currentJob) }
     );
 
     lastInspection = normalizeInspectionLogin(
@@ -992,7 +1013,7 @@
 
     await loadPreparer();
 
-    const item = firstItem(currentJob);
+    const item = currentOrderItem(currentJob);
 
     lastPreparation =
       await window.GMAO_CPKR_PRODUCT_PREPARER.prepare(
@@ -1010,7 +1031,7 @@
     const refreshedInspection =
       window.GMAO_CPKR_PRODUCT_INSPECTOR.inspect(
         Object.assign({}, item, {
-          product_url: productUrl(currentJob)
+          product_url: currentProductUrl(currentJob)
         })
       );
 
@@ -1310,11 +1331,11 @@
 
     return flowSet({
       work_id: currentJob.work_id,
-      stage: batchSessionReady() ? FLOW.ORDER_START : FLOW.BATCH_CART_SCAN,
+      stage: FLOW.BATCH_CART_SCAN,
       item_count: orderItemCount(currentJob),
       item_index: 0,
       batch_cart_snapshot: null,
-      batch_cart_cleared: batchSessionReady(),
+      batch_cart_cleared: false,
       cart_snapshot: null,
       cart_plan: null,
       correction_pass: 0
@@ -1553,8 +1574,45 @@
         return;
 
       case FLOW.BATCH_CART_SCAN: {
+        /*
+         * V054: first decision uses only Coupang's header cart badge.
+         * #headerCartCount == 0  -> no cart page / no cart cleanup.
+         * #headerCartCount > 0   -> enter cart and bulk-clear.
+         * If the badge is unavailable, fall back to the cart page once.
+         */
+        const liveCount = headerCartCount();
+
+        if (liveCount === 0) {
+          batchSessionSet({
+            cart_cleaned: true,
+            cleaned_at: Date.now(),
+            method: 'header-count-zero'
+          });
+          flowSet({
+            stage: FLOW.BATCH_TO_WAIT,
+            batch_cart_snapshot: [],
+            batch_cart_cleared: true,
+            header_cart_count: 0
+          });
+          blankWait(
+            FLOW.BATCH_CLEAN_WAIT,
+            '장바구니 확인 완료\n' +
+            '헤더 장바구니=0 · 청소 불필요 · DOM 해제 완료 · 대기'
+          );
+          return;
+        }
+
+        if (liveCount !== null && liveCount > 0) {
+          flowSet({
+            stage: FLOW.BATCH_CART_CLEAR,
+            header_cart_count: liveCount
+          });
+          blankGate(directCartUrl(), 'BATCH_CART_CLEAR');
+          return;
+        }
+
         if (page !== 'CART') {
-          blankGate(directCartUrl(), 'BATCH_CART_SCAN');
+          blankGate(directCartUrl(), 'BATCH_CART_SCAN_FALLBACK');
           return;
         }
 
@@ -1565,7 +1623,7 @@
           batchSessionSet({
             cart_cleaned: true,
             cleaned_at: Date.now(),
-            method: 'already-empty'
+            method: 'cart-fallback-empty'
           });
           flowSet({
             stage: FLOW.BATCH_TO_WAIT,
@@ -1574,8 +1632,8 @@
           });
           blankWait(
             FLOW.BATCH_CLEAN_WAIT,
-            '연속 작업 최초 장바구니 확인 완료\n' +
-            '기존 상품 없음 · DOM 해제 완료 · 대기'
+            '장바구니 확인 완료\n' +
+            '장바구니 비어 있음 · DOM 해제 완료 · 대기'
           );
           return;
         }
@@ -1584,8 +1642,7 @@
           stage: FLOW.BATCH_CART_CLEAR,
           batch_cart_snapshot: snapshot
         });
-
-        blankGate(directCartUrl(), 'BATCH_CART_CLEAR');
+        await orchestrateCurrentFlow();
         return;
       }
 
@@ -1597,6 +1654,9 @@
 
         await loadCartClear();
         const cleared = await window.CPKR_CART_CLEAR.clearAll();
+        if (!cleared || cleared.ok !== true) {
+          throw new Error('CART_CLEAR_NOT_CONFIRMED');
+        }
 
         batchSessionSet({
           cart_cleaned: true,

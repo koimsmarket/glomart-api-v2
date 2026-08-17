@@ -1,4 +1,4 @@
-/* CPKR_CART_CLEAR_V053
+/* CPKR_CART_CLEAR_V055
  * Single cart-cleaning module.
  * CPKR_CART_CLEAN is retired; all batch-start cart inspection/clearing lives here.
  * Confirmed cart row DOM:
@@ -6,7 +6,7 @@
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '053') return;
+  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '055') return;
 
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function digits(v){ return String(v==null?'':v).replace(/\D/g,''); }
@@ -104,6 +104,30 @@
     });
   }
 
+  function withDeleteConfirmApproved(fn){
+    var originalConfirm=W.confirm;
+
+    W.confirm=function(message){
+      var text=String(message||'').replace(/\s+/g,' ').trim();
+
+      /*
+       * Approve ONLY Coupang's cart-delete confirmation.
+       * Any unrelated confirmation still goes through the browser's
+       * original confirm() behavior.
+       */
+      if(text==='선택한 상품을 삭제하시겠습니까?'){
+        return true;
+      }
+      return originalConfirm.call(W,message);
+    };
+
+    try{
+      return fn();
+    }finally{
+      W.confirm=originalConfirm;
+    }
+  }
+
   async function clearAll(){
     /*
      * One cart operation:
@@ -122,7 +146,9 @@
     var del=selectedDeleteButton();
     if(!del) throw new Error('CART_CLEAR_SELECTED_DELETE_NODE_MISSING');
 
-    del.click();
+    withDeleteConfirmApproved(function(){
+      del.click();
+    });
 
     /*
      * Give Coupang time to process the one bulk delete request.
@@ -152,7 +178,7 @@
   }
 
   W.CPKR_CART_CLEAR={
-    version:'053',
+    version:'055',
     snapshot:snapshot,
     clearAll:clearAll,
     run:run,
