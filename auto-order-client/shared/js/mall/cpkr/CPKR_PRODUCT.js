@@ -1,11 +1,11 @@
-/* CPKR_PRODUCT_V063
+/* CPKR_PRODUCT_V066
  * Authoritative Coupang PRODUCT module.
  * One item = one inspect -> optional quantity input -> one action.
  * IMPORTANT: PUID direct URL already selects the SKU. This module NEVER changes option DOM.
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='062') return;
+  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='066') return;
 
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -39,7 +39,7 @@
   function blocked(){var t=(D.title||'')+' '+text(D.body).slice(0,5000);return /Access Denied|You don't have permission to access|errors\.edgesuite\.net/i.test(t);}
 
   function quantityInput(){
-    var selectors=['input.prod-quantity__input','input[name="quantity"]','input.cart-quantity-input','input[class*="quantity"]'];
+    var selectors=['input.prod-quantity__input','input[name="quantity"]'];
     for(var i=0;i<selectors.length;i++){var nodes=D.querySelectorAll(selectors[i]);for(var j=0;j<nodes.length;j++){if(visible(nodes[j])&&!disabled(nodes[j]))return nodes[j];}}
     return null;
   }
@@ -69,7 +69,27 @@
   function exactCartButton(){var b=D.querySelector('button.prod-cart-btn');return b&&visible(b)&&!disabled(b)?b:null;}
   function exactBuyButton(){var b=D.querySelector('button.prod-buy-btn,a.prod-buy-btn');return b&&visible(b)&&!disabled(b)?b:null;}
 
-  async function run(item,mode){
+  async function waitAfterCartClick(beforeCount){
+    var start=Date.now(), minWait=900;
+    while(Date.now()-start<4000){
+      if(blocked())throw new Error('COUPANG_ACCESS_DENIED');
+      var body=String(D.body&&D.body.innerText||'');
+      if(/서버에서 오류가 발생하였습니다/.test(body))throw new Error('CART_ADD_COUPANG_SERVER_ERROR');
+      var n=D.querySelector('#headerCartCount'), now=n?Number(String(n.textContent||'').replace(/\D/g,''))||0:null;
+      if(Date.now()-start>=minWait && beforeCount!=null && now!=null && now>beforeCount)return {confirmed:true,method:'header-count',before:beforeCount,after:now};
+      if(Date.now()-start>=1400)return {confirmed:false,method:'stability-wait',before:beforeCount,after:now};
+      await sleep(120);
+    }
+    return {confirmed:false,method:'timeout-stability'};
+  }
+  function armServerAlert(pageWindow){
+    var pw=pageWindow||W,old=pw.alert,captured='',done=false;
+    function restore(){if(done)return;done=true;try{if(pw.alert===hook)pw.alert=old;}catch(_e){}}
+    function hook(msg){captured=String(msg||'');try{return old.call(pw,msg);}finally{}}
+    try{pw.alert=hook;}catch(_e){}
+    return {restore:restore,message:function(){return captured;}};
+  }
+  async function run(item,mode,pageWindow){
     mode=String(mode||'MULTI').toUpperCase();
     var check=inspect(item);
     if(check.login_required)throw new Error('LOGIN_REQUIRED');
@@ -82,8 +102,9 @@
       buy.click(); return {ok:true,inspection:check,quantity:q,action:'BUY_NOW',clicked:true};
     }
     var cart=exactCartButton(); if(!cart)throw new Error('CART_BUTTON_NODE_NOT_FOUND');
-    cart.click(); return {ok:true,inspection:check,quantity:q,action:'ADD_TO_CART',clicked:true};
+    var hc=D.querySelector('#headerCartCount'),beforeCount=hc?(Number(String(hc.textContent||'').replace(/\D/g,''))||0):null,alarm=armServerAlert(pageWindow);
+    try{cart.click();var settled=await waitAfterCartClick(beforeCount);var am=alarm.message();if(/서버에서 오류가 발생하였습니다/.test(am))throw new Error('CART_ADD_COUPANG_SERVER_ERROR');return {ok:true,inspection:check,quantity:q,action:'ADD_TO_CART',clicked:true,settled:settled};}finally{alarm.restore();}
   }
 
-  W.CPKR_PRODUCT={version:'062',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
+  W.CPKR_PRODUCT={version:'066',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
 })(window,document);
