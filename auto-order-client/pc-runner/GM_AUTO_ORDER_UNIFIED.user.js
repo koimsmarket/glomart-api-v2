@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.058
+// @version      0.059
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -1155,8 +1155,11 @@
     if (!lastPreparation) throw new Error('먼저 옵션/수량 준비를 실행하세요.');
     if (detectPageType() !== 'PRODUCT') throw new Error('쿠팡 상품 상세 페이지에서 실행하세요.');
     await assertOrderStillActive('BEFORE_ADD_TO_CART');
-    await loadProductOrder();
-    lastCartAction = await window.CPKR_PRODUCT_ORDER.addToCart();
+
+    // V059: restore the proven V045 cart-add execution path.
+    // ProductOrder remains for Buy Now; cart add calls CartManager directly.
+    await loadCartManager();
+    lastCartAction = await window.GMAO_CPKR_CART_MANAGER.addToCart();
     GM_setValue('gmao_runner_cart_v013', lastCartAction);
     await clientHeartbeat();
     render('장바구니 담기 실행 완료\n' + (lastCartAction.ok ? '쿠팡 확인 신호가 감지되었습니다.' : '확인 신호를 확인하지 못했습니다.'));
