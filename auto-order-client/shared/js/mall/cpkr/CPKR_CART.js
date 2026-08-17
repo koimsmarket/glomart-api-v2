@@ -1,44 +1,35 @@
-(function () {
+/* CPKR_CART_V063
+ * Authoritative Coupang CART module.
+ * Owns: header count, one-shot initial clean, snapshot, detached compare,
+ * one correction pass, select-all checkout. No automatic self-run.
+ */
+(function(W,D){
   'use strict';
-  const U = window.GMAO_UTIL;
+  if(W.CPKR_CART && W.CPKR_CART.version==='062') return;
+  function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
+  function num(v,d){var n=Number(String(v==null?'':v).replace(/[^\d.-]/g,''));return isFinite(n)?n:(d||0);}
+  function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
+  function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+  function parseUid(v){var s=String(v||'').trim().replace(/^CPKR_/i,''),m=s.match(/(\d{5,})[_:\-\/](\d{5,})[_:\-\/](\d{5,})/);return m?{puid:[m[1],m[2],m[3]].join('_'),pid:m[1],iid:m[2],vid:m[3]}:{puid:'',pid:'',iid:'',vid:''};}
+  function orderIdentity(item){item=item||{};var keys=[item.puid,item.PUID,item.product_uid,item.productUid,item.pi_ii_vi,item.source_uid,item.sourceUid];for(var i=0;i<keys.length;i++){var p=parseUid(keys[i]);if(p.pid&&p.vid)return p;}var pid=digits(item.product_id||item.productId||item.pid),iid=digits(item.item_id||item.itemId||item.iid),vid=digits(item.vendor_item_id||item.vendorItemId||item.vendor_id||item.vendorId||item.vid);return {puid:(pid&&iid&&vid?[pid,iid,vid].join('_'):''),pid:pid,iid:iid,vid:vid};}
+  function orderQty(item){var n=num(item&&(item.quantity||item.qty||item.order_qty||item.order_quantity||item.count),1);return n>0?Math.floor(n):1;}
+  function headerCount(){var n=D.querySelector('#headerCartCount');if(!n)return null;var raw=String(n.textContent||'').replace(/\D/g,'');return raw===''?0:Number(raw);}
+  function rows(){var out=[],seen=new Set();Array.from(D.querySelectorAll('input.cart-quantity-input')).forEach(function(input){var row=input.closest&&input.closest('div[id^="item_"]');if(row&&!seen.has(row)&&row.querySelector('a[href*="/vp/products/"]')){seen.add(row);out.push(row);}});return out;}
+  function cartIdentity(row){var a=row&&row.querySelector('a[href*="/vp/products/"]'),href=a&&(a.getAttribute('href')||a.href)||'',pid='',iid='',vid='';var m=href.match(/\/vp\/products\/(\d+)/i);if(m)pid=m[1];try{var u=new URL(href,location.href);iid=digits(u.searchParams.get('itemId'));vid=digits(u.searchParams.get('vendorItemId'));}catch(_e){}return {puid:(pid&&iid&&vid?[pid,iid,vid].join('_'):''),pid:pid,iid:iid,vid:vid};}
+  function snapshot(){return rows().map(function(row,index){var id=cartIdentity(row),q=row.querySelector('input.cart-quantity-input');return {index:index,row_id:row.id||'',pid:id.pid,iid:id.iid,vid:id.vid,puid:id.puid,quantity:Math.max(1,Math.floor(num(q&&q.value,1)))};});}
+  function same(a,b){if(a.puid&&b.puid&&a.puid===b.puid)return true;/* User rule: PID+VID match means same item; do NOT delete due IID difference. */return !!(a.pid&&a.vid&&b.pid&&b.vid&&a.pid===b.pid&&a.vid===b.vid);}
+  function compare(orderItems,cartSnap){var targets=(orderItems||[]).map(function(item,index){return {index:index,item:item,id:orderIdentity(item),quantity:orderQty(item),matched:null};}),carts=(cartSnap||[]).map(function(c){return Object.assign({},c,{matched:null});});targets.forEach(function(t){var c=carts.find(function(x){return !x.matched&&same(t.id,x);});if(c){t.matched=c;c.matched=t;}});var missing=targets.filter(function(t){return !t.matched;}).map(function(t){return {index:t.index,item:t.item,pid:t.id.pid,iid:t.id.iid,vid:t.id.vid,puid:t.id.puid,quantity:t.quantity};});var extra=carts.filter(function(c){return !c.matched;});var qtyMismatch=targets.filter(function(t){return t.matched&&Number(t.matched.quantity)!==Number(t.quantity);}).map(function(t){return {index:t.index,row_id:t.matched.row_id,pid:t.id.pid,iid:t.id.iid,vid:t.id.vid,puid:t.id.puid,expected:t.quantity,actual:t.matched.quantity};});return {ok:missing.length===0&&extra.length===0&&qtyMismatch.length===0,missing:missing,extra:extra,qty_mismatch:qtyMismatch,target_count:targets.length,cart_count:carts.length};}
+  function overallCheckbox(){var n=D.querySelector('input[type="checkbox"][title*="모든 상품"],input[type="checkbox"][title*="전체"]');if(n)return n;return Array.from(D.querySelectorAll('input[type="checkbox"]')).find(function(x){var h=x.closest('label,div,span');return h&&/전체\s*선택/.test(text(h));})||null;}
+  function selectedDelete(){return Array.from(D.querySelectorAll('button,a,[role="button"],div')).find(function(el){return text(el)==='선택삭제'&&(el.tagName==='BUTTON'||el.tagName==='A'||el.getAttribute('role')==='button'||/pointer/.test((getComputedStyle(el)||{}).cursor||''));})||null;}
+  function rowCheckbox(row){return row&&row.querySelector('input[type="checkbox"]');}
+  function nativeValue(input,value){var win=input.ownerDocument.defaultView||W,proto=win.HTMLInputElement&&win.HTMLInputElement.prototype,d=proto&&Object.getOwnPropertyDescriptor(proto,'value');if(d&&d.set)d.set.call(input,String(value));else input.value=String(value);input.dispatchEvent(new win.Event('input',{bubbles:true}));input.dispatchEvent(new win.Event('change',{bubbles:true}));try{input.blur();}catch(_e){}}
+  function armConfirm(pageWindow){var pw=pageWindow||W,old=pw.confirm,done=false;function restore(){if(done)return;done=true;try{if(pw.confirm===hook)pw.confirm=old;}catch(_e){}}function hook(msg){var t=String(msg||'').replace(/\s+/g,' ').trim();if(/선택한 상품을 삭제하시겠습니까/.test(t)){restore();return true;}return old.call(pw,msg);}try{pw.confirm=hook;}catch(_e){}setTimeout(restore,2500);return restore;}
 
-  const DOM = {
-    orderButton() {
-      // 캡처 확정 DOM: “총 2개 상품 구매하기”
-      return U.qsAll('button,a').find(el => U.visible(el) && /총\s*\d+\s*개\s*상품\s*구매하기/.test(U.txt(el))) ||
-        U.findButtonByText(['상품 구매하기', '구매하기']);
-    },
-    selectedAll() {
-      return U.findByText('label,span,div', '전체 선택');
-    },
-    bodyText() { return U.txt(document.body); }
-  };
-
-  async function openCart() {
-    if (!/cart\.coupang\.com/.test(location.hostname)) location.href = 'https://cart.coupang.com/cartView.pang';
-    await U.waitFor(() => /cart\.coupang\.com/.test(location.hostname), { timeout: 10000, label: 'cart location' });
-    await U.waitFor(() => DOM.orderButton(), { timeout: 12000, label: 'order button' });
-  }
-
-  const MOD = {
-    async verifyAndOrder(items, order) {
-      U.log('cart verify/order start');
-      await openCart();
-      const text = DOM.bodyText();
-      const missing = [];
-      for (const it of items) {
-        const name = it.product_name || it.title || '';
-        if (name && !text.includes(name.slice(0, Math.min(10, name.length)))) missing.push(name);
-      }
-      if (missing.length) U.warn('cart weak verify missing', missing);
-      const btn = await U.waitFor(() => DOM.orderButton(), { timeout: 6000, label: '총 상품 구매하기' });
-      // 장바구니→주문/결제는 about:blank 절대 금지. 쿠팡 버튼 클릭으로만 이동.
-      U.click(btn, '총 상품 구매하기');
-      await U.waitFor(() => /checkout\.coupang\.com/.test(location.hostname), { timeout: 12000, label: 'checkout location' });
-      return { ok: true };
-    },
-    DOM
-  };
-
-  window.CPKR_CART = MOD;
-})();
+  async function clearAll(pageWindow){var rs=rows();if(!rs.length)return {ok:true,skipped:true,count:0};var all=overallCheckbox();if(!all)throw new Error('CART_SELECT_ALL_NOT_FOUND');if(!all.checked)all.click();var del=selectedDelete();if(!del)throw new Error('CART_SELECTED_DELETE_NOT_FOUND');var restore=armConfirm(pageWindow);del.click();await sleep(900);restore();var remain=rows().length;if(remain!==0)throw new Error('CART_CLEAR_NOT_EMPTY:'+remain);return {ok:true,skipped:false,count:rs.length,remaining:0,method:'select-all-selected-delete'};}
+  function findRow(id){return rows().find(function(r){return same(id,cartIdentity(r));})||null;}
+  async function applyAdjustments(plan,pageWindow){plan=plan||{};/* Quantity: direct numeric input only. */(plan.qty_mismatch||[]).forEach(function(q){var row=findRow(q),input=row&&row.querySelector('input.cart-quantity-input');if(!input)throw new Error('CART_QTY_INPUT_NOT_FOUND');nativeValue(input,q.expected);});
+    var extras=plan.extra||[];if(extras.length){var all=overallCheckbox();if(!all)throw new Error('CART_SELECT_ALL_NOT_FOUND');if(all.checked)all.click();extras.forEach(function(x){var row=findRow(x),cb=rowCheckbox(row);if(!cb)throw new Error('CART_EXTRA_CHECKBOX_NOT_FOUND');if(!cb.checked)cb.click();});var del=selectedDelete();if(!del)throw new Error('CART_SELECTED_DELETE_NOT_FOUND');var restore=armConfirm(pageWindow);del.click();await sleep(800);restore();}
+    return {ok:true,missing:plan.missing||[],qty_changed:(plan.qty_mismatch||[]).length,extra_deleted:extras.length};}
+  function selectAllAndCheckout(){var all=overallCheckbox();if(!all)throw new Error('CART_SELECT_ALL_NOT_FOUND');if(!all.checked)all.click();var go=D.querySelector('a.goPayment[data-pay-role="button"],a.goPayment,[data-pay-role="button"]');if(!go)throw new Error('CART_GO_PAYMENT_NOT_FOUND');go.click();return {ok:true};}
+  W.CPKR_CART={version:'062',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
+})(window,document);
