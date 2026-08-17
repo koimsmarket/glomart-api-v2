@@ -138,37 +138,119 @@
     return value;
   }
 
+  function headerCartCount(){
+    const node=document.querySelector('#headerCartCount');
+    if(!node) return null;
+    const raw=String(node.textContent||'').replace(/[^0-9]/g,'');
+    if(!raw) return 0;
+    const n=Number(raw);
+    return Number.isFinite(n)?n:null;
+  }
+
+  function coupangCartError(){
+    const bodyText=text(document.body);
+    if(/서버에서\s*오류가\s*발생하였습니다/.test(bodyText)){
+      return 'COUPANG_SERVER_ERROR';
+    }
+    if(/일시적으로\s*오류가\s*발생했습니다/.test(bodyText)){
+      return 'COUPANG_TEMPORARY_ERROR';
+    }
+    return '';
+  }
+
+  async function waitForStableCartButton(timeoutMs){
+    const started=Date.now();
+    let last=null;
+    let stableSince=0;
+
+    while(Date.now()-started<timeoutMs){
+      const button=findCartButton();
+      if(button && !disabled(button)){
+        if(button===last){
+          if(!stableSince) stableSince=Date.now();
+          if(Date.now()-stableSince>=700) return button;
+        }else{
+          last=button;
+          stableSince=Date.now();
+        }
+      }
+      await new Promise(resolve=>setTimeout(resolve,120));
+    }
+    return last && !disabled(last) ? last : null;
+  }
+
   async function addToCart(){
     if(!/\/vp\/products\//.test(location.pathname)){
       throw new Error('쿠팡 상품 상세 페이지가 아닙니다.');
     }
 
-    const button=findCartButton();
+    /*
+     * Do not click as soon as the button merely appears. Coupang's product
+     * DOM can be visible before its cart action state is fully attached.
+     * Require the same enabled cart button to stay stable briefly.
+     */
+    let button=await waitForStableCartButton(4000);
     if(!button) throw new Error('장바구니 버튼을 찾지 못했습니다.');
     if(disabled(button)) throw new Error('장바구니 버튼이 비활성화되어 있습니다.');
 
     const beforeUrl=location.href;
     const beforeText=text(button);
+    const beforeCount=headerCartCount();
+
+    // Re-resolve once immediately before the one permitted click.
+    button=findCartButton() || button;
+    if(disabled(button)) throw new Error('장바구니 버튼이 클릭 직전에 비활성화되었습니다.');
+
     button.click();
 
-    const confirmation=await waitFor(()=>{
-      const bodyText=text(document.body);
+    const result=await waitFor(()=>{
+      const error=coupangCartError();
+      if(error) return {type:'error',code:error};
 
-      if(/장바구니에\s*담겼|장바구니에\s*추가|장바구니로\s*이동/.test(bodyText)){
-        return 'message';
+      const afterCount=headerCartCount();
+      if(
+        beforeCount!==null &&
+        afterCount!==null &&
+        afterCount>beforeCount
+      ){
+        return {
+          type:'success',
+          method:'header-cart-count',
+          before_count:beforeCount,
+          after_count:afterCount
+        };
+      }
+
+      const bodyText=text(document.body);
+      if(/장바구니에\s*담겼|장바구니에\s*추가/.test(bodyText)){
+        return {type:'success',method:'message'};
       }
 
       if(location.hostname==='cart.coupang.com' || /\/cart/.test(location.pathname)){
-        return 'cart-navigation';
+        return {type:'success',method:'cart-navigation'};
       }
 
       return null;
-    },5000,250);
+    },5500,150);
+
+    if(result && result.type==='error'){
+      throw new Error('CART_ADD_' + result.code);
+    }
+
+    if(!result || result.type!=='success'){
+      throw new Error(
+        'CART_ADD_NOT_CONFIRMED' +
+        ':before=' + String(beforeCount) +
+        ':after=' + String(headerCartCount())
+      );
+    }
 
     return {
-      ok:Boolean(confirmation),
-      method:confirmation||'click-only',
+      ok:true,
+      method:result.method,
       button_text:beforeText,
+      before_count:beforeCount,
+      after_count:result.after_count==null?headerCartCount():result.after_count,
       before_url:beforeUrl,
       after_url:location.href,
       clicked_at:new Date().toISOString()
@@ -180,6 +262,7 @@
   }
 
   window.GMAO_CPKR_CART_MANAGER={
+    version:'057',
     addToCart,
     inspectCart,
     openCart,

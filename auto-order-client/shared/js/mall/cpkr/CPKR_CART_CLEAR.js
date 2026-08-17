@@ -1,4 +1,4 @@
-/* CPKR_CART_CLEAR_V055
+/* CPKR_CART_CLEAR_V057
  * Single cart-cleaning module.
  * CPKR_CART_CLEAN is retired; all batch-start cart inspection/clearing lives here.
  * Confirmed cart row DOM:
@@ -6,7 +6,7 @@
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '055') return;
+  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '057') return;
 
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function digits(v){ return String(v==null?'':v).replace(/\D/g,''); }
@@ -104,29 +104,34 @@
     });
   }
 
-  function withDeleteConfirmApproved(fn){
-    var originalConfirm=W.confirm;
-
-    W.confirm=function(message){
-      var text=String(message||'').replace(/\s+/g,' ').trim();
-
-      /*
-       * Approve ONLY Coupang's cart-delete confirmation.
-       * Any unrelated confirmation still goes through the browser's
-       * original confirm() behavior.
-       */
-      if(text==='선택한 상품을 삭제하시겠습니까?'){
-        return true;
-      }
-      return originalConfirm.call(W,message);
-    };
-
-    try{
-      return fn();
-    }finally{
-      W.confirm=originalConfirm;
-    }
+  function armMainWorldDeleteConfirm(){
+    /*
+     * Tampermonkey sandbox window.confirm is not necessarily Coupang's
+     * page-world confirm. Inject a one-shot hook into MAIN world.
+     * It approves only the exact cart-delete question and restores itself
+     * immediately after that one matching invocation (or after timeout).
+     */
+    var token='gmao-delete-confirm-'+Date.now()+'-'+Math.random().toString(36).slice(2);
+    var script=D.createElement('script');
+    script.textContent=
+      '(function(){' +
+      'var TOKEN='+JSON.stringify(token)+';' +
+      'var MSG='+JSON.stringify('선택한 상품을 삭제하시겠습니까?')+';' +
+      'var old=window.confirm;' +
+      'var done=false;' +
+      'function restore(){if(done)return;done=true;if(window.confirm===hook)window.confirm=old;}' +
+      'function hook(m){var t=String(m||"").replace(/\\\\s+/g," ").trim();' +
+        'if(t===MSG){restore();return true;}' +
+        'return old.call(window,m);' +
+      '}' +
+      'window.confirm=hook;' +
+      'setTimeout(restore,2500);' +
+      '})();';
+    (D.documentElement||D.head||D.body).appendChild(script);
+    script.remove();
+    return token;
   }
+
 
   async function clearAll(){
     /*
@@ -146,22 +151,32 @@
     var del=selectedDeleteButton();
     if(!del) throw new Error('CART_CLEAR_SELECTED_DELETE_NODE_MISSING');
 
-    withDeleteConfirmApproved(function(){
-      del.click();
-    });
+    armMainWorldDeleteConfirm();
+    await sleep(30);
+    del.click();
 
     /*
-     * Give Coupang time to process the one bulk delete request.
-     * The orchestrator releases the page afterward; do not perform
-     * repeated item-by-item DOM scans here.
+     * Confirm actual deletion. This is one bounded post-action check,
+     * not a repeated item-by-item scrape.
      */
-    await sleep(900);
+    var started=Date.now();
+    var remaining=rows().length;
+    while(Date.now()-started<3500){
+      remaining=rows().length;
+      if(remaining===0) break;
+      await sleep(150);
+    }
+
+    if(remaining!==0){
+      throw new Error('CART_CLEAR_NOT_EMPTY_AFTER_SELECTED_DELETE:' + remaining);
+    }
 
     return {
       ok:true,
       requested:rs.length,
       initial_count:rs.length,
-      method:'select-all-selected-delete',
+      remaining_count:0,
+      method:'select-all-selected-delete-main-confirm',
       select_all_checked:!!checkbox.checked
     };
   }
@@ -178,7 +193,7 @@
   }
 
   W.CPKR_CART_CLEAR={
-    version:'055',
+    version:'057',
     snapshot:snapshot,
     clearAll:clearAll,
     run:run,
