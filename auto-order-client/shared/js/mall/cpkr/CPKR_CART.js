@@ -1,11 +1,11 @@
-/* CPKR_CART_V074
+/* CPKR_CART_V075
  * Authoritative Coupang CART module.
  * Owns: header count, one-shot initial clean, snapshot, detached compare,
  * one correction pass, select-all checkout. No automatic self-run.
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_CART && W.CPKR_CART.version==='074') return;
+  if(W.CPKR_CART && W.CPKR_CART.version==='075') return;
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function num(v,d){var n=Number(String(v==null?'':v).replace(/[^\d.-]/g,''));return isFinite(n)?n:(d||0);}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -170,5 +170,5 @@
     go.click();
     return {ok:true,clicked:true};
   }
-  W.CPKR_CART={version:'074',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
+  W.CPKR_CART={version:'075',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
 })(window,document);

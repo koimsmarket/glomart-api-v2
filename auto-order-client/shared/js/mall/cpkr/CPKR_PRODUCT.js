@@ -1,11 +1,11 @@
-/* CPKR_PRODUCT_V074
+/* CPKR_PRODUCT_V075
  * Authoritative Coupang PRODUCT module.
  * One item = one inspect -> optional quantity input -> one action.
  * IMPORTANT: PUID direct URL already selects the SKU. This module NEVER changes option DOM.
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='074') return;
+  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='075') return;
 
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -133,5 +133,5 @@
     }finally{alarm.restore();}
   }
 
-  W.CPKR_PRODUCT={version:'074',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
+  W.CPKR_PRODUCT={version:'075',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
 })(window,document);

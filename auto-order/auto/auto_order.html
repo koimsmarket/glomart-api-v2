@@ -20,6 +20,7 @@
     .tower-table th,.tower-table td{padding:10px 8px;border-bottom:1px solid #e8ecf1;text-align:left;vertical-align:top}
     .tower-table th{background:#f7f8fa;white-space:nowrap}
     .tower-table .num{text-align:right;white-space:nowrap}
+    .retry-btn{height:30px;padding:0 10px;border:1px solid #c94b43;background:#fff0ef;color:#a12620;border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap;margin-left:4px}
     .pay-confirm-btn{height:30px;padding:0 10px;border:1px solid #d59b00;background:#fff4d6;color:#7b5800;border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap}
     .order-no{font-weight:700;color:#1167c5}
     .pill{display:inline-block;padding:2px 8px;border-radius:12px;background:#edf1f5;white-space:nowrap}
@@ -225,9 +226,11 @@
           '<td class="num"><strong>'+won(x.actual_payment_amount)+'</strong></td>'+
           '<td>'+esc(err||'-')+'</td>'+
           '<td>'+(
-            String(x.work_status||'').toUpperCase()==='WAIT_PAYMENT'
+            ['WAIT_PAYMENT','PAYMENT_WAITING'].includes(String(x.work_status||'').toUpperCase())
               ? '<button class="pay-confirm-btn" data-order-no="'+esc(x.order_no)+'" type="button">결제확인</button>'
-              : '-'
+              : (String(x.work_status||'').toUpperCase()==='FAILED'
+                  ? '<button class="retry-btn" data-work-id="'+esc(x.work_id)+'" type="button">재실행</button>'
+                  : '-')
           )+'</td>'+
         '</tr>';
       }).join('');
@@ -315,10 +318,26 @@
     }
   }
 
+  async function retryFailed(workId,btn){
+    if(!workId)return;
+    if(!window.confirm('실패 작업 #'+workId+'을 장바구니 확인부터 다시 실행할까요?'))return;
+    if(btn){btn.disabled=true;btn.textContent='복구중';}
+    try{
+      var r=await fetch('/api/auto-order/control-tower/work/'+encodeURIComponent(workId)+'/retry',{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_id:'MANUAL'})
+      });
+      var j=await r.json();
+      if(!r.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+r.status));
+      await load();
+    }catch(e){alert('재실행 복구 실패: '+(e&&e.message||e));}
+    finally{if(btn){btn.disabled=false;btn.textContent='재실행';}}
+  }
+
   $('rows').addEventListener('click',function(e){
-    var btn=e.target.closest('.pay-confirm-btn');
-    if(!btn)return;
-    confirmPayment(btn.getAttribute('data-order-no'),btn);
+    var pay=e.target.closest('.pay-confirm-btn');
+    if(pay){confirmPayment(pay.getAttribute('data-order-no'),pay);return;}
+    var retry=e.target.closest('.retry-btn');
+    if(retry){retryFailed(retry.getAttribute('data-work-id'),retry);}
   });
 
   $('refreshBtn').addEventListener('click',load);

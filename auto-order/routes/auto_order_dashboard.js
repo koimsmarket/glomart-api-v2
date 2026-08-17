@@ -713,6 +713,22 @@ router.post('/api/auto-order/control-tower/work/:work_id/assign', async (req,res
 });
 
 
+
+router.post('/api/auto-order/control-tower/work/:work_id/retry', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_RETRY_API_V001',error:'database pool not ready'});
+  try{
+    const data=await controlTower.retryFailedWork(pool,{
+      work_id:req.params.work_id,
+      admin_id:String((req.body&&req.body.admin_id)||'MANUAL').trim()
+    });
+    return res.json({ok:true,version:'GM_AUTO_ORDER_RETRY_API_V001',data});
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_RETRY_FAIL_V001]',String(e&&e.stack||e));
+    return res.status(400).json({ok:false,version:'GM_AUTO_ORDER_RETRY_API_V001',error:'retry failed',detail:String(e&&e.message||e)});
+  }
+});
+
 router.post('/api/auto-order/control-tower/order/:order_no/payment-confirm', async (req,res)=>{
   const pool = poolFrom(req);
   if(!pool){

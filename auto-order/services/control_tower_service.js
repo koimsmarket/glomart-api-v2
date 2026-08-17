@@ -582,10 +582,67 @@ async function listControlTower(pool, opts){
   };
 }
 
+
+async function retryFailedWork(pool, input){
+  input=input||{};
+  const workId=Number(input.work_id||0);
+  const adminId=clean(input.admin_id)||'MANUAL';
+  if(!workId) throw new Error('work_id required');
+
+  const db=await pool.connect();
+  try{
+    await db.query('BEGIN');
+    const before=(await db.query(
+      `SELECT * FROM gm_auto_order_work WHERE work_id=$1 FOR UPDATE`,[workId]
+    )).rows[0];
+    if(!before) throw new Error('work not found: '+workId);
+    if(upper(before.work_status)!=='FAILED') throw new Error('only FAILED work can be retried');
+
+    const work=(await db.query(`
+      UPDATE gm_auto_order_work
+      SET work_status='READY',
+          lock_token=NULL,
+          lock_admin_id=NULL,
+          lock_mall_account_id=NULL,
+          lock_at=NULL,
+          lock_expires_at=NULL,
+          started_at=NULL,
+          completed_at=NULL,
+          error_code=NULL,
+          error_message=NULL,
+          updated_at=now()
+      WHERE work_id=$1
+      RETURNING *`,[workId])).rows[0];
+
+    await db.query(`
+      UPDATE gm_auto_order
+      SET process_status='READY',
+          last_error_code=NULL,
+          last_error_message=NULL,
+          updated_at=now()
+      WHERE auto_order_no=$1`,[work.auto_order_no]);
+
+    await db.query(`
+      INSERT INTO gm_auto_order_log(
+        auto_order_no,work_id,action_type,status_before,status_after,
+        admin_id,mall_account_id,message,detail_json,created_at
+      ) VALUES($1,$2,'MANUAL_RETRY_FAILED',$3,'READY',$4,$5,$6,$7::jsonb,now())`,[
+        work.auto_order_no,work.work_id,before.work_status,adminId,work.mall_account_id||null,
+        'FAILED work reset to READY from control tower',
+        JSON.stringify({previous_error_code:before.error_code||'',previous_error_message:before.error_message||''})
+      ]);
+    await db.query('COMMIT');
+    return {work_id:work.work_id,auto_order_no:work.auto_order_no,work_status:work.work_status};
+  }catch(e){
+    await db.query('ROLLBACK').catch(()=>{}); throw e;
+  }finally{db.release();}
+}
+
 module.exports = {
-  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V005',
+  VERSION:'GM_AUTO_ORDER_CONTROL_TOWER_SERVICE_V006',
   ingestOrder,
   syncRecentOrders,
   listControlTower,
+  retryFailedWork,
   isPaid
 };

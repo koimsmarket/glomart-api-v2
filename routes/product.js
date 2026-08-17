@@ -2128,7 +2128,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
 
 /* GM_DETAIL_FAST_SERVER_V002_PID_MIN
  * PID로 상품 1건 + 같은 PID의 활성 옵션을 조회한다.
- * 고객 응답에는 원가(final_supply_price)를 포함하지 않는다.
+ * 고객 응답에는 외부몰 원가격(mall_sale_price/final_supply_price)을 포함하지 않는다.
  */
 function gmFastThumbList(r){
   const a=[r&&r.thumb_origin_url,...parseThumbPipe(r&&r.thumb_json)], out=[], seen=new Set();
@@ -2152,7 +2152,7 @@ router.get('/api/gm/product/detail-fast',async(req,res)=>{
 
     const pr=await pool.query(`
       SELECT product_uid,mall_code,product_id,item_id,vendor_item_id,pi_ii_vi,
-             product_name,mall_product_name,mall_sale_price,normal_price,discount_price,
+             product_name,mall_product_name,normal_price,discount_price,
              delivery_fee,delivery_eta_text,delivery_type,
              jeju_delivery_yn,jeju_extra_delivery_fee,island_delivery_yn,island_extra_delivery_fee,
              thumb_origin_url,thumb_json,soldout_yn,sale_status,
@@ -2165,7 +2165,7 @@ router.get('/api/gm/product/detail-fast',async(req,res)=>{
     const p=pr.rows[0];
     const or=await pool.query(`
       SELECT product_id,item_id,vendor_item_id,pi_ii_vi,option_name,option_image_url,
-             mall_sale_price,normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
+             normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
              soldout_yn,sale_status,buyable_qty,min_order_qty,max_order_qty
         FROM gm_product_option
        WHERE mall_code=$1 AND product_id=$2 AND COALESCE(active_yn,'Y')='Y'
@@ -2177,7 +2177,7 @@ router.get('/api/gm/product/detail-fast',async(req,res)=>{
       return {
         name:o.option_name||'기본상품',optionName:o.option_name||'기본상품',
         productId:o.product_id,itemId:o.item_id,vendorItemId:o.vendor_item_id,key:o.pi_ii_vi,pi_ii_vi:o.pi_ii_vi,selected,
-        price:o.mall_sale_price||0,priceText:o.mall_sale_price||0,mall_sale_price:o.mall_sale_price||0,
+        price:o.normal_price||0,priceText:o.normal_price||0,
         normal_price:o.normal_price||0,discount_price:o.discount_price||0,
         optionImage:o.option_image_url||'',option_image_url:o.option_image_url||'',
         shippingBadge:o.delivery_type||'',deliveryType:o.delivery_type||'',delivery_type:o.delivery_type||'',
@@ -2188,7 +2188,7 @@ router.get('/api/gm/product/detail-fast',async(req,res)=>{
     });
 
     const sel=options.find(o=>o.selected)||null, images=gmFastThumbList(p);
-    const sale=sel?sel.mall_sale_price:(p.mall_sale_price||0);
+    const sale=sel?sel.normal_price:(p.normal_price||0);
     const fee=sel?sel.delivery_fee:(p.delivery_fee||0);
     const dtype=sel?sel.delivery_type:(p.delivery_type||'');
     const eta=sel?sel.delivery_eta_text:(p.delivery_eta_text||'');
@@ -2201,8 +2201,8 @@ router.get('/api/gm/product/detail-fast',async(req,res)=>{
       vendorItemId:sel?sel.vendorItemId:(vid||p.vendor_item_id),vendor_item_id:sel?sel.vendorItemId:(vid||p.vendor_item_id),
       pi_ii_vi:sel?sel.pi_ii_vi:([pid,iid,vid].filter(Boolean).join('_')||p.pi_ii_vi||''),
       title:p.product_name||p.mall_product_name||'',productName:p.product_name||p.mall_product_name||'',mallProductName:p.mall_product_name||'',
-      mall_sale_price:sale,price:sale,priceText:sale,
-      normal_price:sel?sel.normal_price:(p.normal_price||0),discount_price:sel?sel.discount_price:(p.discount_price||0),
+      price:sale,priceText:sale,
+      normal_price:sale,discount_price:sel?sel.discount_price:(p.discount_price||0),
       delivery_fee:fee,deliveryFee:fee,delivery_eta_text:eta,deliveryType:dtype,delivery_type:dtype,
       jeju_delivery_yn:p.jeju_delivery_yn,jeju_extra_delivery_fee:p.jeju_extra_delivery_fee||0,
       island_delivery_yn:p.island_delivery_yn,island_extra_delivery_fee:p.island_extra_delivery_fee||0,

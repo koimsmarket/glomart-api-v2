@@ -92,7 +92,7 @@ async function confirmOrderPayment(pool,input){
       WHERE a.auto_order_no=w.auto_order_no
         AND a.order_no=$1
         AND w.work_type='ORDER'
-        AND upper(COALESCE(w.work_status,'')) IN ('WAIT_PAYMENT','PENDING')
+        AND upper(COALESCE(w.work_status,'')) IN ('WAIT_PAYMENT','PAYMENT_WAITING','PENDING')
       RETURNING w.work_id,w.auto_order_no,w.work_status
     `,[orderNo]);
 
