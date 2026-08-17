@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.067
+// @version      0.068
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 (function(){
 'use strict';
-const VERSION='0.067';
+const VERSION='0.068';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=066',
@@ -88,7 +88,7 @@ function batch(){return GM_getValue(STORE.batch,null)||migrateBatch()||{};}
 function setBatch(p){let n=Object.assign({},batch(),p||{},{updated_at:Date.now()});GM_setValue(STORE.batch,n);return n;}
 migrateFlow();
 migrateBatch();
-function payload(j){return j&&(j.payload||j)||{};}function items(j){let a=payload(j).items;return Array.isArray(a)?a.filter(Boolean):[];}function page(){if(location.hostname==='cart.coupang.com')return'CART';if(location.hostname==='checkout.coupang.com')return'CHECKOUT';if(location.hostname==='login.coupang.com')return'AUTH';if(location.hostname==='id.coupang.com')return'ADDRESS';if(/\/vp\/products\//.test(location.pathname))return'PRODUCT';return'COUPANG';}
+function payload(j){return j&&(j.payload||j)||{};}function items(j){let a=payload(j).items;return Array.isArray(a)?a.filter(Boolean):[];}function page(){if(document.body&&document.body.dataset&&document.body.dataset.gmaoDetached==='1')return 'DETACHED';if(location.hostname==='cart.coupang.com')return'CART';if(location.hostname==='checkout.coupang.com')return'CHECKOUT';if(location.hostname==='login.coupang.com')return'AUTH';if(location.hostname==='id.coupang.com')return'ADDRESS';if(/\/vp\/products\//.test(location.pathname))return'PRODUCT';return'COUPANG';}
 function uuid(){return crypto&&crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);}function clientId(){let x=GM_getValue(STORE.client,'');if(!x){x='PC-RUNNER-'+uuid();GM_setValue(STORE.client,x);}return x;}
 function blocked(){let t=(document.title||'')+' '+String(document.body&&document.body.innerText||'').slice(0,6000);return /Access Denied|You don't have permission to access|errors\.edgesuite\.net/i.test(t);}
 function settings(extra){return Object.assign({client_id:clientId(),client_type:'PC_RUNNER',admin_id:GM_getValue('gmao_admin_id','derzon'),mall_account_id:GM_getValue('gmao_mall_account_id','CPKR_MASTER'),mall_code:'CPKR',cpkr_ready:true,app_version:VERSION,current_url:location.href,page_type:page(),current_work_id:job?job.work_id:null,state:{stage:flow().stage||'',page_type:page()},device:{platform:'tampermonkey',userAgent:navigator.userAgent}},extra||{});}
@@ -96,10 +96,22 @@ function req(path,method,body){return new Promise((ok,bad)=>GM_xmlhttpRequest({m
 const loaded=new Map();function load(url,ready,label){if(ready())return Promise.resolve();if(loaded.has(url))return loaded.get(url);let p=new Promise((ok,bad)=>GM_xmlhttpRequest({method:'GET',url:url,timeout:12000,onload:r=>{try{new Function('window','document',r.responseText+'\n//# sourceURL='+url)(window,document);}catch(e){bad(new Error(label+'_EXEC:'+e.message));return;}ready()?ok():bad(new Error(label+'_NOT_READY'));},onerror:()=>bad(new Error(label+'_LOAD_ERROR')),ontimeout:()=>bad(new Error(label+'_TIMEOUT'))}));loaded.set(url,p);p.catch(()=>loaded.delete(url));return p;}
 function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.run),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.snapshot),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!window.CPKR_CHECKOUT,'CHECKOUT');}
 function wipeAndGo(url,label){if(!url)throw new Error('NEXT_URL_MISSING');try{window.stop();document.open();document.write('<!doctype html><title>Glomart transition</title><body></body>');document.close();}catch(_e){}setTimeout(()=>location.replace(url),500);}
+
+function detachToBlank(reason){
+  // Tampermonkey cannot bootstrap this userscript on a newly navigated about:blank.
+  // Stop the Coupang document, remove its DOM, and mark an inert detached shell.
+  // No Coupang DOM is available to subsequent comparison code.
+  try{window.stop();}catch(_e){}
+  try{document.documentElement.innerHTML='<html><head><title>Glomart Detached</title></head><body></body></html>';}catch(_e){}
+  try{document.body.dataset.gmaoDetached='1';}catch(_e){}
+  try{history.replaceState({gmaoDetached:true},'',location.href);}catch(_e){}
+  render('쿠팡 DOM 분리 완료 · '+String(reason||''));
+  setTimeout(()=>orchestrate().catch(fail),120);
+}
 function cartUrl(){return'https://cart.coupang.com/cartView.pang';}
-function panel(){let p=document.getElementById('gmao-runner-v066');if(p)return p;p=document.createElement('div');p.id='gmao-runner-v066';p.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;width:300px;background:#111827;color:#d1fae5;border:1px solid #334155;border-radius:10px;padding:10px;font:12px/1.45 Arial,sans-serif;box-shadow:0 4px 18px #0005';document.documentElement.appendChild(p);return p;}
+function panel(){let p=document.getElementById('gmao-runner-v068');if(p)return p;p=document.createElement('div');p.id='gmao-runner-v068';p.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;width:300px;background:#111827;color:#d1fae5;border:1px solid #334155;border-radius:10px;padding:10px;font:12px/1.45 Arial,sans-serif;box-shadow:0 4px 18px #0005';document.documentElement.appendChild(p);return p;}
 function button(t,fn,danger){let b=document.createElement('button');b.textContent=t;b.style.cssText='border:0;border-radius:5px;padding:7px 9px;margin:6px 4px 0 0;color:#fff;font-weight:700;background:'+(danger?'#c9382b':'#1463d6');b.onclick=fn;return b;}
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V067</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V068</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -211,8 +223,73 @@ async function startOrder(){await loadProduct();let a=items(job);if(!a.length)th
 async function runProduct(mode){await guard();await loadProduct();let item=currentItem();if(!item)throw new Error('PRODUCT_ITEM_MISSING');let result=await window.CPKR_PRODUCT.run(item,mode,typeof unsafeWindow!=='undefined'?unsafeWindow:window);render((mode==='SINGLE'?'단건 바로구매 클릭':'다건 장바구니 담기 클릭')+'\nPUID='+result.inspection.current_puid+'\n수량='+result.quantity.after);return result;}
 async function runSingle(){if(page()!=='PRODUCT'){await loadProduct();let u=itemUrl(currentItem());wipeAndGo(u,'SINGLE');return;}await runProduct('SINGLE');setFlow({stage:ST.CHECKOUT_PENDING,checkout_source:'SINGLE',checkout_clicked_at:Date.now()});setTimeout(()=>orchestrate().catch(fail),1200);}
 async function runMultiProduct(){let a=items(job),f=flow(),idx=Math.max(0,Number(f.item_index||0));if(idx>=a.length){setFlow({stage:ST.MULTI_SNAPSHOT});wipeAndGo(cartUrl(),'MULTI_SNAPSHOT');return;}if(page()!=='PRODUCT'){await loadProduct();let u=itemUrl(a[idx]);if(!u)throw new Error('CPKR_PUID_MISSING');wipeAndGo(u,'MULTI_PRODUCT_'+idx);return;}await runProduct('MULTI');idx++;setFlow({item_index:idx});if(idx<a.length){let u=itemUrl(a[idx]);wipeAndGo(u,'MULTI_NEXT');}else{setFlow({stage:ST.MULTI_SNAPSHOT});wipeAndGo(cartUrl(),'MULTI_SNAPSHOT');}}
-async function snapshotAndDetach(finalPass){if(page()!=='CART'){wipeAndGo(cartUrl(),'CART_SNAPSHOT');return;}await loadCart();let snap=window.CPKR_CART.snapshot();setFlow({stage:ST.MULTI_COMPARE,cart_snapshot:snap,final_verify:!!finalPass});await compareDetached();}
-async function compareDetached(){await loadCart();let f=flow(),snap=Array.isArray(f.cart_snapshot)?f.cart_snapshot:[],plan=window.CPKR_CART.compare(items(job),snap);setFlow({cart_plan:plan});if(plan.ok){setFlow({stage:ST.MULTI_CHECKOUT});render('장바구니 일치\n상품='+plan.target_count);wipeAndGo(cartUrl(),'MULTI_CHECKOUT');return;}if(f.final_verify){throw new Error('CART_FINAL_MISMATCH missing='+plan.missing.length+' extra='+plan.extra.length+' qty='+plan.qty_mismatch.length);}setFlow({stage:ST.MULTI_ADJUST});render('장바구니 1회 보정\n누락='+plan.missing.length+' 추가='+plan.extra.length+' 수량='+plan.qty_mismatch.length);wipeAndGo(cartUrl(),'MULTI_ADJUST');}
+async function snapshotAndDetach(finalPass){
+  if(page()!=='CART'){
+    wipeAndGo(cartUrl(),'CART_SNAPSHOT');
+    return;
+  }
+
+  await loadCart();
+
+  // CART DOM is read exactly once.  Everything needed for comparison must
+  // be serialized before leaving Coupang.
+  const snap=window.CPKR_CART.snapshot();
+  if(!snap||!Array.isArray(snap.rows))throw new Error('CART_SNAPSHOT_INVALID');
+
+  setFlow({
+    stage:ST.MULTI_COMPARE,
+    cart_snapshot:snap,
+    final_verify:!!finalPass,
+    detached_compare_pending:true
+  });
+
+  render('장바구니 DOM 확보 완료 · 쿠팡 페이지 분리 후 주문과 비교');
+
+  // Do NOT compare while Coupang CART DOM/runtime is alive.
+  detachToBlank('CART_COMPARE_DETACHED');
+}
+async function compareDetached(){
+  if(page()!=='DETACHED')throw new Error('CART_COMPARE_NOT_DETACHED');
+  const f=flow();
+  const snap=f.cart_snapshot;
+
+  if(!snap||!Array.isArray(snap.rows))throw new Error('CART_SNAPSHOT_MISSING');
+
+  // Comparison is pure data work. CPKR_CART.compare() does not need a live
+  // Coupang DOM, but the module may need to be loaded into the userscript
+  // sandbox first.
+  await loadCart();
+
+  const plan=window.CPKR_CART.compare(items(job),snap);
+  setFlow({
+    cart_plan:plan,
+    detached_compare_pending:false
+  });
+
+  if(plan.ok){
+    if(f.final_verify){
+      setFlow({stage:ST.MULTI_CHECKOUT});
+      render('최종 장바구니 일치 · 구매 단계로 이동');
+      wipeAndGo(cartUrl(),'CART_FINAL_CHECKOUT');
+      return;
+    }
+    setFlow({stage:ST.MULTI_CHECKOUT});
+    render('장바구니 일치 · 구매 단계로 이동');
+    wipeAndGo(cartUrl(),'CART_CHECKOUT');
+    return;
+  }
+
+  if(f.final_verify){
+    const reason=window.CPKR_CART.describePlan
+      ? window.CPKR_CART.describePlan(plan)
+      : JSON.stringify(plan);
+    throw new Error('CART_FINAL_MISMATCH '+reason);
+  }
+
+  setFlow({stage:ST.MULTI_ADJUST});
+  render('장바구니 불일치 · 1회 보정 준비');
+  wipeAndGo(cartUrl(),'CART_ADJUST');
+}
 async function adjustOnce(){if(page()!=='CART'){wipeAndGo(cartUrl(),'MULTI_ADJUST');return;}await guard();await loadCart();let plan=flow().cart_plan;if(!plan)throw new Error('CART_PLAN_MISSING');let r=await window.CPKR_CART.applyAdjustments(plan,typeof unsafeWindow!=='undefined'?unsafeWindow:window);let miss=plan.missing||[];if(miss.length){setFlow({stage:ST.MULTI_REPAIR,repair_index:0,repair_missing:miss});await loadProduct();let u=itemUrl(miss[0].item);wipeAndGo(u,'MULTI_REPAIR');return;}setFlow({stage:ST.MULTI_FINAL_SNAPSHOT});wipeAndGo(cartUrl(),'MULTI_FINAL_SNAPSHOT');}
 async function repairMissing(){let f=flow(),m=Array.isArray(f.repair_missing)?f.repair_missing:[],i=Math.max(0,Number(f.repair_index||0));if(i>=m.length){setFlow({stage:ST.MULTI_FINAL_SNAPSHOT});wipeAndGo(cartUrl(),'MULTI_FINAL_SNAPSHOT');return;}let item=m[i].item;if(page()!=='PRODUCT'){await loadProduct();wipeAndGo(itemUrl(item),'MULTI_REPAIR_'+i);return;}await guard();await loadProduct();let r=await window.CPKR_PRODUCT.run(item,'MULTI',typeof unsafeWindow!=='undefined'?unsafeWindow:window);render('누락상품 1회 추가\nPUID='+r.inspection.current_puid);i++;setFlow({repair_index:i});if(i<m.length)wipeAndGo(itemUrl(m[i].item),'MULTI_REPAIR_NEXT');else{setFlow({stage:ST.MULTI_FINAL_SNAPSHOT});wipeAndGo(cartUrl(),'MULTI_FINAL_SNAPSHOT');}}
 async function multiCheckout(){if(page()!=='CART'){wipeAndGo(cartUrl(),'MULTI_CHECKOUT');return;}await guard();await loadCart();await window.CPKR_CART.selectAllAndCheckout();setFlow({stage:ST.CHECKOUT_PENDING,checkout_source:'MULTI',checkout_clicked_at:Date.now()});setTimeout(()=>orchestrate().catch(fail),1200);}
