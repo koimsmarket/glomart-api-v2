@@ -1,4 +1,4 @@
-/* CPKR_CART_CLEAR_V047
+/* CPKR_CART_CLEAR_V052
  * Single cart-cleaning module.
  * CPKR_CART_CLEAN is retired; all batch-start cart inspection/clearing lives here.
  * Confirmed cart row DOM:
@@ -6,7 +6,7 @@
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '047') return;
+  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '052') return;
 
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function digits(v){ return String(v==null?'':v).replace(/\D/g,''); }
@@ -45,12 +45,43 @@
   }
 
   function deleteButton(row){
-    var nodes=Array.prototype.slice.call(row.querySelectorAll('button,a,[role="button"],div,span'));
+    var nodes=Array.prototype.slice.call(
+      row.querySelectorAll('button,a,[role="button"],div,span')
+    );
+
     return nodes.find(function(el){
       if(String(el.textContent||'').trim()!=='삭제') return false;
+
       var tag=String(el.tagName||'').toUpperCase();
-      if(tag==='BUTTON'||tag==='A'||el.getAttribute('role')==='button') return true;
-      try { return getComputedStyle(el).cursor==='pointer'; } catch(_e) { return false; }
+      var role=String(el.getAttribute && el.getAttribute('role') || '').toLowerCase();
+
+      /*
+       * Coupang cart individual delete is currently a DIV whose Tailwind
+       * class contains "hover:twc-cursor-pointer".  getComputedStyle(cursor)
+       * may still be "auto" until hover, so class intent must also be accepted.
+       */
+      var cls='';
+      try {
+        cls=typeof el.className==='string'
+          ? el.className
+          : String(el.getAttribute && el.getAttribute('class') || '');
+      } catch(_e) {}
+
+      if(
+        tag==='BUTTON' ||
+        tag==='A' ||
+        role==='button' ||
+        /(?:^|\s|:)twc-cursor-pointer(?:\s|$)/.test(cls) ||
+        cls.indexOf('cursor-pointer')>=0
+      ){
+        return true;
+      }
+
+      try {
+        return getComputedStyle(el).cursor==='pointer';
+      } catch(_e) {
+        return false;
+      }
     }) || null;
   }
 
@@ -96,7 +127,7 @@
   }
 
   W.CPKR_CART_CLEAR={
-    version:'047',
+    version:'052',
     snapshot:snapshot,
     clearAll:clearAll,
     run:run,
