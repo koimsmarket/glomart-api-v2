@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.062
+// @version      0.064
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 (function(){
 'use strict';
-const VERSION='0.063';
+const VERSION='0.064';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=063',
@@ -25,10 +25,32 @@ const URLS={
  checkout:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=029',
  util:API+'/auto-order-client/shared/js/GM_AUTO_ORDER_UTIL.js?v=013'
 };
-const STORE={job:'gmao_runner_job_v062',flow:'gmao_cpkr_flow_v062',batch:'gmao_cpkr_batch_v062',client:'gmao_runner_client_id_v013',bridge:'gmao_cpkr_address_bridge_v033'};
+const STORE={
+ job:'gmao_runner_job_v013',
+ flow:'gmao_cpkr_flow_v062',
+ batch:'gmao_cpkr_batch_v062',
+ client:'gmao_runner_client_id_v013',
+ bridge:'gmao_cpkr_address_bridge_v033'
+};
+const LEGACY_JOB_KEYS=['gmao_runner_job_v062'];
 const ST={BATCH_SCAN:'BATCH_SCAN',BATCH_CLEAR:'BATCH_CLEAR',ORDER_START:'ORDER_START',SINGLE:'SINGLE',MULTI_PRODUCT:'MULTI_PRODUCT',MULTI_SNAPSHOT:'MULTI_SNAPSHOT',MULTI_COMPARE:'MULTI_COMPARE',MULTI_ADJUST:'MULTI_ADJUST',MULTI_REPAIR:'MULTI_REPAIR',MULTI_FINAL_SNAPSHOT:'MULTI_FINAL_SNAPSHOT',MULTI_CHECKOUT:'MULTI_CHECKOUT',CHECKOUT:'CHECKOUT',STOPPED:'STOPPED',FAILED:'FAILED',BLOCKED:'BLOCKED'};
 const STALE=new Set(['work_not_found','work_lock_invalid','work_lock_invalid_or_expired','work_not_running','work_cancelled_by_customer']);
-let job=GM_getValue(STORE.job,null),workTimer=null,clientTimer=null,busy=false;
+function restoreLocalJob(){
+  // V062 briefly used a versioned job key. Prefer that key once during
+  // migration because it may hold the currently RUNNING server lock.
+  let j=null;
+  for(const key of LEGACY_JOB_KEYS){
+    const legacy=GM_getValue(key,null);
+    if(legacy&&legacy.work_id&&legacy.lock_token){j=legacy;break;}
+  }
+  if(!j)j=GM_getValue(STORE.job,null);
+  if(j&&j.work_id&&j.lock_token){
+    GM_setValue(STORE.job,j);
+    return j;
+  }
+  return null;
+}
+let job=restoreLocalJob(),workTimer=null,clientTimer=null,busy=false;
 function flow(){return GM_getValue(STORE.flow,null)||{};}function setFlow(p){let n=Object.assign({},flow(),p||{},{updated_at:Date.now()});GM_setValue(STORE.flow,n);return n;}function batch(){return GM_getValue(STORE.batch,null)||{};}function setBatch(p){let n=Object.assign({},batch(),p||{},{updated_at:Date.now()});GM_setValue(STORE.batch,n);return n;}
 function payload(j){return j&&(j.payload||j)||{};}function items(j){let a=payload(j).items;return Array.isArray(a)?a.filter(Boolean):[];}function page(){if(location.hostname==='cart.coupang.com')return'CART';if(location.hostname==='checkout.coupang.com')return'CHECKOUT';if(location.hostname==='login.coupang.com')return'AUTH';if(location.hostname==='id.coupang.com')return'ADDRESS';if(/\/vp\/products\//.test(location.pathname))return'PRODUCT';return'COUPANG';}
 function uuid(){return crypto&&crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);}function clientId(){let x=GM_getValue(STORE.client,'');if(!x){x='PC-RUNNER-'+uuid();GM_setValue(STORE.client,x);}return x;}
@@ -39,13 +61,32 @@ const loaded=new Map();function load(url,ready,label){if(ready())return Promise.
 function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.run),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.snapshot),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!window.CPKR_CHECKOUT,'CHECKOUT');}
 function wipeAndGo(url,label){if(!url)throw new Error('NEXT_URL_MISSING');try{document.title='about:blank';document.documentElement.innerHTML='<head><title>about:blank</title></head><body></body>';}catch(_e){}setTimeout(()=>location.replace(url),750);}
 function cartUrl(){return'https://cart.coupang.com/cartView.pang';}
-function panel(){let p=document.getElementById('gmao-runner-v062');if(p)return p;p=document.createElement('div');p.id='gmao-runner-v062';p.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;width:300px;background:#111827;color:#d1fae5;border:1px solid #334155;border-radius:10px;padding:10px;font:12px/1.45 Arial,sans-serif;box-shadow:0 4px 18px #0005';document.documentElement.appendChild(p);return p;}
+function panel(){let p=document.getElementById('gmao-runner-v062');if(p)return p;p=document.createElement('div');p.id='gmao-runner-v064';p.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;width:300px;background:#111827;color:#d1fae5;border:1px solid #334155;border-radius:10px;padding:10px;font:12px/1.45 Arial,sans-serif;box-shadow:0 4px 18px #0005';document.documentElement.appendChild(p);return p;}
 function button(t,fn,danger){let b=document.createElement('button');b.textContent=t;b.style.cssText='border:0;border-radius:5px;padding:7px 9px;margin:6px 4px 0 0;color:#fff;font-weight:700;background:'+(danger?'#c9382b':'#1463d6');b.onclick=fn;return b;}
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V062</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
-function clearLocal(){job=null;GM_setValue(STORE.job,null);GM_setValue(STORE.flow,null);clearInterval(workTimer);workTimer=null;}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V064</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function clearLocal(){
+  job=null;
+  GM_setValue(STORE.job,null);
+  for(const key of LEGACY_JOB_KEYS)GM_setValue(key,null);
+  GM_setValue(STORE.flow,null);
+  clearInterval(workTimer);
+  workTimer=null;
+}
 function errCode(e){return String(e&&e.message||e||'').trim();}
 async function fail(e){let code=errCode(e);if(STALE.has(code)){clearLocal();render('서버 작업 종료 확인\n'+code,true);return;}if(/COUPANG_ACCESS_DENIED/.test(code)||blocked()){setFlow({stage:ST.BLOCKED,failure_reason:'COUPANG_ACCESS_DENIED'});setBatch({cart_cleaned:false});render('쿠팡 접근 차단 감지 · 자동작업 정지',true);return;}setBatch({cart_cleaned:false});if(job){let j=job,st=flow().stage||'';try{await req('/api/auto-order/runtime/work/'+encodeURIComponent(j.work_id)+'/state','POST',settings({lock_token:j.lock_token,status:'FAILED',detail:{phase:'AUTO_ORDER_FAILED',reason:code,stage:st,page_type:page()}}));}catch(_e){}clearLocal();render('주문 실패 기록 · 다음 주문으로 이동\n'+code,true);setTimeout(()=>claim().catch(fail),700);return;}render('오류\n'+code,true);}
-async function register(){return req('/api/auto-order/runtime/register','POST',settings());}async function heartbeat(){return req('/api/auto-order/runtime/heartbeat','POST',settings());}async function workHeartbeat(){if(!job)return;return req('/api/auto-order/runtime/work/'+encodeURIComponent(job.work_id)+'/heartbeat','POST',settings({lock_token:job.lock_token}));}async function guard(){try{await workHeartbeat();return true;}catch(e){if(STALE.has(errCode(e)))clearLocal();throw e;}}function startWorkTimer(){clearInterval(workTimer);if(job)workTimer=setInterval(()=>workHeartbeat().catch(fail),5000);}
+async function register(){return req('/api/auto-order/runtime/register','POST',settings());}async function heartbeat(){return req('/api/auto-order/runtime/heartbeat','POST',settings());}async function workHeartbeat(){if(!job)return;return req('/api/auto-order/runtime/work/'+encodeURIComponent(job.work_id)+'/heartbeat','POST',settings({lock_token:job.lock_token}));}async function guard(){
+  try{
+    await workHeartbeat();
+    if(job){
+      GM_setValue(STORE.job,job);
+      for(const key of LEGACY_JOB_KEYS)GM_setValue(key,null);
+    }
+    return true;
+  }catch(e){
+    if(STALE.has(errCode(e)))clearLocal();
+    throw e;
+  }
+}function startWorkTimer(){clearInterval(workTimer);if(job)workTimer=setInterval(()=>workHeartbeat().catch(fail),5000);}
 async function claim(){if(job){await guard();render('이미 작업 보유 중 #'+job.work_id);return job;}let r=await req('/api/auto-order/runtime/claim','POST',settings());if(!r.job){render('배정 가능한 작업 없음\n'+(r.reason||'queue_empty'));return null;}job=r.job;GM_setValue(STORE.job,job);startWorkTimer();let clean=batch().cart_cleaned===true;setFlow({work_id:job.work_id,stage:clean?ST.ORDER_START:ST.BATCH_SCAN,item_index:0,repair_index:0,cart_snapshot:null,cart_plan:null,final_verify:false});render('작업 배정 완료 #'+job.work_id+'\n'+(clean?'연속세션 장바구니 청소 생략':'연속세션 최초 장바구니 확인'));setTimeout(()=>orchestrate().catch(fail),250);return job;}
 async function release(){if(!job)return;let j=job;try{await req('/api/auto-order/runtime/work/'+encodeURIComponent(j.work_id)+'/release','POST',settings({lock_token:j.lock_token}));}finally{clearLocal();render('작업 반환 완료');}}
 function itemUrl(item){return window.CPKR_PRODUCT.canonicalUrl(item);}function currentItem(){let a=items(job),i=Math.max(0,Number(flow().item_index||0));return a[i]||null;}
