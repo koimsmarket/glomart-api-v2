@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.054
+// @version      0.056
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.054';
+  const VERSION = '0.056';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -99,8 +99,8 @@
    */
   const ADDRESS_BRIDGE_KEY = 'gmao_cpkr_address_bridge_v033';
 
-  const FLOW_KEY = 'gmao_cpkr_flow_v054';
-  const BATCH_SESSION_KEY = 'gmao_cpkr_batch_session_v054';
+  const FLOW_KEY = 'gmao_cpkr_flow_v056';
+  const BATCH_SESSION_KEY = 'gmao_cpkr_batch_session_v056';
   const BLANK_GATE_MS = 850;
 
   const FLOW = Object.freeze({
@@ -679,13 +679,7 @@
 
     const flow = initializeFlowForCurrentJob(false) || {};
 
-    if (flow.stage === FLOW.BATCH_CLEAN_WAIT) {
-      panel.appendChild(
-        createButton('주문 진행', () => {
-          continueOrderAfterBatchWait().catch(showError);
-        })
-      );
-    } else if (
+    if (
       flow.stage !== FLOW.STOPPED_BEFORE_PAYMENT &&
       flow.stage !== FLOW.FAILED_SKIP
     ) {
@@ -1342,6 +1336,22 @@
     });
   }
 
+  async function continueImmediatelyAfterCartReady(reason) {
+    if (!currentJob) throw new Error('현재 주문이 없습니다.');
+
+    flowSet({
+      stage: FLOW.ORDER_START,
+      cart_ready_reason: String(reason || ''),
+      cart_ready_at: Date.now()
+    });
+
+    /*
+     * Do not stop at about:blank after cart cleanup.
+     * ORDER_START owns the single/multi split and opens the first product URL.
+     */
+    await continueOrderAfterBatchWait();
+  }
+
   async function continueOrderAfterBatchWait() {
     if (!currentJob) throw new Error('현재 주문이 없습니다.');
 
@@ -1589,16 +1599,16 @@
             method: 'header-count-zero'
           });
           flowSet({
-            stage: FLOW.BATCH_TO_WAIT,
+            stage: FLOW.ORDER_START,
             batch_cart_snapshot: [],
             batch_cart_cleared: true,
             header_cart_count: 0
           });
-          blankWait(
-            FLOW.BATCH_CLEAN_WAIT,
+          render(
             '장바구니 확인 완료\n' +
-            '헤더 장바구니=0 · 청소 불필요 · DOM 해제 완료 · 대기'
+            '헤더 장바구니=0 · 청소 불필요 · 주문을 바로 시작합니다.'
           );
+          await continueImmediatelyAfterCartReady('header-count-zero');
           return;
         }
 
@@ -1626,15 +1636,15 @@
             method: 'cart-fallback-empty'
           });
           flowSet({
-            stage: FLOW.BATCH_TO_WAIT,
+            stage: FLOW.ORDER_START,
             batch_cart_snapshot: [],
             batch_cart_cleared: true
           });
-          blankWait(
-            FLOW.BATCH_CLEAN_WAIT,
+          render(
             '장바구니 확인 완료\n' +
-            '장바구니 비어 있음 · DOM 해제 완료 · 대기'
+            '장바구니 비어 있음 · 주문을 바로 시작합니다.'
           );
+          await continueImmediatelyAfterCartReady('cart-fallback-empty');
           return;
         }
 
@@ -1666,24 +1676,22 @@
         });
 
         flowSet({
-          stage: FLOW.BATCH_TO_WAIT,
+          stage: FLOW.ORDER_START,
           batch_cart_cleared: true,
           batch_clear_result: cleared
         });
 
-        blankWait(
-          FLOW.BATCH_CLEAN_WAIT,
-          '연속 작업 최초 장바구니 청소 완료 · DOM 해제 완료 · 대기\n' +
+        render(
+          '장바구니 청소 완료 · 주문을 바로 시작합니다.\n' +
           '삭제요청=' + Number(cleared.requested || 0)
         );
+
+        await continueImmediatelyAfterCartReady('cart-cleared');
         return;
       }
 
       case FLOW.BATCH_CLEAN_WAIT:
-        render(
-          '장바구니 청소 완료 · 대기\n' +
-          '다음 테스트는 주문 아이템 수에 따라 자동 분기합니다.'
-        );
+        await continueImmediatelyAfterCartReady('legacy-clean-wait-recovery');
         return;
 
       case FLOW.SINGLE_PRODUCT:
