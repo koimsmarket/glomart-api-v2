@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.059
+// @version      0.061
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.058';
+  const VERSION = '0.061';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -550,6 +550,16 @@
 
   function currentProductUrl(job) {
     return productUrlForItem(currentOrderItem(job), job);
+  }
+
+  async function settleAfterProductPreparation() {
+    /*
+     * V045 behavior reference:
+     * inspection/preparation completed first, then the operator clicked
+     * "장바구니 담기" later.  In the automatic flow we must preserve that
+     * state-settle gap.  This is one fixed wait only -- no DOM polling.
+     */
+    await new Promise(resolve => setTimeout(resolve, 1800));
   }
 
   function directCartUrl() {
@@ -1462,6 +1472,7 @@
     if (!inspection.puid_match) throw new Error('PRODUCT_PUID_MISMATCH');
 
     await prepareProductPage();
+    await settleAfterProductPreparation();
     await singleBuyNow();
   }
 
@@ -1485,6 +1496,13 @@
     if (!inspection.puid_match) throw new Error('PRODUCT_PUID_MISMATCH');
 
     await prepareProductPage();
+
+    render(
+      '상품 준비 완료 · 쿠팡 상태 반영 대기 후 장바구니 담기\n' +
+      'PUID/옵션/수량 준비값은 더 이상 변경하지 않습니다.'
+    );
+    await settleAfterProductPreparation();
+
     const added = await addCurrentItemToCart();
     if (!added || !added.ok) throw new Error('ADD_TO_CART_NOT_CONFIRMED');
 
