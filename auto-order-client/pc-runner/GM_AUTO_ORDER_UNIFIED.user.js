@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.048
+// @version      0.051
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.048';
+  const VERSION = '0.051';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -99,17 +99,23 @@
    */
   const ADDRESS_BRIDGE_KEY = 'gmao_cpkr_address_bridge_v033';
 
-  const FLOW_KEY = 'gmao_cpkr_flow_v047';
+  const FLOW_KEY = 'gmao_cpkr_flow_v051';
+  const BATCH_SESSION_KEY = 'gmao_cpkr_batch_session_v051';
+  const BLANK_GATE_MS = 850;
+
   const FLOW = Object.freeze({
     BATCH_CART_SCAN: 'BATCH_CART_SCAN',
     BATCH_CART_CLEAR: 'BATCH_CART_CLEAR',
+    BATCH_TO_WAIT: 'BATCH_TO_WAIT',
     ORDER_START: 'ORDER_START',
     SINGLE_PRODUCT: 'SINGLE_PRODUCT',
     MULTI_ADD_ITEMS: 'MULTI_ADD_ITEMS',
     MULTI_CART_SNAPSHOT: 'MULTI_CART_SNAPSHOT',
+    MULTI_SNAPSHOT_RELEASE: 'MULTI_SNAPSHOT_RELEASE',
     MULTI_CART_APPLY: 'MULTI_CART_APPLY',
     MULTI_CART_CHECKOUT: 'MULTI_CART_CHECKOUT',
     CHECKOUT: 'CHECKOUT',
+    BATCH_CLEAN_WAIT: 'BATCH_CLEAN_WAIT',
     STOPPED_BEFORE_PAYMENT: 'STOPPED_BEFORE_PAYMENT',
     FAILED_SKIP: 'FAILED_SKIP'
   });
@@ -120,6 +126,23 @@
     GM_setValue(FLOW_KEY,next); return next;
   }
   function flowClear(){ GM_setValue(FLOW_KEY,null); }
+  function batchSessionGet(){
+    return GM_getValue(BATCH_SESSION_KEY, null);
+  }
+
+  function batchSessionSet(patch){
+    const next = Object.assign({}, batchSessionGet() || {}, patch || {}, {
+      updated_at: Date.now()
+    });
+    GM_setValue(BATCH_SESSION_KEY, next);
+    return next;
+  }
+
+  function batchSessionReady(){
+    const x = batchSessionGet();
+    return !!(x && x.cart_cleaned === true);
+  }
+
   function orderItemCount(job){ const p=payloadOf(job), items=Array.isArray(p.items)?p.items:[]; return items.length; }
 
   function uuid() {
@@ -379,7 +402,10 @@
 
   function firstItem(job) {
     const payload = payloadOf(job);
-    return payload.items && payload.items[0] || {};
+    const items = Array.isArray(payload.items) ? payload.items.filter(Boolean) : [];
+    const flow = flowGet() || {};
+    const index = Math.max(0, Number(flow.item_index || 0));
+    return items[index] || items[0] || {};
   }
 
   function parseCpkrUid(value) {
@@ -413,10 +439,15 @@
     };
   }
 
-  function productUrl(job) {
+  function itemAt(job, index) {
+    const items = jobItems(job);
+    return items[Math.max(0, Number(index || 0))] || null;
+  }
+
+  function productUrlForItem(item, job) {
+    item = item || {};
     const payload = payloadOf(job);
     const order = payload.order || {};
-    const item = firstItem(job);
 
     const directCandidates = [
       item.product_url,
@@ -431,15 +462,73 @@
     const direct = directCandidates.find(value =>
       /^https?:\/\//i.test(String(value || ''))
     );
-
     if (direct) return direct;
 
-    for (const candidate of [item.pi_ii_vi, item.source_uid]) {
+    for (const candidate of [item.pi_ii_vi, item.source_uid, item.puid, item.product_uid]) {
       const parsed = parseCpkrUid(candidate);
       if (parsed.ok) return parsed.product_url;
     }
-
     return '';
+  }
+
+  function resetCurrentItemRuntime() {
+    lastInspection = null;
+    lastPreparation = null;
+    lastCartAction = null;
+    GM_setValue('gmao_runner_inspection_v013', null);
+    GM_setValue('gmao_runner_preparation_v013', null);
+    GM_setValue('gmao_runner_cart_v013', null);
+  }
+
+  function directCartUrl() {
+    return 'https://cart.coupang.com/cartView.pang';
+  }
+
+  function releaseCoupangDom(label) {
+    /*
+     * Tampermonkey cannot continue executing after the same tab is navigated to
+     * literal about:blank. For automatic one-tab operation we therefore destroy
+     * the current Coupang DOM completely and do not query it again before the
+     * next navigation. This is the operational blank gate used by the runner.
+     */
+    try {
+      document.title = 'about:blank';
+      document.documentElement.innerHTML =
+        '<head><title>about:blank</title></head>' +
+        '<body style="margin:0;background:#fff"></body>';
+    } catch (_) {}
+  }
+
+  function blankGate(nextUrl, label) {
+    const target = String(nextUrl || '');
+    if (!target) throw new Error('NEXT_URL_MISSING');
+
+    releaseCoupangDom(label);
+
+    setTimeout(() => {
+      location.replace(target);
+    }, BLANK_GATE_MS);
+
+    return true;
+  }
+
+  function blankWait(stage, message) {
+    flowSet({ stage: stage });
+    releaseCoupangDom(stage);
+
+    setTimeout(() => {
+      /*
+       * Rebuild only the Glomart panel. No Coupang DOM is read again while
+       * stopped at this agreed test boundary.
+       */
+      render(message);
+    }, 50);
+    return true;
+  }
+
+
+  function productUrl(job) {
+    return productUrlForItem(firstItem(job), job);
   }
 
   function createButton(label, handler, danger) {
@@ -550,7 +639,8 @@
     const meta = document.createElement('div');
     meta.textContent =
       '\n' + getClientId() +
-      '\n페이지: ' + detectPageType();
+      '\n페이지: ' + detectPageType() +
+      '\n연속세션청소=' + (batchSessionReady() ? '완료' : '필요');
     meta.style.cssText =
       'color:#93c5fd;white-space:pre-wrap;margin-top:4px';
     panel.appendChild(meta);
@@ -564,87 +654,21 @@
       return;
     }
 
-    const url = productUrl(currentJob);
+    const flow = initializeFlowForCurrentJob(false) || {};
 
-    panel.appendChild(
-      createButton('상품 페이지 열기', () => {
-        if (!url) {
-          showError(new Error('주문 데이터에 상품 URL이 없습니다.'));
-          return;
-        }
-        location.href = url;
-      })
-    );
-
-    if (detectPageType() === 'PRODUCT') {
+    if (flow.stage === FLOW.BATCH_CLEAN_WAIT) {
       panel.appendChild(
-        createButton('상품 페이지 검사', () => {
-          inspectProductPage().catch(showError);
+        createButton('주문 진행', () => {
+          continueOrderAfterBatchWait().catch(showError);
         })
       );
-    }
-
-    if (
-      detectPageType() === 'PRODUCT' &&
-      lastInspection &&
-      !lastInspection.login_required &&
-      lastInspection.puid_match
+    } else if (
+      flow.stage !== FLOW.STOPPED_BEFORE_PAYMENT &&
+      flow.stage !== FLOW.FAILED_SKIP
     ) {
       panel.appendChild(
-        createButton('PUID 확인/수량 준비', () => {
-          prepareProductPage().catch(showError);
-        })
-      );
-    }
-
-    if (
-      detectPageType() === 'PRODUCT' &&
-      lastPreparation
-    ) {
-      /*
-       * V024 PRODUCT RETURN STATE
-       * 장바구니 담기 후 상품페이지로 다시 돌아오면 lastCartAction이 남아 있다.
-       * 기존 코드는 !lastCartAction 조건 때문에 모든 다음 단계 버튼을 숨겼다.
-       * 이미 담기 성공 이력이 있으면 중복 담기하지 말고 장바구니로 복귀시키고,
-       * 담기 이력이 없거나 실패했으면 기존 장바구니 담기 버튼을 다시 제공한다.
-       */
-      if (lastCartAction && lastCartAction.ok) {
-        panel.appendChild(
-          createButton('장바구니 열기 · 주문 계속', () => {
-            openCurrentCart().catch(showError);
-          })
-        );
-      } else {
-        panel.appendChild(
-          createButton('장바구니 담기', () => {
-            addCurrentItemToCart().catch(showError);
-          })
-        );
-      }
-    }
-
-    if (
-      detectPageType() === 'CART' &&
-      currentJob
-    ) {
-      panel.appendChild(
-        createButton('장바구니 검증', () => {
-          inspectCurrentCart().catch(showError);
-        })
-      );
-      if (lastCartAction && lastCartAction.ok) {
-        panel.appendChild(
-          createButton('주문/결제 진행', () => {
-            goCheckout().catch(showError);
-          })
-        );
-      }
-    }
-
-    if (detectPageType() === 'CHECKOUT' && currentJob) {
-      panel.appendChild(
-        createButton('배송지 입력·저장 · 결제직전 정지', () => {
-          fillCheckoutAndStop().catch(showError);
+        createButton('현재 단계 재개', () => {
+          orchestrateCurrentFlow().catch(showError);
         })
       );
     }
@@ -681,8 +705,14 @@
     GM_setValue('gmao_runner_inspection_v013', null);
     GM_setValue('gmao_runner_preparation_v013', null);
     GM_setValue('gmao_runner_cart_v013', null);
+    flowClear();
     clearInterval(workHeartbeatTimer);
     workHeartbeatTimer = null;
+  }
+
+  function resetContinuousBatchSession() {
+    GM_setValue(BATCH_SESSION_KEY, null);
+    flowClear();
   }
 
   function handleWorkHeartbeatError(error) {
@@ -838,22 +868,28 @@
     GM_setValue('gmao_runner_cart_v013', null);
     startWorkHeartbeat();
 
+    flowSet({
+      work_id: currentJob.work_id,
+      stage: batchSessionReady() ? FLOW.ORDER_START : FLOW.BATCH_CART_SCAN,
+      item_count: orderItemCount(currentJob),
+      item_index: 0,
+      batch_cart_snapshot: null,
+      batch_cart_cleared: batchSessionReady(),
+      cart_snapshot: null,
+      cart_plan: null,
+      correction_pass: 0
+    });
+
     render(
       '작업 배정 완료\n' +
       '#' + currentJob.work_id + '\n' +
       currentJob.auto_order_no + '\n' +
-      (productUrl(currentJob)
-        ? 'CPKR UID 링크 생성 완료'
-        : 'CPKR UID 형식 오류: 숫자_숫자_숫자 필요')
+      (batchSessionReady()
+        ? '연속 작업 세션 유지 · 장바구니 재검사 없이 주문 시작'
+        : '연속 작업 최초 1회 · 장바구니 확인/청소 시작')
     );
 
-    if (detectPageType() === 'PRODUCT') {
-      setTimeout(() => { autoInspectAndPrepareProductPage(); }, 700);
-    }
-    if (detectPageType() === 'AUTH') {
-      setTimeout(() => { autoStepupAuth().catch(showError); }, 450);
-    }
-
+    setTimeout(() => { orchestrateCurrentFlow().catch(showError); }, 300);
     return currentJob;
   }
 
@@ -1028,7 +1064,7 @@
         '자동 상품 준비 완료\n' +
         'PUID 일치 · 옵션 변경 없음 · 주문수량=' +
         (actualQty || requestedQty) + '\n' +
-        '다음 단계: 장바구니 담기 테스트'
+        '상품 준비 완료'
       );
     } catch (error) {
       showError(error);
@@ -1258,48 +1294,417 @@
    * Runner owns only orchestration and state.
    */
 
-  async function batchCartSnapshot() {
-    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
-    await loadCartClear();
-    const snap = window.CPKR_CART_CLEAR.snapshot();
-    flowSet({stage: snap.length ? FLOW.BATCH_CART_CLEAR : FLOW.ORDER_START, batch_cart_snapshot:snap});
-    return snap;
+  function flowMatchesCurrentJob(flow) {
+    return !!(
+      flow &&
+      currentJob &&
+      Number(flow.work_id || 0) === Number(currentJob.work_id || 0)
+    );
   }
 
-  async function batchCartClear() {
-    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
-    await loadCartClear();
-    const r = await window.CPKR_CART_CLEAR.clearAll();
-    flowSet({stage:FLOW.ORDER_START,batch_cart_cleared:true});
-    return r;
+  function initializeFlowForCurrentJob(force) {
+    if (!currentJob) return null;
+    const existing = flowGet();
+
+    if (!force && flowMatchesCurrentJob(existing)) return existing;
+
+    return flowSet({
+      work_id: currentJob.work_id,
+      stage: batchSessionReady() ? FLOW.ORDER_START : FLOW.BATCH_CART_SCAN,
+      item_count: orderItemCount(currentJob),
+      item_index: 0,
+      batch_cart_snapshot: null,
+      batch_cart_cleared: batchSessionReady(),
+      cart_snapshot: null,
+      cart_plan: null,
+      correction_pass: 0
+    });
   }
 
-  async function multiCartSnapshotAndPlan() {
+  async function continueOrderAfterBatchWait() {
     if (!currentJob) throw new Error('현재 주문이 없습니다.');
-    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
-    await loadCartCompare();
-    const snap=window.CPKR_CART_COMPARE.snapshot();
-    const plan=window.CPKR_CART_COMPARE.compare(jobItems(currentJob),snap);
-    flowSet({stage:plan.ok?FLOW.MULTI_CART_CHECKOUT:FLOW.MULTI_CART_APPLY,cart_snapshot:snap,cart_plan:plan});
-    return plan;
+
+    const count = orderItemCount(currentJob);
+    if (count <= 0) throw new Error('ORDER_ITEM_EMPTY');
+
+    resetCurrentItemRuntime();
+
+    const nextStage = count === 1
+      ? FLOW.SINGLE_PRODUCT
+      : FLOW.MULTI_ADD_ITEMS;
+
+    flowSet({
+      stage: nextStage,
+      item_count: count,
+      item_index: 0
+    });
+
+    const item = itemAt(currentJob, 0);
+    const url = productUrlForItem(item, currentJob);
+    if (!url) throw new Error('CPKR_PRODUCT_URL_MISSING');
+
+    render(
+      count === 1
+        ? '단건 주문 시작\n장바구니를 사용하지 않고 바로구매로 진행합니다.'
+        : '다건 주문 시작\n각 상품을 장바구니에 순서대로 담습니다.'
+    );
+
+    blankGate(url, 'ORDER_START');
+    return true;
   }
 
-  async function multiCartApplyStoredPlan() {
-    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
-    await loadCartCompare();
-    const f=flowGet()||{}, plan=f.cart_plan;
-    if(!plan) throw new Error('저장된 장바구니 비교 결과가 없습니다.');
-    const r=await window.CPKR_CART_COMPARE.applyPlan(plan);
-    flowSet({stage:(r.missing&&r.missing.length)?FLOW.MULTI_ADD_ITEMS:FLOW.MULTI_CART_CHECKOUT,missing_items:r.missing||[]});
-    return r;
+  async function runSingleProductFlow() {
+    if (detectPageType() !== 'PRODUCT') {
+      const url = productUrl(currentJob);
+      if (!url) throw new Error('CPKR_PRODUCT_URL_MISSING');
+      blankGate(url, 'SINGLE_PRODUCT');
+      return;
+    }
+
+    const inspection = await inspectProductPage();
+    if (!inspection || inspection.login_required) return;
+    if (!inspection.puid_match) throw new Error('PRODUCT_PUID_MISMATCH');
+
+    await prepareProductPage();
+    await singleBuyNow();
   }
 
-  async function multiCartCheckout() {
-    if (detectPageType() !== 'CART') throw new Error('장바구니 페이지에서 실행하세요.');
-    await assertOrderStillActive('BEFORE_MULTI_CART_CHECKOUT');
+  async function runMultiProductFlow() {
+    const flow = flowGet() || {};
+    const items = jobItems(currentJob);
+    const index = Math.max(0, Number(flow.item_index || 0));
+    const item = items[index];
+
+    if (!item) throw new Error('MULTI_ITEM_INDEX_INVALID');
+
+    if (detectPageType() !== 'PRODUCT') {
+      const url = productUrlForItem(item, currentJob);
+      if (!url) throw new Error('CPKR_PRODUCT_URL_MISSING');
+      blankGate(url, 'MULTI_ITEM_' + index);
+      return;
+    }
+
+    const inspection = await inspectProductPage();
+    if (!inspection || inspection.login_required) return;
+    if (!inspection.puid_match) throw new Error('PRODUCT_PUID_MISMATCH');
+
+    await prepareProductPage();
+    const added = await addCurrentItemToCart();
+    if (!added || !added.ok) throw new Error('ADD_TO_CART_NOT_CONFIRMED');
+
+    const nextIndex = index + 1;
+
+    if (nextIndex < items.length) {
+      resetCurrentItemRuntime();
+      flowSet({
+        stage: FLOW.MULTI_ADD_ITEMS,
+        item_index: nextIndex
+      });
+
+      const nextUrl = productUrlForItem(items[nextIndex], currentJob);
+      if (!nextUrl) throw new Error('CPKR_PRODUCT_URL_MISSING');
+      blankGate(nextUrl, 'MULTI_NEXT_ITEM');
+      return;
+    }
+
+    resetCurrentItemRuntime();
+    flowSet({
+      stage: FLOW.MULTI_CART_SNAPSHOT,
+      item_index: nextIndex
+    });
+
+    blankGate(directCartUrl(), 'MULTI_CART_SNAPSHOT');
+  }
+
+  async function continueMultiAfterCompare(plan, snapshot) {
+    const flow = flowGet() || {};
+    const correctionPass = Math.max(0, Number(flow.correction_pass || 0));
+
+    lastCartAction = {
+      ok: !!plan.ok,
+      method: 'multi-cart-compare',
+      snapshot,
+      plan,
+      correction_pass: correctionPass
+    };
+    GM_setValue('gmao_runner_cart_v013', lastCartAction);
+    await clientHeartbeat();
+
+    if (plan.ok) {
+      flowSet({
+        stage: FLOW.MULTI_CART_CHECKOUT,
+        cart_snapshot: snapshot,
+        cart_plan: plan
+      });
+
+      render(
+        '다건 장바구니 검증 일치\n' +
+        '주문상품=' + plan.target_count +
+        ' · 장바구니=' + plan.cart_count +
+        '\n전체선택 후 주문/결제로 진행합니다.'
+      );
+
+      blankGate(directCartUrl(), 'MULTI_CART_CHECKOUT');
+      return;
+    }
+
+    if (correctionPass >= 1) {
+      const reason =
+        'CART_FINAL_MISMATCH' +
+        ' missing=' + plan.missing.length +
+        ' extra=' + plan.extra.length +
+        ' qty=' + plan.qty_mismatch.length;
+
+      flowSet({
+        stage: FLOW.FAILED_SKIP,
+        cart_snapshot: snapshot,
+        cart_plan: plan,
+        failure_reason: reason
+      });
+
+      render(
+        '장바구니 최종 검증 불일치 · 반복하지 않고 주문 패스\n' +
+        reason,
+        true
+      );
+      return;
+    }
+
+    flowSet({
+      stage: FLOW.MULTI_CART_APPLY,
+      cart_snapshot: snapshot,
+      cart_plan: plan,
+      correction_pass: 1
+    });
+
+    render(
+      '장바구니 불일치 · 1회 보정 진행\n' +
+      '누락=' + plan.missing.length +
+      ' · 추가=' + plan.extra.length +
+      ' · 수량차이=' + plan.qty_mismatch.length
+    );
+
+    blankGate(directCartUrl(), 'MULTI_CART_APPLY');
+  }
+
+  async function applyMultiCartPlanOnce() {
+    const flow = flowGet() || {};
+    const plan = flow.cart_plan;
+    if (!plan) throw new Error('MULTI_CART_PLAN_MISSING');
+    if (detectPageType() !== 'CART') {
+      blankGate(directCartUrl(), 'MULTI_CART_APPLY');
+      return;
+    }
+
+    await assertOrderStillActive('BEFORE_CART_CORRECTION');
     await loadCartCompare();
-    flowSet({stage:FLOW.CHECKOUT});
-    return window.CPKR_CART_COMPARE.selectAllAndCheckout();
+
+    const applied = await window.CPKR_CART_COMPARE.applyPlan(plan);
+    if (!applied || applied.ok === false) {
+      throw new Error('CART_CORRECTION_FAILED');
+    }
+
+    /*
+     * One correction only. Re-enter cart and take one final snapshot.
+     * No correction loop is allowed.
+     */
+    flowSet({
+      stage: FLOW.MULTI_CART_SNAPSHOT,
+      correction_pass: 1,
+      cart_apply_result: applied
+    });
+    blankGate(directCartUrl(), 'MULTI_FINAL_VERIFY');
+  }
+
+  async function checkoutVerifiedMultiCart() {
+    if (detectPageType() !== 'CART') {
+      blankGate(directCartUrl(), 'MULTI_CART_CHECKOUT');
+      return;
+    }
+
+    await assertOrderStillActive('BEFORE_MULTI_CHECKOUT');
+    await loadCartCompare();
+
+    /*
+     * The cart was already verified from a detached snapshot.
+     * Do not perform another comparison here; select all and enter checkout.
+     */
+    flowSet({ stage: FLOW.CHECKOUT });
+    render('다건 장바구니 검증 완료 · 전체선택 후 주문/결제로 이동합니다.');
+    await window.CPKR_CART_COMPARE.selectAllAndCheckout();
+  }
+
+
+  async function orchestrateCurrentFlow() {
+    if (!currentJob) return;
+
+    const flow = initializeFlowForCurrentJob(false) || {};
+    const stage = flow.stage || FLOW.BATCH_CART_SCAN;
+    const page = detectPageType();
+
+    if (page === 'AUTH') {
+      await autoStepupAuth();
+      return;
+    }
+
+    switch (stage) {
+      case FLOW.ORDER_START:
+        await continueOrderAfterBatchWait();
+        return;
+
+      case FLOW.BATCH_CART_SCAN: {
+        if (page !== 'CART') {
+          blankGate(directCartUrl(), 'BATCH_CART_SCAN');
+          return;
+        }
+
+        await loadCartClear();
+        const snapshot = window.CPKR_CART_CLEAR.snapshot();
+
+        if (!snapshot.length) {
+          batchSessionSet({
+            cart_cleaned: true,
+            cleaned_at: Date.now(),
+            method: 'already-empty'
+          });
+          flowSet({
+            stage: FLOW.BATCH_TO_WAIT,
+            batch_cart_snapshot: [],
+            batch_cart_cleared: true
+          });
+          blankWait(
+            FLOW.BATCH_CLEAN_WAIT,
+            '연속 작업 최초 장바구니 확인 완료\n' +
+            '기존 상품 없음 · DOM 해제 완료 · 대기'
+          );
+          return;
+        }
+
+        flowSet({
+          stage: FLOW.BATCH_CART_CLEAR,
+          batch_cart_snapshot: snapshot
+        });
+
+        blankGate(directCartUrl(), 'BATCH_CART_CLEAR');
+        return;
+      }
+
+      case FLOW.BATCH_CART_CLEAR: {
+        if (page !== 'CART') {
+          blankGate(directCartUrl(), 'BATCH_CART_CLEAR');
+          return;
+        }
+
+        await loadCartClear();
+        const cleared = await window.CPKR_CART_CLEAR.clearAll();
+
+        batchSessionSet({
+          cart_cleaned: true,
+          cleaned_at: Date.now(),
+          method: 'cleared',
+          deleted_count: Number(cleared.requested || 0)
+        });
+
+        flowSet({
+          stage: FLOW.BATCH_TO_WAIT,
+          batch_cart_cleared: true,
+          batch_clear_result: cleared
+        });
+
+        blankWait(
+          FLOW.BATCH_CLEAN_WAIT,
+          '연속 작업 최초 장바구니 청소 완료 · DOM 해제 완료 · 대기\n' +
+          '삭제요청=' + Number(cleared.requested || 0)
+        );
+        return;
+      }
+
+      case FLOW.BATCH_CLEAN_WAIT:
+        render(
+          '장바구니 청소 완료 · 대기\n' +
+          '다음 테스트는 주문 아이템 수에 따라 자동 분기합니다.'
+        );
+        return;
+
+      case FLOW.SINGLE_PRODUCT:
+        await runSingleProductFlow();
+        return;
+
+      case FLOW.MULTI_ADD_ITEMS:
+        await runMultiProductFlow();
+        return;
+
+      case FLOW.MULTI_CART_SNAPSHOT: {
+        if (page !== 'CART') {
+          blankGate(directCartUrl(), 'MULTI_CART_SNAPSHOT');
+          return;
+        }
+
+        await loadCartCompare();
+        const snapshot = window.CPKR_CART_COMPARE.snapshot();
+
+        flowSet({
+          stage: FLOW.MULTI_SNAPSHOT_RELEASE,
+          cart_snapshot: snapshot
+        });
+
+        /*
+         * Release the Coupang DOM first. Comparison is then performed only
+         * against the detached snapshot and our order payload.
+         */
+        releaseCoupangDom('MULTI_SNAPSHOT_RELEASE');
+
+        setTimeout(() => {
+          try {
+            const f = flowGet() || {};
+            const detached = Array.isArray(f.cart_snapshot) ? f.cart_snapshot : [];
+            const plan = window.CPKR_CART_COMPARE.compare(
+              jobItems(currentJob),
+              detached
+            );
+            continueMultiAfterCompare(plan, detached).catch(showError);
+          } catch (error) {
+            showError(error);
+          }
+        }, 80);
+        return;
+      }
+
+      case FLOW.MULTI_SNAPSHOT_RELEASE: {
+        await loadCartCompare();
+        const detached = Array.isArray(flow.cart_snapshot) ? flow.cart_snapshot : [];
+        const plan = window.CPKR_CART_COMPARE.compare(
+          jobItems(currentJob),
+          detached
+        );
+        await continueMultiAfterCompare(plan, detached);
+        return;
+      }
+
+      case FLOW.MULTI_CART_APPLY:
+        await applyMultiCartPlanOnce();
+        return;
+
+      case FLOW.MULTI_CART_CHECKOUT:
+        await checkoutVerifiedMultiCart();
+        return;
+
+      case FLOW.CHECKOUT:
+        if (page !== 'CHECKOUT') return;
+        await fillCheckoutAndStop();
+        return;
+
+      case FLOW.STOPPED_BEFORE_PAYMENT:
+        render('결제 직전 정지 상태');
+        return;
+
+      case FLOW.FAILED_SKIP:
+        render('주문 실패 기록 후 패스 상태', true);
+        return;
+
+      default:
+        throw new Error('UNKNOWN_FLOW_STAGE:' + stage);
+    }
   }
 
   async function singleBuyNow() {
@@ -1309,56 +1714,6 @@
     await loadProductOrder();
     flowSet({stage:FLOW.CHECKOUT,item_count:1});
     return window.CPKR_PRODUCT_ORDER.buyNow();
-  }
-
-  async function inspectCurrentCart() {
-    if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
-    if (detectPageType() !== 'CART') throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
-
-    await assertOrderStillActive('BEFORE_CART_COMPARE');
-    await loadCartCompare();
-
-    const snapshot = window.CPKR_CART_COMPARE.snapshot();
-    const plan = window.CPKR_CART_COMPARE.compare(jobItems(currentJob), snapshot);
-
-    lastCartAction = {
-      ok: !!plan.ok,
-      method: 'cart-compare-module',
-      snapshot,
-      plan
-    };
-    GM_setValue('gmao_runner_cart_v013', lastCartAction);
-    await clientHeartbeat();
-
-    flowSet({
-      stage: plan.ok ? FLOW.MULTI_CART_CHECKOUT : FLOW.MULTI_CART_APPLY,
-      cart_snapshot: snapshot,
-      cart_plan: plan
-    });
-
-    render(
-      (plan.ok ? '장바구니 비교 완료' : '장바구니 차이 확인') + '\n' +
-      '주문상품=' + plan.target_count +
-      ' · 장바구니=' + plan.cart_count +
-      ' · 누락=' + plan.missing.length +
-      ' · 추가=' + plan.extra.length +
-      ' · 수량차이=' + plan.qty_mismatch.length,
-      !plan.ok
-    );
-
-    return lastCartAction;
-  }
-
-  async function goCheckout() {
-    if (!currentJob) throw new Error('먼저 작업을 가져오세요.');
-    if (detectPageType() !== 'CART') throw new Error('쿠팡 장바구니 페이지에서 실행하세요.');
-    if (!lastCartAction || !lastCartAction.ok) throw new Error('먼저 장바구니 검증을 완료하세요.');
-
-    await assertOrderStillActive('BEFORE_CHECKOUT');
-    await loadCartCompare();
-    flowSet({ stage: FLOW.CHECKOUT });
-    render('주문/결제 페이지로 이동합니다.');
-    return window.CPKR_CART_COMPARE.selectAllAndCheckout();
   }
 
   function nativeInputValue(input, value) {
@@ -1635,17 +1990,16 @@
         try {
           await workHeartbeat();
           startWorkHeartbeat();
+          const flow = initializeFlowForCurrentJob(false);
           render(
             '기존 작업 복구 완료\n' +
             '#' + currentJob.work_id + '\n' +
-            currentJob.auto_order_no
+            currentJob.auto_order_no + '\n' +
+            '단계=' + String(flow && flow.stage || '')
           );
-          if (detectPageType() === 'PRODUCT') {
-            setTimeout(() => { autoInspectAndPrepareProductPage(); }, 700);
-          }
-          if (detectPageType() === 'AUTH') {
-            setTimeout(() => { autoStepupAuth().catch(showError); }, 450);
-          }
+          setTimeout(() => {
+            orchestrateCurrentFlow().catch(showError);
+          }, 500);
         } catch (error) {
           if (isStaleWorkError(error)) {
             const staleCode = errorCode(error);
