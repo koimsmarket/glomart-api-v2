@@ -1,11 +1,11 @@
-/* CPKR_PRODUCT_V066
+/* CPKR_PRODUCT_V074
  * Authoritative Coupang PRODUCT module.
  * One item = one inspect -> optional quantity input -> one action.
  * IMPORTANT: PUID direct URL already selects the SKU. This module NEVER changes option DOM.
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='066') return;
+  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='074') return;
 
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -69,27 +69,36 @@
   function exactCartButton(){var b=D.querySelector('button.prod-cart-btn');return b&&visible(b)&&!disabled(b)?b:null;}
   function exactBuyButton(){var b=D.querySelector('button.prod-buy-btn,a.prod-buy-btn');return b&&visible(b)&&!disabled(b)?b:null;}
 
-  async function waitAfterCartClick(beforeCount){
-    var start=Date.now(), minWait=900;
-    while(Date.now()-start<4000){
-      if(blocked())throw new Error('COUPANG_ACCESS_DENIED');
-      var body=String(D.body&&D.body.innerText||'');
-      if(/서버에서 오류가 발생하였습니다/.test(body))throw new Error('CART_ADD_COUPANG_SERVER_ERROR');
-      var n=D.querySelector('#headerCartCount'), now=n?Number(String(n.textContent||'').replace(/\D/g,''))||0:null;
-      if(Date.now()-start>=minWait && beforeCount!=null && now!=null && now>beforeCount)return {confirmed:true,method:'header-count',before:beforeCount,after:now};
-      if(Date.now()-start>=1400)return {confirmed:false,method:'stability-wait',before:beforeCount,after:now};
-      await sleep(120);
-    }
-    return {confirmed:false,method:'timeout-stability'};
+  async function settleAfterCartClick(){
+    /* No repeated DOM/header/body inspection.
+       Final CART snapshot is the authoritative success verification. */
+    var waitMs=1200;
+    await sleep(waitMs);
+    return {accepted:true,method:'fixed-settle',wait_ms:waitMs};
   }
   function armServerAlert(pageWindow){
     var pw=pageWindow||W,old=pw.alert,captured='',done=false;
-    function restore(){if(done)return;done=true;try{if(pw.alert===hook)pw.alert=old;}catch(_e){}}
-    function hook(msg){captured=String(msg||'');try{return old.call(pw,msg);}finally{}}
+
+    function restore(){
+      if(done)return;
+      done=true;
+      try{if(pw.alert===hook)pw.alert=old;}catch(_e){}
+    }
+
+    function hook(msg){
+      var text=String(msg||'');
+      if(/서버에서 오류가 발생하였습니다/.test(text)){
+        captured=text;
+        return;
+      }
+      return old.call(pw,msg);
+    }
+
     try{pw.alert=hook;}catch(_e){}
     return {restore:restore,message:function(){return captured;}};
   }
-  async function run(item,mode,pageWindow){
+  async function run(item,mode,pageWindow,options){
+    options=options||{};
     mode=String(mode||'MULTI').toUpperCase();
     var check=inspect(item);
     if(check.login_required)throw new Error('LOGIN_REQUIRED');
@@ -99,12 +108,30 @@
     if(mode==='INSPECT_ONLY')return {ok:true,inspection:check,quantity:q,action:'NONE'};
     if(mode==='SINGLE'){
       var buy=exactBuyButton(); if(!buy)throw new Error('BUY_NOW_NODE_NOT_FOUND');
-      buy.click(); return {ok:true,inspection:check,quantity:q,action:'BUY_NOW',clicked:true};
+      if(typeof options.beforeAction==='function')options.beforeAction({action:'BUY_NOW',inspection:check,quantity:q});
+      buy.click();
+      return {ok:true,inspection:check,quantity:q,action:'BUY_NOW',clicked:true};
     }
     var cart=exactCartButton(); if(!cart)throw new Error('CART_BUTTON_NODE_NOT_FOUND');
-    var hc=D.querySelector('#headerCartCount'),beforeCount=hc?(Number(String(hc.textContent||'').replace(/\D/g,''))||0):null,alarm=armServerAlert(pageWindow);
-    try{cart.click();var settled=await waitAfterCartClick(beforeCount);var am=alarm.message();if(/서버에서 오류가 발생하였습니다/.test(am))throw new Error('CART_ADD_COUPANG_SERVER_ERROR');return {ok:true,inspection:check,quantity:q,action:'ADD_TO_CART',clicked:true,settled:settled};}finally{alarm.restore();}
+    var alarm=armServerAlert(pageWindow);
+    try{
+      if(typeof options.beforeAction==='function')options.beforeAction({action:'ADD_TO_CART',inspection:check,quantity:q});
+      cart.click();
+      var settled=await settleAfterCartClick();
+      var am=alarm.message();
+      var uncertain=/서버에서 오류가 발생하였습니다/.test(am);
+      return {
+        ok:true,
+        inspection:check,
+        quantity:q,
+        action:'ADD_TO_CART',
+        clicked:true,
+        settled:settled,
+        uncertain:uncertain,
+        alert_message:uncertain?am:''
+      };
+    }finally{alarm.restore();}
   }
 
-  W.CPKR_PRODUCT={version:'066',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
+  W.CPKR_PRODUCT={version:'074',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
 })(window,document);
