@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.056
+// @version      0.058
 // @description  쿠팡 PC 실행기. Tampermonkey sandbox에서 모듈을 직접 로드하여 PUID 검증과 주문수량 준비를 자동 수행합니다.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -46,7 +46,7 @@
 
 
 
-  const VERSION = '0.056';
+  const VERSION = '0.058';
   const API_BASE =
     'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
   const INSPECTOR_URL =
@@ -99,8 +99,8 @@
    */
   const ADDRESS_BRIDGE_KEY = 'gmao_cpkr_address_bridge_v033';
 
-  const FLOW_KEY = 'gmao_cpkr_flow_v056';
-  const BATCH_SESSION_KEY = 'gmao_cpkr_batch_session_v056';
+  const FLOW_KEY = 'gmao_cpkr_flow_v058';
+  const BATCH_SESSION_KEY = 'gmao_cpkr_batch_session_v058';
   const BLANK_GATE_MS = 850;
 
   const FLOW = Object.freeze({
@@ -117,7 +117,8 @@
     CHECKOUT: 'CHECKOUT',
     BATCH_CLEAN_WAIT: 'BATCH_CLEAN_WAIT',
     STOPPED_BEFORE_PAYMENT: 'STOPPED_BEFORE_PAYMENT',
-    FAILED_SKIP: 'FAILED_SKIP'
+    FAILED_SKIP: 'FAILED_SKIP',
+    COUPANG_BLOCKED_STOP: 'COUPANG_BLOCKED_STOP'
   });
 
   function flowGet(){ return GM_getValue(FLOW_KEY, null); }
@@ -168,6 +169,54 @@
     if (location.hostname === 'id.coupang.com') return 'ADDRESS';
     if (/\/vp\/products\//.test(location.pathname)) return 'PRODUCT';
     return 'COUPANG';
+  }
+
+  function detectCoupangBlockPage() {
+    const title = String(document.title || '').trim();
+    const body = String(document.body && document.body.innerText || '').slice(0, 12000);
+
+    if (
+      /Access Denied/i.test(title) ||
+      /Access Denied/i.test(body) ||
+      /You don't have permission to access/i.test(body) ||
+      /errors\.edgesuite\.net/i.test(body) ||
+      /Reference\s*#?\d+\./i.test(body)
+    ) {
+      return {
+        blocked: true,
+        code: 'COUPANG_ACCESS_DENIED',
+        title: title,
+        url: location.href
+      };
+    }
+
+    return { blocked: false };
+  }
+
+  function stopForCoupangBlock(info) {
+    const detail = info || detectCoupangBlockPage();
+    flowSet({
+      stage: FLOW.COUPANG_BLOCKED_STOP,
+      failure_reason: detail.code || 'COUPANG_ACCESS_DENIED',
+      blocked_url: location.href,
+      blocked_title: String(document.title || ''),
+      blocked_at: Date.now()
+    });
+
+    lastCartAction = {
+      ok: false,
+      method: 'coupang-block-guard',
+      error: detail.code || 'COUPANG_ACCESS_DENIED',
+      url: location.href
+    };
+    GM_setValue('gmao_runner_cart_v013', lastCartAction);
+
+    render(
+      '쿠팡 접근 차단 감지 · 자동작업 즉시 정지\n' +
+      (detail.code || 'COUPANG_ACCESS_DENIED') +
+      '\n추가 클릭/DOM 작업/페이지 이동을 실행하지 않습니다.',
+      true
+    );
   }
 
   function settings(extra) {
@@ -681,7 +730,8 @@
 
     if (
       flow.stage !== FLOW.STOPPED_BEFORE_PAYMENT &&
-      flow.stage !== FLOW.FAILED_SKIP
+      flow.stage !== FLOW.FAILED_SKIP &&
+      flow.stage !== FLOW.COUPANG_BLOCKED_STOP
     ) {
       panel.appendChild(
         createButton('현재 단계 재개', () => {
@@ -756,8 +806,20 @@
   }
 
   function showError(error) {
+    const message = String(error && error.message || error);
+
+    if (
+      /COUPANG_ACCESS_DENIED|COUPANG_EDGE_BLOCKED|COUPANG_BLOCKED/.test(message)
+    ) {
+      stopForCoupangBlock({
+        blocked: true,
+        code: message.split(':')[0] || 'COUPANG_ACCESS_DENIED'
+      });
+      return;
+    }
+
     render(
-      '오류\n' + String(error && error.message || error),
+      '오류\n' + message,
       true
     );
   }
@@ -1569,6 +1631,12 @@
   async function orchestrateCurrentFlow() {
     if (!currentJob) return;
 
+    const block = detectCoupangBlockPage();
+    if (block.blocked) {
+      stopForCoupangBlock(block);
+      return;
+    }
+
     const flow = initializeFlowForCurrentJob(false) || {};
     const stage = flow.stage || FLOW.BATCH_CART_SCAN;
     const page = detectPageType();
@@ -1768,6 +1836,14 @@
 
       case FLOW.FAILED_SKIP:
         render('주문 실패 기록 후 패스 상태', true);
+        return;
+
+      case FLOW.COUPANG_BLOCKED_STOP:
+        render(
+          '쿠팡 접근 차단 상태 · 자동작업 정지\n' +
+          '사용자가 정상 접속을 확인하기 전까지 재시도하지 않습니다.',
+          true
+        );
         return;
 
       default:

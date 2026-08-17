@@ -138,6 +138,27 @@
     return value;
   }
 
+  function detectHardBlock(){
+    const title=String(document.title||'').trim();
+    const body=text(document.body).slice(0,12000);
+
+    if(
+      /Access Denied/i.test(title) ||
+      /Access Denied/i.test(body) ||
+      /You don't have permission to access/i.test(body) ||
+      /errors\.edgesuite\.net/i.test(body)
+    ){
+      return 'COUPANG_ACCESS_DENIED';
+    }
+
+    return '';
+  }
+
+  function assertNotBlocked(){
+    const code=detectHardBlock();
+    if(code) throw new Error(code);
+  }
+
   function headerCartCount(){
     const node=document.querySelector('#headerCartCount');
     if(!node) return null;
@@ -159,11 +180,13 @@
   }
 
   async function waitForStableCartButton(timeoutMs){
+    assertNotBlocked();
     const started=Date.now();
     let last=null;
     let stableSince=0;
 
     while(Date.now()-started<timeoutMs){
+      assertNotBlocked();
       const button=findCartButton();
       if(button && !disabled(button)){
         if(button===last){
@@ -180,6 +203,8 @@
   }
 
   async function addToCart(){
+    assertNotBlocked();
+
     if(!/\/vp\/products\//.test(location.pathname)){
       throw new Error('쿠팡 상품 상세 페이지가 아닙니다.');
     }
@@ -204,6 +229,9 @@
     button.click();
 
     const result=await waitFor(()=>{
+      const hardBlock=detectHardBlock();
+      if(hardBlock) return {type:'error',code:hardBlock};
+
       const error=coupangCartError();
       if(error) return {type:'error',code:error};
 
@@ -262,7 +290,7 @@
   }
 
   window.GMAO_CPKR_CART_MANAGER={
-    version:'057',
+    version:'058',
     addToCart,
     inspectCart,
     openCart,
