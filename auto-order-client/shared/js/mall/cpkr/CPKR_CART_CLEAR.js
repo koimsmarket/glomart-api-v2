@@ -1,4 +1,4 @@
-/* CPKR_CART_CLEAR_V052
+/* CPKR_CART_CLEAR_V053
  * Single cart-cleaning module.
  * CPKR_CART_CLEAN is retired; all batch-start cart inspection/clearing lives here.
  * Confirmed cart row DOM:
@@ -6,7 +6,7 @@
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '052') return;
+  if(W.CPKR_CART_CLEAR && W.CPKR_CART_CLEAR.version === '053') return;
 
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function digits(v){ return String(v==null?'':v).replace(/\D/g,''); }
@@ -44,45 +44,49 @@
     return isFinite(n)&&n>0 ? Math.floor(n) : 1;
   }
 
-  function deleteButton(row){
+  function selectAllCheckbox(){
+    var inputs=Array.prototype.slice.call(
+      D.querySelectorAll('input[type="checkbox"]')
+    );
+
+    /*
+     * Confirmed Coupang cart DOM:
+     * input title="모든 상품을 결제상품으로 설정"
+     * label text contains "전체 선택 (N / N)".
+     */
+    return inputs.find(function(input){
+      var title=String(input.getAttribute('title')||'').trim();
+      if(title==='모든 상품을 결제상품으로 설정') return true;
+
+      var host=input.closest && input.closest('label');
+      var text=String(host && host.textContent || '').replace(/\s+/g,' ').trim();
+      return /전체\s*선택/.test(text);
+    }) || null;
+  }
+
+  function selectedDeleteButton(){
+    /*
+     * Confirmed Coupang cart DOM:
+     * <div ... hover:twc-cursor-pointer>선택삭제</div>
+     * Use exact visible text so "품절/판매종료상품 전체삭제" is never chosen.
+     */
     var nodes=Array.prototype.slice.call(
-      row.querySelectorAll('button,a,[role="button"],div,span')
+      D.querySelectorAll('button,a,[role="button"],div,span')
     );
 
     return nodes.find(function(el){
-      if(String(el.textContent||'').trim()!=='삭제') return false;
-
-      var tag=String(el.tagName||'').toUpperCase();
-      var role=String(el.getAttribute && el.getAttribute('role') || '').toLowerCase();
-
-      /*
-       * Coupang cart individual delete is currently a DIV whose Tailwind
-       * class contains "hover:twc-cursor-pointer".  getComputedStyle(cursor)
-       * may still be "auto" until hover, so class intent must also be accepted.
-       */
-      var cls='';
-      try {
-        cls=typeof el.className==='string'
-          ? el.className
-          : String(el.getAttribute && el.getAttribute('class') || '');
-      } catch(_e) {}
-
-      if(
-        tag==='BUTTON' ||
-        tag==='A' ||
-        role==='button' ||
-        /(?:^|\s|:)twc-cursor-pointer(?:\s|$)/.test(cls) ||
-        cls.indexOf('cursor-pointer')>=0
-      ){
-        return true;
-      }
-
-      try {
-        return getComputedStyle(el).cursor==='pointer';
-      } catch(_e) {
-        return false;
-      }
+      return String(el.textContent||'').replace(/\s+/g,' ').trim()==='선택삭제';
     }) || null;
+  }
+
+  function ensureSelectAll(){
+    var checkbox=selectAllCheckbox();
+    if(!checkbox) throw new Error('CART_CLEAR_SELECT_ALL_NODE_MISSING');
+
+    if(!checkbox.checked){
+      checkbox.click();
+    }
+    return checkbox;
   }
 
   function snapshot(){
@@ -95,24 +99,45 @@
         iid:id.iid,
         vid:id.vid,
         puid:id.puid,
-        quantity:quantity(row),
-        has_delete:!!deleteButton(row)
+        quantity:quantity(row)
       };
     });
   }
 
   async function clearAll(){
-    /* Collect once. No order comparison, no repeated full DOM scan. */
+    /*
+     * One cart operation:
+     * 1) ensure all cart items are selected
+     * 2) click the single "선택삭제" control
+     * No per-item delete DOM lookup/click loop.
+     */
     var rs=rows();
-    var buttons=rs.map(deleteButton);
-    if(rs.length && buttons.some(function(b){return !b;})) {
-      throw new Error('CART_CLEAR_DELETE_NODE_MISSING');
+    if(!rs.length){
+      return {ok:true,requested:0,initial_count:0,method:'already-empty'};
     }
-    buttons.filter(Boolean).forEach(function(btn){
-      try { btn.click(); } catch(_e) {}
-    });
+
+    var checkbox=ensureSelectAll();
+    await sleep(120);
+
+    var del=selectedDeleteButton();
+    if(!del) throw new Error('CART_CLEAR_SELECTED_DELETE_NODE_MISSING');
+
+    del.click();
+
+    /*
+     * Give Coupang time to process the one bulk delete request.
+     * The orchestrator releases the page afterward; do not perform
+     * repeated item-by-item DOM scans here.
+     */
     await sleep(900);
-    return {ok:true, requested:buttons.filter(Boolean).length, initial_count:rs.length};
+
+    return {
+      ok:true,
+      requested:rs.length,
+      initial_count:rs.length,
+      method:'select-all-selected-delete',
+      select_all_checked:!!checkbox.checked
+    };
   }
 
   /* Backward-compatible entry point for any existing caller. */
@@ -127,11 +152,13 @@
   }
 
   W.CPKR_CART_CLEAR={
-    version:'052',
+    version:'053',
     snapshot:snapshot,
     clearAll:clearAll,
     run:run,
     isEmpty:function(){ return rows().length===0; },
-    rows:rows
+    rows:rows,
+    selectAllCheckbox:selectAllCheckbox,
+    selectedDeleteButton:selectedDeleteButton
   };
 })(window,document);
