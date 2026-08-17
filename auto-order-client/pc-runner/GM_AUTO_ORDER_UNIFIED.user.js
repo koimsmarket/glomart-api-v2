@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.066
+// @version      0.067
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 (function(){
 'use strict';
-const VERSION='0.066';
+const VERSION='0.067';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=066',
@@ -27,12 +27,14 @@ const URLS={
 };
 const STORE={
  job:'gmao_runner_job_v013',
- flow:'gmao_cpkr_flow_v066',
- batch:'gmao_cpkr_batch_v066',
+ flow:'gmao_cpkr_flow_stable_v1',
+ batch:'gmao_cpkr_batch_session_stable_v1',
  client:'gmao_runner_client_id_v013',
  bridge:'gmao_cpkr_address_bridge_v033'
 };
 const LEGACY_JOB_KEYS=['gmao_runner_job_v062'];
+const LEGACY_FLOW_KEYS=['gmao_cpkr_flow_v066','gmao_cpkr_flow_v062'];
+const LEGACY_BATCH_KEYS=['gmao_cpkr_batch_v066','gmao_cpkr_batch_v062'];
 const ST={BATCH_SCAN:'BATCH_SCAN',BATCH_CLEAR:'BATCH_CLEAR',ORDER_START:'ORDER_START',SINGLE:'SINGLE',MULTI_PRODUCT:'MULTI_PRODUCT',MULTI_SNAPSHOT:'MULTI_SNAPSHOT',MULTI_COMPARE:'MULTI_COMPARE',MULTI_ADJUST:'MULTI_ADJUST',MULTI_REPAIR:'MULTI_REPAIR',MULTI_FINAL_SNAPSHOT:'MULTI_FINAL_SNAPSHOT',MULTI_CHECKOUT:'MULTI_CHECKOUT',CHECKOUT_PENDING:'CHECKOUT_PENDING',CHECKOUT:'CHECKOUT',STOPPED:'STOPPED',FAILED:'FAILED',BLOCKED:'BLOCKED'};
 const STALE=new Set(['work_not_found','work_lock_invalid','work_lock_invalid_or_expired','work_not_running','work_cancelled_by_customer']);
 function restoreLocalJob(){
@@ -50,7 +52,42 @@ function restoreLocalJob(){
   return null;
 }
 let job=restoreLocalJob(),workTimer=null,clientTimer=null,busy=false;
-function flow(){return GM_getValue(STORE.flow,null)||{};}function setFlow(p){let n=Object.assign({},flow(),p||{},{updated_at:Date.now()});GM_setValue(STORE.flow,n);return n;}function batch(){return GM_getValue(STORE.batch,null)||{};}function setBatch(p){let n=Object.assign({},batch(),p||{},{updated_at:Date.now()});GM_setValue(STORE.batch,n);return n;}
+
+function validStageName(x){
+  return !!x&&Object.values(ST).includes(String(x));
+}
+function migrateFlow(){
+  let cur=GM_getValue(STORE.flow,null);
+  if(cur&&(!job||String(cur.work_id||'')===String(job.work_id||''))&&validStageName(cur.stage))return cur;
+  if(job){
+    for(const key of LEGACY_FLOW_KEYS){
+      const x=GM_getValue(key,null);
+      if(x&&String(x.work_id||'')===String(job.work_id||'')&&validStageName(x.stage)){
+        GM_setValue(STORE.flow,x);
+        return x;
+      }
+    }
+  }
+  return {};
+}
+function migrateBatch(){
+  let cur=GM_getValue(STORE.batch,null);
+  if(cur)return cur;
+  for(const key of LEGACY_BATCH_KEYS){
+    const x=GM_getValue(key,null);
+    if(x){
+      GM_setValue(STORE.batch,x);
+      return x;
+    }
+  }
+  return {};
+}
+function flow(){return GM_getValue(STORE.flow,null)||migrateFlow()||{};}
+function setFlow(p){let n=Object.assign({},flow(),p||{},{updated_at:Date.now()});GM_setValue(STORE.flow,n);return n;}
+function batch(){return GM_getValue(STORE.batch,null)||migrateBatch()||{};}
+function setBatch(p){let n=Object.assign({},batch(),p||{},{updated_at:Date.now()});GM_setValue(STORE.batch,n);return n;}
+migrateFlow();
+migrateBatch();
 function payload(j){return j&&(j.payload||j)||{};}function items(j){let a=payload(j).items;return Array.isArray(a)?a.filter(Boolean):[];}function page(){if(location.hostname==='cart.coupang.com')return'CART';if(location.hostname==='checkout.coupang.com')return'CHECKOUT';if(location.hostname==='login.coupang.com')return'AUTH';if(location.hostname==='id.coupang.com')return'ADDRESS';if(/\/vp\/products\//.test(location.pathname))return'PRODUCT';return'COUPANG';}
 function uuid(){return crypto&&crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);}function clientId(){let x=GM_getValue(STORE.client,'');if(!x){x='PC-RUNNER-'+uuid();GM_setValue(STORE.client,x);}return x;}
 function blocked(){let t=(document.title||'')+' '+String(document.body&&document.body.innerText||'').slice(0,6000);return /Access Denied|You don't have permission to access|errors\.edgesuite\.net/i.test(t);}
@@ -62,7 +99,7 @@ function wipeAndGo(url,label){if(!url)throw new Error('NEXT_URL_MISSING');try{wi
 function cartUrl(){return'https://cart.coupang.com/cartView.pang';}
 function panel(){let p=document.getElementById('gmao-runner-v066');if(p)return p;p=document.createElement('div');p.id='gmao-runner-v066';p.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;width:300px;background:#111827;color:#d1fae5;border:1px solid #334155;border-radius:10px;padding:10px;font:12px/1.45 Arial,sans-serif;box-shadow:0 4px 18px #0005';document.documentElement.appendChild(p);return p;}
 function button(t,fn,danger){let b=document.createElement('button');b.textContent=t;b.style.cssText='border:0;border-radius:5px;padding:7px 9px;margin:6px 4px 0 0;color:#fff;font-weight:700;background:'+(danger?'#c9382b':'#1463d6');b.onclick=fn;return b;}
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V066</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim(true).catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V067</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -73,37 +110,34 @@ function clearLocal(){
 }
 function errCode(e){return String(e&&e.message||e||'').trim();}
 async function fail(e){
-  let code=errCode(e),st=flow().stage||'';
-  if(STALE.has(code)){clearLocal();render('서버 작업 종료 확인\n'+code,true);return;}
-  if(/COUPANG_ACCESS_DENIED/.test(code)||blocked()){
-    setFlow({stage:ST.BLOCKED,failure_reason:'COUPANG_ACCESS_DENIED'});
-    setBatch({cart_cleaned:false});
-    render('쿠팡 접근 차단 감지 · 자동작업 정지',true);
-    return;
-  }
+  const code=errCode(e);
+  const st=flow().stage||'';
 
-  // Initial cart scan/cleanup belongs to the continuous-session preflight.
-  // A DOM/confirm timing failure here must not discard the already claimed order.
-  if(job&&(st===ST.BATCH_SCAN||st===ST.BATCH_CLEAR)){
-    setBatch({cart_cleaned:false,last_preflight_error:code});
-    setFlow({stage:st,preflight_error:code});
-    render('장바구니 사전정리 단계 정지\n'+code+'\n현재 작업은 유지합니다. 다시 실행하면 같은 단계부터 재개합니다.',true);
-    return;
-  }
-
-  setBatch({cart_cleaned:false});
-  if(job){
-    let j=job;
-    try{
-      await req('/api/auto-order/runtime/work/'+encodeURIComponent(j.work_id)+'/state','POST',
-        settings({lock_token:j.lock_token,status:'FAILED',detail:{phase:'AUTO_ORDER_FAILED',reason:code,stage:st,page_type:page()}}));
-    }catch(_e){}
+  if(STALE.has(code)){
     clearLocal();
-    render('주문 실패 기록 · 다음 주문으로 이동\n'+code,true);
-    setTimeout(()=>claim(false).catch(fail),700);
+    render('서버에서 현재 작업이 종료된 것을 확인했습니다.\n'+code+'\n로컬 작업만 정리했습니다.',true);
     return;
   }
-  render('오류\n'+code,true);
+
+  if(/COUPANG_ACCESS_DENIED/.test(code)||blocked()){
+    setFlow({stage:ST.BLOCKED,failure_reason:'COUPANG_ACCESS_DENIED',last_error:code});
+    setBatch({cart_cleaned:false});
+    render('쿠팡 접근 차단 감지 · 현재 작업/단계 보존\n'+code,true);
+    return;
+  }
+
+  // During development/testing an execution error must NOT throw away the
+  // claimed work. Keep work_id, lock_token and exact stage for inspection/retry.
+  setFlow({last_error:code,error_stage:st,error_page:page(),error_at:Date.now()});
+  if(st===ST.BATCH_SCAN||st===ST.BATCH_CLEAR)setBatch({cart_cleaned:false,last_preflight_error:code});
+
+  render(
+    '현재 작업에서 오류 발생 · 작업 보존\n'+
+    'work_id='+(job&&job.work_id||'-')+'\n'+
+    'stage='+(st||'-')+' · page='+page()+'\n'+
+    code+'\n현재 단계 재개 또는 작업 반환을 선택하세요.',
+    true
+  );
 }
 async function register(){return req('/api/auto-order/runtime/register','POST',settings());}async function heartbeat(){return req('/api/auto-order/runtime/heartbeat','POST',settings());}async function workHeartbeat(){if(!job)return;return req('/api/auto-order/runtime/work/'+encodeURIComponent(job.work_id)+'/heartbeat','POST',settings({lock_token:job.lock_token}));}async function guard(){
   try{
@@ -118,40 +152,57 @@ async function register(){return req('/api/auto-order/runtime/register','POST',s
     throw e;
   }
 }function startWorkTimer(){clearInterval(workTimer);if(job)workTimer=setInterval(()=>workHeartbeat().catch(fail),5000);}
-async function claim(manualStart){
-  if(job){await guard();render('이미 작업 보유 중 #'+job.work_id);return job;}
-
-  // User pressing "작업 가져오기" means a NEW continuous run.
-  // Its first order always checks/cleans the cart.
-  if(manualStart===true){
-    setBatch({
-      cart_cleaned:false,
-      session_id:'S-'+Date.now(),
-      session_started_at:Date.now(),
-      last_preflight_error:null
-    });
+async function claim(){
+  if(job){
+    try{
+      await workHeartbeat();
+      startWorkTimer();
+      render('이미 유효한 작업 보유 중 #'+job.work_id+'\n현재 단계를 계속 사용합니다.');
+      return job;
+    }catch(e){
+      if(!STALE.has(errCode(e)))throw e;
+      const stale=errCode(e);
+      clearLocal();
+      render('기존 로컬 작업은 서버에서 종료됨\n'+stale+'\n새 작업을 요청합니다.');
+    }
   }
 
-  let r=await req('/api/auto-order/runtime/claim','POST',settings());
-  if(!r.job){render('배정 가능한 작업 없음\n'+(r.reason||'queue_empty'));return null;}
+  render('작업 배정 요청 중…');
+  const r=await req('/api/auto-order/runtime/claim','POST',settings());
+  if(!r.job){
+    render('배정 가능한 작업 없음\n'+(r.reason||'queue_empty'));
+    return null;
+  }
 
   job=r.job;
   GM_setValue(STORE.job,job);
   startWorkTimer();
 
-  let clean=(manualStart!==true&&batch().cart_cleaned===true);
+  // A newly claimed work is the first work of a new continuous run from
+  // the Runner's point of view. Cart state must be inspected before product work.
+  GM_setValue(STORE.batch,null);
+  setBatch({
+    cart_cleaned:false,
+    session_id:'S-'+Date.now(),
+    session_started_at:Date.now()
+  });
   setFlow({
     work_id:job.work_id,
-    stage:clean?ST.ORDER_START:ST.BATCH_SCAN,
+    stage:ST.BATCH_SCAN,
     item_index:0,
     repair_index:0,
     cart_snapshot:null,
     cart_plan:null,
     final_verify:false,
-    preflight_error:null
+    last_error:null
   });
-  render('작업 배정 완료 #'+job.work_id+'\n'+(clean?'연속작업 다음 주문 · 장바구니 사전청소 생략':'연속작업 첫 주문 · 장바구니 확인/청소부터 시작'));
-  setTimeout(()=>orchestrate().catch(fail),250);
+
+  render(
+    '작업 배정 완료 #'+job.work_id+'\n'+
+    String(job.auto_order_no||'')+'\n'+
+    '장바구니 확인/청소부터 시작'
+  );
+  setTimeout(()=>orchestrate().catch(fail),300);
   return job;
 }
 async function release(){if(!job)return;let j=job;try{await req('/api/auto-order/runtime/work/'+encodeURIComponent(j.work_id)+'/release','POST',settings({lock_token:j.lock_token}));}finally{clearLocal();render('작업 반환 완료');}}
@@ -173,7 +224,7 @@ function passwordMethodButton(){return Array.from(document.querySelectorAll('but
 async function auth(){if(!job||page()!=='AUTH')return false;let input=document.querySelector('#auth-password-input,input[name="password"][type="password"]');if(!input){let b=passwordMethodButton();if(b){GM_setValue('gmao_runner_auth_status_v023',{state:'PASSWORD_METHOD_SELECTED',ts:Date.now()});render('쿠팡 추가인증 감지\n비밀번호 확인 방식을 선택합니다.');b.click();return true;}return false;}await guard();let x=await req('/api/auto-order/runtime/work/'+encodeURIComponent(job.work_id)+'/credential','POST',settings({lock_token:job.lock_token})),c=x&&x.credential||{};if(!c.password)throw new Error('CPKR_MASTER 비밀번호가 컨트롤타워에 등록되지 않았습니다.');GM_setValue('gmao_runner_auth_status_v023',{state:'PASSWORD_FILLING',ts:Date.now()});render('쿠팡 추가인증 감지\nCPKR_MASTER 비밀번호를 자동 입력합니다.');nativeInputValue(input,c.password);c.password='';await new Promise(r=>setTimeout(r,250));let submit=document.querySelector('button[type="submit"].authentication-password__submit-btn,button[type="submit"]');if(!submit)throw new Error('쿠팡 추가인증 계속하기 버튼을 찾지 못했습니다.');if(submit.disabled){input.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,key:'a'}));await new Promise(r=>setTimeout(r,200));}GM_setValue('gmao_runner_auth_status_v023',{state:'PASSWORD_SUBMITTED',ts:Date.now()});submit.click();return true;}
 function setBridge(x){GM_setValue(STORE.bridge,Object.assign({ts:Date.now()},x||{}));}function getBridge(){return GM_getValue(STORE.bridge,null);}async function waitBridge(workId,ms){let t=Date.now();while(Date.now()-t<(ms||90000)){let x=getBridge();if(x&&String(x.work_id)===String(workId)){if(x.state==='DONE')return x;if(x.state==='ERROR')throw new Error(x.error||'ADDRESS_BRIDGE_ERROR');}await new Promise(r=>setTimeout(r,250));}throw new Error('ADDRESS_BRIDGE_TIMEOUT');}
 async function addressFrame(){if(location.hostname!=='id.coupang.com'||!/^\/addressbook\//.test(location.pathname))return false;let b=null,t=Date.now();while(Date.now()-t<300000){let x=getBridge();if(x&&x.state==='REQUESTED'&&x.receiver){b=x;break;}await new Promise(r=>setTimeout(r,250));}if(!b)return true;try{await loadCheckout();setBridge(Object.assign({},b,{state:'RUNNING'}));let r=await window.CPKR_CHECKOUT.fillAddressOnly(b.receiver,null,{action:b.action||'ADD',current_address_text:b.current_address_text||''});setBridge(Object.assign({},b,{state:'DONE',result:r||{ok:true}}));}catch(e){setBridge(Object.assign({},b,{state:'ERROR',error:errCode(e)}));}return true;}
-async function checkout(){if(page()!=='CHECKOUT')return;await guard();await loadCheckout();let p=payload(job),receiver=p.receiver||{};if(!receiver.name||!receiver.phone||!receiver.zipcode||!receiver.road_address)throw new Error('RECEIVER_PAYLOAD_INCOMPLETE');let order=Object.assign({},p.order||{},{receiver:receiver,shipping:receiver,address:receiver}),plan=window.CPKR_CHECKOUT.inspectAddress(order);if(plan.action!=='KEEP')setBridge({state:'REQUESTED',work_id:job.work_id,auto_order_no:job.auto_order_no,action:plan.action,current_address_text:plan.current_text||'',receiver:receiver});let r=await window.CPKR_CHECKOUT.fillAndStop(order,{addressPlan:plan,onProgress:x=>render('배송지 처리\n'+x),waitForAddressBridge:()=>waitBridge(job.work_id,90000)});await req('/api/auto-order/runtime/work/'+encodeURIComponent(job.work_id)+'/state','POST',settings({lock_token:job.lock_token,status:'STOPPED_BEFORE_PAYMENT',detail:{phase:'CHECKOUT_STOPPED_BEFORE_PAYMENT',address_branch:plan.branch,address_action:(r&&r.address_result&&r.address_result.action)||plan.action}}));setFlow({stage:ST.STOPPED});clearInterval(workTimer);GM_setValue(STORE.job,null);job=null;render('결제하기 직전 정지 완료');}
+async function checkout(){if(page()!=='CHECKOUT')return;await guard();await loadCheckout();let p=payload(job),receiver=p.receiver||{};if(!receiver.name||!receiver.phone||!receiver.zipcode||!receiver.road_address)throw new Error('RECEIVER_PAYLOAD_INCOMPLETE');let order=Object.assign({},p.order||{},{receiver:receiver,shipping:receiver,address:receiver}),plan=window.CPKR_CHECKOUT.inspectAddress(order);if(plan.action!=='KEEP')setBridge({state:'REQUESTED',work_id:job.work_id,auto_order_no:job.auto_order_no,action:plan.action,current_address_text:plan.current_text||'',receiver:receiver});let r=await window.CPKR_CHECKOUT.fillAndStop(order,{addressPlan:plan,onProgress:x=>render('배송지 처리\n'+x),waitForAddressBridge:()=>waitBridge(job.work_id,90000)});await req('/api/auto-order/runtime/work/'+encodeURIComponent(job.work_id)+'/state','POST',settings({lock_token:job.lock_token,status:'STOPPED_BEFORE_PAYMENT',detail:{phase:'CHECKOUT_STOPPED_BEFORE_PAYMENT',address_branch:plan.branch,address_action:(r&&r.address_result&&r.address_result.action)||plan.action}}));setFlow({stage:ST.STOPPED});clearInterval(workTimer);workTimer=null;GM_setValue(STORE.job,null);job=null;render('결제하기 직전 정지 완료');}
 async function orchestrate(){if(busy||!job)return;if(blocked()){await fail(new Error('COUPANG_ACCESS_DENIED'));return;}busy=true;try{let f=flow(),s=f.stage||ST.BATCH_SCAN;if(page()==='AUTH'){await auth();return;}if(s===ST.BATCH_SCAN)await batchScan();else if(s===ST.BATCH_CLEAR)await batchClear();else if(s===ST.ORDER_START)await startOrder();else if(s===ST.SINGLE)await runSingle();else if(s===ST.MULTI_PRODUCT)await runMultiProduct();else if(s===ST.MULTI_SNAPSHOT)await snapshotAndDetach(false);else if(s===ST.MULTI_COMPARE)await compareDetached();else if(s===ST.MULTI_ADJUST)await adjustOnce();else if(s===ST.MULTI_REPAIR)await repairMissing();else if(s===ST.MULTI_FINAL_SNAPSHOT)await snapshotAndDetach(true);else if(s===ST.MULTI_CHECKOUT)await multiCheckout();else if(s===ST.CHECKOUT_PENDING)await checkoutPending();else if(s===ST.CHECKOUT)await checkout();else if(s===ST.STOPPED)render('결제 직전 정지 상태');else if(s===ST.FAILED)render('실패 기록 완료 · 다음 작업 대기',true);else if(s===ST.BLOCKED)render('쿠팡 접근 차단 상태',true);else throw new Error('UNKNOWN_STAGE:'+s);}finally{busy=false;}}
 async function start(){
   try{
@@ -188,8 +239,9 @@ async function start(){
         startWorkTimer();
 
         let f=flow();
-        if(String(f.work_id||'')!==String(job.work_id||'')||!f.stage){
-          setBatch({cart_cleaned:false});
+        if(String(f.work_id||'')!==String(job.work_id||'')||!validStageName(f.stage)){
+          GM_setValue(STORE.batch,null);
+          setBatch({cart_cleaned:false,session_id:'R-'+Date.now(),session_started_at:Date.now()});
           setFlow({
             work_id:job.work_id,
             stage:ST.BATCH_SCAN,
@@ -198,11 +250,11 @@ async function start(){
             cart_snapshot:null,
             cart_plan:null,
             final_verify:false,
-            preflight_error:null
+            last_error:null
           });
-          render('기존 작업 복구 #'+job.work_id+'\n진행상태 연결이 없어 장바구니 확인부터 복구');
+          render('기존 작업 복구 #'+job.work_id+'\n진행상태 연결 없음 → 장바구니 확인부터 안전 복구');
         }else{
-          render('기존 작업 복구 #'+job.work_id);
+          render('기존 작업 복구 #'+job.work_id+'\n단계='+f.stage);
         }
         setTimeout(()=>orchestrate().catch(fail),350);
       }catch(e){
