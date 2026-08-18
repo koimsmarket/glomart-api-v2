@@ -1,11 +1,11 @@
-/* CPKR_PRODUCT_V075
+/* CPKR_PRODUCT_V076
  * Authoritative Coupang PRODUCT module.
  * One item = one inspect -> optional quantity input -> one action.
  * IMPORTANT: PUID direct URL already selects the SKU. This module NEVER changes option DOM.
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='075') return;
+  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='076') return;
 
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -69,6 +69,32 @@
   function exactCartButton(){var b=D.querySelector('button.prod-cart-btn');return b&&visible(b)&&!disabled(b)?b:null;}
   function exactBuyButton(){var b=D.querySelector('button.prod-buy-btn,a.prod-buy-btn');return b&&visible(b)&&!disabled(b)?b:null;}
 
+  function activateBuyButton(buy,pageWindow){
+    /* Coupang BUY NOW is handled by mouse-event listeners on some product pages.
+       HTMLElement.click() alone can leave the page at PRODUCT even though the
+       button node exists. Send one normal mouse activation sequence instead.
+       IMPORTANT: this is still exactly one BUY action; there is no retry. */
+    var pw=pageWindow||W;
+    try{buy.scrollIntoView({block:'center',inline:'center'});}catch(_e){}
+    try{buy.focus({preventScroll:true});}catch(_e2){try{buy.focus();}catch(_e3){}}
+    var rect=buy.getBoundingClientRect();
+    var x=Math.max(0,Math.round(rect.left+rect.width/2));
+    var y=Math.max(0,Math.round(rect.top+rect.height/2));
+    var init={bubbles:true,cancelable:true,view:pw,button:0,buttons:1,clientX:x,clientY:y};
+    var names=['pointerdown','mousedown','pointerup','mouseup','click'];
+    for(var i=0;i<names.length;i++){
+      var name=names[i],ev;
+      try{
+        if(/^pointer/.test(name)&&pw.PointerEvent)ev=new pw.PointerEvent(name,Object.assign({},init,{pointerId:1,pointerType:'mouse',isPrimary:true}));
+        else ev=new pw.MouseEvent(name,init);
+        buy.dispatchEvent(ev);
+      }catch(_e4){
+        if(name==='click'){buy.click();}
+      }
+    }
+    return {method:'mouse-sequence',tag:String(buy.tagName||''),class_name:String(buy.className||'')};
+  }
+
   async function settleAfterCartClick(){
     /* No repeated DOM/header/body inspection.
        Final CART snapshot is the authoritative success verification. */
@@ -109,8 +135,8 @@
     if(mode==='SINGLE'){
       var buy=exactBuyButton(); if(!buy)throw new Error('BUY_NOW_NODE_NOT_FOUND');
       if(typeof options.beforeAction==='function')options.beforeAction({action:'BUY_NOW',inspection:check,quantity:q});
-      buy.click();
-      return {ok:true,inspection:check,quantity:q,action:'BUY_NOW',clicked:true};
+      var activation=activateBuyButton(buy,pageWindow);
+      return {ok:true,inspection:check,quantity:q,action:'BUY_NOW',clicked:true,activation:activation};
     }
     var cart=exactCartButton(); if(!cart)throw new Error('CART_BUTTON_NODE_NOT_FOUND');
     var alarm=armServerAlert(pageWindow);
@@ -133,5 +159,5 @@
     }finally{alarm.restore();}
   }
 
-  W.CPKR_PRODUCT={version:'075',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
+  W.CPKR_PRODUCT={version:'076',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
 })(window,document);

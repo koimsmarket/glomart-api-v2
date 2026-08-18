@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.075
+// @version      0.076
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -17,10 +17,10 @@
 // ==/UserScript==
 (function(){
 'use strict';
-const VERSION='0.075';
+const VERSION='0.076';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
- product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=075',
+ product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=076',
  cart:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=075',
  checkout:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=029',
  util:API+'/auto-order-client/shared/js/GM_AUTO_ORDER_UTIL.js?v=013'
@@ -137,7 +137,7 @@ function blocked(){let t=(document.title||'')+' '+String(document.body&&document
 function settings(extra){return Object.assign({client_id:clientId(),client_type:'PC_RUNNER',admin_id:GM_getValue('gmao_admin_id','derzon'),mall_account_id:GM_getValue('gmao_mall_account_id','CPKR_MASTER'),mall_code:'CPKR',cpkr_ready:true,app_version:VERSION,current_url:location.href,page_type:page(),current_work_id:job?job.work_id:null,state:{stage:flow().stage||'',page_type:page()},device:{platform:'tampermonkey',userAgent:navigator.userAgent}},extra||{});}
 function req(path,method,body){return new Promise((ok,bad)=>GM_xmlhttpRequest({method:method||'GET',url:API+path,headers:{'Content-Type':'application/json'},data:body?JSON.stringify(body):undefined,timeout:15000,onload:r=>{let x={};try{x=r.responseText?JSON.parse(r.responseText):{};}catch(_e){bad(new Error('NON_JSON_'+r.status));return;}if(r.status<200||r.status>=300||x.ok===false){bad(new Error(x.detail||x.error||'HTTP_'+r.status));return;}ok(x);},onerror:()=>bad(new Error('NETWORK_ERROR')),ontimeout:()=>bad(new Error('REQUEST_TIMEOUT'))}));}
 const loaded=new Map();function load(url,ready,label){if(ready())return Promise.resolve();if(loaded.has(url))return loaded.get(url);let p=new Promise((ok,bad)=>GM_xmlhttpRequest({method:'GET',url:url,timeout:12000,onload:r=>{try{new Function('window','document',r.responseText+'\n//# sourceURL='+url)(window,document);}catch(e){bad(new Error(label+'_EXEC:'+e.message));return;}ready()?ok():bad(new Error(label+'_NOT_READY'));},onerror:()=>bad(new Error(label+'_LOAD_ERROR')),ontimeout:()=>bad(new Error(label+'_TIMEOUT'))}));loaded.set(url,p);p.catch(()=>loaded.delete(url));return p;}
-function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.version==='075'&&window.CPKR_PRODUCT.run),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.version==='075'&&window.CPKR_CART.snapshot),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!window.CPKR_CHECKOUT,'CHECKOUT');}
+function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.version==='074'&&window.CPKR_PRODUCT.run),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.version==='074'&&window.CPKR_CART.snapshot),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!window.CPKR_CHECKOUT,'CHECKOUT');}
 function wipeAndGo(url,label){
   if(!url)throw new Error('NEXT_URL_MISSING');
 
@@ -208,9 +208,9 @@ async function settleCartStage(tag,ms){
   cartSettleMemo.tags.add(key);
 }
 function cartUrl(){return'https://cart.coupang.com/cartView.pang';}
-function panel(){let p=document.getElementById('gmao-runner-v075');if(p)return p;p=document.createElement('div');p.id='gmao-runner-v075';p.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;width:300px;background:#111827;color:#d1fae5;border:1px solid #334155;border-radius:10px;padding:10px;font:12px/1.45 Arial,sans-serif;box-shadow:0 4px 18px #0005';document.documentElement.appendChild(p);return p;}
+function panel(){let p=document.getElementById('gmao-runner-v074');if(p)return p;p=document.createElement('div');p.id='gmao-runner-v074';p.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;width:300px;background:#111827;color:#d1fae5;border:1px solid #334155;border-radius:10px;padding:10px;font:12px/1.45 Arial,sans-serif;box-shadow:0 4px 18px #0005';document.documentElement.appendChild(p);return p;}
 function button(t,fn,danger){let b=document.createElement('button');b.textContent=t;b.style.cssText='border:0;border-radius:5px;padding:7px 9px;margin:6px 4px 0 0;color:#fff;font-weight:700;background:'+(danger?'#c9382b':'#1463d6');b.onclick=fn;return b;}
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V075</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V074</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('현재 단계 재개',()=>orchestrate().catch(fail)));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -309,8 +309,6 @@ async function claim(){
 
   job=r.job;
   GM_setValue(STORE.job,job);
-  // New claim must never inherit AUTH progress from a previous work.
-  GM_setValue('gmao_runner_auth_status_v023',null);
   startWorkTimer();
 
   let b=batch();
@@ -583,7 +581,8 @@ async function adjustOnce(){
     setFlow({
       stage:ST.MULTI_REPAIR,
       repair_index:0,
-      repair_missing:miss
+      repair_missing:miss,
+      cart_settled_for:null
     });
     await loadProduct();
     let u=itemUrl(miss[0].item);
