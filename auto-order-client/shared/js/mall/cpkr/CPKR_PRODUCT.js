@@ -164,7 +164,21 @@
 
     if(mode==='MULTI'){
       var cart=await waitProductActionReady('MULTI');
-      if(!cart)throw new Error('CART_BUTTON_NODE_NOT_FOUND');
+      if(!cart){
+        /* Soldier contract: absence is a report, not a process-killing error.
+           Runner decides whether to verify CART, retry once, or fail the order. */
+        return {
+          ok:true,
+          mode:'MULTI',
+          _target:null,
+          inspection:check,
+          quantity:q,
+          action:'ADD_TO_CART',
+          ready:false,
+          found:false,
+          reason:'CART_BUTTON_NOT_FOUND'
+        };
+      }
       return {
         ok:true,
         mode:'MULTI',
@@ -172,7 +186,8 @@
         inspection:check,
         quantity:q,
         action:'ADD_TO_CART',
-        ready:true
+        ready:true,
+        found:true
       };
     }
 

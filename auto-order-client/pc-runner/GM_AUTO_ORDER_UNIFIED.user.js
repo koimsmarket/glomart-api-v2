@@ -425,9 +425,12 @@ async function prepareProduct(mode,item){
   render(
     (String(mode).toUpperCase()==='SINGLE'
       ?'단건 상품 준비 완료'
-      :'다건 상품 준비 완료')+
-    '\nPUID='+prepared.inspection.current_puid+
-    '\n수량='+prepared.quantity.after+
+      :(prepared.ready===false
+        ?'다건 PRODUCT 병사 보고 · 대상 없음'
+        :'다건 상품 준비 완료'))+
+    '\nPUID='+(prepared.inspection&&prepared.inspection.current_puid||'-')+
+    '\n수량='+(prepared.quantity&&prepared.quantity.after||'-')+
+    (prepared.reason?'\nREPORT='+prepared.reason:'')+
     (prepared.target
       ?'\nACTION='+prepared.target.tag+
         ' ['+prepared.target.text+'] href='+(prepared.target.href||'-')
@@ -560,12 +563,32 @@ async function runMultiProduct(){
 
   /* Prepare and verify immediately before the one cart click. */
   let prepared=await prepareProduct('MULTI',item);
+
+  if(prepared&&prepared.ready===false&&prepared.reason==='CART_BUTTON_NOT_FOUND'){
+    /* Soldier found no actionable cart button. Do not fail here and do not click
+       anything. Commander verifies the authoritative CART state next. */
+    setFlow({
+      stage:ST.MULTI_PRODUCT_PENDING,
+      item_index:idx,
+      multi_pending:{
+        key:runnerUid(item).key,
+        qty:Number(item.qty||item.quantity||1),
+        ts:Date.now(),
+        clicked:false,
+        report:'CART_BUTTON_NOT_FOUND'
+      }
+    });
+    render('PRODUCT 병사 복귀 보고 · 장바구니 버튼 없음\n클릭 없이 CART에서 실제 반영 여부를 확인합니다.');
+    wipeAndGo(cartUrl(),'MULTI_PRODUCT_NO_CART_BUTTON_VERIFY');
+    return;
+  }
+
   await guard();
 
   setFlow({
     stage:ST.MULTI_PRODUCT_PENDING,
     item_index:idx,
-    multi_pending:{key:runnerUid(item).key,qty:Number(item.qty||item.quantity||1),ts:Date.now()}
+    multi_pending:{key:runnerUid(item).key,qty:Number(item.qty||item.quantity||1),ts:Date.now(),clicked:true}
   });
 
   let result=await window.CPKR_PRODUCT.addToCart(
@@ -764,6 +787,32 @@ async function repairMissing(){
   }
 
   let prepared=await prepareProduct('MULTI',item);
+
+  if(prepared&&prepared.ready===false&&prepared.reason==='CART_BUTTON_NOT_FOUND'){
+    /* One repair visit also found no target. Soldier reports and returns.
+       Commander continues to the final CART snapshot; only the final compare
+       may decide that the order itself failed. */
+    let reports=Array.isArray(f.repair_reports)?f.repair_reports.slice():[];
+    reports.push({
+      repair_index:i,
+      reason:'CART_BUTTON_NOT_FOUND',
+      puid:prepared.inspection&&prepared.inspection.current_puid||'',
+      at:Date.now()
+    });
+    i++;
+    setFlow({repair_index:i,repair_reports:reports});
+    render('누락상품 PRODUCT 병사 복귀 보고 · 장바구니 버튼 없음\n전체 작업을 죽이지 않고 최종 CART 검증으로 넘깁니다.');
+    if(i<m.length){
+      let next=itemUrl(m[i].item);
+      if(!next)throw new Error('CPKR_PUID_MISSING');
+      wipeAndGo(next,'MULTI_REPAIR_NEXT_REPORT');
+      return;
+    }
+    setFlow({stage:ST.MULTI_FINAL_SNAPSHOT});
+    wipeAndGo(cartUrl(),'MULTI_FINAL_SNAPSHOT_AFTER_REPORT');
+    return;
+  }
+
   await guard();
 
   let result=await window.CPKR_PRODUCT.addToCart(
@@ -897,6 +946,16 @@ async function batchScan(){
 
   let c=window.CPKR_CART.headerCount();
 
+  /* Header 0 is authoritative: never dispatch the CART cleaning soldier.
+     If the header is not readable yet, give it a short second chance before
+     navigating to CART for confirmation. */
+  if(c==null){
+    for(let retry=0;retry<3&&c==null;retry++){
+      await new Promise(r=>setTimeout(r,250));
+      c=window.CPKR_CART.headerCount();
+    }
+  }
+
   if(c===0){
     setBatch({
       cart_cleaned:true,
@@ -905,6 +964,7 @@ async function batchScan(){
       method:'header-zero-confirmed'
     });
     setFlow({stage:ST.ORDER_START});
+    render('장바구니 헤더 0 확인 · CART 청소 병사 호출 없이 주문 시작');
     await startOrder();
     return;
   }
@@ -915,6 +975,7 @@ async function batchScan(){
     return;
   }
 
+  /* Unknown is not treated as non-empty. CART is opened only to confirm state. */
   wipeAndGo(cartUrl(),'BATCH_SCAN_CART_CONFIRM');
 }async function batchClear(){
   if(page()!=='CART'){
