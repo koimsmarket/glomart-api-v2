@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.080
+// @version      0.083
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
 // @match        https://checkout.coupang.com/*
 // @match        https://login.coupang.com/*
 // @match        https://id.coupang.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -17,11 +17,37 @@
 // ==/UserScript==
 (function(){
 'use strict';
-const VERSION='0.080';
+
+/* V083: Coupang occasionally raises a native alert while PRODUCT is still
+   loading because one of its auxiliary next-api calls returns 403. The
+   product/SKU itself can remain fully usable. A native alert blocks every
+   page script, including the PRODUCT soldier, so suppress only this exact
+   transient server-error dialog as early as document-start. Other dialogs
+   keep Coupang's native behavior. */
+(function installCoupangTransientServerAlertBypass(){
+  let pw;
+  try{pw=(typeof unsafeWindow!=='undefined'&&unsafeWindow)?unsafeWindow:window;}catch(_e){pw=window;}
+  let nativeAlert;
+  try{nativeAlert=pw.alert;}catch(_e){nativeAlert=null;}
+  if(typeof nativeAlert!=='function')return;
+  if(nativeAlert.__gmaoV083TransientServerAlertBypass)return;
+
+  function alertHook(message){
+    const msg=String(message==null?'':message).replace(/\s+/g,' ').trim();
+    if(/^서버에서 오류가 발생하였습니다\.?$/.test(msg)){
+      try{console.info('[GMAO V083] Coupang transient server alert suppressed:',msg);}catch(_e){}
+      return;
+    }
+    return nativeAlert.apply(this,arguments);
+  }
+  try{Object.defineProperty(alertHook,'__gmaoV083TransientServerAlertBypass',{value:true});}catch(_e){}
+  try{pw.alert=alertHook;}catch(_e){}
+})();
+const VERSION='0.083';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
- product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=080',
- cart:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=080',
+ product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=083',
+ cart:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=083',
  checkout:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=029',
  util:API+'/auto-order-client/shared/js/GM_AUTO_ORDER_UTIL.js?v=013'
 };
@@ -137,7 +163,7 @@ function blocked(){let t=(document.title||'')+' '+String(document.body&&document
 function settings(extra){return Object.assign({client_id:clientId(),client_type:'PC_RUNNER',admin_id:GM_getValue('gmao_admin_id','derzon'),mall_account_id:GM_getValue('gmao_mall_account_id','CPKR_MASTER'),mall_code:'CPKR',cpkr_ready:true,app_version:VERSION,current_url:location.href,page_type:page(),current_work_id:job?job.work_id:null,state:{stage:flow().stage||'',page_type:page()},device:{platform:'tampermonkey',userAgent:navigator.userAgent}},extra||{});}
 function req(path,method,body){return new Promise((ok,bad)=>GM_xmlhttpRequest({method:method||'GET',url:API+path,headers:{'Content-Type':'application/json'},data:body?JSON.stringify(body):undefined,timeout:15000,onload:r=>{let x={};try{x=r.responseText?JSON.parse(r.responseText):{};}catch(_e){bad(new Error('NON_JSON_'+r.status));return;}if(r.status<200||r.status>=300||x.ok===false){bad(new Error(x.detail||x.error||'HTTP_'+r.status));return;}ok(x);},onerror:()=>bad(new Error('NETWORK_ERROR')),ontimeout:()=>bad(new Error('REQUEST_TIMEOUT'))}));}
 const loaded=new Map();function load(url,ready,label){if(ready())return Promise.resolve();if(loaded.has(url))return loaded.get(url);let p=new Promise((ok,bad)=>GM_xmlhttpRequest({method:'GET',url:url,timeout:12000,onload:r=>{try{new Function('window','document',r.responseText+'\n//# sourceURL='+url)(window,document);}catch(e){bad(new Error(label+'_EXEC:'+e.message));return;}ready()?ok():bad(new Error(label+'_NOT_READY'));},onerror:()=>bad(new Error(label+'_LOAD_ERROR')),ontimeout:()=>bad(new Error(label+'_TIMEOUT'))}));loaded.set(url,p);p.catch(()=>loaded.delete(url));return p;}
-function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.version==='080'&&typeof window.CPKR_PRODUCT.prepare==='function'&&typeof window.CPKR_PRODUCT.buyNow==='function'&&typeof window.CPKR_PRODUCT.addToCart==='function'),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.version==='080'&&typeof window.CPKR_CART.headerCount==='function'&&typeof window.CPKR_CART.snapshot==='function'&&typeof window.CPKR_CART.clearAll==='function'&&typeof window.CPKR_CART.compare==='function'&&typeof window.CPKR_CART.applyAdjustments==='function'&&typeof window.CPKR_CART.prepareCheckout==='function'&&typeof window.CPKR_CART.checkout==='function'),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!(window.CPKR_CHECKOUT&&typeof window.CPKR_CHECKOUT.inspectAddress==='function'&&typeof window.CPKR_CHECKOUT.fillAndStop==='function'&&typeof window.CPKR_CHECKOUT.fillAddressOnly==='function'),'CHECKOUT');}
+function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.version==='083'&&typeof window.CPKR_PRODUCT.prepare==='function'&&typeof window.CPKR_PRODUCT.buyNow==='function'&&typeof window.CPKR_PRODUCT.addToCart==='function'),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.version==='083'&&typeof window.CPKR_CART.headerCount==='function'&&typeof window.CPKR_CART.snapshot==='function'&&typeof window.CPKR_CART.clearAll==='function'&&typeof window.CPKR_CART.compare==='function'&&typeof window.CPKR_CART.applyAdjustments==='function'&&typeof window.CPKR_CART.prepareCheckout==='function'&&typeof window.CPKR_CART.checkout==='function'),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!(window.CPKR_CHECKOUT&&typeof window.CPKR_CHECKOUT.inspectAddress==='function'&&typeof window.CPKR_CHECKOUT.fillAndStop==='function'&&typeof window.CPKR_CHECKOUT.fillAddressOnly==='function'),'CHECKOUT');}
 function wipeAndGo(url,label){
   if(!url)throw new Error('NEXT_URL_MISSING');
 
@@ -220,7 +246,7 @@ function resumeCurrentStageExplicit(){
   }
   orchestrate().catch(fail);
 }
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V080</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button(f.stage===ST.BLOCKED?'차단 해제 후 재개':'현재 단계 재개',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V083</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button(f.stage===ST.BLOCKED?'차단 해제 후 재개':'현재 단계 재개',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -517,11 +543,41 @@ async function recoverMultiProductPending(){
   let expected=Number(item.qty||item.quantity||1),actual=Number(found&&(found.qty||found.quantity)||0);
   if(found&&actual>=expected){
     idx++;
-    setFlow({stage:ST.MULTI_PRODUCT,item_index:idx,multi_pending:null,multi_pending_recovered_at:Date.now()});
+    setFlow({
+      stage:ST.MULTI_PRODUCT,
+      item_index:idx,
+      multi_pending:null,
+      multi_no_cart_retry_count:0,
+      multi_pending_recovered_at:Date.now()
+    });
     render('장바구니 반영 확인 · 같은 상품을 다시 클릭하지 않습니다.');
     if(idx<a.length){let u=itemUrl(a[idx]);if(!u)throw new Error('CPKR_PUID_MISSING');wipeAndGo(u,'MULTI_PENDING_NEXT');return;}
     setFlow({stage:ST.MULTI_SNAPSHOT});wipeAndGo(cartUrl(),'MULTI_SNAPSHOT');return;
   }
+
+  /* Special contract: PRODUCT soldier reported that no cart button existed,
+     and CART verification confirms that this exact PID+VID is still absent.
+     This is not a normal missing-item repair case. Return to PRODUCT and let
+     prepare(MULTI) inspect one freshly loaded DOM exactly once. */
+  if(f.multi_pending&&f.multi_pending.report==='CART_BUTTON_NOT_FOUND'&&!found){
+    let retryCount=Math.max(0,Number(f.multi_no_cart_retry_count||0));
+    if(retryCount<1){
+      let u=itemUrl(item);
+      if(!u)throw new Error('CPKR_PUID_MISSING');
+      setFlow({
+        stage:ST.MULTI_PRODUCT,
+        item_index:idx,
+        multi_pending:null,
+        multi_no_cart_retry_count:retryCount+1,
+        multi_no_cart_retry_at:Date.now(),
+        failure_reason:null
+      });
+      render('CART 확인 결과 현재 상품 없음 · PRODUCT 새 DOM에서 prepare(MULTI) 1회 재시도');
+      wipeAndGo(u,'MULTI_PRODUCT_FRESH_RETRY');
+      return;
+    }
+  }
+
   let repairItem=Object.assign({},item,{quantity:expected,qty:expected});
   setFlow({
     stage:ST.MULTI_REPAIR,
@@ -565,21 +621,38 @@ async function runMultiProduct(){
   let prepared=await prepareProduct('MULTI',item);
 
   if(prepared&&prepared.ready===false&&prepared.reason==='CART_BUTTON_NOT_FOUND'){
-    /* Soldier found no actionable cart button. Do not fail here and do not click
-       anything. Commander verifies the authoritative CART state next. */
+    let retryCount=Math.max(0,Number(f.multi_no_cart_retry_count||0));
+
+    /* On the first report, commander verifies CART instead of blaming the
+       soldier. If CART confirms the item is absent, recoverMultiProductPending()
+       returns here on one freshly loaded PRODUCT DOM. */
+    if(retryCount<1){
+      setFlow({
+        stage:ST.MULTI_PRODUCT_PENDING,
+        item_index:idx,
+        multi_pending:{
+          key:runnerUid(item).key,
+          qty:Number(item.qty||item.quantity||1),
+          ts:Date.now(),
+          clicked:false,
+          report:'CART_BUTTON_NOT_FOUND'
+        }
+      });
+      render('PRODUCT 병사 복귀 보고 · 장바구니 버튼 없음\n클릭 없이 CART에서 실제 반영 여부를 확인합니다.');
+      wipeAndGo(cartUrl(),'MULTI_PRODUCT_NO_CART_BUTTON_VERIFY');
+      return;
+    }
+
+    /* Fresh PRODUCT DOM was already tried once and the target is still absent.
+       Soldier only reports; commander makes the final failure decision. */
     setFlow({
-      stage:ST.MULTI_PRODUCT_PENDING,
+      stage:ST.FAILED,
       item_index:idx,
-      multi_pending:{
-        key:runnerUid(item).key,
-        qty:Number(item.qty||item.quantity||1),
-        ts:Date.now(),
-        clicked:false,
-        report:'CART_BUTTON_NOT_FOUND'
-      }
+      multi_pending:null,
+      failure_reason:'CART_BUTTON_NOT_FOUND_AFTER_FRESH_RETRY',
+      failed_at:Date.now()
     });
-    render('PRODUCT 병사 복귀 보고 · 장바구니 버튼 없음\n클릭 없이 CART에서 실제 반영 여부를 확인합니다.');
-    wipeAndGo(cartUrl(),'MULTI_PRODUCT_NO_CART_BUTTON_VERIFY');
+    render('PRODUCT 새 DOM 재시도 후에도 장바구니 버튼 없음 · 지휘관이 작업 실패로 판정',true);
     return;
   }
 
@@ -608,7 +681,7 @@ async function runMultiProduct(){
 
   /* item_index advances only after PRODUCT action returns. */
   idx++;
-  setFlow({stage:ST.MULTI_PRODUCT,item_index:idx,multi_pending:null});
+  setFlow({stage:ST.MULTI_PRODUCT,item_index:idx,multi_pending:null,multi_no_cart_retry_count:0});
 
   if(idx<a.length){
     let u=itemUrl(a[idx]);
@@ -1229,5 +1302,9 @@ async function start(){
     }else render('온라인 · 작업 배정 대기');
   }catch(e){await fail(e);}
 }
-start();
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',()=>start(),{once:true});
+}else{
+  start();
+}
 })();
