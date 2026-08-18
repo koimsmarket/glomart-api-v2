@@ -84,7 +84,7 @@
     if(blocked())throw new Error('COUPANG_ACCESS_DENIED');
     if(!/\/vp\/products\//.test(location.pathname))throw new Error('NOT_PRODUCT_PAGE');
     var expected=identity(item),current=fromUrl(location.href);
-    /* V084 identity contract: Coupang itemId(IID) can change while the same
+    /* V085 identity contract: Coupang itemId(IID) can change while the same
        sellable option keeps the same PID+VID. Treat PID+VID as authoritative.
        IID is diagnostic/current-route data only and must never cause a re-open. */
     var match=!!(expected.pid&&expected.vid&&current.pid===expected.pid&&current.vid===expected.vid);
@@ -272,5 +272,5 @@
     return prepared;
   }
 
-  W.CPKR_PRODUCT={version:'084',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,prepare:prepare,buyNow:buyNow,addToCart:addToCart,run:run};
+  W.CPKR_PRODUCT={version:'085',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,prepare:prepare,buyNow:buyNow,addToCart:addToCart,run:run};
 })(window,document);

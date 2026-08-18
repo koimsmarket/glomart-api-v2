@@ -240,5 +240,5 @@
     var prepared=await prepareCheckout();
     return checkout(prepared);
   }
-  W.CPKR_CART={version:'084',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,prepareCheckout:prepareCheckout,checkout:checkout,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
+  W.CPKR_CART={version:'085',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,prepareCheckout:prepareCheckout,checkout:checkout,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
 })(window,document);
