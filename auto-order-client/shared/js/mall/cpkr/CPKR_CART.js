@@ -1,11 +1,11 @@
-/* CPKR_CART_V075
+/* CPKR_CART_V076
  * Authoritative Coupang CART module.
  * Owns: header count, one-shot initial clean, snapshot, detached compare,
  * one correction pass, select-all checkout. No automatic self-run.
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_CART && W.CPKR_CART.version==='075') return;
+  if(W.CPKR_CART && W.CPKR_CART.version==='076') return;
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function num(v,d){var n=Number(String(v==null?'':v).replace(/[^\d.-]/g,''));return isFinite(n)?n:(d||0);}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -29,7 +29,26 @@
     return {ok:missing.length===0&&extra.length===0&&qtyMismatch.length===0,missing:missing,extra:extra,qty_mismatch:qtyMismatch,target_count:targetMap.size,cart_count:cartMap.size};
   }
   function overallCheckbox(){var n=D.querySelector('input[type="checkbox"][title*="모든 상품"],input[type="checkbox"][title*="전체"]');if(n)return n;return Array.from(D.querySelectorAll('input[type="checkbox"]')).find(function(x){var h=x.closest('label,div,span');return h&&/전체\s*선택/.test(text(h));})||null;}
-  function selectedDelete(){return Array.from(D.querySelectorAll('button,a,[role="button"],div')).find(function(el){return text(el)==='선택삭제'&&(el.tagName==='BUTTON'||el.tagName==='A'||el.getAttribute('role')==='button'||/pointer/.test((getComputedStyle(el)||{}).cursor||''));})||null;}
+  function selectedDelete(){
+    var label=Array.from(D.querySelectorAll('button,a,[role="button"],div,span')).find(function(el){
+      return text(el)==='선택삭제';
+    });
+    if(!label)return null;
+
+    /* Coupang currently renders the text inside a plain inner div.
+       Use its clickable ancestor instead of requiring the text node itself
+       to have cursor:pointer. */
+    if(
+      label.tagName==='BUTTON' ||
+      label.tagName==='A' ||
+      label.getAttribute('role')==='button'
+    )return label;
+
+    var clickable=label.closest(
+      'button,a,[role="button"],div[class*="cursor-pointer"],div[class*="cursor_pointer"]'
+    );
+    return clickable||label;
+  }
   function rowCheckbox(row){return row&&row.querySelector('input[type="checkbox"]');}
   function nativeValue(input,value){var win=input.ownerDocument.defaultView||W,proto=win.HTMLInputElement&&win.HTMLInputElement.prototype,d=proto&&Object.getOwnPropertyDescriptor(proto,'value');if(d&&d.set)d.set.call(input,String(value));else input.value=String(value);input.dispatchEvent(new win.Event('input',{bubbles:true}));input.dispatchEvent(new win.Event('change',{bubbles:true}));try{input.blur();}catch(_e){}}
   function armConfirm(pageWindow){var pw=pageWindow||W,old=pw.confirm,done=false;function restore(){if(done)return;done=true;try{if(pw.confirm===hook)pw.confirm=old;}catch(_e){}}function hook(msg){var t=String(msg||'').replace(/\s+/g,' ').trim();if(/선택한 상품을 삭제하시겠습니까/.test(t)){restore();return true;}return old.call(pw,msg);}try{pw.confirm=hook;}catch(_e){}setTimeout(restore,2500);return restore;}
@@ -170,5 +189,5 @@
     go.click();
     return {ok:true,clicked:true};
   }
-  W.CPKR_CART={version:'075',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
+  W.CPKR_CART={version:'076',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
 })(window,document);
