@@ -5,7 +5,7 @@
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='083') return;
+  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='084') return;
 
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -83,8 +83,13 @@
   function inspect(item){
     if(blocked())throw new Error('COUPANG_ACCESS_DENIED');
     if(!/\/vp\/products\//.test(location.pathname))throw new Error('NOT_PRODUCT_PAGE');
-    var expected=identity(item),current=fromUrl(location.href),match=!!(expected.pid&&expected.iid&&expected.vid&&current.pid===expected.pid&&current.iid===expected.iid&&current.vid===expected.vid);
-    return {ok:match,puid_match:match,expected_puid:puid(expected),current_puid:puid(current),expected:expected,current:current,title:title(),login_required:loginRequired(),quantity:qty(item),url:location.href};
+    var expected=identity(item),current=fromUrl(location.href);
+    /* V084 identity contract: Coupang itemId(IID) can change while the same
+       sellable option keeps the same PID+VID. Treat PID+VID as authoritative.
+       IID is diagnostic/current-route data only and must never cause a re-open. */
+    var match=!!(expected.pid&&expected.vid&&current.pid===expected.pid&&current.vid===expected.vid);
+    var iidChanged=!!(match&&expected.iid&&current.iid&&expected.iid!==current.iid);
+    return {ok:match,puid_match:match,pid_vid_match:match,iid_changed:iidChanged,expected_puid:puid(expected),current_puid:puid(current),expected:expected,current:current,title:title(),login_required:loginRequired(),quantity:qty(item),url:location.href};
   }
   function exactCartButton(){
     return Array.from(D.querySelectorAll('button.prod-cart-btn,a.prod-cart-btn'))
@@ -267,5 +272,5 @@
     return prepared;
   }
 
-  W.CPKR_PRODUCT={version:'083',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,prepare:prepare,buyNow:buyNow,addToCart:addToCart,run:run};
+  W.CPKR_PRODUCT={version:'084',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,prepare:prepare,buyNow:buyNow,addToCart:addToCart,run:run};
 })(window,document);

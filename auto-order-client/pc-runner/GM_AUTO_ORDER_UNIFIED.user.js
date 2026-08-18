@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.083
+// @version      0.084
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -18,7 +18,7 @@
 (function(){
 'use strict';
 
-/* V083: Coupang occasionally raises a native alert while PRODUCT is still
+/* V084: Coupang occasionally raises a native alert while PRODUCT is still
    loading because one of its auxiliary next-api calls returns 403. The
    product/SKU itself can remain fully usable. A native alert blocks every
    page script, including the PRODUCT soldier, so suppress only this exact
@@ -30,24 +30,24 @@
   let nativeAlert;
   try{nativeAlert=pw.alert;}catch(_e){nativeAlert=null;}
   if(typeof nativeAlert!=='function')return;
-  if(nativeAlert.__gmaoV083TransientServerAlertBypass)return;
+  if(nativeAlert.__gmaoV084TransientServerAlertBypass)return;
 
   function alertHook(message){
     const msg=String(message==null?'':message).replace(/\s+/g,' ').trim();
     if(/^서버에서 오류가 발생하였습니다\.?$/.test(msg)){
-      try{console.info('[GMAO V083] Coupang transient server alert suppressed:',msg);}catch(_e){}
+      try{console.info('[GMAO V084] Coupang transient server alert suppressed:',msg);}catch(_e){}
       return;
     }
     return nativeAlert.apply(this,arguments);
   }
-  try{Object.defineProperty(alertHook,'__gmaoV083TransientServerAlertBypass',{value:true});}catch(_e){}
+  try{Object.defineProperty(alertHook,'__gmaoV084TransientServerAlertBypass',{value:true});}catch(_e){}
   try{pw.alert=alertHook;}catch(_e){}
 })();
-const VERSION='0.083';
+const VERSION='0.084';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
- product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=083',
- cart:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=083',
+ product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=084',
+ cart:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CART.js?v=084',
  checkout:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_CHECKOUT.js?v=029',
  util:API+'/auto-order-client/shared/js/GM_AUTO_ORDER_UTIL.js?v=013'
 };
@@ -163,7 +163,7 @@ function blocked(){let t=(document.title||'')+' '+String(document.body&&document
 function settings(extra){return Object.assign({client_id:clientId(),client_type:'PC_RUNNER',admin_id:GM_getValue('gmao_admin_id','derzon'),mall_account_id:GM_getValue('gmao_mall_account_id','CPKR_MASTER'),mall_code:'CPKR',cpkr_ready:true,app_version:VERSION,current_url:location.href,page_type:page(),current_work_id:job?job.work_id:null,state:{stage:flow().stage||'',page_type:page()},device:{platform:'tampermonkey',userAgent:navigator.userAgent}},extra||{});}
 function req(path,method,body){return new Promise((ok,bad)=>GM_xmlhttpRequest({method:method||'GET',url:API+path,headers:{'Content-Type':'application/json'},data:body?JSON.stringify(body):undefined,timeout:15000,onload:r=>{let x={};try{x=r.responseText?JSON.parse(r.responseText):{};}catch(_e){bad(new Error('NON_JSON_'+r.status));return;}if(r.status<200||r.status>=300||x.ok===false){bad(new Error(x.detail||x.error||'HTTP_'+r.status));return;}ok(x);},onerror:()=>bad(new Error('NETWORK_ERROR')),ontimeout:()=>bad(new Error('REQUEST_TIMEOUT'))}));}
 const loaded=new Map();function load(url,ready,label){if(ready())return Promise.resolve();if(loaded.has(url))return loaded.get(url);let p=new Promise((ok,bad)=>GM_xmlhttpRequest({method:'GET',url:url,timeout:12000,onload:r=>{try{new Function('window','document',r.responseText+'\n//# sourceURL='+url)(window,document);}catch(e){bad(new Error(label+'_EXEC:'+e.message));return;}ready()?ok():bad(new Error(label+'_NOT_READY'));},onerror:()=>bad(new Error(label+'_LOAD_ERROR')),ontimeout:()=>bad(new Error(label+'_TIMEOUT'))}));loaded.set(url,p);p.catch(()=>loaded.delete(url));return p;}
-function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.version==='083'&&typeof window.CPKR_PRODUCT.prepare==='function'&&typeof window.CPKR_PRODUCT.buyNow==='function'&&typeof window.CPKR_PRODUCT.addToCart==='function'),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.version==='083'&&typeof window.CPKR_CART.headerCount==='function'&&typeof window.CPKR_CART.snapshot==='function'&&typeof window.CPKR_CART.clearAll==='function'&&typeof window.CPKR_CART.compare==='function'&&typeof window.CPKR_CART.applyAdjustments==='function'&&typeof window.CPKR_CART.prepareCheckout==='function'&&typeof window.CPKR_CART.checkout==='function'),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!(window.CPKR_CHECKOUT&&typeof window.CPKR_CHECKOUT.inspectAddress==='function'&&typeof window.CPKR_CHECKOUT.fillAndStop==='function'&&typeof window.CPKR_CHECKOUT.fillAddressOnly==='function'),'CHECKOUT');}
+function loadProduct(){return load(URLS.product,()=>!!(window.CPKR_PRODUCT&&window.CPKR_PRODUCT.version==='084'&&typeof window.CPKR_PRODUCT.prepare==='function'&&typeof window.CPKR_PRODUCT.buyNow==='function'&&typeof window.CPKR_PRODUCT.addToCart==='function'),'PRODUCT');}function loadCart(){return load(URLS.cart,()=>!!(window.CPKR_CART&&window.CPKR_CART.version==='084'&&typeof window.CPKR_CART.headerCount==='function'&&typeof window.CPKR_CART.snapshot==='function'&&typeof window.CPKR_CART.clearAll==='function'&&typeof window.CPKR_CART.compare==='function'&&typeof window.CPKR_CART.applyAdjustments==='function'&&typeof window.CPKR_CART.prepareCheckout==='function'&&typeof window.CPKR_CART.checkout==='function'),'CART');}async function loadCheckout(){await load(URLS.util,()=>!!window.GMAO_UTIL,'UTIL');return load(URLS.checkout,()=>!!(window.CPKR_CHECKOUT&&typeof window.CPKR_CHECKOUT.inspectAddress==='function'&&typeof window.CPKR_CHECKOUT.fillAndStop==='function'&&typeof window.CPKR_CHECKOUT.fillAddressOnly==='function'),'CHECKOUT');}
 function wipeAndGo(url,label){
   if(!url)throw new Error('NEXT_URL_MISSING');
 
@@ -246,7 +246,7 @@ function resumeCurrentStageExplicit(){
   }
   orchestrate().catch(fail);
 }
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V083</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button(f.stage===ST.BLOCKED?'차단 해제 후 재개':'현재 단계 재개',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V084</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button(f.stage===ST.BLOCKED?'차단 해제 후 재개':'현재 단계 재개',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
