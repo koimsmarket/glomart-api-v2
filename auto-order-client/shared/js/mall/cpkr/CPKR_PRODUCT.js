@@ -1,17 +1,37 @@
-/* CPKR_PRODUCT_V076
+/* CPKR_PRODUCT_V075
  * Authoritative Coupang PRODUCT module.
  * One item = one inspect -> optional quantity input -> one action.
  * IMPORTANT: PUID direct URL already selects the SKU. This module NEVER changes option DOM.
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='076') return;
+  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='080') return;
 
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
   function visible(el){if(!el||!el.getBoundingClientRect)return false;var r=el.getBoundingClientRect();var s;try{s=(el.ownerDocument.defaultView||W).getComputedStyle(el);}catch(_e){}return r.width>0&&r.height>0&&(!s||(s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0'));}
   function disabled(el){return !!(el&&(el.disabled||el.getAttribute('aria-disabled')==='true'||/disabled|soldout|out-of-stock/i.test(String(el.className||''))));}
   function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+  async function waitProductActionReady(mode){
+    var started=Date.now(), last=null, stable=0;
+    while(Date.now()-started<6000){
+      var b=String(mode||'').toUpperCase()==='SINGLE'?exactBuyButton():exactCartButton();
+      if(b){
+        if(b===last)stable++; else {last=b;stable=1;}
+        if(stable>=3){
+          /* Keep one quiet gap after the same actionable node is observed
+             repeatedly. This replaces the readiness naturally provided by
+             the old INSPECTOR -> PREPARER -> PRODUCT_ORDER chain. */
+          await sleep(350);
+          return b;
+        }
+      }else{
+        last=null; stable=0;
+      }
+      await sleep(120);
+    }
+    return null;
+  }
 
   function fromUrl(raw){
     try{var u=new URL(String(raw||''),location.href),m=u.pathname.match(/\/vp\/products\/(\d+)/i);return {pid:m?m[1]:'',iid:digits(u.searchParams.get('itemId')),vid:digits(u.searchParams.get('vendorItemId'))};}
@@ -66,33 +86,16 @@
     var expected=identity(item),current=fromUrl(location.href),match=!!(expected.pid&&expected.iid&&expected.vid&&current.pid===expected.pid&&current.iid===expected.iid&&current.vid===expected.vid);
     return {ok:match,puid_match:match,expected_puid:puid(expected),current_puid:puid(current),expected:expected,current:current,title:title(),login_required:loginRequired(),quantity:qty(item),url:location.href};
   }
-  function exactCartButton(){var b=D.querySelector('button.prod-cart-btn');return b&&visible(b)&&!disabled(b)?b:null;}
-  function exactBuyButton(){var b=D.querySelector('button.prod-buy-btn,a.prod-buy-btn');return b&&visible(b)&&!disabled(b)?b:null;}
-
-  function activateBuyButton(buy,pageWindow){
-    /* Coupang BUY NOW is handled by mouse-event listeners on some product pages.
-       HTMLElement.click() alone can leave the page at PRODUCT even though the
-       button node exists. Send one normal mouse activation sequence instead.
-       IMPORTANT: this is still exactly one BUY action; there is no retry. */
-    var pw=pageWindow||W;
-    try{buy.scrollIntoView({block:'center',inline:'center'});}catch(_e){}
-    try{buy.focus({preventScroll:true});}catch(_e2){try{buy.focus();}catch(_e3){}}
-    var rect=buy.getBoundingClientRect();
-    var x=Math.max(0,Math.round(rect.left+rect.width/2));
-    var y=Math.max(0,Math.round(rect.top+rect.height/2));
-    var init={bubbles:true,cancelable:true,view:pw,button:0,buttons:1,clientX:x,clientY:y};
-    var names=['pointerdown','mousedown','pointerup','mouseup','click'];
-    for(var i=0;i<names.length;i++){
-      var name=names[i],ev;
-      try{
-        if(/^pointer/.test(name)&&pw.PointerEvent)ev=new pw.PointerEvent(name,Object.assign({},init,{pointerId:1,pointerType:'mouse',isPrimary:true}));
-        else ev=new pw.MouseEvent(name,init);
-        buy.dispatchEvent(ev);
-      }catch(_e4){
-        if(name==='click'){buy.click();}
-      }
-    }
-    return {method:'mouse-sequence',tag:String(buy.tagName||''),class_name:String(buy.className||'')};
+  function exactCartButton(){
+    return Array.from(D.querySelectorAll('button.prod-cart-btn,a.prod-cart-btn'))
+      .find(function(el){return visible(el)&&!disabled(el);})||null;
+  }
+  function exactBuyButton(){
+    var nodes=Array.from(D.querySelectorAll('button.prod-buy-btn,a.prod-buy-btn'));
+    return nodes.find(function(el){
+      if(!visible(el)||disabled(el))return false;
+      return /^바로\s*구매$/.test(text(el));
+    })||null;
   }
 
   async function settleAfterCartClick(){
@@ -123,41 +126,131 @@
     try{pw.alert=hook;}catch(_e){}
     return {restore:restore,message:function(){return captured;}};
   }
-  async function run(item,mode,pageWindow,options){
-    options=options||{};
+  async function prepare(item,mode){
     mode=String(mode||'MULTI').toUpperCase();
+
     var check=inspect(item);
     if(check.login_required)throw new Error('LOGIN_REQUIRED');
-    if(!check.puid_match)throw new Error('PRODUCT_PUID_MISMATCH expected='+check.expected_puid+' current='+check.current_puid);
-    var q=await setQuantity(item);
-    /* No second inspect. No option click. No retry. */
-    if(mode==='INSPECT_ONLY')return {ok:true,inspection:check,quantity:q,action:'NONE'};
-    if(mode==='SINGLE'){
-      var buy=exactBuyButton(); if(!buy)throw new Error('BUY_NOW_NODE_NOT_FOUND');
-      if(typeof options.beforeAction==='function')options.beforeAction({action:'BUY_NOW',inspection:check,quantity:q});
-      var activation=activateBuyButton(buy,pageWindow);
-      return {ok:true,inspection:check,quantity:q,action:'BUY_NOW',clicked:true,activation:activation};
+    if(!check.puid_match){
+      throw new Error(
+        'PRODUCT_PUID_MISMATCH expected='+check.expected_puid+
+        ' current='+check.current_puid
+      );
     }
-    var cart=exactCartButton(); if(!cart)throw new Error('CART_BUTTON_NODE_NOT_FOUND');
+
+    var q=await setQuantity(item);
+
+    /* Preparation owns inspection/quantity/readiness only.
+       It never changes Runner stage and never clicks an order button. */
+    if(mode==='SINGLE'){
+      var buy=await waitProductActionReady('SINGLE');
+      if(!buy)throw new Error('BUY_NOW_NODE_NOT_FOUND');
+      return {
+        ok:true,
+        mode:'SINGLE',
+        _target:buy,
+        inspection:check,
+        quantity:q,
+        action:'BUY_NOW',
+        ready:true,
+        target:{
+          tag:String(buy.tagName||''),
+          text:text(buy),
+          href:String(buy.href||(buy.getAttribute&&buy.getAttribute('href'))||''),
+          class_name:String(buy.className||'')
+        }
+      };
+    }
+
+    if(mode==='MULTI'){
+      var cart=await waitProductActionReady('MULTI');
+      if(!cart)throw new Error('CART_BUTTON_NODE_NOT_FOUND');
+      return {
+        ok:true,
+        mode:'MULTI',
+        _target:cart,
+        inspection:check,
+        quantity:q,
+        action:'ADD_TO_CART',
+        ready:true
+      };
+    }
+
+    return {
+      ok:true,
+      mode:mode,
+      inspection:check,
+      quantity:q,
+      action:'NONE',
+      ready:true
+    };
+  }
+
+  function buyNow(prepared){
+    prepared=prepared||{};
+    if(String(prepared.mode||'').toUpperCase()!=='SINGLE'){
+      throw new Error('PRODUCT_SINGLE_NOT_PREPARED');
+    }
+    var buy=prepared._target||null;
+    if(!buy||!visible(buy)||disabled(buy))throw new Error('BUY_NOW_TARGET_STALE');
+
+    var meta={
+      tag:String(buy.tagName||''),
+      text:text(buy),
+      href:String(buy.href||(buy.getAttribute&&buy.getAttribute('href'))||''),
+      class_name:String(buy.className||'')
+    };
+
+    buy.click();
+    return {
+      ok:true,
+      clicked:true,
+      action:'BUY_NOW',
+      inspection:prepared.inspection,
+      quantity:prepared.quantity,
+      buy_target:meta
+    };
+  }
+
+  async function addToCart(prepared,pageWindow){
+    prepared=prepared||{};
+    if(String(prepared.mode||'').toUpperCase()!=='MULTI'){
+      throw new Error('PRODUCT_MULTI_NOT_PREPARED');
+    }
+    var cart=prepared._target||null;
+    if(!cart||!visible(cart)||disabled(cart))throw new Error('CART_BUTTON_TARGET_STALE');
+
     var alarm=armServerAlert(pageWindow);
     try{
-      if(typeof options.beforeAction==='function')options.beforeAction({action:'ADD_TO_CART',inspection:check,quantity:q});
       cart.click();
       var settled=await settleAfterCartClick();
       var am=alarm.message();
       var uncertain=/서버에서 오류가 발생하였습니다/.test(am);
+
       return {
         ok:true,
-        inspection:check,
-        quantity:q,
-        action:'ADD_TO_CART',
         clicked:true,
+        action:'ADD_TO_CART',
+        inspection:prepared.inspection,
+        quantity:prepared.quantity,
         settled:settled,
         uncertain:uncertain,
         alert_message:uncertain?am:''
       };
-    }finally{alarm.restore();}
+    }finally{
+      alarm.restore();
+    }
   }
 
-  W.CPKR_PRODUCT={version:'076',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,run:run};
+  /* Compatibility wrapper only.
+     The current Runner does NOT use callbacks or this wrapper for stage changes. */
+  async function run(item,mode,pageWindow){
+    var prepared=await prepare(item,mode);
+    mode=String(mode||'MULTI').toUpperCase();
+    if(mode==='SINGLE')return buyNow(prepared);
+    if(mode==='MULTI')return addToCart(prepared,pageWindow);
+    return prepared;
+  }
+
+  W.CPKR_PRODUCT={version:'080',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,prepare:prepare,buyNow:buyNow,addToCart:addToCart,run:run};
 })(window,document);

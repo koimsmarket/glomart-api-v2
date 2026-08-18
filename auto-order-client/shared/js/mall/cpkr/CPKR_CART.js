@@ -5,7 +5,10 @@
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_CART && W.CPKR_CART.version==='075') return;
+  function visible(el){if(!el)return false;var s=getComputedStyle(el),r=el.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||1)>0&&r.width>0&&r.height>0;}
+  function actionable(el){return !!(el&&visible(el)&&!el.disabled&&el.getAttribute('aria-disabled')!=='true');}
+
+  if(W.CPKR_CART && W.CPKR_CART.version==='080') return;
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function num(v,d){var n=Number(String(v==null?'':v).replace(/[^\d.-]/g,''));return isFinite(n)?n:(d||0);}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -28,28 +31,27 @@
     cartMap.forEach(function(x,k){if(!targetMap.has(k))extra.push(x);});
     return {ok:missing.length===0&&extra.length===0&&qtyMismatch.length===0,missing:missing,extra:extra,qty_mismatch:qtyMismatch,target_count:targetMap.size,cart_count:cartMap.size};
   }
-  function overallCheckbox(){var n=D.querySelector('input[type="checkbox"][title*="모든 상품"],input[type="checkbox"][title*="전체"]');if(n)return n;return Array.from(D.querySelectorAll('input[type="checkbox"]')).find(function(x){var h=x.closest('label,div,span');return h&&/전체\s*선택/.test(text(h));})||null;}
+  function overallCheckbox(){var n=D.querySelector('input[type="checkbox"][title*="모든 상품"],input[type="checkbox"][title*="전체"]');if(actionable(n))return n;return Array.from(D.querySelectorAll('input[type="checkbox"]')).find(function(x){var h=x.closest('label,div,span');return actionable(x)&&h&&/전체\s*선택/.test(text(h));})||null;}
   function selectedDelete(){
-    var label=Array.from(D.querySelectorAll('button,a,[role="button"],div,span')).find(function(el){
-      return text(el)==='선택삭제';
-    });
-    if(!label)return null;
+    var labels=Array.from(D.querySelectorAll('button,a,[role="button"],span,div'))
+      .filter(function(n){return /^선택\s*삭제$/.test(text(n));});
 
-    /* Coupang currently renders the text inside a plain inner div.
-       Use its clickable ancestor instead of requiring the text node itself
-       to have cursor:pointer. */
-    if(
-      label.tagName==='BUTTON' ||
-      label.tagName==='A' ||
-      label.getAttribute('role')==='button'
-    )return label;
+    for(var i=0;i<labels.length;i++){
+      var label=labels[i];
+      var clickable=null;
 
-    var clickable=label.closest(
-      'button,a,[role="button"],div[class*="cursor-pointer"],div[class*="cursor_pointer"]'
-    );
-    return clickable||label;
+      if(label.matches&&label.matches('button,a,[role="button"]'))clickable=label;
+      else if(label.closest)clickable=label.closest('button,a,[role="button"]');
+
+      if(actionable(clickable))return clickable;
+    }
+    return null;
   }
-  function rowCheckbox(row){return row&&row.querySelector('input[type="checkbox"]');}
+  function rowCheckbox(row){
+    if(!row||!row.querySelector)return null;
+    var cb=row.querySelector('input[type="checkbox"]');
+    return actionable(cb)?cb:null;
+  }
   function nativeValue(input,value){var win=input.ownerDocument.defaultView||W,proto=win.HTMLInputElement&&win.HTMLInputElement.prototype,d=proto&&Object.getOwnPropertyDescriptor(proto,'value');if(d&&d.set)d.set.call(input,String(value));else input.value=String(value);input.dispatchEvent(new win.Event('input',{bubbles:true}));input.dispatchEvent(new win.Event('change',{bubbles:true}));try{input.blur();}catch(_e){}}
   function armConfirm(pageWindow){var pw=pageWindow||W,old=pw.confirm,done=false;function restore(){if(done)return;done=true;try{if(pw.confirm===hook)pw.confirm=old;}catch(_e){}}function hook(msg){var t=String(msg||'').replace(/\s+/g,' ').trim();if(/선택한 상품을 삭제하시겠습니까/.test(t)){restore();return true;}return old.call(pw,msg);}try{pw.confirm=hook;}catch(_e){}setTimeout(restore,2500);return restore;}
 
@@ -174,20 +176,56 @@
       duplicate_deleted_rows:deleteRows.length
     };
   }
-  async function selectAllAndCheckout(options){
-    options=options||{};
+  async function prepareCheckout(){
     var all=overallCheckbox();
     if(!all)throw new Error('CART_SELECT_ALL_NOT_FOUND');
+
     if(!all.checked){
       all.click();
-      if(!(await waitChecked(all,true,2500)))throw new Error('CART_SELECT_ALL_NOT_APPLIED');
+      if(!(await waitChecked(all,true,2500))){
+        throw new Error('CART_SELECT_ALL_NOT_APPLIED');
+      }
     }
+
     await sleep(250);
-    var go=D.querySelector('a.goPayment[data-pay-role="button"],a.goPayment');
+
+    var go=Array.from(D.querySelectorAll('a.goPayment[data-pay-role="button"],a.goPayment')).find(function(el){return actionable(el);})||null;
     if(!go)throw new Error('CART_GO_PAYMENT_NOT_FOUND');
-    if(typeof options.beforeAction==='function')options.beforeAction({action:'CHECKOUT'});
-    go.click();
-    return {ok:true,clicked:true};
+
+    return {
+      ok:true,
+      ready:true,
+      action:'CHECKOUT',
+      _target:go,
+      target:{
+        tag:String(go.tagName||''),
+        text:text(go),
+        href:String(go.href||(go.getAttribute&&go.getAttribute('href'))||''),
+        class_name:String(go.className||'')
+      }
+    };
   }
-  W.CPKR_CART={version:'075',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
+
+  function checkout(prepared){
+    prepared=prepared||{};
+    if(!prepared.ready)throw new Error('CART_CHECKOUT_NOT_PREPARED');
+
+    var go=prepared._target||null;
+    if(!actionable(go))throw new Error('CART_CHECKOUT_BUTTON_TARGET_STALE');
+
+    go.click();
+    return {
+      ok:true,
+      clicked:true,
+      action:'CHECKOUT',
+      target:prepared.target||null
+    };
+  }
+
+  /* Compatibility wrapper only. Current Runner uses prepareCheckout + checkout. */
+  async function selectAllAndCheckout(){
+    var prepared=await prepareCheckout();
+    return checkout(prepared);
+  }
+  W.CPKR_CART={version:'080',headerCount:headerCount,snapshot:snapshot,compare:compare,clearAll:clearAll,applyAdjustments:applyAdjustments,prepareCheckout:prepareCheckout,checkout:checkout,selectAllAndCheckout:selectAllAndCheckout,orderIdentity:orderIdentity,orderQty:orderQty,same:same};
 })(window,document);
