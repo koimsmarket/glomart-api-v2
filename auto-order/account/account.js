@@ -1,4 +1,4 @@
-/* GM_AUTO_ORDER_ACCOUNT_UI_V012
+/* GM_AUTO_ORDER_ACCOUNT_UI_V013
  * Production account UI: DB rows only. No demo/fallback accounts.
  * Until account-allocation rules are re-finalized, account rows remain MASTER-only.
  */
@@ -32,7 +32,7 @@
     }catch(e){
       state.accounts=[];
       state.loadError=String(e&&e.message||e);
-      console.error('[GM_AUTO_ORDER_ACCOUNT_UI_V012] load failed',e);
+      console.error('[GM_AUTO_ORDER_ACCOUNT_UI_V013] load failed',e);
     }
     render();
   }
@@ -54,7 +54,7 @@
     if(keyWarning){
       keyWarning.classList.toggle('hidden',state.credentialKeyConfigured);
     }
-    if($('btnNew')) $('btnNew').disabled=!state.credentialKeyConfigured;
+    if($('btnNew')) $('btnNew').disabled=false;
     $('accountRows').innerHTML=rows.map(a=>`<tr>
       <td><strong>${esc(a.mall_account_id)}</strong></td>
       <td>${esc(a.mall_code)}</td>
@@ -80,10 +80,6 @@
     return m?String(m.admin_id):'';
   }
   function newAccount(){
-    if(!state.credentialKeyConfigured){
-      toast('서버 암호화 키가 설정되지 않아 계정을 등록할 수 없습니다.');
-      return;
-    }
     $('modalTitle').textContent='외부몰 계정 등록'; $('editMallAccountId').value='';
     $('mallCode').value='CPKR'; $('mallAccountId').value=''; $('mallAccountId').disabled=false;
     $('accountName').value=''; $('loginId').value=''; $('password').disabled=false; $('password').value=''; $('password').required=true;
@@ -95,8 +91,8 @@
     $('mallCode').value=a.mall_code; $('mallAccountId').value=a.mall_account_id; $('mallAccountId').disabled=true;
     $('accountName').value=a.account_name||''; $('loginId').value=a.login_id_raw||'';
     $('password').value=''; $('password').required=false;
-    $('password').disabled=!state.credentialKeyConfigured;
-    $('pwHint').textContent=state.credentialKeyConfigured?'비워두면 기존 비밀번호 유지':'서버 암호화 키 미설정 · 비밀번호 수정 잠김';
+    $('password').disabled=false;
+    $('pwHint').textContent=state.credentialKeyConfigured?'비워두면 기존 비밀번호 유지':'입력은 가능합니다. 저장 시 서버 암호화 키 설정 여부를 검증합니다.';
     $('adminId').value=a.admin_id||masterAdminId(); $('enabled').checked=!!a.enabled; open('accountModal');
   }
   async function saveAccount(e){
@@ -111,7 +107,7 @@
       account_admin_role:'MASTER',
       enabled:$('enabled').checked
     };
-    if(!$('password').disabled && $('password').value) body.password=$('password').value;
+    if($('password').value) body.password=$('password').value;
     try{
       if(editId) await api(API.update(editId),{method:'PUT',body:JSON.stringify(body)});
       else await api(API.create,{method:'POST',body:JSON.stringify(body)});
