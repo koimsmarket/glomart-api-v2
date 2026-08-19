@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.092
+// @version      0.093
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -43,7 +43,7 @@
   try{Object.defineProperty(alertHook,'__gmaoV085TransientServerAlertBypass',{value:true});}catch(_e){}
   try{pw.alert=alertHook;}catch(_e){}
 })();
-const VERSION='0.092';
+const VERSION='0.093';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=086',
@@ -247,7 +247,7 @@ function resumeCurrentStageExplicit(){
   render('처음부터 재시작 · 기존 장바구니 확인/청소부터 시작');
   orchestrate().catch(fail);
 }
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V092</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V093</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -747,6 +747,12 @@ async function runMultiProduct(){
 }
 
 async function snapshotAndDetach(finalPass){
+  if(page()==='DETACHED'){
+    /* V093 recovery from V092 persisted detached document. */
+    setFlow({stage:finalPass?ST.MULTI_FINAL_SNAPSHOT:ST.MULTI_SNAPSHOT});
+    wipeAndGo(cartUrl(),'RECOVER_FROM_DETACHED');
+    return;
+  }
   if(page()!=='CART'){
     wipeAndGo(cartUrl(),'CART_SNAPSHOT');
     return;
@@ -755,8 +761,6 @@ async function snapshotAndDetach(finalPass){
   await settleCartStage(finalPass?'MULTI_FINAL_SNAPSHOT':'MULTI_SNAPSHOT',1100);
   await loadCart();
 
-  // CART DOM is read exactly once.  Everything needed for comparison must
-  // be serialized before leaving Coupang.
   const snap=window.CPKR_CART.snapshot();
   if(!Array.isArray(snap))throw new Error('CART_SNAPSHOT_INVALID');
 
@@ -764,13 +768,14 @@ async function snapshotAndDetach(finalPass){
     stage:ST.MULTI_COMPARE,
     cart_snapshot:snap,
     final_verify:!!finalPass,
-    detached_compare_pending:true
+    detached_compare_pending:false
   });
 
-  render('장바구니 DOM 확보 완료 · 쿠팡 페이지 분리 후 주문과 비교');
+  render('장바구니 DOM 유지 · snapshot 저장 완료 · 주문과 즉시 비교');
 
-  // Do NOT compare while Coupang CART DOM/runtime is alive.
-  detachForCompare('CART_COMPARE_DETACHED');
+  /* V093: never destroy Coupang CART DOM. Compare serialized data while
+     #btnPay remains available in the same document. */
+  await compareDetached();
 }
 function materialCartMismatch(plan){
   const missing=Array.isArray(plan&&plan.missing)?plan.missing:[];
@@ -780,37 +785,32 @@ function materialCartMismatch(plan){
 }
 
 async function compareDetached(){
-  if(page()!=='DETACHED')throw new Error('CART_COMPARE_NOT_DETACHED');
+  if(page()==='DETACHED'){
+    /* Legacy V092 state: DOM is already gone, so restore CART once. */
+    const f0=flow();
+    setFlow({stage:f0.final_verify?ST.MULTI_FINAL_SNAPSHOT:ST.MULTI_SNAPSHOT});
+    wipeAndGo(cartUrl(),'LEGACY_DETACHED_RECOVERY');
+    return;
+  }
+  if(page()!=='CART')throw new Error('CART_COMPARE_NOT_CART');
+
   const f=flow();
   const snap=f.cart_snapshot;
-
   if(!Array.isArray(snap))throw new Error('CART_SNAPSHOT_MISSING');
 
-  // Comparison is pure data work. CPKR_CART.compare() does not need a live
-  // Coupang DOM, but the module may need to be loaded into the userscript
-  // sandbox first.
   await loadCart();
-
   const plan=window.CPKR_CART.compare(rawItems(job),snap);
-  setFlow({
-    cart_plan:plan,
-    detached_compare_pending:false
-  });
+  setFlow({cart_plan:plan,detached_compare_pending:false});
 
   const mm=materialCartMismatch(plan);
 
-  /* Coupang checks newly added cart rows by default.  Selection-state
-     differences are therefore not an adjustment target.  The commander
-     validates only material order facts: missing / extra / quantity. */
   if(plan.ok || !mm.has){
     setFlow({stage:ST.MULTI_CHECKOUT});
-    render((f.final_verify?'최종 ':'')+'장바구니 상품/수량 일치 · 체크박스 조작 없이 구매 단계로 이동');
-    wipeAndGo(cartUrl(),f.final_verify?'CART_FINAL_CHECKOUT':'CART_CHECKOUT');
+    render((f.final_verify?'최종 ':'')+'장바구니 상품/수량 일치 · 같은 화면에서 구매하기로 진행');
+    await multiCheckout();
     return;
   }
 
-  /* Missing rows alone are repaired by revisiting PRODUCT.  We never call
-     CART.applyAdjustments(), so CART_ROW_CHECKBOX_NOT_FOUND cannot occur. */
   if(!f.final_verify && mm.missing.length && !mm.extra.length && !mm.qty.length){
     setFlow({
       stage:ST.MULTI_REPAIR,
@@ -825,8 +825,6 @@ async function compareDetached(){
     return;
   }
 
-  /* Extra or quantity mismatch is not repaired by clicking cart controls.
-     Fail safe and restart the next order from a clean cart. */
   await finishFinalMismatch(plan);
 }
 async function finishFinalMismatch(plan){
