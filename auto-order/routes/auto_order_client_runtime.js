@@ -6,7 +6,7 @@ const clients = require('../services/runtime_client_registry');
 const works = require('../services/runtime_work_service');
 const accounts = require('../services/account_service');
 
-const VERSION = 'GM_AUTO_ORDER_CLIENT_RUNTIME_API_V013_STEPUP_AUTH';
+const VERSION = 'GM_AUTO_ORDER_CLIENT_RUNTIME_API_V014_ACCOUNT_VAULT';
 
 function pool(req) {
   return req.app.locals.pool || req.app.locals.db;
@@ -136,7 +136,9 @@ router.post('/api/auto-order/runtime/work/:work_id/credential', async (req,res)=
     const credential=await accounts.credentialForLockedWork(pool(req),req.params.work_id,req.body||{});
     return ok(res,{credential});
   }catch(error){
-    return fail(res,403,'credential_access_failed',error);
+    const m=String(error&&error.message||error);
+    const status=(m==='work_not_found')?404:409;
+    return fail(res,status,'credential_access_failed',error);
   }
 });
 
@@ -151,5 +153,5 @@ router.get('/api/auto-order/runtime/status', async (req, res) => {
   }
 });
 
-console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V013_STEPUP_AUTH] route loaded');
+console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V014_ACCOUNT_VAULT] route loaded');
 module.exports = router;

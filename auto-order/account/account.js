@@ -1,4 +1,4 @@
-/* GM_AUTO_ORDER_ACCOUNT_UI_V013
+/* GM_AUTO_ORDER_ACCOUNT_UI_V014
  * Production account UI: DB rows only. No demo/fallback accounts.
  * Until account-allocation rules are re-finalized, account rows remain MASTER-only.
  */
@@ -10,7 +10,7 @@
     update:(id)=>'/api/gm/auto-order/accounts/'+encodeURIComponent(id),
     remove:(id)=>'/api/gm/auto-order/accounts/'+encodeURIComponent(id)
   };
-  const state={accounts:[],loadError:'',credentialKeyConfigured:false};
+  const state={accounts:[],loadError:'',credentialKeyConfigured:false,credentialKeySource:''};
   const $=(id)=>document.getElementById(id);
   const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const toast=(m)=>{const t=$('toast');t.textContent=m;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),2600)};
@@ -19,8 +19,16 @@
 
   async function api(url,opt){
     const r=await fetch(url,Object.assign({headers:{'Content-Type':'application/json','Accept':'application/json'}},opt||{}));
-    const text=await r.text(); let j={}; try{j=text?JSON.parse(text):{}}catch(_){j={error:text||('HTTP '+r.status)}}
-    if(!r.ok || j.ok===false) throw new Error(j.error||j.detail||('HTTP '+r.status));
+    const text=await r.text();
+    let j={};
+    try{j=text?JSON.parse(text):{}}
+    catch(_){
+      const compact=String(text||'').replace(/\\s+/g,' ').trim().slice(0,300);
+      throw new Error('HTTP '+r.status+(compact?' · '+compact:''));
+    }
+    if(!r.ok || j.ok===false){
+      throw new Error((j.error||j.detail||'HTTP '+r.status)+' [HTTP '+r.status+']');
+    }
     return j;
   }
   async function loadAccounts(){
@@ -29,10 +37,11 @@
       const j=await api(API.list);
       state.accounts=Array.isArray(j)?j:(j.accounts||j.rows||[]);
       state.credentialKeyConfigured=Array.isArray(j)?false:(j.credential_key_configured===true);
+      state.credentialKeySource=Array.isArray(j)?'':String(j.credential_key_source||'');
     }catch(e){
       state.accounts=[];
       state.loadError=String(e&&e.message||e);
-      console.error('[GM_AUTO_ORDER_ACCOUNT_UI_V013] load failed',e);
+      console.error('[GM_AUTO_ORDER_ACCOUNT_UI_V014] load failed',e);
     }
     render();
   }

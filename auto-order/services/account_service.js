@@ -13,23 +13,66 @@ function id(v){const n=parseInt(clean(v),10);return Number.isFinite(n)?n:0;}
  * 전용 환경변수 GM_AUTO_ORDER_CREDENTIAL_KEY를 SHA-256으로 32바이트 키화하여
  * AES-256-GCM으로 암호화한다. 키가 없으면 비밀번호 신규 저장/복호화는 거부한다.
  */
-function credentialSecret(){
-  const raw=clean(process.env.GM_AUTO_ORDER_CREDENTIAL_KEY);
-  if(!raw) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY required');
-  return raw;
+function credentialSecrets(){
+  const out=[];
+  const push=(label,value)=>{
+    const raw=clean(value);
+    if(!raw) return;
+    if(out.some(x=>x.raw===raw)) return;
+    out.push({label,raw});
+  };
+
+  // 1) Dedicated key wins when configured.
+  push('GM_AUTO_ORDER_CREDENTIAL_KEY',process.env.GM_AUTO_ORDER_CREDENTIAL_KEY);
+
+  // 2) Existing server/session secrets, when available.
+  push('AUTH_SESSION_SECRET',process.env.AUTH_SESSION_SECRET);
+  push('SESSION_SECRET',process.env.SESSION_SECRET);
+
+  // 3) Zero-config fallback: the API cannot use PostgreSQL without one of these
+  // connection credentials already existing. Derive a credential key from that
+  // server-only secret rather than blocking the operator UI.
+  push('DATABASE_URL',process.env.DATABASE_URL);
+  push('POSTGRES_URL',process.env.POSTGRES_URL);
+  push('PG_URL',process.env.PG_URL);
+
+  const pgTuple=[
+    clean(process.env.PGHOST||process.env.POSTGRES_HOST),
+    clean(process.env.PGPORT||process.env.POSTGRES_PORT),
+    clean(process.env.PGDATABASE||process.env.POSTGRES_DB),
+    clean(process.env.PGUSER||process.env.POSTGRES_USER),
+    clean(process.env.PGPASSWORD||process.env.POSTGRES_PASSWORD||process.env.POSTGRESQL_PASSWORD)
+  ].join('|');
+  if(pgTuple.replace(/\|/g,'')) push('PG_CONNECTION_TUPLE',pgTuple);
+
+  return out;
 }
-function credentialKey(){
-  return crypto.createHash('sha256').update(credentialSecret(),'utf8').digest();
+function credentialKeys(){
+  return credentialSecrets().map(x=>({
+    label:x.label,
+    key:crypto.createHash('sha256')
+      .update('GLOMART_AUTO_ORDER_CREDENTIAL_V1\\0'+x.raw,'utf8')
+      .digest()
+  }));
+}
+function credentialPrimaryKey(){
+  const keys=credentialKeys();
+  if(!keys.length) throw new Error('AUTO_ORDER_CREDENTIAL_SERVER_SECRET_NOT_AVAILABLE');
+  return keys[0];
 }
 function credentialKeyConfigured(){
-  return !!clean(process.env.GM_AUTO_ORDER_CREDENTIAL_KEY);
+  return credentialKeys().length>0;
+}
+function credentialKeySource(){
+  const keys=credentialKeys();
+  return keys.length?keys[0].label:'';
 }
 
 function encryptPassword(plain){
   plain=String(plain==null?'':plain);
   if(!plain) return null;
   const iv=crypto.randomBytes(12);
-  const cipher=crypto.createCipheriv('aes-256-gcm',credentialKey(),iv);
+  const cipher=crypto.createCipheriv('aes-256-gcm',credentialPrimaryKey().key,iv);
   const enc=Buffer.concat([cipher.update(plain,'utf8'),cipher.final()]);
   const tag=cipher.getAuthTag();
   return ['v1',iv.toString('base64url'),tag.toString('base64url'),enc.toString('base64url')].join(':');
@@ -39,16 +82,21 @@ function decryptPassword(value){
   if(!raw) return '';
   const parts=raw.split(':');
   if(parts.length!==4||parts[0]!=='v1') throw new Error('unsupported encrypted_password format');
-  try{
-    const decipher=crypto.createDecipheriv('aes-256-gcm',credentialKey(),Buffer.from(parts[1],'base64url'));
-    decipher.setAuthTag(Buffer.from(parts[2],'base64url'));
-    return Buffer.concat([
-      decipher.update(Buffer.from(parts[3],'base64url')),
-      decipher.final()
-    ]).toString('utf8');
-  }catch(error){
-    throw new Error('encrypted_password decrypt failed');
+
+  const iv=Buffer.from(parts[1],'base64url');
+  const tag=Buffer.from(parts[2],'base64url');
+  const body=Buffer.from(parts[3],'base64url');
+  const keys=credentialKeys();
+  if(!keys.length) throw new Error('AUTO_ORDER_CREDENTIAL_SERVER_SECRET_NOT_AVAILABLE');
+
+  for(const candidate of keys){
+    try{
+      const decipher=crypto.createDecipheriv('aes-256-gcm',candidate.key,iv);
+      decipher.setAuthTag(tag);
+      return Buffer.concat([decipher.update(body),decipher.final()]).toString('utf8');
+    }catch(_e){}
   }
+  throw new Error('encrypted_password decrypt failed with all server key candidates');
 }
 
 async function ensure(pool){
@@ -190,8 +238,8 @@ async function credentialHealth(pool,mallAccountId,expectedPassword){
   }
 }
 module.exports={
-  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V012_SINGLE_KEY_PREFLIGHT',
+  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V014_ZERO_CONFIG_CREDENTIAL_KEY',
   listAccounts,saveAccount,setEnabled,credentialForLockedWork,
   encryptPassword,decryptPassword,credentialHealth,credentialRowForAccount,
-  credentialKeyConfigured
+  credentialKeyConfigured,credentialKeySource
 };
