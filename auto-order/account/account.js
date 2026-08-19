@@ -1,4 +1,4 @@
-/* GM_AUTO_ORDER_ACCOUNT_UI_V004
+/* GM_AUTO_ORDER_ACCOUNT_UI_V008
  * Production account UI: DB rows only. No demo/fallback accounts.
  * Until account-allocation rules are re-finalized, account rows remain MASTER-only.
  */
@@ -31,13 +31,21 @@
     }catch(e){
       state.accounts=[];
       state.loadError=String(e&&e.message||e);
-      console.error('[GM_AUTO_ORDER_ACCOUNT_UI_V004] load failed',e);
+      console.error('[GM_AUTO_ORDER_ACCOUNT_UI_V008] load failed',e);
     }
     render();
   }
   function filtered(){
     const mall=$('mallFilter').value,k=$('keyword').value.trim().toLowerCase();
     return state.accounts.filter(a=>(!mall||a.mall_code===mall)&&(!k||[a.mall_account_id,a.account_name,a.login_id,a.admin_id].some(v=>String(v||'').toLowerCase().includes(k))));
+  }
+  function credentialBadge(a){
+    const st=String(a.credential_status||'').toUpperCase();
+    if(st==='READY') return '<span class="badge ready">등록/복호화 정상</span>';
+    if(st==='PASSWORD_NOT_CONFIGURED') return '<span class="badge login">비밀번호 미등록</span>';
+    if(st==='PASSWORD_DECRYPT_ERROR'||st==='PASSWORD_DECRYPTED_EMPTY') return '<span class="badge blocked">복호화 오류</span>';
+    if(st==='LOGIN_ID_NOT_CONFIGURED') return '<span class="badge blocked">로그인 ID 오류</span>';
+    return '<span class="badge disabled">'+esc(st||'확인 필요')+'</span>';
   }
   function render(){
     const rows=filtered();
@@ -48,6 +56,7 @@
       <td class="masked-id">${esc(a.login_id||'-')}</td>
       <td><strong>${esc(a.admin_id||'-')}</strong></td>
       <td>${esc(a.account_admin_role||'MASTER')}</td>
+      <td>${credentialBadge(a)}</td>
       <td><span class="status-toggle ${a.enabled?'on':'off'}">${a.enabled?'사용':'중지'}</span></td>
       <td><div class="row-actions"><button data-act="edit" data-id="${esc(a.mall_account_id)}">수정</button><button class="danger-lite" data-act="delete" data-id="${esc(a.mall_account_id)}">삭제</button></div></td>
     </tr>`).join('');
@@ -94,7 +103,7 @@
     try{
       if(editId) await api(API.update(editId),{method:'PUT',body:JSON.stringify(body)});
       else await api(API.create,{method:'POST',body:JSON.stringify(body)});
-      close('accountModal'); $('password').value=''; toast('저장되었습니다.'); await loadAccounts();
+      close('accountModal'); $('password').value=''; toast('저장·암호화·복호화 검증까지 완료되었습니다.'); await loadAccounts();
     }catch(err){toast('저장 실패: '+String(err&&err.message||err));}
   }
   async function deleteAccount(id){

@@ -135,22 +135,61 @@ async function credentialForLockedWork(pool,workId,input){
   if(clean(w.lock_token)!==token) throw new Error('work_lock_invalid');
   if(admin && clean(w.lock_admin_id)!==admin) throw new Error('work_admin_mismatch');
   if(mallAccount && clean(w.lock_mall_account_id)!==mallAccount) throw new Error('work_mall_account_mismatch');
-  const ar=await pool.query(`
-    SELECT account_admin_id,login_id,encrypted_password
-      FROM gm_auto_order_account
-     WHERE enabled=true
-       AND can_order=true
-       AND upper(COALESCE(mall_code,''))=upper($1)
-       AND COALESCE(mall_account_id,'')=$2
-       AND COALESCE(admin_id,'')=$3
-     ORDER BY CASE WHEN COALESCE(encrypted_password,'')<>'' THEN 0 ELSE 1 END,
-              CASE WHEN upper(COALESCE(account_admin_role,''))='MASTER' THEN 0 ELSE 1 END,
-              account_admin_id DESC
-     LIMIT 1`,[clean(w.mall_code),clean(w.lock_mall_account_id),clean(w.lock_admin_id)]);
-  if(!ar.rows.length) throw new Error('mall_account_credential_not_found');
-  const a=ar.rows[0];
-  if(!clean(a.encrypted_password)) throw new Error('mall_account_password_not_configured');
-  return {login_id:clean(a.login_id)||null,password:decryptPassword(a.encrypted_password)};
-}
-module.exports={VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V005_PASSWORD_ROW_PRIORITY',listAccounts,saveAccount,setEnabled,credentialForLockedWork};
 
+  const accountId=clean(w.lock_mall_account_id);
+  if(!accountId) throw new Error('work_mall_account_not_assigned');
+  const mall=upper(w.mall_code)||upper(accountId.split('_')[0]);
+  const a=await credentialRowForAccount(pool,accountId,mall,{enabledOnly:true,orderOnly:true});
+  if(!a) throw new Error('mall_account_credential_not_found');
+  if(!clean(a.login_id)) throw new Error('mall_account_login_id_not_configured');
+  if(!clean(a.encrypted_password)) throw new Error('mall_account_password_not_configured');
+  const password=decryptPassword(a.encrypted_password);
+  if(!password) throw new Error('mall_account_password_decrypted_empty');
+  return {login_id:clean(a.login_id),password,mall_account_id:accountId,mall_code:mall};
+}
+
+
+async function credentialRowForAccount(pool,mallAccountId,mallCode,opts){
+  opts=opts||{};
+  const account=clean(mallAccountId), mall=upper(mallCode);
+  if(!account) return null;
+  const conditions=[`COALESCE(mall_account_id,'')=$1`];
+  if(opts.enabledOnly!==false) conditions.push(`COALESCE(enabled,true)=true`);
+  if(opts.orderOnly!==false) conditions.push(`COALESCE(can_order,true)=true`);
+  const order=[];
+  if(mall) order.push(`CASE WHEN upper(COALESCE(mall_code,''))=upper($2) THEN 0 ELSE 1 END`);
+  order.push(`CASE WHEN COALESCE(encrypted_password,'')<>'' THEN 0 ELSE 1 END`);
+  order.push(`CASE WHEN upper(COALESCE(account_admin_role,''))='MASTER' THEN 0 ELSE 1 END`);
+  order.push(`account_admin_id DESC`);
+  const r=await pool.query(`
+    SELECT account_admin_id,admin_id,account_admin_role,mall_account_id,mall_code,login_id,encrypted_password,enabled,can_order
+      FROM gm_auto_order_account
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY ${order.join(', ')}
+     LIMIT 1`,[account,mall]);
+  return r.rows&&r.rows[0]||null;
+}
+function safeEqualText(a,b){
+  const aa=Buffer.from(String(a==null?'':a),'utf8'), bb=Buffer.from(String(b==null?'':b),'utf8');
+  return aa.length===bb.length && crypto.timingSafeEqual(aa,bb);
+}
+async function credentialHealth(pool,mallAccountId,expectedPassword){
+  const a=await credentialRowForAccount(pool,mallAccountId,'',{enabledOnly:false,orderOnly:false});
+  if(!a) return {ok:false,credential_status:'ACCOUNT_NOT_FOUND',password_configured:false,password_decryptable:false,login_id_configured:false};
+  const configured=!!clean(a.encrypted_password), loginConfigured=!!clean(a.login_id);
+  if(!configured) return {ok:false,credential_status:'PASSWORD_NOT_CONFIGURED',password_configured:false,password_decryptable:false,login_id_configured:loginConfigured};
+  try{
+    const plain=decryptPassword(a.encrypted_password);
+    const matched=expectedPassword===undefined?null:safeEqualText(plain,String(expectedPassword));
+    if(!plain) return {ok:false,credential_status:'PASSWORD_DECRYPTED_EMPTY',password_configured:true,password_decryptable:false,login_id_configured:loginConfigured};
+    if(matched===false) return {ok:false,credential_status:'PASSWORD_VERIFY_MISMATCH',password_configured:true,password_decryptable:true,login_id_configured:loginConfigured,password_matches:false};
+    return {ok:loginConfigured,credential_status:loginConfigured?'READY':'LOGIN_ID_NOT_CONFIGURED',password_configured:true,password_decryptable:true,login_id_configured:loginConfigured,password_matches:matched};
+  }catch(error){
+    return {ok:false,credential_status:'PASSWORD_DECRYPT_ERROR',password_configured:true,password_decryptable:false,login_id_configured:loginConfigured,detail:String(error&&error.message||error)};
+  }
+}
+module.exports={
+  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V008_CREDENTIAL_SELF_VERIFY',
+  listAccounts,saveAccount,setEnabled,credentialForLockedWork,
+  encryptPassword,decryptPassword,credentialHealth,credentialRowForAccount
+};

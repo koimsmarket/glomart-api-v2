@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.089
+// @version      0.090
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -43,7 +43,7 @@
   try{Object.defineProperty(alertHook,'__gmaoV085TransientServerAlertBypass',{value:true});}catch(_e){}
   try{pw.alert=alertHook;}catch(_e){}
 })();
-const VERSION='0.089';
+const VERSION='0.090';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=086',
@@ -247,7 +247,7 @@ function resumeCurrentStageExplicit(){
   render('처음부터 재시작 · 기존 장바구니 확인/청소부터 시작');
   orchestrate().catch(fail);
 }
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V089</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V090</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -271,8 +271,22 @@ function loginRequiredNow(){
   if(page()==='AUTH')return true;
   return !!loginEntry();
 }
-async function beginLogin(){
+async function credentialPreflight(){
+  if(!job)throw new Error('CREDENTIAL_PREFLIGHT_NO_JOB');
   await guard();
+  const x=await req('/api/auto-order/runtime/work/'+encodeURIComponent(job.work_id)+'/credential','POST',settings({lock_token:job.lock_token}));
+  const c=x&&x.credential||{};
+  const loginId=String(c.login_id||c.loginId||c.id||c.email||'').trim();
+  const password=String(c.password||'');
+  const accountId=String(c.mall_account_id||job.mall_account_id||job.lock_mall_account_id||'').trim();
+  c.password='';
+  if(!loginId)throw new Error('CREDENTIAL_PREFLIGHT_LOGIN_ID_MISSING');
+  if(!password)throw new Error('CREDENTIAL_PREFLIGHT_PASSWORD_MISSING');
+  setBatch({credential_preflight_ok:true,credential_preflight_at:Date.now(),credential_account_id:accountId||null});
+  return {ok:true,login_id:loginId,mall_account_id:accountId||null};
+}
+async function beginLogin(){
+  await credentialPreflight();
   setBatch({cart_cleaned:false,needs_clean:true,last_login_required_at:Date.now()});
   setFlow({stage:ST.BATCH_SCAN,item_index:0,repair_index:0,cart_snapshot:null,cart_plan:null,final_verify:false,last_error:null});
   GM_setValue('gmao_runner_auth_status_v023',null);
@@ -419,11 +433,18 @@ async function claim(){
 
   render(
     '작업 배정 완료 #'+job.work_id+'\n'+
-    String(job.auto_order_no||'')+'\n'+
-    (continuing
-      ?'연속작업 다음 주문 · 장바구니 사전청소 생략'
-      :'연속작업 첫/복구 주문 · 장바구니 확인/청소부터 시작')
+    String(job.auto_order_no||'')+'\n계정 자격정보 사전검증 중…'
   );
+  try{
+    const pre=await credentialPreflight();
+    render('계정 자격정보 사전검증 완료\n'+(pre.mall_account_id||'')+'\n'+
+      (continuing?'연속작업 다음 주문':'장바구니 확인/청소부터 시작'));
+  }catch(e){
+    setBatch({credential_preflight_ok:false,credential_preflight_at:Date.now(),credential_preflight_error:errCode(e),needs_clean:true});
+    setFlow({last_error:errCode(e),error_stage:'CREDENTIAL_PREFLIGHT',error_page:page(),error_at:Date.now()});
+    render('자동주문 시작 중지 · 계정 자격정보 사전검증 실패\n'+errCode(e)+'\n쿠팡 페이지 이동/클릭은 수행하지 않았습니다.',true);
+    return job;
+  }
 
   setTimeout(()=>orchestrate().catch(fail),300);
   return job;
@@ -1118,6 +1139,25 @@ function passwordMethodButton(){
     return /^비밀번호\s*확인$/.test(text(el));
   })||null;
 }
+function loginRejectMessage(){
+  const selectors=[
+    '.login__content--message',
+    '.member__input--error',
+    '.member__message',
+    '[class*="login"][class*="error"]',
+    '[class*="member"][class*="error"]'
+  ];
+  for(const sel of selectors){
+    for(const el of Array.from(document.querySelectorAll(sel))){
+      if(!authActionable(el))continue;
+      const t=text(el);
+      if(t&&/(아이디|이메일|비밀번호|로그인|계정|인증|일치|확인|오류|실패)/i.test(t))return t.slice(0,220);
+    }
+  }
+  const body=String(document.body&&document.body.innerText||'').replace(/\s+/g,' ').trim();
+  const m=body.match(/(?:아이디|이메일|비밀번호)[^.!?\n]{0,100}(?:일치하지|확인|잘못|오류|실패)[^.!?\n]{0,100}/i);
+  return m?m[0].slice(0,220):'';
+}
 async function login(){
   if(!job||page()!=='AUTH')return false;
   let body=String(document.body&&document.body.innerText||'').slice(0,12000);
@@ -1131,6 +1171,8 @@ async function login(){
   }
   let st=GM_getValue('gmao_runner_auth_status_v023',null)||{};
   if(st.state==='LOGIN_SUBMITTED'){
+    const reject=loginRejectMessage();
+    if(reject)throw new Error('LOGIN_REJECTED:'+reject);
     if(Date.now()-Number(st.ts||0)<6000){setTimeout(()=>orchestrate().catch(fail),900);return true;}
     throw new Error('LOGIN_NAVIGATION_TIMEOUT');
   }
@@ -1345,6 +1387,23 @@ async function start(){
           render('기존 작업 재시작 #'+job.work_id+'\n중간 단계 폐기 → 기존 장바구니 확인/청소부터 시작');
         }else{
           render('정상 페이지 이동 계속 #'+job.work_id+'\n단계='+f.stage);
+        }
+        if(page()!=='AUTH'){
+          const authState=GM_getValue('gmao_runner_auth_status_v023',null)||{};
+          if(authState.state==='LOGIN_SUBMITTED'){
+            GM_setValue('gmao_runner_auth_status_v023',null);
+            setBatch({last_login_success_at:Date.now(),cart_cleaned:false,needs_clean:true});
+            setFlow({work_id:job.work_id,stage:ST.BATCH_SCAN,item_index:0,repair_index:0,cart_snapshot:null,cart_plan:null,final_verify:false,last_error:null});
+            render('쿠팡 로그인 성공 확인 · BATCH_SCAN부터 다시 시작');
+          }
+        }
+        try{
+          await credentialPreflight();
+        }catch(preErr){
+          setBatch({credential_preflight_ok:false,credential_preflight_at:Date.now(),credential_preflight_error:errCode(preErr),needs_clean:true});
+          setFlow({last_error:errCode(preErr),error_stage:'CREDENTIAL_PREFLIGHT',error_page:page(),error_at:Date.now()});
+          render('기존 작업 자동재개 중지 · 계정 자격정보 사전검증 실패\n'+errCode(preErr)+'\n쿠팡 조작은 수행하지 않았습니다.',true);
+          return;
         }
         setTimeout(()=>orchestrate().catch(fail),350);
       }catch(e){
