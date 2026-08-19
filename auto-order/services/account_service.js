@@ -17,13 +17,14 @@ function credentialSecrets(){
   const values=[
     clean(process.env.GM_AUTO_ORDER_CREDENTIAL_KEY),
     clean(process.env.GM_AUTO_ORDER_CREDENTIAL_SECRET),
-    clean(process.env.AUTH_SESSION_SECRET)
+    clean(process.env.AUTH_SESSION_SECRET),
+    clean(process.env.SESSION_SECRET)
   ].filter(Boolean);
   return [...new Set(values)];
 }
 function credentialKey(raw){
   raw=clean(raw||credentialSecrets()[0]);
-  if(!raw) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY or GM_AUTO_ORDER_CREDENTIAL_SECRET required');
+  if(!raw) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY / GM_AUTO_ORDER_CREDENTIAL_SECRET / AUTH_SESSION_SECRET / SESSION_SECRET required');
   return crypto.createHash('sha256').update(raw,'utf8').digest();
 }
 
@@ -42,7 +43,7 @@ function decryptPassword(value){
   const parts=raw.split(':');
   if(parts.length!==4||parts[0]!=='v1') throw new Error('unsupported encrypted_password format');
   const secrets=credentialSecrets();
-  if(!secrets.length) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY or GM_AUTO_ORDER_CREDENTIAL_SECRET required');
+  if(!secrets.length) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY / GM_AUTO_ORDER_CREDENTIAL_SECRET / AUTH_SESSION_SECRET / SESSION_SECRET required');
   let lastError=null;
   for(const sec of secrets){
     try{
@@ -193,7 +194,7 @@ async function credentialHealth(pool,mallAccountId,expectedPassword){
   }
 }
 module.exports={
-  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V009_BIND_FIX_SELF_VERIFY',
+  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V010_SESSION_SECRET_FALLBACK',
   listAccounts,saveAccount,setEnabled,credentialForLockedWork,
   encryptPassword,decryptPassword,credentialHealth,credentialRowForAccount
 };
