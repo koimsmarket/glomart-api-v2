@@ -153,11 +153,15 @@ async function credentialRowForAccount(pool,mallAccountId,mallCode,opts){
   opts=opts||{};
   const account=clean(mallAccountId), mall=upper(mallCode);
   if(!account) return null;
+  const params=[account];
   const conditions=[`COALESCE(mall_account_id,'')=$1`];
   if(opts.enabledOnly!==false) conditions.push(`COALESCE(enabled,true)=true`);
   if(opts.orderOnly!==false) conditions.push(`COALESCE(can_order,true)=true`);
   const order=[];
-  if(mall) order.push(`CASE WHEN upper(COALESCE(mall_code,''))=upper($2) THEN 0 ELSE 1 END`);
+  if(mall){
+    params.push(mall);
+    order.push(`CASE WHEN upper(COALESCE(mall_code,''))=upper($${params.length}) THEN 0 ELSE 1 END`);
+  }
   order.push(`CASE WHEN COALESCE(encrypted_password,'')<>'' THEN 0 ELSE 1 END`);
   order.push(`CASE WHEN upper(COALESCE(account_admin_role,''))='MASTER' THEN 0 ELSE 1 END`);
   order.push(`account_admin_id DESC`);
@@ -166,7 +170,7 @@ async function credentialRowForAccount(pool,mallAccountId,mallCode,opts){
       FROM gm_auto_order_account
      WHERE ${conditions.join(' AND ')}
      ORDER BY ${order.join(', ')}
-     LIMIT 1`,[account,mall]);
+     LIMIT 1`,params);
   return r.rows&&r.rows[0]||null;
 }
 function safeEqualText(a,b){
@@ -189,7 +193,7 @@ async function credentialHealth(pool,mallAccountId,expectedPassword){
   }
 }
 module.exports={
-  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V008_CREDENTIAL_SELF_VERIFY',
+  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V009_BIND_FIX_SELF_VERIFY',
   listAccounts,saveAccount,setEnabled,credentialForLockedWork,
   encryptPassword,decryptPassword,credentialHealth,credentialRowForAccount
 };
