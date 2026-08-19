@@ -1,0 +1,753 @@
+{
+  "version": "GM_MLKIT_LANGUAGE_CATALOG_V001",
+  "provider": "Google ML Kit Translation",
+  "model_delivery": "on_device_remote_model",
+  "note": "These JSON files are download descriptors. The ML Kit model binary itself is downloaded to the Android device by Google ML Kit RemoteModelManager/TranslationEngine; model binaries are not hosted on the Glomart server.",
+  "supported_count": 59,
+  "primary_country_count": 25,
+  "primary_mlkit_supported_count": 17,
+  "languages": [
+    {
+      "code": "af",
+      "name_en": "Afrikaans",
+      "name_native": "Afrikaans",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/af.json"
+    },
+    {
+      "code": "ar",
+      "name_en": "Arabic",
+      "name_native": "العربية",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ar.json"
+    },
+    {
+      "code": "be",
+      "name_en": "Belarusian",
+      "name_native": "Беларуская",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/be.json"
+    },
+    {
+      "code": "bg",
+      "name_en": "Bulgarian",
+      "name_native": "Български",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/bg.json"
+    },
+    {
+      "code": "bn",
+      "name_en": "Bengali",
+      "name_native": "বাংলা",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/bn.json"
+    },
+    {
+      "code": "ca",
+      "name_en": "Catalan",
+      "name_native": "Català",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ca.json"
+    },
+    {
+      "code": "cs",
+      "name_en": "Czech",
+      "name_native": "Čeština",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/cs.json"
+    },
+    {
+      "code": "cy",
+      "name_en": "Welsh",
+      "name_native": "Cymraeg",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/cy.json"
+    },
+    {
+      "code": "da",
+      "name_en": "Danish",
+      "name_native": "Dansk",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/da.json"
+    },
+    {
+      "code": "de",
+      "name_en": "German",
+      "name_native": "Deutsch",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/de.json"
+    },
+    {
+      "code": "el",
+      "name_en": "Greek",
+      "name_native": "Ελληνικά",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/el.json"
+    },
+    {
+      "code": "en",
+      "name_en": "English",
+      "name_native": "English",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/en.json"
+    },
+    {
+      "code": "eo",
+      "name_en": "Esperanto",
+      "name_native": "Esperanto",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/eo.json"
+    },
+    {
+      "code": "es",
+      "name_en": "Spanish",
+      "name_native": "Español",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/es.json"
+    },
+    {
+      "code": "et",
+      "name_en": "Estonian",
+      "name_native": "Eesti",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/et.json"
+    },
+    {
+      "code": "fa",
+      "name_en": "Persian",
+      "name_native": "فارسی",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/fa.json"
+    },
+    {
+      "code": "fi",
+      "name_en": "Finnish",
+      "name_native": "Suomi",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/fi.json"
+    },
+    {
+      "code": "fr",
+      "name_en": "French",
+      "name_native": "Français",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/fr.json"
+    },
+    {
+      "code": "ga",
+      "name_en": "Irish",
+      "name_native": "Gaeilge",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ga.json"
+    },
+    {
+      "code": "gl",
+      "name_en": "Galician",
+      "name_native": "Galego",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/gl.json"
+    },
+    {
+      "code": "gu",
+      "name_en": "Gujarati",
+      "name_native": "ગુજરાતી",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/gu.json"
+    },
+    {
+      "code": "he",
+      "name_en": "Hebrew",
+      "name_native": "עברית",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/he.json"
+    },
+    {
+      "code": "hi",
+      "name_en": "Hindi",
+      "name_native": "हिन्दी",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/hi.json"
+    },
+    {
+      "code": "hr",
+      "name_en": "Croatian",
+      "name_native": "Hrvatski",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/hr.json"
+    },
+    {
+      "code": "ht",
+      "name_en": "Haitian",
+      "name_native": "Kreyòl ayisyen",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ht.json"
+    },
+    {
+      "code": "hu",
+      "name_en": "Hungarian",
+      "name_native": "Magyar",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/hu.json"
+    },
+    {
+      "code": "id",
+      "name_en": "Indonesian",
+      "name_native": "Bahasa Indonesia",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/id.json"
+    },
+    {
+      "code": "is",
+      "name_en": "Icelandic",
+      "name_native": "Íslenska",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/is.json"
+    },
+    {
+      "code": "it",
+      "name_en": "Italian",
+      "name_native": "Italiano",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/it.json"
+    },
+    {
+      "code": "ja",
+      "name_en": "Japanese",
+      "name_native": "日本語",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ja.json"
+    },
+    {
+      "code": "ka",
+      "name_en": "Georgian",
+      "name_native": "ქართული",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ka.json"
+    },
+    {
+      "code": "kn",
+      "name_en": "Kannada",
+      "name_native": "ಕನ್ನಡ",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/kn.json"
+    },
+    {
+      "code": "ko",
+      "name_en": "Korean",
+      "name_native": "한국어",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ko.json"
+    },
+    {
+      "code": "lt",
+      "name_en": "Lithuanian",
+      "name_native": "Lietuvių",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/lt.json"
+    },
+    {
+      "code": "lv",
+      "name_en": "Latvian",
+      "name_native": "Latviešu",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/lv.json"
+    },
+    {
+      "code": "mk",
+      "name_en": "Macedonian",
+      "name_native": "Македонски",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/mk.json"
+    },
+    {
+      "code": "mr",
+      "name_en": "Marathi",
+      "name_native": "मराठी",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/mr.json"
+    },
+    {
+      "code": "ms",
+      "name_en": "Malay",
+      "name_native": "Bahasa Melayu",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ms.json"
+    },
+    {
+      "code": "mt",
+      "name_en": "Maltese",
+      "name_native": "Malti",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/mt.json"
+    },
+    {
+      "code": "nl",
+      "name_en": "Dutch",
+      "name_native": "Nederlands",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/nl.json"
+    },
+    {
+      "code": "no",
+      "name_en": "Norwegian",
+      "name_native": "Norsk",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/no.json"
+    },
+    {
+      "code": "pl",
+      "name_en": "Polish",
+      "name_native": "Polski",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/pl.json"
+    },
+    {
+      "code": "pt",
+      "name_en": "Portuguese",
+      "name_native": "Português",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/pt.json"
+    },
+    {
+      "code": "ro",
+      "name_en": "Romanian",
+      "name_native": "Română",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ro.json"
+    },
+    {
+      "code": "ru",
+      "name_en": "Russian",
+      "name_native": "Русский",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ru.json"
+    },
+    {
+      "code": "sk",
+      "name_en": "Slovak",
+      "name_native": "Slovenčina",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/sk.json"
+    },
+    {
+      "code": "sl",
+      "name_en": "Slovenian",
+      "name_native": "Slovenščina",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/sl.json"
+    },
+    {
+      "code": "sq",
+      "name_en": "Albanian",
+      "name_native": "Shqip",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/sq.json"
+    },
+    {
+      "code": "sv",
+      "name_en": "Swedish",
+      "name_native": "Svenska",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/sv.json"
+    },
+    {
+      "code": "sw",
+      "name_en": "Swahili",
+      "name_native": "Kiswahili",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/sw.json"
+    },
+    {
+      "code": "ta",
+      "name_en": "Tamil",
+      "name_native": "தமிழ்",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ta.json"
+    },
+    {
+      "code": "te",
+      "name_en": "Telugu",
+      "name_native": "తెలుగు",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/te.json"
+    },
+    {
+      "code": "th",
+      "name_en": "Thai",
+      "name_native": "ไทย",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/th.json"
+    },
+    {
+      "code": "tl",
+      "name_en": "Tagalog",
+      "name_native": "Tagalog",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/tl.json"
+    },
+    {
+      "code": "tr",
+      "name_en": "Turkish",
+      "name_native": "Türkçe",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/tr.json"
+    },
+    {
+      "code": "uk",
+      "name_en": "Ukrainian",
+      "name_native": "Українська",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/uk.json"
+    },
+    {
+      "code": "ur",
+      "name_en": "Urdu",
+      "name_native": "اردو",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/ur.json"
+    },
+    {
+      "code": "vi",
+      "name_en": "Vietnamese",
+      "name_native": "Tiếng Việt",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/vi.json"
+    },
+    {
+      "code": "zh",
+      "name_en": "Chinese",
+      "name_native": "中文",
+      "supported": true,
+      "provider": "Google ML Kit",
+      "download_mode": "android_remote_model",
+      "approx_size_mb": 30,
+      "endpoint": "/download/android/mlkit/lang/zh.json"
+    }
+  ],
+  "primary25": [
+    {
+      "gm_lang": "kr",
+      "mlkit_code": "ko",
+      "country": "Korea",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "en",
+      "mlkit_code": "en",
+      "country": "English",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "zh",
+      "mlkit_code": "zh",
+      "country": "China",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "vi",
+      "mlkit_code": "vi",
+      "country": "Vietnam",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "ja",
+      "mlkit_code": "ja",
+      "country": "Japan",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "tw",
+      "mlkit_code": "zh",
+      "country": "Taiwan",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "th",
+      "mlkit_code": "th",
+      "country": "Thailand",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "uz",
+      "mlkit_code": "uz",
+      "country": "Uzbekistan",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "ne",
+      "mlkit_code": "ne",
+      "country": "Nepal",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "km",
+      "mlkit_code": "km",
+      "country": "Cambodia",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "id",
+      "mlkit_code": "id",
+      "country": "Indonesia",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "tl",
+      "mlkit_code": "tl",
+      "country": "Philippines",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "mn",
+      "mlkit_code": "mn",
+      "country": "Mongolia",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "my",
+      "mlkit_code": "my",
+      "country": "Myanmar",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "kk",
+      "mlkit_code": "kk",
+      "country": "Kazakhstan",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "si",
+      "mlkit_code": "si",
+      "country": "Sri Lanka",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "ru",
+      "mlkit_code": "ru",
+      "country": "Russia",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "bn",
+      "mlkit_code": "bn",
+      "country": "Bangladesh",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "ur",
+      "mlkit_code": "ur",
+      "country": "Pakistan",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "lo",
+      "mlkit_code": "lo",
+      "country": "Laos",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "hi",
+      "mlkit_code": "hi",
+      "country": "India",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "tr",
+      "mlkit_code": "tr",
+      "country": "Turkey",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "fa",
+      "mlkit_code": "fa",
+      "country": "Iran",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "es",
+      "mlkit_code": "es",
+      "country": "Spain",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "fr",
+      "mlkit_code": "fr",
+      "country": "France",
+      "mlkit_supported": true
+    }
+  ]
+}

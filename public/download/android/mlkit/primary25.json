@@ -1,0 +1,155 @@
+{
+  "version": "GM_MLKIT_PRIMARY25_V001",
+  "items": [
+    {
+      "gm_lang": "kr",
+      "mlkit_code": "ko",
+      "country": "Korea",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "en",
+      "mlkit_code": "en",
+      "country": "English",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "zh",
+      "mlkit_code": "zh",
+      "country": "China",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "vi",
+      "mlkit_code": "vi",
+      "country": "Vietnam",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "ja",
+      "mlkit_code": "ja",
+      "country": "Japan",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "tw",
+      "mlkit_code": "zh",
+      "country": "Taiwan",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "th",
+      "mlkit_code": "th",
+      "country": "Thailand",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "uz",
+      "mlkit_code": "uz",
+      "country": "Uzbekistan",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "ne",
+      "mlkit_code": "ne",
+      "country": "Nepal",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "km",
+      "mlkit_code": "km",
+      "country": "Cambodia",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "id",
+      "mlkit_code": "id",
+      "country": "Indonesia",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "tl",
+      "mlkit_code": "tl",
+      "country": "Philippines",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "mn",
+      "mlkit_code": "mn",
+      "country": "Mongolia",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "my",
+      "mlkit_code": "my",
+      "country": "Myanmar",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "kk",
+      "mlkit_code": "kk",
+      "country": "Kazakhstan",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "si",
+      "mlkit_code": "si",
+      "country": "Sri Lanka",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "ru",
+      "mlkit_code": "ru",
+      "country": "Russia",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "bn",
+      "mlkit_code": "bn",
+      "country": "Bangladesh",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "ur",
+      "mlkit_code": "ur",
+      "country": "Pakistan",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "lo",
+      "mlkit_code": "lo",
+      "country": "Laos",
+      "mlkit_supported": false
+    },
+    {
+      "gm_lang": "hi",
+      "mlkit_code": "hi",
+      "country": "India",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "tr",
+      "mlkit_code": "tr",
+      "country": "Turkey",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "fa",
+      "mlkit_code": "fa",
+      "country": "Iran",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "es",
+      "mlkit_code": "es",
+      "country": "Spain",
+      "mlkit_supported": true
+    },
+    {
+      "gm_lang": "fr",
+      "mlkit_code": "fr",
+      "country": "France",
+      "mlkit_supported": true
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": "GM_MLKIT_LANGUAGE_V001",
+  "code": "kn",
+  "name_en": "Kannada",
+  "name_native": "ಕನ್ನಡ",
+  "supported": true,
+  "provider": "Google ML Kit",
+  "download_mode": "android_remote_model",
+  "approx_size_mb": 30,
+  "endpoint": "/download/android/mlkit/lang/kn.json",
+  "action": "Call AndroidGM.gmTranslationModelDownload(code) inside the Glomart Android app.",
+  "binary_hosted_by_glomart": false
+}
