@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Glomart 외부몰 계정관리</title>
-  <link rel="stylesheet" href="./account.css?v=001" />
+  <link rel="stylesheet" href="./account.css?v=004" />
 </head>
 <body>
   <header class="topbar">
@@ -29,7 +29,7 @@
       <div class="page-head">
         <div>
           <h1>외부몰 계정관리</h1>
-          <p>쿠팡/알리 회사 계정을 등록하고 자동주문 사용권한을 관리합니다.</p>
+          <p>쿠팡/알리 회사 계정을 등록하고 MASTER 기준으로 관리합니다.</p>
         </div>
         <button class="primary" id="btnNew">+ 계정 등록</button>
       </div>
@@ -37,8 +37,8 @@
       <section class="summary-grid">
         <div class="summary-card"><span>전체 계정</span><strong id="sumTotal">0</strong></div>
         <div class="summary-card"><span>사용 가능</span><strong id="sumEnabled">0</strong></div>
-        <div class="summary-card"><span>로그인 필요</span><strong id="sumLoginRequired">0</strong></div>
-        <div class="summary-card"><span>실행중 Lock</span><strong id="sumLocked">0</strong></div>
+        <div class="summary-card"><span>사용 중지</span><strong id="sumDisabled">0</strong></div>
+        <div class="summary-card"><span>MASTER 배정</span><strong id="sumMaster">0</strong></div>
       </section>
 
       <section class="panel">
@@ -49,14 +49,6 @@
               <option value="">전체 몰</option>
               <option value="CPKR">쿠팡(CPKR)</option>
               <option value="ALKR">알리(ALKR)</option>
-            </select>
-            <select id="statusFilter">
-              <option value="">전체 상태</option>
-              <option value="READY">READY</option>
-              <option value="LOGIN_REQUIRED">LOGIN_REQUIRED</option>
-              <option value="MFA_REQUIRED">MFA_REQUIRED</option>
-              <option value="BLOCKED">BLOCKED</option>
-              <option value="DISABLED">DISABLED</option>
             </select>
             <input id="keyword" type="search" placeholder="계정명 / 로그인 ID / 내부계정ID 검색" />
             <button id="btnSearch">조회</button>
@@ -71,9 +63,8 @@
                 <th>몰</th>
                 <th>계정명</th>
                 <th>로그인 ID</th>
-                <th>상태</th>
-                <th>현재 작업</th>
-                <th>최근 로그인</th>
+                <th>관리자</th>
+                <th>역할</th>
                 <th>사용</th>
                 <th>관리</th>
               </tr>
@@ -84,18 +75,6 @@
         <div id="emptyState" class="empty hidden">등록된 외부몰 계정이 없습니다.</div>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>관리자 사용권한</h2>
-            <p class="sub">선택한 외부몰 계정을 어떤 MEMBER 관리자가 사용할 수 있는지 지정합니다.</p>
-          </div>
-          <div class="selected-account" id="selectedAccountLabel">계정을 선택하세요</div>
-        </div>
-        <div class="permission-box" id="permissionBox">
-          <div class="empty">왼쪽 계정 목록에서 [권한]을 선택하세요.</div>
-        </div>
-      </section>
     </main>
   </div>
 
@@ -126,15 +105,10 @@
           <label class="wide">비밀번호 <span class="hint" id="pwHint">등록 시 필수</span>
             <input id="password" type="password" autocomplete="new-password" placeholder="평문은 저장/재표시하지 않습니다" />
           </label>
-          <label>계정 상태
-            <select id="accountStatus">
-              <option value="READY">READY</option>
-              <option value="LOGIN_REQUIRED">LOGIN_REQUIRED</option>
-              <option value="MFA_REQUIRED">MFA_REQUIRED</option>
-              <option value="BLOCKED">BLOCKED</option>
-            </select>
+          <label>MASTER MEMBER ID
+            <input id="adminId" required placeholder="예: derzon" maxlength="80" />
           </label>
-          <label class="checkline"><input id="enabled" type="checkbox" checked /> 자동 배정 사용</label>
+          <label class="checkline"><input id="enabled" type="checkbox" checked /> 계정 사용</label>
         </div>
         <div class="security-note">
           비밀번호는 저장 후 다시 화면에 표시하지 않습니다. 수정 시 비밀번호를 비워두면 기존 암호화 비밀번호를 유지합니다.
@@ -147,43 +121,7 @@
     </div>
   </div>
 
-  <div class="modal-backdrop hidden" id="permissionModal">
-    <div class="modal wide-modal">
-      <div class="modal-head">
-        <h3>관리자 권한 추가</h3>
-        <button class="icon-btn" data-close="permissionModal">×</button>
-      </div>
-      <form id="permissionForm">
-        <input type="hidden" id="permissionMallAccountId" />
-        <div class="form-grid">
-          <label>관리자 MEMBER ID
-            <input id="adminId" required placeholder="예: derzon" />
-          </label>
-          <label>역할
-            <select id="adminRole">
-              <option value="OPERATOR">OPERATOR</option>
-              <option value="DEPUTY">DEPUTY</option>
-              <option value="MASTER">MASTER</option>
-            </select>
-          </label>
-        </div>
-        <div class="permission-checks">
-          <label><input id="canOrder" type="checkbox" checked /> 주문</label>
-          <label><input id="canPayment" type="checkbox" /> 결제</label>
-          <label><input id="canCancel" type="checkbox" checked /> 취소</label>
-          <label><input id="canExchange" type="checkbox" checked /> 교환</label>
-          <label><input id="canReturn" type="checkbox" checked /> 반품</label>
-          <label><input id="permEnabled" type="checkbox" checked /> 사용</label>
-        </div>
-        <div class="modal-actions">
-          <button type="button" data-close="permissionModal">취소</button>
-          <button class="primary" type="submit">저장</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
   <div id="toast" class="toast hidden"></div>
-  <script src="./account.js?v=001"></script>
+  <script src="./account.js?v=004"></script>
 </body>
 </html>

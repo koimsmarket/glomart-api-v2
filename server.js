@@ -372,6 +372,14 @@ try {
   console.error('[GM_AUTO_ORDER_DASHBOARD_API_V012] mount failed:', String(e && e.stack || e));
 }
 
+/* GM_AUTO_ORDER_ACCOUNT_API_V001 */
+try {
+  app.use(require('./auto-order/routes/auto_order_account'));
+  console.log('[GM_AUTO_ORDER_ACCOUNT_API_V001] mounted');
+} catch (e) {
+  console.error('[GM_AUTO_ORDER_ACCOUNT_API_V001] mount failed:', String(e && e.stack || e));
+}
+
 console.log('[GM_AUTO_ORDER_RUNTIME_BOOT_V012] mount attempt');
 try {
   const gmAutoOrderClientRuntime = require('./auto-order/routes/auto_order_client_runtime');
