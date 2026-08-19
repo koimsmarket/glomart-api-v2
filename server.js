@@ -130,6 +130,8 @@ app.get('/auto-order/icon.svg', gmAutoOrderSend('icon.svg'));
 app.get('/auto-order/order/order.html', gmAutoOrderSend(path.join('order', 'order.html')));
 app.get('/auto-order/auto/auto_order.html', gmAutoOrderSend(path.join('auto', 'auto_order.html')));
 app.get('/auto-order/account/account.html', gmAutoOrderSend(path.join('account', 'account.html')));
+app.get('/auto-order/account/account.css', gmAutoOrderSend(path.join('account', 'account.css')));
+app.get('/auto-order/account/account.js', gmAutoOrderSend(path.join('account', 'account.js')));
 app.get('/auto-order/delivery/delivery.html', gmAutoOrderSend(path.join('delivery', 'delivery.html')));
 app.get('/auto-order/claim/claim.html', gmAutoOrderSend(path.join('claim', 'claim.html')));
 app.get('/auto-order/cs/cs.html', gmAutoOrderSend(path.join('cs', 'cs.html')));
