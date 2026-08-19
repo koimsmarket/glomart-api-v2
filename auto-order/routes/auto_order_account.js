@@ -5,7 +5,7 @@
 const express=require('express');
 const crypto=require('crypto');
 const router=express.Router();
-const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V002_CREDENTIAL_KEY_COMPAT';
+const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V003_PASSWORD_ROW_PRIORITY';
 const clean=v=>String(v==null?'':v).trim();
 const bool=v=>v===true||v===1||/^(1|true|y|yes)$/i.test(clean(v));
 function db(req){return req.app.locals.pool||req.app.locals.db;}

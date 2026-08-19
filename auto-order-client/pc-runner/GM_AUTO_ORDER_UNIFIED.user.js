@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.088
+// @version      0.089
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -43,7 +43,7 @@
   try{Object.defineProperty(alertHook,'__gmaoV085TransientServerAlertBypass',{value:true});}catch(_e){}
   try{pw.alert=alertHook;}catch(_e){}
 })();
-const VERSION='0.088';
+const VERSION='0.089';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=086',
@@ -247,7 +247,7 @@ function resumeCurrentStageExplicit(){
   render('처음부터 재시작 · 기존 장바구니 확인/청소부터 시작');
   orchestrate().catch(fail);
 }
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V088</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V089</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -258,13 +258,25 @@ function clearLocal(){
   workTimer=null;
 }
 function errCode(e){return String(e&&e.message||e||'').trim();}
-function text(el){return String(el&&((el.innerText!=null?el.innerText:el.textContent)||'')||'').replace(/\s+/g,' ').trim();}
+function text(el){return String(el&&(el.innerText||el.textContent)||'').replace(/\s+/g,' ').trim();}
+function loginEntry(){
+  if(page()==='AUTH')return null;
+  return Array.from(document.querySelectorAll('a[href]')).find(function(a){
+    if(!authActionable(a))return false;
+    let href=String(a.href||'');
+    return /login\.coupang\.com\/login\//i.test(href)&&/^로그인$/.test(text(a));
+  })||null;
+}
+function loginRequiredNow(){
+  if(page()==='AUTH')return true;
+  return !!loginEntry();
+}
 async function beginLogin(){
   await guard();
   setBatch({cart_cleaned:false,needs_clean:true,last_login_required_at:Date.now()});
   setFlow({stage:ST.BATCH_SCAN,item_index:0,repair_index:0,cart_snapshot:null,cart_plan:null,final_verify:false,last_error:null});
   GM_setValue('gmao_runner_auth_status_v023',null);
-  let a=Array.from(document.querySelectorAll('a[href]')).find(x=>/login\.coupang\.com/i.test(String(x.href||''))&&/^로그인$/.test(text(x)));
+  let a=loginEntry();
   let u=a&&a.href||'https://login.coupang.com/login/login.pang';
   render('쿠팡 로그아웃 감지 · 등록된 회사계정으로 자동 로그인\n성공 후 장바구니 확인/청소부터 다시 시작');
   markNav();try{window.stop();}catch(_e){}setTimeout(()=>location.replace(u),250);
@@ -1100,9 +1112,9 @@ function authActionable(el){
   return true;
 }
 function passwordMethodButton(){
-  let nodes=Array.from(D.querySelectorAll('button,a,[role="button"]'));
+  let nodes=Array.from(document.querySelectorAll('button,a,[role="button"]'));
   return nodes.find(function(el){
-    if(!visible(el)||el.disabled||el.getAttribute('aria-disabled')==='true')return false;
+    if(!authActionable(el))return false;
     return /^비밀번호\s*확인$/.test(text(el));
   })||null;
 }
@@ -1110,8 +1122,8 @@ async function login(){
   if(!job||page()!=='AUTH')return false;
   let body=String(document.body&&document.body.innerText||'').slice(0,12000);
   if(/자동입력\s*방지|captcha/i.test(body))throw new Error('LOGIN_CAPTCHA_REQUIRED');
-  let id=document.querySelector('input[type="email"],input[name="email"],#login-email-input,input[name="loginId"],input[name="login_id"],input[autocomplete="username"]');
-  let pw=Array.from(document.querySelectorAll('input[type="password"]')).find(x=>x.id!=='auth-password-input')||null;
+  let id=document.querySelector('#login-email-input')||document.querySelector('input[type="email"],input[name="email"],input[name="loginId"],input[name="login_id"],input[autocomplete="username"]');
+  let pw=document.querySelector('#login-password-input')||Array.from(document.querySelectorAll('input[type="password"]')).find(x=>x.id!=='auth-password-input')||null;
   if(!(id&&pw)){
     let sw=Array.from(document.querySelectorAll('a,button,[role="button"]')).find(x=>authActionable(x)&&/비밀번호로\s*로그인|sign\s*in\s*with\s*password/i.test(text(x)));
     if(sw){sw.click();setTimeout(()=>orchestrate().catch(fail),700);return true;}
@@ -1128,7 +1140,7 @@ async function login(){
   if(!loginId)throw new Error('LOGIN_ID_NOT_RETURNED');
   if(!c.password)throw new Error('LOGIN_PASSWORD_NOT_RETURNED');
   nativeInputValue(id,loginId);nativeInputValue(pw,c.password);c.password='';await new Promise(r=>setTimeout(r,250));
-  let submit=Array.from(document.querySelectorAll('button[type="submit"],input[type="submit"],button')).find(x=>authActionable(x)&&(x.type==='submit'||/^로그인$|^sign\s*in$/i.test(text(x))));
+  let submit=document.querySelector('button.login__button--submit,button.login__button--submit-rds')||Array.from(document.querySelectorAll('button[type="submit"],input[type="submit"],button')).find(x=>authActionable(x)&&(x.type==='submit'||/^로그인$|^sign\s*in$/i.test(text(x))));
   if(!submit)throw new Error('LOGIN_SUBMIT_NOT_FOUND');
   GM_setValue('gmao_runner_auth_status_v023',{state:'LOGIN_SUBMITTED',ts:Date.now()});
   render('쿠팡 계정 자동 입력 완료 · 로그인 1회 실행\n성공하면 BATCH_SCAN부터 다시 시작');submit.click();
@@ -1286,6 +1298,12 @@ async function orchestrate(){
     }
 
     if(page()==='AUTH'){await handleAuthPage();return;}
+
+    /* V089: 주문 단계보다 로그인 상태를 먼저 확인한다. */
+    if(loginRequiredNow()){
+      await beginLogin();
+      return;
+    }
 
     if(s===ST.BATCH_SCAN)await batchScan();
     else if(s===ST.BATCH_CLEAR)await batchClear();

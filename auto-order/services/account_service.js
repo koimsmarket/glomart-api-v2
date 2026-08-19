@@ -143,7 +143,8 @@ async function credentialForLockedWork(pool,workId,input){
        AND upper(COALESCE(mall_code,''))=upper($1)
        AND COALESCE(mall_account_id,'')=$2
        AND COALESCE(admin_id,'')=$3
-     ORDER BY CASE WHEN upper(COALESCE(account_admin_role,''))='MASTER' THEN 0 ELSE 1 END,
+     ORDER BY CASE WHEN COALESCE(encrypted_password,'')<>'' THEN 0 ELSE 1 END,
+              CASE WHEN upper(COALESCE(account_admin_role,''))='MASTER' THEN 0 ELSE 1 END,
               account_admin_id DESC
      LIMIT 1`,[clean(w.mall_code),clean(w.lock_mall_account_id),clean(w.lock_admin_id)]);
   if(!ar.rows.length) throw new Error('mall_account_credential_not_found');
@@ -151,5 +152,5 @@ async function credentialForLockedWork(pool,workId,input){
   if(!clean(a.encrypted_password)) throw new Error('mall_account_password_not_configured');
   return {login_id:clean(a.login_id)||null,password:decryptPassword(a.encrypted_password)};
 }
-module.exports={VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V004_CREDENTIAL_KEY_COMPAT',listAccounts,saveAccount,setEnabled,credentialForLockedWork};
+module.exports={VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V005_PASSWORD_ROW_PRIORITY',listAccounts,saveAccount,setEnabled,credentialForLockedWork};
 
