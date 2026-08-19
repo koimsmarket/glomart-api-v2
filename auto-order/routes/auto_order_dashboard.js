@@ -8,7 +8,7 @@ const paymentConfirm = require('../services/payment_confirm_service');
 const accountService = require('../services/account_service');
 
 /*
- * GM_AUTO_ORDER_DASHBOARD_API_V018
+ * GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL
  *
  * This is the ONLY auto-order dashboard server route file.
  *
@@ -513,7 +513,7 @@ router.get('/api/auto-order/dashboard/summary', async (req, res) => {
   if(!pool){
     return res.status(503).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V018',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',
       error:'database pool not ready'
     });
   }
@@ -522,14 +522,14 @@ router.get('/api/auto-order/dashboard/summary', async (req, res) => {
     const data = await buildSummary(pool);
     return res.json({
       ok:true,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V018',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',
       data
     });
   }catch(e){
     console.error('[GM_AUTO_ORDER_DASHBOARD_SUMMARY_V018]', String(e && e.stack || e));
     return res.status(500).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V018',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',
       error:'dashboard summary failed',
       detail:String(e && e.message || e)
     });
@@ -538,7 +538,7 @@ router.get('/api/auto-order/dashboard/summary', async (req, res) => {
 
 router.get('/api/auto-order/orders', async (req, res) => {
   const pool = poolFrom(req);
-  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_DASHBOARD_API_V018',error:'database pool not ready'});
+  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',error:'database pool not ready'});
   const opts={q:String(req.query.q||'').trim().slice(0,120),order_mode:String(req.query.order_mode||'').trim().slice(0,40),payment_status:String(req.query.payment_status||'').trim().slice(0,40),order_status:String(req.query.order_status||'').trim().slice(0,40),limit:safeInt(req.query.limit,100,1,500),offset:safeInt(req.query.offset,0,0,1000000)};
   try{
     const data=await buildOrderList(pool,opts);
@@ -554,7 +554,7 @@ router.get('/api/auto-order/dashboard/clients', (req, res) => {
   // PC PWA / Android client registry is connected in the next auto-order phase.
   return res.json({
     ok:true,
-    version:'GM_AUTO_ORDER_DASHBOARD_API_V018',
+    version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',
     data:[]
   });
 });
@@ -564,7 +564,7 @@ router.get('/api/auto-order/dashboard/attention', async (req, res) => {
   if(!pool){
     return res.status(503).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V018',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',
       error:'database pool not ready'
     });
   }
@@ -573,14 +573,14 @@ router.get('/api/auto-order/dashboard/attention', async (req, res) => {
     const data = await buildAttention(pool);
     return res.json({
       ok:true,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V018',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',
       data
     });
   }catch(e){
     console.error('[GM_AUTO_ORDER_DASHBOARD_ATTENTION_V018]', String(e && e.stack || e));
     return res.status(500).json({
       ok:false,
-      version:'GM_AUTO_ORDER_DASHBOARD_API_V018',
+      version:'GM_AUTO_ORDER_DASHBOARD_API_V019_DETAIL',
       error:'dashboard attention failed',
       detail:String(e && e.message || e)
     });
@@ -651,6 +651,117 @@ router.get('/api/auto-order/control-tower', async (req, res) => {
   }
 });
 
+
+
+router.get('/api/auto-order/control-tower/order/:order_no/detail', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'database pool not ready'});
+
+  const orderNo=String(req.params.order_no||'').trim().slice(0,120);
+  if(!orderNo) return res.status(400).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order_no required'});
+
+  const pick=(row,keys)=>{
+    const out={};
+    if(!row) return out;
+    for(const k of keys){ if(Object.prototype.hasOwnProperty.call(row,k)) out[k]=row[k]; }
+    return out;
+  };
+
+  try{
+    const orderTable=await firstExistingTable(pool,['gm_order','gm_orders']);
+    const itemTable=await firstExistingTable(pool,['gm_order_item','gm_order_items']);
+    if(!orderTable) return res.status(404).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order table not found'});
+
+    const orderR=await pool.query(`SELECT * FROM ${qIdent(orderTable)} WHERE order_no=$1 LIMIT 1`,[orderNo]);
+    if(!orderR.rows.length) return res.status(404).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order not found'});
+
+    let itemRows=[];
+    if(itemTable){
+      const rr=await pool.query(`SELECT * FROM ${qIdent(itemTable)} WHERE order_no=$1 ORDER BY created_at NULLS LAST, ctid`,[orderNo]);
+      itemRows=rr.rows||[];
+    }
+
+    let autoOrders=[],autoItems=[],works=[],logs=[];
+    const hasAutoOrder=await tableExists(pool,'gm_auto_order');
+    const hasAutoItem=await tableExists(pool,'gm_auto_order_item');
+    const hasWork=await tableExists(pool,'gm_auto_order_work');
+    const hasLog=await tableExists(pool,'gm_auto_order_log');
+
+    if(hasAutoOrder){
+      const rr=await pool.query(`SELECT * FROM gm_auto_order WHERE order_no=$1 ORDER BY auto_order_no`,[orderNo]);
+      autoOrders=rr.rows||[];
+    }
+    if(hasAutoItem){
+      const rr=await pool.query(`SELECT * FROM gm_auto_order_item WHERE order_no=$1 ORDER BY auto_order_no, auto_order_item_id`,[orderNo]);
+      autoItems=rr.rows||[];
+    }
+    if(hasWork && hasAutoOrder){
+      const rr=await pool.query(`
+        SELECT w.*
+        FROM gm_auto_order_work w
+        JOIN gm_auto_order a ON a.auto_order_no=w.auto_order_no
+        WHERE a.order_no=$1
+        ORDER BY w.work_id
+      `,[orderNo]);
+      works=rr.rows||[];
+    }
+    if(hasLog && hasAutoOrder){
+      const rr=await pool.query(`
+        SELECT l.*
+        FROM gm_auto_order_log l
+        JOIN gm_auto_order a ON a.auto_order_no=l.auto_order_no
+        WHERE a.order_no=$1
+        ORDER BY l.created_at DESC, l.log_id DESC
+        LIMIT 40
+      `,[orderNo]);
+      logs=rr.rows||[];
+    }
+
+    const order=pick(orderR.rows[0],[
+      'order_no','cafe24_order_no','member_id','orderer_name','receiver_name','receiver_mobile',
+      'receiver_zipcode','receiver_address1','receiver_address2','delivery_memo','payment_method','payment_method_display',
+      'expected_payment_amount','actual_payment_amount','payment_difference_amount','total_product_price','total_delivery_fee',
+      'extra_area_delivery_fee','total_payment_price','order_status','payment_status','shipping_status','seller_status','customer_status',
+      'ordered_at','payment_completed_at','created_at','updated_at'
+    ]);
+
+    const items=itemRows.map(x=>pick(x,[
+      'pi_ii_vi','product_name','option_name','option_value','quantity','mall_sale_price','customer_order_price','final_supply_price',
+      'product_amount','delivery_type','delivery_fee','extra_area_delivery_fee','mall_code','source_mall','source_uid','supplier_name',
+      'product_url','item_order_status','item_shipping_status'
+    ]));
+
+    const ao=autoOrders.map(x=>pick(x,[
+      'auto_order_no','mall_code','mode','admin_id','mall_account_id','received_item_count','ordered_item_count','order_status','process_status',
+      'total_product_price','discount_amount','total_delivery_fee','extra_area_delivery_fee','actual_payment_amount','mall_order_no',
+      'payment_method','payment_completed_at','last_error_code','last_error_message','created_at','updated_at'
+    ]));
+
+    const ai=autoItems.map(x=>pick(x,[
+      'auto_order_item_id','auto_order_no','pi_ii_vi','mall_code','source_uid','product_name','option_name','option_value','quantity',
+      'ordered_quantity','mall_sale_price','order_attempt_price','ordered_price','item_discount_amount','product_amount','item_order_status',
+      'process_status','mall_order_no','mall_order_item_no','ordered_at','error_code','error_message'
+    ]));
+
+    const ww=works.map(x=>pick(x,[
+      'work_id','auto_order_no','work_type','work_status','priority','admin_id','mall_account_id','lock_admin_id','lock_mall_account_id',
+      'requested_at','started_at','completed_at','error_code','error_message','updated_at'
+    ]));
+
+    const ll=logs.map(x=>pick(x,[
+      'log_id','auto_order_no','auto_order_item_id','work_id','action_type','status_before','status_after','admin_id','mall_account_id','message','created_at'
+    ]));
+
+    return res.json({
+      ok:true,
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',
+      data:{order,items,auto_orders:ao,auto_items:ai,works:ww,logs:ll}
+    });
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_FAIL_V001]',String(e&&e.stack||e));
+    return res.status(500).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order detail failed',detail:String(e&&e.message||e)});
+  }
+});
 
 router.get('/api/auto-order/control-tower/accounts', async (req,res)=>{
   const pool = poolFrom(req);
