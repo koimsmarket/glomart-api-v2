@@ -1,5 +1,7 @@
 'use strict';
 
+/* GM_AUTO_ORDER_RUNTIME_WORK_SERVICE_V015_QUEUE_SYNC */
+
 const crypto = require('crypto');
 const LOCK_SECONDS = Math.max(
   60,
@@ -270,6 +272,27 @@ async function recoverExpired(db) {
   }
 }
 
+async function normalizeReadyLocks(db) {
+  /* READY means unclaimed. Any lock fields left on a READY row are stale
+     bookkeeping from an interrupted/retried test run and must never make
+     the row permanently unclaimable. No date restriction is used. */
+  await db.query(
+    `UPDATE gm_auto_order_work
+     SET lock_token=NULL,
+         lock_admin_id=NULL,
+         lock_mall_account_id=NULL,
+         lock_at=NULL,
+         lock_expires_at=NULL,
+         updated_at=now()
+     WHERE upper(work_status)='READY'
+       AND (lock_token IS NOT NULL
+         OR lock_admin_id IS NOT NULL
+         OR lock_mall_account_id IS NOT NULL
+         OR lock_at IS NOT NULL
+         OR lock_expires_at IS NOT NULL)`
+  );
+}
+
 async function readyList(pool, data) {
   const adminId = clean(data.admin_id || data.adminId);
   const mallAccountId = clean(data.mall_account_id || data.mallAccountId);
@@ -358,6 +381,7 @@ async function claim(pool, data) {
   try {
     await db.query('BEGIN');
     await recoverExpired(db);
+    await normalizeReadyLocks(db);
 
     const result = await db.query(
       `SELECT w.*
@@ -375,7 +399,6 @@ async function claim(pool, data) {
          AND w.admin_id=$1
          AND w.mall_account_id=$2
          AND upper(o.mall_code)=$3
-         AND (w.lock_token IS NULL OR w.lock_expires_at < now())
        ORDER BY
          w.priority DESC,
          w.requested_at ASC,

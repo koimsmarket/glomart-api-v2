@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.093
+// @version      0.094
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -43,7 +43,7 @@
   try{Object.defineProperty(alertHook,'__gmaoV085TransientServerAlertBypass',{value:true});}catch(_e){}
   try{pw.alert=alertHook;}catch(_e){}
 })();
-const VERSION='0.093';
+const VERSION='0.094';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=086',
@@ -78,7 +78,7 @@ function restoreLocalJob(){
   }
   return null;
 }
-let job=restoreLocalJob(),workTimer=null,clientTimer=null,busy=false;
+let job=restoreLocalJob(),workTimer=null,clientTimer=null,claimTimer=null,claimBusy=false,busy=false;
 
 function validStageName(x){
   return !!x&&Object.values(ST).includes(String(x));
@@ -247,7 +247,7 @@ function resumeCurrentStageExplicit(){
   render('처음부터 재시작 · 기존 장바구니 확인/청소부터 시작');
   orchestrate().catch(fail);
 }
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V093</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V094</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -353,7 +353,19 @@ async function register(){return req('/api/auto-order/runtime/register','POST',s
     throw e;
   }
 }function startWorkTimer(){clearInterval(workTimer);if(job)workTimer=setInterval(()=>workHeartbeat().catch(fail),5000);}
+function scheduleClaim(delayMs){
+  if(job)return;
+  clearTimeout(claimTimer);
+  claimTimer=setTimeout(()=>{
+    claimTimer=null;
+    claim().catch(fail);
+  },Math.max(500,Number(delayMs||5000)));
+}
+
 async function claim(){
+  if(claimBusy)return job||null;
+  claimBusy=true;
+  try{
   if(job){
     try{
       await workHeartbeat();
@@ -373,19 +385,23 @@ async function claim(){
   const r=await req('/api/auto-order/runtime/claim','POST',settings());
 
   if(!r.job){
-    /* No more work = this continuous run is over.
-       The next future manual start begins with a cart check/clean. */
+    /* Queue can become claimable later (lock expiry/retry/manual READY).
+       Stay idle and poll; never use order date as an eligibility rule. */
     setBatch({
       session_active:false,
       cart_cleaned:false,
       needs_clean:true,
       session_ended_at:Date.now(),
-      session_end_reason:r.reason||'queue_empty'
+      session_end_reason:r.reason||'queue_empty',
+      idle_polling:true
     });
-    render('배정 가능한 작업 없음\n'+(r.reason||'queue_empty'));
+    render('배정 가능한 작업 없음\n'+(r.reason||'queue_empty')+'\n5초 후 자동 재조회');
+    scheduleClaim(5000);
     return null;
   }
 
+  clearTimeout(claimTimer);
+  claimTimer=null;
   job=r.job;
   GM_setValue(STORE.job,job);
   GM_setValue('gmao_runner_auth_status_v023',null); // V076 new-job-only AUTH reset
@@ -450,6 +466,9 @@ async function claim(){
 
   setTimeout(()=>orchestrate().catch(fail),300);
   return job;
+  }finally{
+    claimBusy=false;
+  }
 }
 async function release(){
   if(!job)return;
@@ -1436,7 +1455,10 @@ async function start(){
         if(STALE.has(errCode(e))){clearLocal();render('오래된 작업 자동 정리');}
         else throw e;
       }
-    }else render('온라인 · 작업 배정 대기');
+    }else{
+      render('온라인 · 작업 배정 대기\n자동 Queue 조회 시작');
+      scheduleClaim(500);
+    }
   }catch(e){await fail(e);}
 }
 if(document.readyState==='loading'){

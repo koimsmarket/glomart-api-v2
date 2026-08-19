@@ -1,5 +1,7 @@
 'use strict';
 
+/* GM_AUTO_ORDER_DASHBOARD_SERVICE_V013_READY_QUEUE_SYNC */
+
 /*
  * GM_AUTO_ORDER_DASHBOARD_SERVICE_V016
  *
@@ -129,7 +131,7 @@ async function applyAutoOrderControlTower(pool, out){
     SELECT
       COUNT(*) FILTER (
         WHERE upper(${workType})='ORDER'
-          AND upper(${workStatus}) IN ('WAIT_PAYMENT','PENDING','READY')
+          AND upper(${workStatus})='READY'
       )::int AS auto_order_waiting,
 
       COUNT(*) FILTER (
