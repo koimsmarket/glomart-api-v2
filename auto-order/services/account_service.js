@@ -21,6 +21,9 @@ function credentialSecret(){
 function credentialKey(){
   return crypto.createHash('sha256').update(credentialSecret(),'utf8').digest();
 }
+function credentialKeyConfigured(){
+  return !!clean(process.env.GM_AUTO_ORDER_CREDENTIAL_KEY);
+}
 
 function encryptPassword(plain){
   plain=String(plain==null?'':plain);
@@ -187,7 +190,8 @@ async function credentialHealth(pool,mallAccountId,expectedPassword){
   }
 }
 module.exports={
-  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V011_SINGLE_CREDENTIAL_KEY',
+  VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V012_SINGLE_KEY_PREFLIGHT',
   listAccounts,saveAccount,setEnabled,credentialForLockedWork,
-  encryptPassword,decryptPassword,credentialHealth,credentialRowForAccount
+  encryptPassword,decryptPassword,credentialHealth,credentialRowForAccount,
+  credentialKeyConfigured
 };

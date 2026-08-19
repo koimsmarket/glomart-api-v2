@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Glomart 외부몰 계정관리</title>
-  <link rel="stylesheet" href="./account.css?v=008" />
+  <link rel="stylesheet" href="./account.css?v=012" />
 </head>
 <body>
   <header class="topbar">
@@ -32,6 +32,10 @@
           <p>쿠팡/알리 회사 계정을 등록하고 MASTER 기준으로 관리합니다.</p>
         </div>
         <button class="primary" id="btnNew">+ 계정 등록</button>
+      </div>
+
+      <div id="credentialKeyWarning" class="credential-key-warning hidden">
+        서버 암호화 키(GM_AUTO_ORDER_CREDENTIAL_KEY)가 설정되지 않았습니다. 비밀번호 등록/수정은 잠겨 있습니다.
       </div>
 
       <section class="summary-grid">
@@ -123,6 +127,6 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="./account.js?v=008"></script>
+  <script src="./account.js?v=012"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-/* GM_AUTO_ORDER_ACCOUNT_API_V011_SINGLE_CREDENTIAL_KEY
+/* GM_AUTO_ORDER_ACCOUNT_API_V012_SINGLE_KEY_PREFLIGHT
  * Production DB rows only. MASTER-only policy.
  * Password save succeeds only after DB re-read + decrypt + exact-match verification.
  * Plain password is never returned by this admin API.
@@ -7,7 +7,7 @@
 const express=require('express');
 const router=express.Router();
 const accountService=require('../services/account_service');
-const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V011_SINGLE_CREDENTIAL_KEY';
+const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V012_SINGLE_KEY_PREFLIGHT';
 const clean=v=>String(v==null?'':v).trim();
 const bool=v=>v===true||v===1||/^(1|true|y|yes)$/i.test(clean(v));
 function db(req){return req.app.locals.pool||req.app.locals.db;}
@@ -51,7 +51,12 @@ router.get('/api/gm/auto-order/accounts',async(req,res)=>{
       const h=await accountService.credentialHealth(q,id);
       accounts.push({...row,...healthPublic(h),login_id_raw:clean(row.login_id),login_id:maskLogin(row.login_id),enabled:row.enabled!==false});
     }
-    res.json({ok:true,accounts,version:VERSION});
+    res.json({
+      ok:true,
+      accounts,
+      credential_key_configured:accountService.credentialKeyConfigured(),
+      version:VERSION
+    });
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e),version:VERSION});}
 });
 
@@ -67,6 +72,7 @@ router.post('/api/gm/auto-order/accounts',async(req,res)=>{
   const q=db(req),b=req.body||{};
   try{
     const err=validate(b,false);if(err)return res.status(400).json({ok:false,error:err,version:VERSION});
+    if(!accountService.credentialKeyConfigured())return res.status(503).json({ok:false,error:'GM_AUTO_ORDER_CREDENTIAL_KEY_NOT_CONFIGURED',version:VERSION});
     if(!(await tableExists(q,'gm_auto_order_account')))return res.status(409).json({ok:false,error:'gm_auto_order_account table not found',version:VERSION});
     const c=await cols(q,'gm_auto_order_account');
     const h=await withTx(q,async tx=>{
@@ -86,6 +92,7 @@ router.put('/api/gm/auto-order/accounts/:id',async(req,res)=>{
   const q=db(req),b={...(req.body||{}),mall_account_id:clean(req.params.id)};
   try{
     const err=validate(b,true);if(err)return res.status(400).json({ok:false,error:err,version:VERSION});
+    if(clean(b.password)&&!accountService.credentialKeyConfigured())return res.status(503).json({ok:false,error:'GM_AUTO_ORDER_CREDENTIAL_KEY_NOT_CONFIGURED',version:VERSION});
     const c=await cols(q,'gm_auto_order_account');
     const passwordChanged=!!clean(b.password);
     const h=await withTx(q,async tx=>{

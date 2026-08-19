@@ -3,3 +3,14 @@
 /* V004: destructive action is visually separated from normal edit. */
 .danger-lite{color:#b42318!important;border-color:#f3b6b0!important;background:#fff!important}
 .danger-lite:hover{background:#fff1f0!important}
+
+.credential-key-warning{
+  margin:0 0 16px;
+  padding:12px 14px;
+  border:1px solid #e7b56b;
+  background:#fff7e7;
+  color:#8a5311;
+  border-radius:6px;
+  font-weight:600;
+}
+button:disabled{opacity:.45;cursor:not-allowed}
