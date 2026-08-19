@@ -5,7 +5,7 @@
  */
 (function(W,D){
   'use strict';
-  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='084') return;
+  if(W.CPKR_PRODUCT && W.CPKR_PRODUCT.version==='086') return;
 
   function digits(v){return String(v==null?'':v).replace(/\D/g,'');}
   function text(el){return String(el&&el.textContent||'').replace(/\s+/g,' ').trim();}
@@ -272,5 +272,5 @@
     return prepared;
   }
 
-  W.CPKR_PRODUCT={version:'085',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,prepare:prepare,buyNow:buyNow,addToCart:addToCart,run:run};
+  W.CPKR_PRODUCT={version:'086',identity:identity,puid:puid,canonicalUrl:canonicalUrl,inspect:inspect,setQuantity:setQuantity,prepare:prepare,buyNow:buyNow,addToCart:addToCart,run:run};
 })(window,document);
