@@ -1,70 +1,189 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>실행계정관리</title><link rel="stylesheet" href="../dashboard.css?v=gm_v1">
-<style>
-.wrap{display:grid;grid-template-columns:380px 1fr;gap:16px}.box{background:#fff;border:1px solid #ddd;border-radius:6px}.head{padding:14px;font-weight:800;border-bottom:1px solid #eee}.body{padding:14px}
-label{display:block;font-size:12px;font-weight:700;margin:10px 0 4px}input,select,button{height:38px;border:1px solid #cbd2db;border-radius:4px;padding:0 9px;box-sizing:border-box}input,select{width:100%}
-.actions{display:flex;gap:8px;margin-top:14px}.primary{background:#1768d2;color:#fff;border-color:#1768d2}.checks{display:flex;gap:14px;margin-top:12px}.checks label{font-size:13px;margin:0}.checks input{width:auto;height:auto}
-.tools{display:grid;grid-template-columns:1fr 130px 130px 90px;gap:8px;padding:12px;border-bottom:1px solid #eee}.tools input,.tools select{width:100%}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid #eee;text-align:left}th{background:#f7f8fa}.table{overflow:auto}.summary{padding:9px 12px;color:#666}.small{height:28px}.notice{margin-top:12px;background:#fff6dc;padding:10px;font-size:12px}
-@media(max-width:1000px){.wrap{grid-template-columns:1fr}}
-</style></head><body>
-<header class="topbar"><div class="brand">Glomart</div><div class="top-title">외부상품 운영센터</div></header>
-<div class="layout"><aside class="sidebar"><div class="side-group">주문 운영</div><nav class="side-nav">
-<a href="../">대시보드</a><a href="../order/order.html">주문관리</a><a href="../auto/auto_order.html">자동주문</a><a class="active" href="../account/account.html">실행계정관리</a>
-<a href="../delivery/delivery.html">배송관리</a></nav></aside>
-<main class="main"><section class="page-head"><div><h1>실행계정관리</h1><p>자동주문 작업 배정용 담당자·주문처 계정을 관리합니다.</p></div><a href="../auto/auto_order.html">컨트롤타워</a></section>
-<section class="wrap"><div class="box"><div class="head">계정 등록/수정</div><div class="body">
-<input id="pk" type="hidden"><label>주문처</label><select id="mall"><option>GMKR</option><option>CPKR</option><option>ALKR</option></select>
-<label>담당 관리자 ID</label><input id="admin" placeholder="admin01"><label>계정명</label><input id="name" placeholder="국내상품 주문담당">
-<label>몰 계정 ID</label><input id="mallAccount"><label>로그인 ID</label><input id="login">
-<label>로그인 비밀번호</label><input id="password" type="password" autocomplete="new-password" placeholder="빈칸이면 기존 비밀번호 유지">
-<div style="margin-top:5px;font-size:12px;color:#666"><span id="passwordState">비밀번호 미등록</span> · 값은 화면/API 목록에 다시 표시하지 않습니다.</div>
-<label style="font-size:12px;font-weight:400"><input id="clearPassword" type="checkbox" style="width:auto;height:auto"> 저장된 비밀번호 삭제</label>
-<label>역할</label><select id="role"><option>OPERATOR</option><option>MASTER</option><option>DEPUTY</option></select>
-<div class="checks"><label><input id="canOrder" type="checkbox" checked> 주문 가능</label><label><input id="canPayment" type="checkbox"> 결제 가능</label><label><input id="enabled" type="checkbox" checked> 사용</label></div>
-<div class="actions"><button id="save" class="primary">저장</button><button id="reset">신규 입력</button></div>
-<div class="notice">쿠키·토큰은 저장하지 않습니다. 로그인 비밀번호는 서버에서 AES-256-GCM 암호화 후 저장하며, 현재 자동주문 작업의 lock_token이 일치하는 Runner에만 인증 단계에서 전달합니다.</div></div></div>
-<div class="box"><div class="head">등록 계정</div><div class="tools"><input id="q" placeholder="담당자/계정 검색"><select id="fm"><option value="">전체 주문처</option><option>GMKR</option><option>CPKR</option><option>ALKR</option></select><select id="fe"><option value="">전체 상태</option><option value="true">사용</option><option value="false">중지</option></select><button id="search">조회</button></div>
-<div id="summary" class="summary">조회 중...</div><div class="table"><table><thead><tr><th>주문처</th><th>계정명</th><th>담당자</th><th>몰계정</th><th>로그인ID</th><th>주문</th><th>결제</th><th>사용</th><th>관리</th></tr></thead><tbody id="rows"></tbody></table></div></div>
-</section></main></div>
-<script>
-const $=id=>document.getElementById(id), cache=new Map(), yes=v=>v===true||String(v).toLowerCase()==='true';
-function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-function clearForm(){
-$('pk').value='';$('mall').value='GMKR';$('admin').value='';$('name').value='';
-$('mallAccount').value='';$('login').value='';$('password').value='';$('clearPassword').checked=false;$('passwordState').textContent='비밀번호 미등록';$('role').value='OPERATOR';
-$('canOrder').checked=true;$('canPayment').checked=false;$('enabled').checked=true;
-$('save').textContent='저장';
-}
-async function load(){const p=new URLSearchParams();if($('q').value.trim())p.set('q',$('q').value.trim());if($('fm').value)p.set('mall_code',$('fm').value);if($('fe').value)p.set('enabled',$('fe').value);
-const r=await fetch('/api/auto-order/accounts?'+p);const j=await r.json();if(!r.ok||!j.ok)throw Error(j.detail||j.error);const a=j.data.rows||[];cache.clear();a.forEach(x=>cache.set(String(x.account_admin_id),x));$('summary').textContent='총 '+a.length+'건';
-$('rows').innerHTML=a.length?a.map(x=>`<tr><td>${esc(x.mall_code)}</td><td>${esc(x.account_name)}</td><td>${esc(x.admin_id)}</td><td>${esc(x.mall_account_id||'-')}</td><td>${esc(x.login_id||'-')}</td><td>${yes(x.can_order)?'가능':'불가'}</td><td>${yes(x.can_payment)?'가능':'불가'}</td><td>${yes(x.enabled)?'사용':'중지'}</td><td><button class="small" data-edit="${x.account_admin_id}">수정</button> <button class="small" data-toggle="${x.account_admin_id}" data-enabled="${!yes(x.enabled)}">${yes(x.enabled)?'중지':'사용'}</button></td></tr>`).join(''):'<tr><td colspan="9">등록된 계정이 없습니다.</td></tr>';}
-function edit(id){
-const x=cache.get(String(id));if(!x)return;
-$('pk').value=x.account_admin_id||'';$('mall').value=x.mall_code||'GMKR';
-$('admin').value=x.admin_id||'';$('name').value=x.account_name||'';
-$('mallAccount').value=x.mall_account_id||'';$('login').value=x.login_id||'';$('password').value='';$('clearPassword').checked=false;$('passwordState').textContent=x.password_configured?'비밀번호 등록됨':'비밀번호 미등록';
-$('role').value=x.account_admin_role||'OPERATOR';
-$('canOrder').checked=yes(x.can_order);$('canPayment').checked=yes(x.can_payment);
-$('enabled').checked=yes(x.enabled);$('save').textContent='수정 저장';scrollTo(0,0);
-}
-async function saveForm(){
-const body={
-  account_admin_id:$('pk').value||null,
-  mall_code:$('mall').value,
-  admin_id:$('admin').value.trim(),
-  account_name:$('name').value.trim(),
-  mall_account_id:$('mallAccount').value.trim(),
-  login_id:$('login').value.trim(),
-  password:$('password').value,
-  clear_password:$('clearPassword').checked,
-  account_admin_role:$('role').value,
-  can_order:$('canOrder').checked,
-  can_payment:$('canPayment').checked,
-  enabled:$('enabled').checked
-};
-if(!body.admin_id||!body.account_name)return alert('담당 관리자 ID와 계정명을 입력하세요.');
-const r=await fetch('/api/auto-order/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),j=await r.json();if(!r.ok||!j.ok)return alert(j.detail||j.error);clearForm();load();}
-async function toggle(id,en){const r=await fetch('/api/auto-order/accounts/'+id+'/enabled',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:String(en)==='true'})}),j=await r.json();if(!r.ok||!j.ok)return alert(j.detail||j.error);load();}
-$('save').addEventListener('click',saveForm);$('reset').addEventListener('click',clearForm);$('search').addEventListener('click',load);$('rows').addEventListener('click',e=>{const a=e.target.closest('[data-edit]');if(a)return edit(a.dataset.edit);const b=e.target.closest('[data-toggle]');if(b)toggle(b.dataset.toggle,b.dataset.enabled);});clearForm();load().catch(e=>$('summary').textContent=e.message);
-</script></body></html>
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Glomart 외부몰 계정관리</title>
+  <link rel="stylesheet" href="./account.css?v=001" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Glomart</div>
+    <div class="system-name">외부상품 운영센터</div>
+    <div class="top-user"><span id="gmMasterLabel">MASTER</span></div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <a href="../index.html">대시보드</a>
+      <a href="../order/order.html">주문관리</a>
+      <a href="../auto/auto_order.html">자동주문</a>
+      <a href="../auto/runner.html">실행계정관리</a>
+      <a href="../delivery/delivery.html">배송관리</a>
+      <a href="../claim/claim.html">취소/교환/반품</a>
+      <a href="../cs/cs.html">CS관리</a>
+      <a class="active" href="./account.html">외부몰 계정관리</a>
+    </aside>
+
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>외부몰 계정관리</h1>
+          <p>쿠팡/알리 회사 계정을 등록하고 자동주문 사용권한을 관리합니다.</p>
+        </div>
+        <button class="primary" id="btnNew">+ 계정 등록</button>
+      </div>
+
+      <section class="summary-grid">
+        <div class="summary-card"><span>전체 계정</span><strong id="sumTotal">0</strong></div>
+        <div class="summary-card"><span>사용 가능</span><strong id="sumEnabled">0</strong></div>
+        <div class="summary-card"><span>로그인 필요</span><strong id="sumLoginRequired">0</strong></div>
+        <div class="summary-card"><span>실행중 Lock</span><strong id="sumLocked">0</strong></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>회사 외부몰 계정</h2>
+          <div class="filters">
+            <select id="mallFilter">
+              <option value="">전체 몰</option>
+              <option value="CPKR">쿠팡(CPKR)</option>
+              <option value="ALKR">알리(ALKR)</option>
+            </select>
+            <select id="statusFilter">
+              <option value="">전체 상태</option>
+              <option value="READY">READY</option>
+              <option value="LOGIN_REQUIRED">LOGIN_REQUIRED</option>
+              <option value="MFA_REQUIRED">MFA_REQUIRED</option>
+              <option value="BLOCKED">BLOCKED</option>
+              <option value="DISABLED">DISABLED</option>
+            </select>
+            <input id="keyword" type="search" placeholder="계정명 / 로그인 ID / 내부계정ID 검색" />
+            <button id="btnSearch">조회</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>내부 계정ID</th>
+                <th>몰</th>
+                <th>계정명</th>
+                <th>로그인 ID</th>
+                <th>상태</th>
+                <th>현재 작업</th>
+                <th>최근 로그인</th>
+                <th>사용</th>
+                <th>관리</th>
+              </tr>
+            </thead>
+            <tbody id="accountRows"></tbody>
+          </table>
+        </div>
+        <div id="emptyState" class="empty hidden">등록된 외부몰 계정이 없습니다.</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>관리자 사용권한</h2>
+            <p class="sub">선택한 외부몰 계정을 어떤 MEMBER 관리자가 사용할 수 있는지 지정합니다.</p>
+          </div>
+          <div class="selected-account" id="selectedAccountLabel">계정을 선택하세요</div>
+        </div>
+        <div class="permission-box" id="permissionBox">
+          <div class="empty">왼쪽 계정 목록에서 [권한]을 선택하세요.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop hidden" id="accountModal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="modalTitle">외부몰 계정 등록</h3>
+        <button class="icon-btn" data-close="accountModal">×</button>
+      </div>
+      <form id="accountForm">
+        <input type="hidden" id="editMallAccountId" />
+        <div class="form-grid">
+          <label>외부몰
+            <select id="mallCode" required>
+              <option value="CPKR">쿠팡(CPKR)</option>
+              <option value="ALKR">알리(ALKR)</option>
+            </select>
+          </label>
+          <label>내부 계정ID
+            <input id="mallAccountId" required placeholder="예: CPKR_001" maxlength="40" />
+          </label>
+          <label class="wide">계정명
+            <input id="accountName" required placeholder="예: 쿠팡 회사계정 1호" maxlength="80" />
+          </label>
+          <label class="wide">로그인 ID
+            <input id="loginId" required autocomplete="off" placeholder="쿠팡/알리 로그인 ID" maxlength="150" />
+          </label>
+          <label class="wide">비밀번호 <span class="hint" id="pwHint">등록 시 필수</span>
+            <input id="password" type="password" autocomplete="new-password" placeholder="평문은 저장/재표시하지 않습니다" />
+          </label>
+          <label>계정 상태
+            <select id="accountStatus">
+              <option value="READY">READY</option>
+              <option value="LOGIN_REQUIRED">LOGIN_REQUIRED</option>
+              <option value="MFA_REQUIRED">MFA_REQUIRED</option>
+              <option value="BLOCKED">BLOCKED</option>
+            </select>
+          </label>
+          <label class="checkline"><input id="enabled" type="checkbox" checked /> 자동 배정 사용</label>
+        </div>
+        <div class="security-note">
+          비밀번호는 저장 후 다시 화면에 표시하지 않습니다. 수정 시 비밀번호를 비워두면 기존 암호화 비밀번호를 유지합니다.
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-close="accountModal">취소</button>
+          <button class="primary" type="submit">저장</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="permissionModal">
+    <div class="modal wide-modal">
+      <div class="modal-head">
+        <h3>관리자 권한 추가</h3>
+        <button class="icon-btn" data-close="permissionModal">×</button>
+      </div>
+      <form id="permissionForm">
+        <input type="hidden" id="permissionMallAccountId" />
+        <div class="form-grid">
+          <label>관리자 MEMBER ID
+            <input id="adminId" required placeholder="예: derzon" />
+          </label>
+          <label>역할
+            <select id="adminRole">
+              <option value="OPERATOR">OPERATOR</option>
+              <option value="DEPUTY">DEPUTY</option>
+              <option value="MASTER">MASTER</option>
+            </select>
+          </label>
+        </div>
+        <div class="permission-checks">
+          <label><input id="canOrder" type="checkbox" checked /> 주문</label>
+          <label><input id="canPayment" type="checkbox" /> 결제</label>
+          <label><input id="canCancel" type="checkbox" checked /> 취소</label>
+          <label><input id="canExchange" type="checkbox" checked /> 교환</label>
+          <label><input id="canReturn" type="checkbox" checked /> 반품</label>
+          <label><input id="permEnabled" type="checkbox" checked /> 사용</label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-close="permissionModal">취소</button>
+          <button class="primary" type="submit">저장</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="./account.js?v=001"></script>
+</body>
+</html>
