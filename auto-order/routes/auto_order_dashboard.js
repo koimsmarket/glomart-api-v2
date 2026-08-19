@@ -655,10 +655,10 @@ router.get('/api/auto-order/control-tower', async (req, res) => {
 
 router.get('/api/auto-order/control-tower/order/:order_no/detail', async (req,res)=>{
   const pool=poolFrom(req);
-  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'database pool not ready'});
+  if(!pool) return res.status(503).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V002',error:'database pool not ready'});
 
   const orderNo=String(req.params.order_no||'').trim().slice(0,120);
-  if(!orderNo) return res.status(400).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order_no required'});
+  if(!orderNo) return res.status(400).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V002',error:'order_no required'});
 
   const pick=(row,keys)=>{
     const out={};
@@ -670,10 +670,10 @@ router.get('/api/auto-order/control-tower/order/:order_no/detail', async (req,re
   try{
     const orderTable=await firstExistingTable(pool,['gm_order','gm_orders']);
     const itemTable=await firstExistingTable(pool,['gm_order_item','gm_order_items']);
-    if(!orderTable) return res.status(404).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order table not found'});
+    if(!orderTable) return res.status(404).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V002',error:'order table not found'});
 
     const orderR=await pool.query(`SELECT * FROM ${qIdent(orderTable)} WHERE order_no=$1 LIMIT 1`,[orderNo]);
-    if(!orderR.rows.length) return res.status(404).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order not found'});
+    if(!orderR.rows.length) return res.status(404).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V002',error:'order not found'});
 
     let itemRows=[];
     if(itemTable){
@@ -711,8 +711,9 @@ router.get('/api/auto-order/control-tower/order/:order_no/detail', async (req,re
         FROM gm_auto_order_log l
         JOIN gm_auto_order a ON a.auto_order_no=l.auto_order_no
         WHERE a.order_no=$1
+          AND COALESCE(l.action_type,'') <> 'CONTROL_TOWER_SYNC'
         ORDER BY l.created_at DESC, l.log_id DESC
-        LIMIT 40
+        LIMIT 10
       `,[orderNo]);
       logs=rr.rows||[];
     }
@@ -754,12 +755,12 @@ router.get('/api/auto-order/control-tower/order/:order_no/detail', async (req,re
 
     return res.json({
       ok:true,
-      version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V002',
       data:{order,items,auto_orders:ao,auto_items:ai,works:ww,logs:ll}
     });
   }catch(e){
-    console.error('[GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_FAIL_V001]',String(e&&e.stack||e));
-    return res.status(500).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V001',error:'order detail failed',detail:String(e&&e.message||e)});
+    console.error('[GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_FAIL_V002]',String(e&&e.stack||e));
+    return res.status(500).json({ok:false,version:'GM_AUTO_ORDER_CONTROL_TOWER_DETAIL_API_V002',error:'order detail failed',detail:String(e&&e.message||e)});
   }
 });
 

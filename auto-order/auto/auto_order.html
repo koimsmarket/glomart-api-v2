@@ -358,7 +358,7 @@
     out+='</tbody></table></div></div>';
 
     if(logs.length){
-      out+='<div class="detail-section"><div class="detail-title">최근 처리 로그 ('+logs.length+'건)</div><div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>일시</th><th>작업</th><th>상태변경</th><th>Work</th><th>메시지</th></tr></thead><tbody>';
+      out+='<div class="detail-section"><div class="detail-title">주요 처리 이력 ('+logs.length+'건)</div><div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>일시</th><th>작업</th><th>상태변경</th><th>Work</th><th>메시지</th></tr></thead><tbody>';
       logs.forEach(function(x){
         out+='<tr><td>'+detailDate(x.created_at)+'</td><td>'+text(x.action_type)+'</td><td>'+text(x.status_before)+' → '+text(x.status_after)+'</td><td>'+text(x.work_id)+'</td><td class="wrap">'+text(x.message)+'</td></tr>';
       });
