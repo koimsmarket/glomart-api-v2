@@ -1,4 +1,4 @@
-/* GM_AUTO_ORDER_ACCOUNT_API_V010_SESSION_SECRET_FALLBACK
+/* GM_AUTO_ORDER_ACCOUNT_API_V011_SINGLE_CREDENTIAL_KEY
  * Production DB rows only. MASTER-only policy.
  * Password save succeeds only after DB re-read + decrypt + exact-match verification.
  * Plain password is never returned by this admin API.
@@ -7,7 +7,7 @@
 const express=require('express');
 const router=express.Router();
 const accountService=require('../services/account_service');
-const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V010_SESSION_SECRET_FALLBACK';
+const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V011_SINGLE_CREDENTIAL_KEY';
 const clean=v=>String(v==null?'':v).trim();
 const bool=v=>v===true||v===1||/^(1|true|y|yes)$/i.test(clean(v));
 function db(req){return req.app.locals.pool||req.app.locals.db;}
