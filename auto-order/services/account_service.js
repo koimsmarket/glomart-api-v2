@@ -13,11 +13,20 @@ function id(v){const n=parseInt(clean(v),10);return Number.isFinite(n)?n:0;}
  * 전용 환경변수 GM_AUTO_ORDER_CREDENTIAL_KEY를 SHA-256으로 32바이트 키화하여
  * AES-256-GCM으로 암호화한다. 키가 없으면 비밀번호 신규 저장/복호화는 거부한다.
  */
-function credentialKey(){
-  const raw=clean(process.env.GM_AUTO_ORDER_CREDENTIAL_KEY);
-  if(!raw) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY required');
+function credentialSecrets(){
+  const values=[
+    clean(process.env.GM_AUTO_ORDER_CREDENTIAL_KEY),
+    clean(process.env.GM_AUTO_ORDER_CREDENTIAL_SECRET),
+    clean(process.env.AUTH_SESSION_SECRET)
+  ].filter(Boolean);
+  return [...new Set(values)];
+}
+function credentialKey(raw){
+  raw=clean(raw||credentialSecrets()[0]);
+  if(!raw) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY or GM_AUTO_ORDER_CREDENTIAL_SECRET required');
   return crypto.createHash('sha256').update(raw,'utf8').digest();
 }
+
 function encryptPassword(plain){
   plain=String(plain==null?'':plain);
   if(!plain) return null;
@@ -32,9 +41,17 @@ function decryptPassword(value){
   if(!raw) return '';
   const parts=raw.split(':');
   if(parts.length!==4||parts[0]!=='v1') throw new Error('unsupported encrypted_password format');
-  const decipher=crypto.createDecipheriv('aes-256-gcm',credentialKey(),Buffer.from(parts[1],'base64url'));
-  decipher.setAuthTag(Buffer.from(parts[2],'base64url'));
-  return Buffer.concat([decipher.update(Buffer.from(parts[3],'base64url')),decipher.final()]).toString('utf8');
+  const secrets=credentialSecrets();
+  if(!secrets.length) throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY or GM_AUTO_ORDER_CREDENTIAL_SECRET required');
+  let lastError=null;
+  for(const sec of secrets){
+    try{
+      const decipher=crypto.createDecipheriv('aes-256-gcm',credentialKey(sec),Buffer.from(parts[1],'base64url'));
+      decipher.setAuthTag(Buffer.from(parts[2],'base64url'));
+      return Buffer.concat([decipher.update(Buffer.from(parts[3],'base64url')),decipher.final()]).toString('utf8');
+    }catch(error){ lastError=error; }
+  }
+  throw new Error('encrypted_password decrypt failed with configured credential keys'+(lastError?'':' '));
 }
 
 async function ensure(pool){
@@ -134,5 +151,5 @@ async function credentialForLockedWork(pool,workId,input){
   if(!clean(a.encrypted_password)) throw new Error('mall_account_password_not_configured');
   return {login_id:clean(a.login_id)||null,password:decryptPassword(a.encrypted_password)};
 }
-module.exports={VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V003_CREDENTIAL_VAULT',listAccounts,saveAccount,setEnabled,credentialForLockedWork};
+module.exports={VERSION:'GM_AUTO_ORDER_ACCOUNT_SERVICE_V004_CREDENTIAL_KEY_COMPAT',listAccounts,saveAccount,setEnabled,credentialForLockedWork};
 

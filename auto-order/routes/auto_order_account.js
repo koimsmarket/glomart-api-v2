@@ -5,15 +5,23 @@
 const express=require('express');
 const crypto=require('crypto');
 const router=express.Router();
-const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V001';
+const VERSION='GM_AUTO_ORDER_ACCOUNT_API_V002_CREDENTIAL_KEY_COMPAT';
 const clean=v=>String(v==null?'':v).trim();
 const bool=v=>v===true||v===1||/^(1|true|y|yes)$/i.test(clean(v));
 function db(req){return req.app.locals.pool||req.app.locals.db;}
 function maskLogin(v){const s=clean(v);if(!s)return '';const at=s.indexOf('@');if(at>1)return s.slice(0,Math.min(3,at))+'***'+s.slice(at);if(s.length<=4)return '***';return s.slice(0,2)+'***'+s.slice(-2);}
-function secret(){return clean(process.env.GM_AUTO_ORDER_CREDENTIAL_SECRET||process.env.AUTH_SESSION_SECRET);}
+function credentialSecrets(){
+  const values=[
+    clean(process.env.GM_AUTO_ORDER_CREDENTIAL_KEY),
+    clean(process.env.GM_AUTO_ORDER_CREDENTIAL_SECRET),
+    clean(process.env.AUTH_SESSION_SECRET)
+  ].filter(Boolean);
+  return [...new Set(values)];
+}
 function encryptPassword(v){
-  const sec=secret();if(!sec)throw new Error('GM_AUTO_ORDER_CREDENTIAL_SECRET or AUTH_SESSION_SECRET is required');
-  const key=crypto.createHash('sha256').update(sec).digest(),iv=crypto.randomBytes(12);
+  const sec=credentialSecrets()[0];
+  if(!sec)throw new Error('GM_AUTO_ORDER_CREDENTIAL_KEY or GM_AUTO_ORDER_CREDENTIAL_SECRET is required');
+  const key=crypto.createHash('sha256').update(sec,'utf8').digest(),iv=crypto.randomBytes(12);
   const c=crypto.createCipheriv('aes-256-gcm',key,iv),enc=Buffer.concat([c.update(String(v),'utf8'),c.final()]),tag=c.getAuthTag();
   return ['v1',iv.toString('base64url'),tag.toString('base64url'),enc.toString('base64url')].join(':');
 }
