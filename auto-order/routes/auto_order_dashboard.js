@@ -1208,4 +1208,302 @@ router.get('/api/auto-order/control-tower/cs', async (req,res)=>{
   }
 });
 
+
+/* GM_AUTO_ORDER_OPERATIONS_API_V001
+ * Read-only operation-center APIs.
+ * No external mall access and no DB writes.
+ */
+
+function opsStatus(v){
+  return String(v||'').trim().toUpperCase();
+}
+
+router.get('/api/auto-order/operations/delivery', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,error:'database pool not ready'});
+  try{
+    const q=String(req.query.q||'').trim();
+    const mall=String(req.query.mall_code||'').trim().toUpperCase();
+    const status=String(req.query.status||'').trim().toUpperCase();
+    const limit=safeInt(req.query.limit,300,1,500);
+
+    if(!(await tableExists(pool,'gm_order_item'))){
+      return res.json({ok:true,version:'GM_AUTO_ORDER_OPERATIONS_API_V001',data:{total:0,counts:{total:0,ready:0,shipping:0,delivered:0,no_invoice:0,exception:0},rows:[]}});
+    }
+
+    const sql=`
+      SELECT
+        i.order_no,
+        COALESCE(o.member_id,'') AS member_id,
+        o.ordered_at,
+        i.pi_ii_vi,
+        i.product_name,
+        trim(COALESCE(i.option_name,'') || CASE WHEN COALESCE(i.option_value,'')<>'' THEN ' '||i.option_value ELSE '' END) AS option_text,
+        i.quantity,
+        COALESCE(i.mall_code,i.source_mall,'') AS mall_code,
+        COALESCE(ao.mall_order_no,'') AS mall_order_no,
+        COALESCE(ao.admin_id,'') AS admin_id,
+        COALESCE(ao.mall_account_id,'') AS mall_account_id,
+        COALESCE(i.item_order_status,'') AS item_order_status,
+        COALESCE(i.item_shipping_status,'') AS item_shipping_status,
+        COALESCE(o.shipping_status,'') AS order_shipping_status,
+        COALESCE(NULLIF(i.item_shipping_status,''),NULLIF(o.shipping_status,''),'PENDING') AS shipping_status,
+        COALESCE(i.carrier_name,'') AS carrier_name,
+        COALESCE(i.tracking_number,'') AS tracking_number,
+        i.shipping_started_at,
+        i.shipping_completed_at,
+        COALESCE(i.updated_at,i.created_at,o.updated_at,o.ordered_at) AS updated_at
+      FROM gm_order_item i
+      LEFT JOIN gm_order o ON o.order_no=i.order_no
+      LEFT JOIN LATERAL (
+        SELECT a.*
+        FROM gm_auto_order a
+        WHERE a.order_no=i.order_no
+          AND upper(COALESCE(a.mall_code,''))=upper(COALESCE(i.mall_code,i.source_mall,''))
+        ORDER BY a.created_at DESC
+        LIMIT 1
+      ) ao ON TRUE
+      WHERE ($1='' OR upper(COALESCE(i.mall_code,i.source_mall,''))=$1)
+        AND (
+          $2='' OR
+          i.order_no ILIKE '%'||$2||'%' OR
+          COALESCE(o.member_id,'') ILIKE '%'||$2||'%' OR
+          COALESCE(i.product_name,'') ILIKE '%'||$2||'%' OR
+          COALESCE(ao.mall_order_no,'') ILIKE '%'||$2||'%'
+        )
+        AND (
+          $3='' OR
+          ($3='READY' AND upper(COALESCE(NULLIF(i.item_shipping_status,''),o.shipping_status,'')) IN ('PENDING','READY','READY_TO_SHIP','PREPARING','DELIVERY_READY')) OR
+          ($3='SHIPPING' AND upper(COALESCE(NULLIF(i.item_shipping_status,''),o.shipping_status,'')) IN ('SHIPPING','IN_TRANSIT','SHIPPED','DISPATCHED')) OR
+          ($3='DELIVERED' AND upper(COALESCE(NULLIF(i.item_shipping_status,''),o.shipping_status,'')) IN ('DELIVERED','COMPLETE','COMPLETED')) OR
+          ($3='NO_INVOICE' AND upper(COALESCE(NULLIF(i.item_shipping_status,''),o.shipping_status,'')) IN ('SHIPPING','IN_TRANSIT','SHIPPED','DISPATCHED') AND btrim(COALESCE(i.tracking_number,''))='') OR
+          ($3='EXCEPTION' AND upper(COALESCE(NULLIF(i.item_shipping_status,''),o.shipping_status,'')) IN ('DELAYED','DELIVERY_DELAY','HOLD','ON_HOLD','ERROR','FAILED'))
+        )
+      ORDER BY COALESCE(i.updated_at,i.created_at,o.ordered_at) DESC NULLS LAST,i.order_no DESC
+      LIMIT $4
+    `;
+    const rr=await pool.query(sql,[mall,q,status,limit]);
+    const rows=rr.rows;
+    const counts={total:rows.length,ready:0,shipping:0,delivered:0,no_invoice:0,exception:0};
+    for(const x of rows){
+      const s=opsStatus(x.shipping_status);
+      if(['PENDING','READY','READY_TO_SHIP','PREPARING','DELIVERY_READY'].includes(s)) counts.ready++;
+      if(['SHIPPING','IN_TRANSIT','SHIPPED','DISPATCHED'].includes(s)) counts.shipping++;
+      if(['DELIVERED','COMPLETE','COMPLETED'].includes(s)) counts.delivered++;
+      if(['SHIPPING','IN_TRANSIT','SHIPPED','DISPATCHED'].includes(s) && !String(x.tracking_number||'').trim()) counts.no_invoice++;
+      if(['DELAYED','DELIVERY_DELAY','HOLD','ON_HOLD','ERROR','FAILED'].includes(s)) counts.exception++;
+    }
+    res.json({ok:true,version:'GM_AUTO_ORDER_OPERATIONS_API_V001',data:{total:rows.length,counts,rows}});
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_DELIVERY_LIST_FAIL_V001]',String(e&&e.stack||e));
+    res.status(500).json({ok:false,error:'delivery list failed',detail:String(e&&e.message||e)});
+  }
+});
+
+router.get('/api/auto-order/operations/claims', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,error:'database pool not ready'});
+  try{
+    const type=String(req.query.type||'').trim().toUpperCase();
+    const q=String(req.query.q||'').trim();
+    const mall=String(req.query.mall_code||'').trim().toUpperCase();
+    const status=String(req.query.status||'').trim().toUpperCase();
+    const limit=safeInt(req.query.limit,300,1,500);
+
+    const sql=`
+      WITH cs_rows AS (
+        SELECT
+          c.cs_no,
+          c.request_at AS requested_at,
+          c.order_no,
+          c.pi_ii_vi,
+          upper(c.cs_type) AS claim_type,
+          c.cs_status AS raw_status,
+          c.message_summary AS reason_text,
+          COALESCE(oi.product_name,aoi.product_name,'') AS product_name,
+          COALESCE(oi.quantity,aoi.quantity,0)::int AS quantity,
+          COALESCE(ao.mall_code,aoi.mall_code,oi.mall_code,'') AS mall_code,
+          COALESCE(aoi.mall_order_no,ao.mall_order_no,'') AS mall_order_no,
+          c.return_carrier,c.return_invoice_no,c.return_received_at,
+          c.reship_at,c.reship_carrier,c.reship_invoice_no,
+          CASE
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('completed','return_confirmed') THEN 'COMPLETED'
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('processing','return_shipping','return_received','reshipped') THEN 'PROCESSING'
+            WHEN lower(COALESCE(c.cs_status,''))='cancelled' THEN 'WITHDRAWN'
+            ELSE 'REQUESTED'
+          END AS normalized_status,
+          COALESCE(w.work_status,'') AS work_status,
+          COALESCE(w.admin_id,ao.admin_id,'') AS admin_id,
+          COALESCE(w.mall_account_id,ao.mall_account_id,'') AS mall_account_id,
+          COALESCE(w.error_code,'') AS error_code,
+          COALESCE(w.error_message,'') AS error_message
+        FROM gm_cs c
+        LEFT JOIN gm_order_item oi ON oi.order_no=c.order_no AND oi.pi_ii_vi=c.pi_ii_vi
+        LEFT JOIN LATERAL (
+          SELECT x.* FROM gm_auto_order_item x
+          WHERE x.order_no=c.order_no AND (c.pi_ii_vi IS NULL OR x.pi_ii_vi=c.pi_ii_vi)
+          ORDER BY CASE WHEN c.pi_ii_vi IS NOT NULL AND x.pi_ii_vi=c.pi_ii_vi THEN 0 ELSE 1 END,x.created_at DESC
+          LIMIT 1
+        ) aoi ON TRUE
+        LEFT JOIN gm_auto_order ao ON ao.auto_order_no=aoi.auto_order_no
+        LEFT JOIN LATERAL (
+          SELECT ww.* FROM gm_auto_order_work ww
+          WHERE ww.auto_order_no=ao.auto_order_no
+            AND upper(ww.work_type) IN ('CANCEL','EXCHANGE','RETURN')
+          ORDER BY ww.created_at DESC,ww.work_id DESC LIMIT 1
+        ) w ON TRUE
+        WHERE upper(c.cs_type) IN ('CANCEL','CANCEL_REQUEST','CANCEL_REQUESTED','EXCHANGE','EXCHANGE_REQUEST','EXCHANGE_REQUESTED','RETURN','RETURN_REQUEST','RETURN_REQUESTED')
+      ),
+      legacy AS (
+        SELECT
+          NULL::text AS cs_no,
+          COALESCE(o.cs_requested_at,o.updated_at,o.ordered_at) AS requested_at,
+          o.order_no,
+          NULL::text AS pi_ii_vi,
+          split_part(upper(o.customer_status),'_',1) AS claim_type,
+          o.customer_status AS raw_status,
+          o.cs_reason_text AS reason_text,
+          COALESCE(ai.product_names,'') AS product_name,
+          COALESCE(ai.quantity,0)::int AS quantity,
+          COALESCE(ao.mall_code,'') AS mall_code,
+          COALESCE(ao.mall_order_no,'') AS mall_order_no,
+          NULL::text AS return_carrier,NULL::text AS return_invoice_no,NULL::timestamp AS return_received_at,
+          NULL::timestamp AS reship_at,NULL::text AS reship_carrier,NULL::text AS reship_invoice_no,
+          CASE
+            WHEN upper(o.customer_status) LIKE '%COMPLETED' THEN 'COMPLETED'
+            WHEN upper(o.customer_status) LIKE '%PROCESSING' THEN 'PROCESSING'
+            WHEN upper(o.customer_status) LIKE '%REJECTED' THEN 'FAILED'
+            WHEN upper(o.customer_status) LIKE '%WITHDRAWN' THEN 'WITHDRAWN'
+            ELSE 'REQUESTED'
+          END AS normalized_status,
+          COALESCE(w.work_status,'') AS work_status,
+          COALESCE(w.admin_id,ao.admin_id,'') AS admin_id,
+          COALESCE(w.mall_account_id,ao.mall_account_id,'') AS mall_account_id,
+          COALESCE(w.error_code,'') AS error_code,
+          COALESCE(w.error_message,'') AS error_message
+        FROM gm_order o
+        LEFT JOIN gm_auto_order ao ON ao.order_no=o.order_no
+        LEFT JOIN LATERAL (
+          SELECT string_agg(COALESCE(x.product_name,''),' / ' ORDER BY x.created_at) AS product_names,
+                 SUM(COALESCE(x.quantity,0))::int AS quantity
+          FROM gm_auto_order_item x WHERE x.auto_order_no=ao.auto_order_no
+        ) ai ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT ww.* FROM gm_auto_order_work ww
+          WHERE ww.auto_order_no=ao.auto_order_no
+            AND upper(ww.work_type)=split_part(upper(o.customer_status),'_',1)
+          ORDER BY ww.created_at DESC,ww.work_id DESC LIMIT 1
+        ) w ON TRUE
+        WHERE upper(COALESCE(o.customer_status,'')) ~ '^(CANCEL|EXCHANGE|RETURN)_(REQUESTED|PROCESSING|COMPLETED|REJECTED|WITHDRAWN)$'
+          AND NOT EXISTS (
+            SELECT 1 FROM gm_cs c2
+            WHERE c2.order_no=o.order_no
+              AND upper(c2.cs_type) LIKE split_part(upper(o.customer_status),'_',1)||'%'
+          )
+      ),
+      all_rows AS (
+        SELECT * FROM cs_rows
+        UNION ALL
+        SELECT * FROM legacy
+      )
+      SELECT * FROM all_rows
+      WHERE ($1='' OR claim_type=$1)
+        AND ($2='' OR upper(COALESCE(mall_code,''))=$2)
+        AND ($3='' OR normalized_status=$3)
+        AND ($4='' OR COALESCE(order_no,'') ILIKE '%'||$4||'%' OR COALESCE(mall_order_no,'') ILIKE '%'||$4||'%' OR COALESCE(product_name,'') ILIKE '%'||$4||'%' OR COALESCE(cs_no,'') ILIKE '%'||$4||'%')
+      ORDER BY requested_at DESC NULLS LAST,order_no DESC
+      LIMIT $5
+    `;
+    const rr=await pool.query(sql,[type,mall,status,q,limit]);
+    const rows=rr.rows;
+    const counts={total:rows.length,requested:0,processing:0,completed:0,failed:0,withdrawn:0};
+    for(const x of rows){
+      const s=opsStatus(x.normalized_status);
+      if(s==='REQUESTED')counts.requested++;
+      else if(s==='PROCESSING')counts.processing++;
+      else if(s==='COMPLETED')counts.completed++;
+      else if(s==='FAILED')counts.failed++;
+      else if(s==='WITHDRAWN')counts.withdrawn++;
+    }
+    res.json({ok:true,version:'GM_AUTO_ORDER_OPERATIONS_API_V001',data:{total:rows.length,counts,rows}});
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_CLAIMS_LIST_FAIL_V001]',String(e&&e.stack||e));
+    res.status(500).json({ok:false,error:'claims list failed',detail:String(e&&e.message||e)});
+  }
+});
+
+router.get('/api/auto-order/operations/cs', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool) return res.status(503).json({ok:false,error:'database pool not ready'});
+  try{
+    const q=String(req.query.q||'').trim();
+    const type=String(req.query.type||'').trim().toUpperCase();
+    const status=String(req.query.status||'').trim().toUpperCase();
+    const limit=safeInt(req.query.limit,300,1,500);
+
+    if(!(await tableExists(pool,'gm_cs'))){
+      return res.json({ok:true,version:'GM_AUTO_ORDER_OPERATIONS_API_V001',data:{total:0,counts:{total:0,requested:0,processing:0,completed:0,unread:0,delivery_payment:0},rows:[]}});
+    }
+
+    const sql=`
+      SELECT
+        c.cs_no,c.request_at AS requested_at,c.order_no,c.pi_ii_vi,upper(c.cs_type) AS cs_type,c.cs_status,
+        c.message_summary,c.return_carrier,c.return_invoice_no,c.reship_carrier,c.reship_invoice_no,
+        COALESCE(o.member_id,'') AS member_id,
+        COALESCE(oi.product_name,'') AS product_name,
+        COALESCE(ao.mall_order_no,'') AS mall_order_no,
+        CASE
+          WHEN lower(COALESCE(c.cs_status,'')) IN ('completed','return_confirmed') THEN 'COMPLETED'
+          WHEN lower(COALESCE(c.cs_status,'')) IN ('processing','return_shipping','return_received','reshipped') THEN 'PROCESSING'
+          WHEN lower(COALESCE(c.cs_status,''))='cancelled' THEN 'CANCELLED'
+          ELSE 'REQUESTED'
+        END AS normalized_status,
+        COALESCE(msg.message_count,0)::int AS message_count,
+        COALESCE(msg.unread_count,0)::int AS unread_count,
+        COALESCE(msg.last_message,'') AS last_message,
+        msg.last_message_at
+      FROM gm_cs c
+      LEFT JOIN gm_order o ON o.order_no=c.order_no
+      LEFT JOIN gm_order_item oi ON oi.order_no=c.order_no AND oi.pi_ii_vi=c.pi_ii_vi
+      LEFT JOIN LATERAL (
+        SELECT a.* FROM gm_auto_order a WHERE a.order_no=c.order_no ORDER BY a.created_at DESC LIMIT 1
+      ) ao ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS message_count,
+               COUNT(*) FILTER (WHERE upper(COALESCE(m.read_yn,'N'))<>'Y')::int AS unread_count,
+               (array_agg(COALESCE(m.message_text,'') ORDER BY m.created_at DESC))[1] AS last_message,
+               MAX(m.created_at) AS last_message_at
+        FROM gm_cs_message m
+        WHERE m.cs_no=c.cs_no
+      ) msg ON TRUE
+      WHERE ($1='' OR upper(c.cs_type)=$1)
+        AND ($2='' OR
+          CASE
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('completed','return_confirmed') THEN 'COMPLETED'
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('processing','return_shipping','return_received','reshipped') THEN 'PROCESSING'
+            WHEN lower(COALESCE(c.cs_status,''))='cancelled' THEN 'CANCELLED'
+            ELSE 'REQUESTED'
+          END=$2)
+        AND ($3='' OR COALESCE(c.cs_no,'') ILIKE '%'||$3||'%' OR COALESCE(c.order_no,'') ILIKE '%'||$3||'%' OR COALESCE(oi.product_name,'') ILIKE '%'||$3||'%' OR COALESCE(c.message_summary,'') ILIKE '%'||$3||'%' OR COALESCE(msg.last_message,'') ILIKE '%'||$3||'%')
+      ORDER BY c.request_at DESC,c.cs_no DESC
+      LIMIT $4
+    `;
+    const rr=await pool.query(sql,[type,status,q,limit]);
+    const rows=rr.rows;
+    const counts={total:rows.length,requested:0,processing:0,completed:0,unread:0,delivery_payment:0};
+    for(const x of rows){
+      const s=opsStatus(x.normalized_status);
+      if(s==='REQUESTED')counts.requested++;
+      else if(s==='PROCESSING')counts.processing++;
+      else if(s==='COMPLETED')counts.completed++;
+      counts.unread += Number(x.unread_count||0);
+      if(['DELIVERY','PAYMENT'].includes(opsStatus(x.cs_type)))counts.delivery_payment++;
+    }
+    res.json({ok:true,version:'GM_AUTO_ORDER_OPERATIONS_API_V001',data:{total:rows.length,counts,rows}});
+  }catch(e){
+    console.error('[GM_AUTO_ORDER_CS_LIST_FAIL_V001]',String(e&&e.stack||e));
+    res.status(500).json({ok:false,error:'cs list failed',detail:String(e&&e.message||e)});
+  }
+});
+
 module.exports = router;
