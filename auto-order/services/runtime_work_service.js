@@ -371,6 +371,10 @@ async function claim(pool, data) {
   const adminId = clean(data.admin_id || data.adminId);
   const mallAccountId = clean(data.mall_account_id || data.mallAccountId);
   const mallCode = upper(data.mall_code || data.mallCode || 'CPKR');
+  const preferredWorkIdRaw = Number(data.preferred_work_id || data.preferredWorkId || 0);
+  const preferredWorkId = Number.isFinite(preferredWorkIdRaw) && preferredWorkIdRaw > 0
+    ? Math.trunc(preferredWorkIdRaw)
+    : null;
 
   if (!adminId || !mallAccountId) {
     return { job: null, reason: 'client_assignment_required' };
@@ -399,18 +403,23 @@ async function claim(pool, data) {
          AND w.admin_id=$1
          AND w.mall_account_id=$2
          AND upper(o.mall_code)=$3
+         AND ($4::bigint IS NULL OR w.work_id=$4)
        ORDER BY
          w.priority DESC,
          w.requested_at ASC,
          w.work_id ASC
        FOR UPDATE SKIP LOCKED
        LIMIT 1`,
-      [adminId, mallAccountId, mallCode]
+      [adminId, mallAccountId, mallCode, preferredWorkId]
     );
 
     if (!result.rows.length) {
       await db.query('COMMIT');
-      return { job: null, reason: 'queue_empty' };
+      return {
+        job: null,
+        reason: preferredWorkId ? 'preferred_work_not_ready' : 'queue_empty',
+        preferred_work_id: preferredWorkId
+      };
     }
 
     const previous = result.rows[0];

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Glomart Auto Order PC Runner
 // @namespace    https://koims.market/auto-order
-// @version      0.094
+// @version      0.095
 // @description  Thin orchestrator: stage routing only. Product/cart DOM work lives in CPKR_PRODUCT/CPKR_CART; existing checkout/auth flow is preserved.
 // @match        https://www.coupang.com/*
 // @match        https://cart.coupang.com/*
@@ -43,7 +43,7 @@
   try{Object.defineProperty(alertHook,'__gmaoV085TransientServerAlertBypass',{value:true});}catch(_e){}
   try{pw.alert=alertHook;}catch(_e){}
 })();
-const VERSION='0.094';
+const VERSION='0.095';
 const API='https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';
 const URLS={
  product:API+'/auto-order-client/shared/js/mall/cpkr/CPKR_PRODUCT.js?v=086',
@@ -247,7 +247,7 @@ function resumeCurrentStageExplicit(){
   render('처음부터 재시작 · 기존 장바구니 확인/청소부터 시작');
   orchestrate().catch(fail);
 }
-function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V094</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
+function render(msg,err){let p=panel(),f=flow();p.innerHTML='<b>Glomart Runner V095</b><div style="margin-top:5px;white-space:pre-wrap;color:'+(err?'#fecaca':'#d1fae5')+'">'+String(msg||'')+'</div><div style="margin-top:5px;color:#93c5fd">단계='+String(f.stage||'-')+' · PAGE='+page()+'</div>';if(!job)p.appendChild(button('작업 가져오기',()=>claim().catch(fail)));if(job)p.appendChild(button('처음부터 재시작',()=>resumeCurrentStageExplicit()));if(job)p.appendChild(button('작업 반환',()=>release().catch(fail),true));}
 function clearLocal(){
   job=null;
   GM_setValue(STORE.job,null);
@@ -297,13 +297,89 @@ async function beginLogin(){
   render('쿠팡 로그아웃 감지 · 등록된 회사계정으로 자동 로그인\n성공 후 장바구니 확인/청소부터 다시 시작');
   markNav();try{window.stop();}catch(_e){}setTimeout(()=>location.replace(u),250);
 }
+async function reclaimSameWorkAfterStale(staleCode){
+  if(!job)return false;
+
+  const staleJob=job;
+  const staleFlow=flow();
+  const staleStage=staleFlow.stage||ST.BATCH_SCAN;
+
+  /* Do not use generic claim here. The Coupang page/cart currently belongs
+     to staleJob, therefore only that exact work_id is safe to resume. */
+  let result;
+  try{
+    result=await req(
+      '/api/auto-order/runtime/claim',
+      'POST',
+      settings({
+        preferred_work_id:Number(staleJob.work_id),
+        current_work_id:Number(staleJob.work_id),
+        reclaim_reason:String(staleCode||'work_lock_stale')
+      })
+    );
+  }catch(_e){
+    return false;
+  }
+
+  const next=result&&result.job;
+  if(!next || String(next.work_id)!==String(staleJob.work_id)){
+    return false;
+  }
+
+  job=next;
+  GM_setValue(STORE.job,job);
+  for(const key of LEGACY_JOB_KEYS)GM_setValue(key,null);
+  startWorkTimer();
+
+  /* Preserve the exact operational stage and cart snapshot. A lock refresh
+     is not a new order and must not send CART back to BATCH_SCAN. */
+  setFlow(Object.assign({},staleFlow,{
+    work_id:job.work_id,
+    stage:staleStage,
+    lock_reclaimed_at:Date.now(),
+    lock_reclaimed_from:staleCode||null,
+    last_error:null
+  }));
+
+  setBatch({
+    session_active:true,
+    last_lock_reclaim_at:Date.now(),
+    last_lock_reclaim_work_id:job.work_id,
+    idle_polling:false
+  });
+
+  render(
+    '작업 Lock 재획득 완료 · 같은 주문 계속 진행\n'+
+    'work_id='+job.work_id+'\n'+
+    'stage='+staleStage
+  );
+
+  setTimeout(()=>orchestrate().catch(fail),250);
+  return true;
+}
+
 async function fail(e){
   const code=errCode(e);
   const st=flow().stage||'';
 
   if(STALE.has(code)){
+    if(code==='work_cancelled_by_customer'){
+      clearLocal();
+      render('고객 취소 확인 · 현재 작업 종료\n'+code,true);
+      return;
+    }
+
+    /* Lock expiry / invalidation during CART or CHECKOUT is recoverable.
+       Reclaim the SAME work first; never switch to another order. */
+    if(await reclaimSameWorkAfterStale(code))return;
+
     clearLocal();
-    render('서버에서 현재 작업이 종료된 것을 확인했습니다.\n'+code+'\n로컬 작업만 정리했습니다.',true);
+    render(
+      '같은 작업 Lock 재획득 실패 · 주문 진행 중지\n'+
+      code+
+      '\n다른 주문은 가져오지 않습니다.',
+      true
+    );
     return;
   }
 
@@ -349,7 +425,8 @@ async function register(){return req('/api/auto-order/runtime/register','POST',s
     }
     return true;
   }catch(e){
-    if(STALE.has(errCode(e)))clearLocal();
+    /* V095: never discard an active order merely because its lock expired.
+       fail() will first try to reclaim this exact work_id. */
     throw e;
   }
 }function startWorkTimer(){clearInterval(workTimer);if(job)workTimer=setInterval(()=>workHeartbeat().catch(fail),5000);}
@@ -375,9 +452,13 @@ async function claim(){
     }catch(e){
       if(!STALE.has(errCode(e)))throw e;
       const stale=errCode(e);
+      if(stale!=='work_cancelled_by_customer' && await reclaimSameWorkAfterStale(stale)){
+        return job;
+      }
       clearLocal();
       setBatch({needs_clean:true,last_stale_at:Date.now(),last_stale_code:stale});
-      render('기존 로컬 작업은 서버에서 종료됨\n'+stale+'\n새 작업을 요청합니다.');
+      render('기존 작업을 같은 work_id로 재획득하지 못했습니다\n'+stale+'\n다른 주문은 자동으로 이어받지 않습니다.');
+      return null;
     }
   }
 
