@@ -926,4 +926,286 @@ router.patch('/api/auto-order/accounts/:id/enabled', async (req,res)=>{
   }
 });
 
+
+/* GM_AUTO_ORDER_CONTROL_TOWER_CS_API_V007
+ * READ ONLY.
+ *
+ * Sources:
+ *  1) item_cs       : gm_cs with pi_ii_vi -> exact gm_auto_order_item -> exact gm_auto_order
+ *  2) order_cs      : gm_cs without pi_ii_vi -> one row per gm_auto_order of that Glomart order
+ *  3) legacy_order  : existing gm_order CANCEL_x / RETURN_x request flow when no matching gm_cs exists
+ *
+ * Existing ORDER control tower APIs / Runner are unchanged.
+ */
+router.get('/api/auto-order/control-tower/cs', async (req,res)=>{
+  const pool=poolFrom(req);
+  if(!pool){
+    return res.status(503).json({
+      ok:false,
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_CS_API_V007',
+      error:'database pool not ready'
+    });
+  }
+
+  try{
+    const type=String(req.query.type||'').trim().toLowerCase();
+    if(type!=='cancel'&&type!=='return'){
+      return res.status(400).json({
+        ok:false,
+        version:'GM_AUTO_ORDER_CONTROL_TOWER_CS_API_V007',
+        error:'type must be cancel or return'
+      });
+    }
+
+    const csType=type.toUpperCase();
+    const q=String(req.query.q||'').trim();
+    const mall=String(req.query.mall_code||'').trim().toUpperCase();
+    const filterStatus=String(req.query.work_status||'').trim().toUpperCase();
+    const limit=safeInt(req.query.limit,200,1,500);
+
+    const sql=`
+      WITH item_cs AS (
+        SELECT
+          c.cs_no,
+          c.request_at AS requested_at,
+          c.order_no,
+          c.pi_ii_vi,
+          upper(c.cs_type) AS cs_type,
+          c.cs_status,
+          c.message_summary AS reason_text,
+          COALESCE(oi.product_name,aoi.product_name,'') AS product_name,
+          COALESCE(oi.quantity,aoi.quantity,0)::int AS quantity,
+          COALESCE(ao.mall_code,aoi.mall_code,oi.mall_code,'') AS mall_code,
+          COALESCE(aoi.mall_order_no,ao.mall_order_no,'') AS mall_order_no,
+          CASE
+            WHEN w.work_status IS NOT NULL THEN upper(w.work_status)
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('completed','return_confirmed') THEN 'COMPLETED'
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('processing','return_shipping','return_received','reshipped') THEN 'RUNNING'
+            WHEN lower(COALESCE(c.cs_status,''))='cancelled' THEN 'CANCELLED'
+            ELSE 'REQUESTED'
+          END AS work_status,
+          COALESCE(w.admin_id,ao.admin_id,'') AS admin_id,
+          COALESCE(w.mall_account_id,ao.mall_account_id,'') AS mall_account_id,
+          COALESCE(w.error_code,'') AS error_code,
+          COALESCE(w.error_message,'') AS error_message,
+          COALESCE(o.member_id,'') AS member_id
+        FROM gm_cs c
+        LEFT JOIN gm_order o
+          ON o.order_no=c.order_no
+        LEFT JOIN gm_order_item oi
+          ON oi.order_no=c.order_no
+         AND oi.pi_ii_vi=c.pi_ii_vi
+        LEFT JOIN LATERAL (
+          SELECT x.*
+          FROM gm_auto_order_item x
+          WHERE x.order_no=c.order_no
+            AND x.pi_ii_vi=c.pi_ii_vi
+          ORDER BY x.created_at DESC,x.auto_order_item_id DESC
+          LIMIT 1
+        ) aoi ON TRUE
+        LEFT JOIN gm_auto_order ao
+          ON ao.auto_order_no=aoi.auto_order_no
+        LEFT JOIN LATERAL (
+          SELECT ww.*
+          FROM gm_auto_order_work ww
+          WHERE ww.auto_order_no=ao.auto_order_no
+            AND upper(ww.work_type)=$1
+          ORDER BY ww.created_at DESC,ww.work_id DESC
+          LIMIT 1
+        ) w ON TRUE
+        WHERE upper(c.cs_type) IN ($1,$1||'_REQUEST',$1||'_REQUESTED')
+          AND NULLIF(trim(COALESCE(c.pi_ii_vi,'')),'') IS NOT NULL
+      ),
+
+      order_cs AS (
+        SELECT
+          c.cs_no,
+          c.request_at AS requested_at,
+          c.order_no,
+          NULL::text AS pi_ii_vi,
+          upper(c.cs_type) AS cs_type,
+          c.cs_status,
+          c.message_summary AS reason_text,
+          COALESCE(ai.product_names,'') AS product_name,
+          COALESCE(ai.quantity,0)::int AS quantity,
+          COALESCE(ao.mall_code,'') AS mall_code,
+          COALESCE(ao.mall_order_no,'') AS mall_order_no,
+          CASE
+            WHEN w.work_status IS NOT NULL THEN upper(w.work_status)
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('completed','return_confirmed') THEN 'COMPLETED'
+            WHEN lower(COALESCE(c.cs_status,'')) IN ('processing','return_shipping','return_received','reshipped') THEN 'RUNNING'
+            WHEN lower(COALESCE(c.cs_status,''))='cancelled' THEN 'CANCELLED'
+            ELSE 'REQUESTED'
+          END AS work_status,
+          COALESCE(w.admin_id,ao.admin_id,'') AS admin_id,
+          COALESCE(w.mall_account_id,ao.mall_account_id,'') AS mall_account_id,
+          COALESCE(w.error_code,'') AS error_code,
+          COALESCE(w.error_message,'') AS error_message,
+          COALESCE(o.member_id,'') AS member_id
+        FROM gm_cs c
+        LEFT JOIN gm_order o
+          ON o.order_no=c.order_no
+        LEFT JOIN gm_auto_order ao
+          ON ao.order_no=c.order_no
+        LEFT JOIN LATERAL (
+          SELECT
+            string_agg(
+              COALESCE(x.product_name,''),
+              ' / '
+              ORDER BY x.created_at,x.auto_order_item_id
+            ) AS product_names,
+            SUM(COALESCE(x.quantity,0))::int AS quantity
+          FROM gm_auto_order_item x
+          WHERE x.auto_order_no=ao.auto_order_no
+        ) ai ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT ww.*
+          FROM gm_auto_order_work ww
+          WHERE ww.auto_order_no=ao.auto_order_no
+            AND upper(ww.work_type)=$1
+          ORDER BY ww.created_at DESC,ww.work_id DESC
+          LIMIT 1
+        ) w ON TRUE
+        WHERE upper(c.cs_type) IN ($1,$1||'_REQUEST',$1||'_REQUESTED')
+          AND NULLIF(trim(COALESCE(c.pi_ii_vi,'')),'') IS NULL
+      ),
+
+      legacy_order AS (
+        SELECT
+          NULL::text AS cs_no,
+          COALESCE(o.cs_requested_at,o.updated_at,o.ordered_at) AS requested_at,
+          o.order_no,
+          NULL::text AS pi_ii_vi,
+          $1::text AS cs_type,
+          o.cs_status,
+          o.cs_reason_text AS reason_text,
+          COALESCE(ai.product_names,'') AS product_name,
+          COALESCE(ai.quantity,0)::int AS quantity,
+          COALESCE(ao.mall_code,'') AS mall_code,
+          COALESCE(ao.mall_order_no,'') AS mall_order_no,
+          CASE
+            WHEN w.work_status IS NOT NULL THEN upper(w.work_status)
+            WHEN upper(COALESCE(o.cs_status,'')) LIKE $1||'%COMPLETED' THEN 'COMPLETED'
+            WHEN upper(COALESCE(o.cs_status,'')) LIKE $1||'%PROCESSING' THEN 'RUNNING'
+            WHEN upper(COALESCE(o.cs_status,'')) LIKE $1||'%REJECTED' THEN 'FAILED'
+            WHEN upper(COALESCE(o.cs_status,'')) LIKE $1||'%WITHDRAWN' THEN 'CANCELLED'
+            ELSE 'REQUESTED'
+          END AS work_status,
+          COALESCE(w.admin_id,ao.admin_id,'') AS admin_id,
+          COALESCE(w.mall_account_id,ao.mall_account_id,'') AS mall_account_id,
+          COALESCE(w.error_code,'') AS error_code,
+          COALESCE(w.error_message,'') AS error_message,
+          COALESCE(o.member_id,'') AS member_id
+        FROM gm_order o
+        LEFT JOIN gm_auto_order ao
+          ON ao.order_no=o.order_no
+        LEFT JOIN LATERAL (
+          SELECT
+            string_agg(
+              COALESCE(x.product_name,''),
+              ' / '
+              ORDER BY x.created_at,x.auto_order_item_id
+            ) AS product_names,
+            SUM(COALESCE(x.quantity,0))::int AS quantity
+          FROM gm_auto_order_item x
+          WHERE x.auto_order_no=ao.auto_order_no
+        ) ai ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT ww.*
+          FROM gm_auto_order_work ww
+          WHERE ww.auto_order_no=ao.auto_order_no
+            AND upper(ww.work_type)=$1
+          ORDER BY ww.created_at DESC,ww.work_id DESC
+          LIMIT 1
+        ) w ON TRUE
+        WHERE upper(COALESCE(o.cs_status,'')) LIKE $1||'_%'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM gm_cs c2
+            WHERE c2.order_no=o.order_no
+              AND upper(c2.cs_type) IN ($1,$1||'_REQUEST',$1||'_REQUESTED')
+          )
+      ),
+
+      all_rows AS (
+        SELECT * FROM item_cs
+        UNION ALL
+        SELECT * FROM order_cs
+        UNION ALL
+        SELECT * FROM legacy_order
+      )
+
+      SELECT *
+      FROM all_rows
+      WHERE ($2='' OR upper(COALESCE(mall_code,''))=$2)
+        AND ($3='' OR upper(COALESCE(work_status,'REQUESTED'))=$3)
+        AND (
+          $4='' OR
+          COALESCE(order_no,'') ILIKE '%'||$4||'%' OR
+          COALESCE(mall_order_no,'') ILIKE '%'||$4||'%' OR
+          COALESCE(product_name,'') ILIKE '%'||$4||'%' OR
+          COALESCE(member_id,'') ILIKE '%'||$4||'%'
+        )
+      ORDER BY
+        requested_at DESC NULLS LAST,
+        order_no DESC,
+        mall_code,
+        pi_ii_vi NULLS LAST
+      LIMIT $5
+    `;
+
+    const rr=await pool.query(sql,[csType,mall,filterStatus,q,limit]);
+
+    const rows=rr.rows.map(x=>({
+      cs_no:x.cs_no||'',
+      requested_at:x.requested_at,
+      order_no:x.order_no||'',
+      pi_ii_vi:x.pi_ii_vi||'',
+      cs_type:x.cs_type||csType,
+      cs_status:x.cs_status||'',
+      reason_text:x.reason_text||'',
+      product_name:x.product_name||'',
+      quantity:Number(x.quantity||0),
+      mall_code:x.mall_code||'',
+      mall_order_no:x.mall_order_no||'',
+      work_status:x.work_status||'REQUESTED',
+      admin_id:x.admin_id||'',
+      mall_account_id:x.mall_account_id||'',
+      error_code:x.error_code||'',
+      error_message:x.error_message||''
+    }));
+
+    const counts={
+      REQUESTED:0,
+      READY:0,
+      RUNNING:0,
+      COMPLETED:0,
+      FAILED:0,
+      CANCELLED:0
+    };
+
+    for(const x of rows){
+      const s=String(x.work_status||'REQUESTED').toUpperCase();
+      counts[s]=(counts[s]||0)+1;
+    }
+
+    return res.json({
+      ok:true,
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_CS_API_V007',
+      data:{total:rows.length,counts,rows}
+    });
+  }catch(e){
+    console.error(
+      '[GM_AUTO_ORDER_CONTROL_TOWER_CS_FAIL_V007]',
+      String(e&&e.stack||e)
+    );
+    return res.status(500).json({
+      ok:false,
+      version:'GM_AUTO_ORDER_CONTROL_TOWER_CS_API_V007',
+      error:'cs list failed',
+      detail:String(e&&e.message||e)
+    });
+  }
+});
+
 module.exports = router;

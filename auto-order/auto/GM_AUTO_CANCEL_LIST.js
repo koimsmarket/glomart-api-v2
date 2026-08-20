@@ -1,57 +1,116 @@
-(function(){
+/* GM_AUTO_CANCEL_LIST_V006 */
+(function(w){
 'use strict';
-var $=function(id){return document.getElementById(id);};
-var panel=document.querySelector('main.main section.panel');
-if(!panel)return;
-panel.innerHTML=
-'<div class="panel-head"><h2>결제후 취소</h2></div>'+
-'<div class="tower-cards">'+
-'<div class="tower-card"><div class="label">전체 취소작업</div><div id="cTotal" class="value">0</div></div>'+
-'<div class="tower-card"><div class="label">실행대기</div><div id="cReady" class="value">0</div></div>'+
-'<div class="tower-card"><div class="label">실행중</div><div id="cRunning" class="value">0</div></div>'+
-'<div class="tower-card"><div class="label">취소완료</div><div id="cDone" class="value">0</div></div>'+
-'</div>'+
-'<div class="tower-tools" style="grid-template-columns:minmax(220px,1fr) 140px 140px 100px;">'+
-'<input id="q" class="wide" type="search" placeholder="주문번호 / 외부몰 주문번호 / 회원ID 검색">'+
-'<select id="mall"><option value="">전체 실제 주문처</option><option value="CPKR">쿠팡</option><option value="ALKR">알리</option></select>'+
-'<select id="status"><option value="">전체 상태</option><option value="READY">실행대기</option><option value="RUNNING">실행중</option><option value="COMPLETED">취소완료</option><option value="FAILED">실패</option></select>'+
-'<button id="searchBtn" type="button">조회</button>'+
-'</div>'+
-'<div id="summary" class="tower-summary">조회 중...</div>'+
-'<div class="tower-table-wrap"><table class="tower-table"><thead><tr>'+
-'<th>요청일</th><th>Glomart 주문번호</th><th>외부몰 주문번호</th><th>상품</th><th>취소수량</th><th>취소유형</th><th>취소사유</th><th>예상 환불금액</th><th>상태</th><th>담당 관리자</th><th>몰 계정</th><th>오류</th><th>처리</th>'+
-'</tr></thead><tbody id="rows"><tr><td colspan="13" class="empty">조회 중...</td></tr></tbody></table></div>';
+var MODE='cancel';
+var mountedRoot=null;
 
 function esc(v){return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-function won(v){var n=Number(v||0);return (Number.isFinite(n)?n:0).toLocaleString('ko-KR')+'원';}
-function dt(v){if(!v)return '-';var d=new Date(v);return Number.isNaN(d.getTime())?esc(v):d.toLocaleDateString('ko-KR');}
-function st(s){s=String(s||'').toUpperCase();var m={READY:'실행대기',RUNNING:'실행중',COMPLETED:'취소완료',FAILED:'실패',REQUESTED:'요청'};return m[s]||s||'-';}
+function dt(v){if(!v)return '-';var d=new Date(v);return Number.isNaN(d.getTime())?esc(v):d.toLocaleString('ko-KR');}
+function ko(s){s=String(s||'').toUpperCase();var m={REQUESTED:'요청',READY:'실행대기',RUNNING:'실행중',COMPLETED:'완료',FAILED:'실패',CANCELLED:'철회/취소'};return m[s]||s||'-';}
+function root(){return mountedRoot;}
+function el(id){var r=root();return r?r.querySelector('#'+id):null;}
+
+function shell(){
+  var r=root();if(!r)return;
+  r.innerHTML=
+    '<div class="panel-head"><h2>결제후 취소 작업</h2></div>'+
+    '<div class="tower-cards" style="grid-template-columns:repeat(6,1fr)">'+
+      '<div class="tower-card"><div class="label">전체</div><div id="gmCsTotal" class="value">0</div></div>'+
+      '<div class="tower-card"><div class="label">요청</div><div id="gmCsRequested" class="value">0</div></div>'+
+      '<div class="tower-card"><div class="label">실행대기</div><div id="gmCsReady" class="value">0</div></div>'+
+      '<div class="tower-card"><div class="label">실행중</div><div id="gmCsRunning" class="value">0</div></div>'+
+      '<div class="tower-card"><div class="label">완료</div><div id="gmCsCompleted" class="value">0</div></div>'+
+      '<div class="tower-card"><div class="label">실패</div><div id="gmCsFailed" class="value">0</div></div>'+
+    '</div>'+
+    '<div class="tower-tools" style="grid-template-columns:minmax(220px,1fr) 140px 140px 100px;">'+
+      '<input id="gmCsQ" class="wide" type="search" placeholder="주문번호 / 외부몰 주문번호 / 상품 / 회원ID 검색">'+
+      '<select id="gmCsMall"><option value="">전체 실제 주문처</option><option value="CPKR">쿠팡</option><option value="ALKR">알리</option></select>'+
+      '<select id="gmCsStatus"><option value="">전체 상태</option><option value="REQUESTED">요청</option><option value="READY">실행대기</option><option value="RUNNING">실행중</option><option value="COMPLETED">완료</option><option value="FAILED">실패</option><option value="CANCELLED">철회/취소</option></select>'+
+      '<button id="gmCsSearch" type="button">조회</button>'+
+    '</div>'+
+    '<div id="gmCsSummary" class="tower-summary">조회 중...</div>'+
+    '<div class="tower-table-wrap"><table class="tower-table"><thead><tr>'+
+      '<th>요청일</th><th>Glomart 주문번호</th><th>외부몰</th><th>외부몰 주문번호</th><th>상품</th><th>수량</th><th>요청범위</th><th>사유</th><th>작업상태</th><th>담당 관리자</th><th>몰 계정</th><th>오류</th><th>처리</th>'+
+    '</tr></thead><tbody id="gmCsRows"><tr><td colspan="13" class="empty">조회 중...</td></tr></tbody></table></div>';
+
+  el('gmCsSearch').addEventListener('click',load);
+  el('gmCsQ').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
+}
 
 async function load(){
-  $('summary').textContent='결제후 취소 작업 조회 중...';
-  $('rows').innerHTML='<tr><td colspan="13" class="empty">조회 중...</td></tr>';
-  var p=new URLSearchParams({type:'cancel',limit:'200'});
-  var q=$('q').value.trim(), mall=$('mall').value, status=$('status').value;
-  if(q)p.set('q',q); if(mall)p.set('mall_code',mall); if(status)p.set('status',status);
+  var summary=el('gmCsSummary'),rowsEl=el('gmCsRows');
+  if(!summary||!rowsEl)return;
+
+  summary.textContent='조회 중...';
+  rowsEl.innerHTML='<tr><td colspan="13" class="empty">조회 중...</td></tr>';
+
+  var p=new URLSearchParams();
+  p.set('type',MODE);
+  p.set('limit','200');
+  var q=el('gmCsQ').value.trim();
+  var mall=el('gmCsMall').value;
+  var status=el('gmCsStatus').value;
+  if(q)p.set('q',q);
+  if(mall)p.set('mall_code',mall);
+  if(status)p.set('work_status',status);
+
   try{
-    var r=await fetch('/api/auto-order/claims?'+p.toString(),{cache:'no-store'});
-    var j=await r.json();
-    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+r.status));
-    var rows=(j.data&&Array.isArray(j.data.rows))?j.data.rows:[];
-    var counts=(j.data&&j.data.counts)||{};
-    $('cTotal').textContent=Number(j.data&&j.data.total||rows.length||0).toLocaleString('ko-KR');
-    $('cReady').textContent=Number(counts.READY||0).toLocaleString('ko-KR');
-    $('cRunning').textContent=Number(counts.RUNNING||0).toLocaleString('ko-KR');
-    $('cDone').textContent=Number(counts.COMPLETED||0).toLocaleString('ko-KR');
-    $('summary').textContent='총 '+Number(j.data&&j.data.total||rows.length||0).toLocaleString('ko-KR')+'건 · 현재 '+rows.length+'건 표시';
-    if(!rows.length){$('rows').innerHTML='<tr><td colspan="13" class="empty">결제후 취소 작업이 없습니다.</td></tr>';return;}
-    $('rows').innerHTML=rows.map(function(x){
-      return '<tr><td>'+dt(x.requested_at||x.created_at)+'</td><td>'+esc(x.order_no||'-')+'</td><td>'+esc(x.mall_order_no||'-')+'</td><td class="product">'+esc(x.product_name||x.product_names||'-')+'</td><td class="num">'+esc(x.quantity||x.cancel_quantity||0)+'</td><td>'+esc(x.request_type||x.cancel_type||'부분/전체')+'</td><td>'+esc(x.reason||x.reason_text||'-')+'</td><td class="num"><strong>'+won(x.refund_amount||x.expected_refund_amount)+'</strong></td><td>'+esc(st(x.status||x.work_status))+'</td><td>'+esc(x.admin_id||'-')+'</td><td>'+esc(x.mall_account_id||'-')+'</td><td>'+esc(x.error_message||x.error_code||'-')+'</td><td>-</td></tr>';
+    var rr=await fetch('/api/auto-order/control-tower/cs?'+p.toString(),{cache:'no-store'});
+    var j=await rr.json();
+    if(!rr.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+rr.status));
+
+    var d=j.data||{};
+    var rows=Array.isArray(d.rows)?d.rows:[];
+    var c=d.counts||{};
+
+    el('gmCsTotal').textContent=Number(d.total||0).toLocaleString('ko-KR');
+    el('gmCsRequested').textContent=Number(c.REQUESTED||0).toLocaleString('ko-KR');
+    el('gmCsReady').textContent=Number(c.READY||0).toLocaleString('ko-KR');
+    el('gmCsRunning').textContent=Number(c.RUNNING||0).toLocaleString('ko-KR');
+    el('gmCsCompleted').textContent=Number(c.COMPLETED||0).toLocaleString('ko-KR');
+    el('gmCsFailed').textContent=Number(c.FAILED||0).toLocaleString('ko-KR');
+
+    summary.textContent='총 '+Number(d.total||0).toLocaleString('ko-KR')+'건 · 현재 '+rows.length+'건 표시';
+
+    if(!rows.length){
+      rowsEl.innerHTML='<tr><td colspan="13" class="empty">결제후 취소 요청이 없습니다.</td></tr>';
+      return;
+    }
+
+    rowsEl.innerHTML=rows.map(function(x){
+      var scope=x.pi_ii_vi?'상품':'외부주문';
+      var err=[x.error_code,x.error_message].filter(Boolean).join(' / ');
+      return '<tr>'+
+        '<td>'+dt(x.requested_at)+'</td>'+
+        '<td><strong>'+esc(x.order_no||'-')+'</strong><div class="muted">'+esc(x.cs_no||'')+'</div></td>'+
+        '<td>'+esc(x.mall_code||'-')+'</td>'+
+        '<td>'+esc(x.mall_order_no||'-')+'</td>'+
+        '<td class="product">'+esc(x.product_name||'-')+'<div class="muted">'+esc(x.pi_ii_vi||'')+'</div></td>'+
+        '<td class="num">'+esc(x.quantity||0)+'</td>'+
+        '<td>'+scope+'</td>'+
+        '<td>'+esc(x.reason_text||'-')+'</td>'+
+        '<td>'+esc(ko(x.work_status))+'</td>'+
+        '<td>'+esc(x.admin_id||'-')+'</td>'+
+        '<td>'+esc(x.mall_account_id||'-')+'</td>'+
+        '<td>'+esc(err||'-')+'</td>'+
+        '<td>-</td>'+
+      '</tr>';
     }).join('');
-  }catch(e){$('summary').textContent='결제후 취소 조회 실패';$('rows').innerHTML='<tr><td colspan="13" class="empty">'+esc(e&&e.message||e)+'</td></tr>';}
+  }catch(e){
+    summary.textContent='조회 실패';
+    rowsEl.innerHTML='<tr><td colspan="13" class="empty">'+esc(e&&e.message||e)+'</td></tr>';
+  }
 }
-$('searchBtn').addEventListener('click',load);
-$('q').addEventListener('keydown',function(e){if(e.key==='Enter')load();});
-var rb=document.getElementById('refreshBtn'); if(rb)rb.addEventListener('click',load);
-load();
-})();
+
+function mount(r){
+  mountedRoot=r;
+  if(!r)return;
+  shell();
+  load();
+}
+function refresh(){
+  if(root())load();
+}
+w.GM_AUTO_CANCEL_LIST={mount:mount,refresh:refresh};
+})(window);
+
