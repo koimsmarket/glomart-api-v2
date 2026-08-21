@@ -7,8 +7,9 @@
 
 const refundBank=require('./GM_ORDER_REFUND_BANK');
 const refundDeposit=require('./GM_ORDER_REFUND_DEPOSIT');
+const orderMessageEvent=require('./order_message_event_service');
 
-const VERSION = 'GM_ORDER_HISTORY_SERVICE_V008_PAID_ONLY_REFUND';
+const VERSION = 'GM_ORDER_HISTORY_SERVICE_V009_ORDER_EVENT_MESSAGE';
 
 function text(v){ return String(v == null ? '' : v).trim(); }
 function upper(v){ return text(v).toUpperCase(); }
@@ -399,8 +400,31 @@ async function action(pool, options){
 
     const updatedRows = (await client.query(`SELECT * FROM gm_order WHERE member_id=$1 AND order_no=$2 LIMIT 1`, [memberId, orderNo])).rows;
     const updated = normalizeOrder(updatedRows[0], itemRows);
+
+    /* [ORDER EVENT MESSAGE]
+     * 고객의 상태변경이 DB에 성공한 경우에만 주문 알림함에 1건을 추가한다.
+     * 메시지 저장 실패는 취소/반품/교환 자체를 롤백시키지 않는다.
+     */
+    const messageTypeMap={
+      direct_cancel:'CANCEL_COMPLETED',
+      cancel_request:'CANCEL_REQUESTED',
+      return_request:'RETURN_REQUESTED',
+      exchange_request:'EXCHANGE_REQUESTED'
+    };
+    let messageEvent=null, messageEventError='';
+    const messageType=messageTypeMap[actionName]||'';
+    if(messageType){
+      try{
+        const mr=await orderMessageEvent.create(client,{order:updatedRows[0],message_type:messageType});
+        messageEvent=mr&&mr.item||null;
+      }catch(messageError){
+        messageEventError=String(messageError&&messageError.message||messageError);
+        try{console.error('[GM_ORDER_EVENT_MESSAGE_FAIL]',JSON.stringify({order_no:orderNo,action:actionName,message_type:messageType,error:messageEventError}));}catch(_log){}
+      }
+    }
+
     await client.query('COMMIT');
-    return { action:actionName, order:updated, refund:refundResult };
+    return { action:actionName, order:updated, refund:refundResult, message_event:messageEvent, message_event_error:messageEventError };
   }catch(error){
     try{ await client.query('ROLLBACK'); }catch(_){}
     throw error;

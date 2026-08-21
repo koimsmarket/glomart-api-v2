@@ -1,6 +1,6 @@
 /* services/order_cs_service.js | GM_ORDER_CS_SERVICE_V003_AUTO_ORDER_CANCEL_GUARD */
 'use strict';
-const history=require('./order_history_service');const VERSION='GM_ORDER_CS_SERVICE_V003_AUTO_ORDER_CANCEL_GUARD';
+const history=require('./order_history_service');const orderMessageEvent=require('./order_message_event_service');const VERSION='GM_ORDER_CS_SERVICE_V004_ORDER_EVENT_MESSAGE';
 function text(v){return String(v==null?'':v).trim();}
 function cafe24Url(action,cafeNo){const base='/myshop/order/';if(action==='detail')return base+'detail.html?order_id='+encodeURIComponent(cafeNo);if(action.indexOf('exchange')===0)return base+'exchange.html?order_id='+encodeURIComponent(cafeNo);if(action.indexOf('return')===0)return base+'return.html?order_id='+encodeURIComponent(cafeNo);return base+'cancel.html?order_id='+encodeURIComponent(cafeNo);}
 function allowed(order,action){const a=order.actions||{};return {direct_cancel:a.direct_cancel,cancel_request:a.cancel_request,cancel_withdraw:a.cancel_withdraw,exchange_request:a.exchange_request,exchange_withdraw:a.exchange_withdraw,return_request:a.return_request,return_withdraw:a.return_withdraw,purchase_confirm:a.purchase_confirm,shipping_trace:a.shipping_trace}[action]===true;}
@@ -35,6 +35,17 @@ async function action(pool,input){
     await pool.query(`UPDATE gm_auto_order SET cancel_status='CANCELLED',process_status='CANCELLED',updated_at=now() WHERE order_no=$1`,[orderNo]);
     await pool.query(`UPDATE gm_auto_order_work w SET work_status='CANCELLED',lock_token=NULL,lock_admin_id=NULL,lock_mall_account_id=NULL,lock_at=NULL,lock_expires_at=NULL,error_code='CUSTOMER_CANCELLED',error_message='Glomart 주문이 고객에 의해 취소되어 자동주문 작업을 즉시 중단함',updated_at=now() FROM gm_auto_order a WHERE a.auto_order_no=w.auto_order_no AND a.order_no=$1 AND upper(COALESCE(w.work_status,'')) NOT IN ('COMPLETED','CANCELLED')`,[orderNo]);
   }
-  return {version:VERSION,order_no:orderNo,action:act,ok:true};
+  let messageEvent=null,messageEventError='';
+  const messageTypeMap={direct_cancel:'CANCEL_COMPLETED',cancel_request:'CANCEL_REQUESTED',return_request:'RETURN_REQUESTED',exchange_request:'EXCHANGE_REQUESTED'};
+  if(messageTypeMap[act]){
+    try{
+      const mr=await orderMessageEvent.create(pool,{order_no:orderNo,message_type:messageTypeMap[act]});
+      messageEvent=mr&&mr.item||null;
+    }catch(messageError){
+      messageEventError=String(messageError&&messageError.message||messageError);
+      try{console.error('[GM_ORDER_CS_EVENT_MESSAGE_FAIL]',JSON.stringify({order_no:orderNo,action:act,error:messageEventError}));}catch(_log){}
+    }
+  }
+  return {version:VERSION,order_no:orderNo,action:act,ok:true,message_event:messageEvent,message_event_error:messageEventError};
 }
 module.exports={VERSION,action};

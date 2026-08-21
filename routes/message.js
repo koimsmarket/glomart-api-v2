@@ -615,7 +615,8 @@ router.post('/api/gm/message/cleanup', async (req,res)=>{
  *   앱/FCM 송신부는 이 payload를 소비하고 received_yn ACK를 별도 호출한다.
  * ============================================================================ */
 const GM_ORDER_MESSAGE_TYPES = new Set([
-  'ORDER_RECEIVED','ORDER_SHIPPED','RETURN_APPROVED','EXCHANGE_APPROVED',
+  'ORDER_RECEIVED','ORDER_SHIPPED','CANCEL_REQUESTED','CANCEL_COMPLETED',
+  'RETURN_REQUESTED','EXCHANGE_REQUESTED','RETURN_APPROVED','EXCHANGE_APPROVED',
   'RETURN_COMPLETED','EXCHANGE_RESHIPPED','DIRECT'
 ]);
 function validOrderDeviceLang(v){
@@ -659,6 +660,51 @@ const ORDER_RECEIVED_TEXT={
   fr:{title:'Commande reçue',no:'Numéro de commande',at:'Date de commande',amount:'Montant',bank:'Virement bancaire',detail:'Voir le détail de la commande',confirm:'OK'}
 }
 function orderMessageText(lang){ return ORDER_RECEIVED_TEXT[lang] || ORDER_RECEIVED_TEXT.en; }
+
+const ORDER_EVENT_TITLES={
+  ko:{CANCEL_REQUESTED:'취소 요청이 접수되었습니다',CANCEL_COMPLETED:'주문이 취소되었습니다',RETURN_REQUESTED:'반품 요청이 접수되었습니다',EXCHANGE_REQUESTED:'교환 요청이 접수되었습니다'},
+  en:{CANCEL_REQUESTED:'Cancellation request received',CANCEL_COMPLETED:'Order cancelled',RETURN_REQUESTED:'Return request received',EXCHANGE_REQUESTED:'Exchange request received'},
+  zh:{CANCEL_REQUESTED:'已收到取消申请',CANCEL_COMPLETED:'订单已取消',RETURN_REQUESTED:'已收到退货申请',EXCHANGE_REQUESTED:'已收到换货申请'},
+  tw:{CANCEL_REQUESTED:'已收到取消申請',CANCEL_COMPLETED:'訂單已取消',RETURN_REQUESTED:'已收到退貨申請',EXCHANGE_REQUESTED:'已收到換貨申請'},
+  vi:{CANCEL_REQUESTED:'Đã tiếp nhận yêu cầu hủy đơn',CANCEL_COMPLETED:'Đơn hàng đã được hủy',RETURN_REQUESTED:'Đã tiếp nhận yêu cầu trả hàng',EXCHANGE_REQUESTED:'Đã tiếp nhận yêu cầu đổi hàng'},
+  ja:{CANCEL_REQUESTED:'キャンセル申請を受け付けました',CANCEL_COMPLETED:'注文をキャンセルしました',RETURN_REQUESTED:'返品申請を受け付けました',EXCHANGE_REQUESTED:'交換申請を受け付けました'},
+  th:{CANCEL_REQUESTED:'รับคำขอยกเลิกแล้ว',CANCEL_COMPLETED:'ยกเลิกคำสั่งซื้อแล้ว',RETURN_REQUESTED:'รับคำขอคืนสินค้าแล้ว',EXCHANGE_REQUESTED:'รับคำขอเปลี่ยนสินค้าแล้ว'},
+  uz:{CANCEL_REQUESTED:'Bekor qilish so‘rovi qabul qilindi',CANCEL_COMPLETED:'Buyurtma bekor qilindi',RETURN_REQUESTED:'Qaytarish so‘rovi qabul qilindi',EXCHANGE_REQUESTED:'Almashtirish so‘rovi qabul qilindi'},
+  ne:{CANCEL_REQUESTED:'रद्द गर्ने अनुरोध प्राप्त भयो',CANCEL_COMPLETED:'अर्डर रद्द गरियो',RETURN_REQUESTED:'फिर्ता अनुरोध प्राप्त भयो',EXCHANGE_REQUESTED:'साट्ने अनुरोध प्राप्त भयो'},
+  km:{CANCEL_REQUESTED:'បានទទួលសំណើលុបចោល',CANCEL_COMPLETED:'ការបញ្ជាទិញត្រូវបានលុបចោល',RETURN_REQUESTED:'បានទទួលសំណើប្រគល់ទំនិញ',EXCHANGE_REQUESTED:'បានទទួលសំណើប្តូរទំនិញ'},
+  id:{CANCEL_REQUESTED:'Permintaan pembatalan telah diterima',CANCEL_COMPLETED:'Pesanan telah dibatalkan',RETURN_REQUESTED:'Permintaan pengembalian telah diterima',EXCHANGE_REQUESTED:'Permintaan penukaran telah diterima'},
+  tl:{CANCEL_REQUESTED:'Natanggap na ang kahilingan sa pagkansela',CANCEL_COMPLETED:'Kinansela na ang order',RETURN_REQUESTED:'Natanggap na ang kahilingan sa pagsasauli',EXCHANGE_REQUESTED:'Natanggap na ang kahilingan sa pagpapalit'},
+  mn:{CANCEL_REQUESTED:'Цуцлах хүсэлтийг хүлээн авлаа',CANCEL_COMPLETED:'Захиалгыг цуцаллаа',RETURN_REQUESTED:'Буцаалтын хүсэлтийг хүлээн авлаа',EXCHANGE_REQUESTED:'Солих хүсэлтийг хүлээн авлаа'},
+  my:{CANCEL_REQUESTED:'ပယ်ဖျက်ရန် တောင်းဆိုမှုကို လက်ခံရရှိပါပြီ',CANCEL_COMPLETED:'အော်ဒါကို ပယ်ဖျက်ပြီးပါပြီ',RETURN_REQUESTED:'ပြန်အပ်ရန် တောင်းဆိုမှုကို လက်ခံရရှိပါပြီ',EXCHANGE_REQUESTED:'လဲလှယ်ရန် တောင်းဆိုမှုကို လက်ခံရရှိပါပြီ'},
+  kk:{CANCEL_REQUESTED:'Бас тарту сұрауы қабылданды',CANCEL_COMPLETED:'Тапсырыс жойылды',RETURN_REQUESTED:'Қайтару сұрауы қабылданды',EXCHANGE_REQUESTED:'Айырбастау сұрауы қабылданды'},
+  si:{CANCEL_REQUESTED:'අවලංගු කිරීමේ ඉල්ලීම ලැබී ඇත',CANCEL_COMPLETED:'ඇණවුම අවලංගු කර ඇත',RETURN_REQUESTED:'ආපසු භාරදීමේ ඉල්ලීම ලැබී ඇත',EXCHANGE_REQUESTED:'මාරු කිරීමේ ඉල්ලීම ලැබී ඇත'},
+  ru:{CANCEL_REQUESTED:'Запрос на отмену получен',CANCEL_COMPLETED:'Заказ отменён',RETURN_REQUESTED:'Запрос на возврат получен',EXCHANGE_REQUESTED:'Запрос на обмен получен'},
+  bn:{CANCEL_REQUESTED:'বাতিলের অনুরোধ গ্রহণ করা হয়েছে',CANCEL_COMPLETED:'অর্ডার বাতিল করা হয়েছে',RETURN_REQUESTED:'রিটার্নের অনুরোধ গ্রহণ করা হয়েছে',EXCHANGE_REQUESTED:'বিনিময়ের অনুরোধ গ্রহণ করা হয়েছে'},
+  ur:{CANCEL_REQUESTED:'منسوخی کی درخواست موصول ہو گئی ہے',CANCEL_COMPLETED:'آرڈر منسوخ کر دیا گیا ہے',RETURN_REQUESTED:'واپسی کی درخواست موصول ہو گئی ہے',EXCHANGE_REQUESTED:'تبادلے کی درخواست موصول ہو گئی ہے'},
+  lo:{CANCEL_REQUESTED:'ໄດ້ຮັບຄຳຮ້ອງຂໍຍົກເລີກແລ້ວ',CANCEL_COMPLETED:'ຍົກເລີກຄຳສັ່ງຊື້ແລ້ວ',RETURN_REQUESTED:'ໄດ້ຮັບຄຳຮ້ອງຂໍຄືນສິນຄ້າແລ້ວ',EXCHANGE_REQUESTED:'ໄດ້ຮັບຄຳຮ້ອງຂໍປ່ຽນສິນຄ້າແລ້ວ'},
+  hi:{CANCEL_REQUESTED:'रद्द करने का अनुरोध प्राप्त हो गया है',CANCEL_COMPLETED:'ऑर्डर रद्द कर दिया गया है',RETURN_REQUESTED:'वापसी का अनुरोध प्राप्त हो गया है',EXCHANGE_REQUESTED:'बदलने का अनुरोध प्राप्त हो गया है'},
+  tr:{CANCEL_REQUESTED:'İptal talebiniz alındı',CANCEL_COMPLETED:'Sipariş iptal edildi',RETURN_REQUESTED:'İade talebiniz alındı',EXCHANGE_REQUESTED:'Değişim talebiniz alındı'},
+  fa:{CANCEL_REQUESTED:'درخواست لغو دریافت شد',CANCEL_COMPLETED:'سفارش لغو شد',RETURN_REQUESTED:'درخواست مرجوعی دریافت شد',EXCHANGE_REQUESTED:'درخواست تعویض دریافت شد'},
+  es:{CANCEL_REQUESTED:'Solicitud de cancelación recibida',CANCEL_COMPLETED:'Pedido cancelado',RETURN_REQUESTED:'Solicitud de devolución recibida',EXCHANGE_REQUESTED:'Solicitud de cambio recibida'},
+  fr:{CANCEL_REQUESTED:'Demande d’annulation reçue',CANCEL_COMPLETED:'Commande annulée',RETURN_REQUESTED:'Demande de retour reçue',EXCHANGE_REQUESTED:'Demande d’échange reçue'}
+};
+function buildOrderEventPayload(order,langInfo,messageType){
+  const lang=langInfo.lang||'en';
+  const base=orderMessageText(lang);
+  const title=(ORDER_EVENT_TITLES[lang]&&ORDER_EVENT_TITLES[lang][messageType]) ||
+              (ORDER_EVENT_TITLES.en&&ORDER_EVENT_TITLES.en[messageType]) || messageType;
+  const orderNo=s(order.order_no);
+  const eventAt=orderDateText(order.sent_at||order.updated_at||order.cs_requested_at||order.cancel_completed_at||order.created_at);
+  const detailUrl='/myshop/order/gm_detail.html?order_no='+encodeURIComponent(orderNo);
+  const lines=[`${base.no}: ${orderNo}`,eventAt?`${base.at}: ${eventAt}`:'',title].filter(Boolean);
+  return {
+    message_type:messageType,title,message:lines.join('\n'),notification_text:lines.join('\n'),
+    order_no:orderNo,event_at:eventAt,detail_url:detailUrl,detail_label:base.detail,
+    confirm_label:base.confirm||'OK',device_lang:langInfo.device_lang,
+    language_code:lang,language_source:langInfo.source
+  };
+}
+
 function orderMoney(v){
   const n=Number(v||0);
   return Number.isFinite(n) ? Math.round(n) : 0;
@@ -783,7 +829,9 @@ async function orderInboxRowPayload(pool,row){
     lang: orderMessageLangCode(order.device_lang || 'en'),
     source: 'MESSAGE_SAVED_LANG'
   };
-  if(s(order.message_type).toUpperCase()==='ORDER_RECEIVED') return buildOrderReceivedPayload(order,langInfo);
+  const mt=s(order.message_type).toUpperCase();
+  if(mt==='ORDER_RECEIVED') return buildOrderReceivedPayload(order,langInfo);
+  if(['CANCEL_REQUESTED','CANCEL_COMPLETED','RETURN_REQUESTED','EXCHANGE_REQUESTED'].includes(mt)) return buildOrderEventPayload(order,langInfo,mt);
   const detailUrl='/myshop/order/gm_detail.html?order_no='+encodeURIComponent(s(order.order_no));
   const direct=s(order.direct_message);
   return {
@@ -820,7 +868,8 @@ router.get('/api/gm/message/order/list', async (req,res)=>{
     const limit=Math.min(100,Math.max(1,Number(req.query.limit||50)||50));
     const r=await pool.query(`SELECT m.order_no,m.message_seq,m.message_type,m.direct_message,m.device_lang,
       m.received_yn,m.sent_at,m.opened_at,
-      o.member_id,o.cafe24_order_no,o.ordered_at,o.created_at,
+      o.member_id,o.cafe24_order_no,o.ordered_at,o.created_at,o.updated_at,
+      o.cs_requested_at,o.cs_completed_at,o.cancel_completed_at,
       o.total_payment_price,o.expected_payment_amount,o.actual_payment_amount,
       o.payment_bank_name,o.payment_account_number,o.depositor_name,
       to_char(o.ordered_at,'YYYY-MM-DD HH24:MI') AS ordered_at_text,
