@@ -1910,7 +1910,7 @@ app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
 app.use(require('./routes/account'));
-app.use(require('./routes/gm_deposit')); // GM_DEPOSIT_V002 Glomart deposit read API
+app.use(require('./routes/deposit')); // Glomart deposit read API
 app.use(require('./routes/order'));
 app.use(require('./routes/order_history')); // GM 주문조회 전용 라우트(서버는 평면 구조 유지)
 app.use(require('./routes/order_cs')); // GM 주문 취소/교환/반품/구매확정 전용 라우트
