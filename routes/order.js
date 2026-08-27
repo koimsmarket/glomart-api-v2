@@ -10,6 +10,7 @@
 
 const express = require('express');
 const router = express.Router();
+const paymentConfirm=require('../auto-order/services/payment_confirm_service');
 
 function enqueueAfterResponse(label, task){
   const run=()=>{
@@ -1007,6 +1008,20 @@ router.post('/api/gm/order/link', async (req, res) => {
     client.release();
   }
 });
+
+router.post('/api/gm/order/deposit-payment/apply', async (req,res)=>{
+  const pool=req.app.locals.db||req.app.locals.pool;
+  if(!pool)return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  try{
+    const data=await paymentConfirm.applyOrderDepositPayment(pool,req.body||{});
+    return res.json(data);
+  }catch(e){
+    const msg=String(e&&e.message||e);
+    const status=/required|mismatch|invalid/.test(msg)?400:/not_found/.test(msg)?404:500;
+    return res.status(status).json({ok:false,error:msg});
+  }
+});
+
 // 기존 GET 호환 URL 유지
 router.get('/api/order/:order_no', async (req,res)=>{
   req.query.order_no = req.params.order_no;

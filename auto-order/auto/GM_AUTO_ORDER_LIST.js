@@ -283,8 +283,8 @@
       var d=j.data||{};
       if(Number(d.no_account||0)>0){
         alert(
-          '배정 완료 '+Number(d.assigned||0)+'건\\n'+
-          '계정 미등록/비활성 '+Number(d.no_account||0)+'건\\n\\n'+
+          '배정 완료 '+Number(d.assigned||0)+'건\n'+
+          '계정 미등록/비활성 '+Number(d.no_account||0)+'건\n\n'+
           '미배정 건은 gm_auto_order_account 등록 후 다시 배정하면 됩니다.'
         );
       }
@@ -300,24 +300,46 @@
 
   async function confirmPayment(orderNo,btn){
     if(!orderNo)return;
-    if(!window.confirm(orderNo+' 주문을 결제완료로 처리할까요?'))return;
+    var raw=window.prompt(
+      orderNo+' 주문의 현재까지 실제 입금 확인 금액을 입력하세요.\n'+
+      '주문결과에서 사용된 예치금은 서버가 자동 합산합니다.',
+      ''
+    );
+    if(raw===null)return;
+    raw=String(raw).replace(/,/g,'').trim();
+    if(!/^\d+$/.test(raw)){alert('입금 확인 금액을 숫자로 입력하세요.');return;}
+    var actual=Number(raw);
+    if(!Number.isFinite(actual)||actual<0){alert('입금 확인 금액이 올바르지 않습니다.');return;}
 
     if(btn){btn.disabled=true;btn.textContent='처리중';}
     try{
       var r=await fetch('/api/auto-order/control-tower/order/'+encodeURIComponent(orderNo)+'/payment-confirm',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({admin_id:'MANUAL'})
+        body:JSON.stringify({admin_id:'MANUAL',actual_payment_amount:actual})
       });
       var j=await r.json();
       if(!r.ok||!j.ok)throw new Error(j.detail||j.error||('HTTP '+r.status));
 
       var d=j.data||{};
-      alert(
-        '결제확인 완료\\n'+
-        '주문번호: '+orderNo+'\\n'+
-        '실행대기 전환: '+Number(d.works_ready||0)+'건'
-      );
+      if(String(d.payment_status||'').toUpperCase()==='PAID'){
+        alert(
+          '결제확인 완료\n'+
+          '주문번호: '+orderNo+'\n'+
+          '실제 입금: '+won(d.actual_payment_amount)+'\n'+
+          '예치금 사용: '+won(d.deposit_used_amount)+'\n'+
+          '실행대기 전환: '+Number(d.works_ready||0)+'건'
+        );
+      }else{
+        alert(
+          '아직 완불되지 않았습니다.\n'+
+          '주문번호: '+orderNo+'\n'+
+          '실제 입금: '+won(d.actual_payment_amount)+'\n'+
+          '이미 사용된 예치금: '+won(d.deposit_used_amount)+'\n'+
+          '남은 결제금액: '+won(d.remaining_amount)+'\n\n'+
+          '주문은 결제대기에 그대로 남습니다.'
+        );
+      }
       await load();
     }catch(e){
       alert('결제확인 실패: '+(e&&e.message||e));

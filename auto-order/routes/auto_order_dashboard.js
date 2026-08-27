@@ -855,7 +855,8 @@ router.post('/api/auto-order/control-tower/order/:order_no/payment-confirm', asy
     const data = await paymentConfirm.confirmOrderPayment(pool, {
       order_no:req.params.order_no,
       admin_id:String((req.body && req.body.admin_id) || 'MANUAL').trim(),
-      memo:String((req.body && req.body.memo) || '').trim().slice(0,500)
+      memo:String((req.body && req.body.memo) || '').trim().slice(0,500),
+      actual_payment_amount:req.body && req.body.actual_payment_amount
     });
 
     console.log('[GM_AUTO_ORDER_PAYMENT_CONFIRM_V001]', JSON.stringify({

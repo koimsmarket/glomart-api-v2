@@ -240,6 +240,14 @@ async function detail(pool, options){
     account_no:text(member.refund_account_no),
     account_holder:text(member.refund_account_holder)
   };
+  const depositUse=(await pool.query(
+    `SELECT COALESCE(withdraw_amount,0)::bigint AS used
+       FROM gm_deposit_transaction
+      WHERE order_no=$1 AND member_id=$2 AND transaction_type='ORDER_USE'
+      ORDER BY transaction_id ASC LIMIT 1`,
+    [orderNo,memberId]
+  )).rows[0];
+  out.deposit_used_amount=Math.max(0,int(depositUse&&depositUse.used,0));
   return out;
 }
 
@@ -283,18 +291,31 @@ async function action(pool, options){
     let paidForRefund=false;
     if(actionName === 'direct_cancel'){
       const payStatus=upper(rows[0].payment_status);
-      // 환불/예치금 전환은 결제 완료 주문에 한해서만 허용한다. 부분입금(PARTIALLY_PAID)은 취소만 한다.
-      paidForRefund=['PAID','OVERPAID','PAYMENT_COMPLETE','PAYMENT_COMPLETED','COMPLETED','COMPLETE','DONE','SUCCESS','SETTLED'].includes(payStatus);
-      if(paidForRefund){
-        // Refund only money actually received. Older rows may have PAID status but actual_payment_amount=0,
-        // so expected/total is used only as a legacy fallback in that case.
-        const actualPaid=Math.max(0,int(rows[0].actual_payment_amount,0));
-        refundAmount=actualPaid>0?actualPaid:Math.max(
+      const completedPayment=['PAID','OVERPAID','PAYMENT_COMPLETE','PAYMENT_COMPLETED','COMPLETED','COMPLETE','DONE','SUCCESS','SETTLED'].includes(payStatus);
+      const actualPaid=Math.max(0,int(rows[0].actual_payment_amount,0));
+
+      // 예치금 사용액도 실제 결제된 금액이다.
+      // 취소 시 자동으로 예치금에 복원하지 않고, 현금 입금액과 합산하여
+      // 사용자가 선택한 기존 환불방법(BANK / DEPOSIT)으로 처리한다.
+      const useRow=(await client.query(
+        `SELECT COALESCE(withdraw_amount,0)::bigint AS used
+           FROM gm_deposit_transaction
+          WHERE order_no=$1 AND member_id=$2 AND transaction_type='ORDER_USE'
+          ORDER BY transaction_id ASC LIMIT 1`,
+        [orderNo,memberId]
+      )).rows[0];
+      const depositUsed=Math.max(0,int(useRow&&useRow.used,0));
+
+      refundAmount=actualPaid+depositUsed;
+      // 과거 결제완료 데이터에 actual_payment_amount가 없고 예치금 사용도 없는 경우만 기존 fallback 유지.
+      if(refundAmount<=0 && completedPayment){
+        refundAmount=Math.max(
           int(rows[0].expected_payment_amount,0),
           int(rows[0].total_payment_price,0)
         );
-        if(refundAmount>0 && !['BANK','DEPOSIT'].includes(refundMethod)) throw new Error('refund_method_required');
       }
+      paidForRefund=refundAmount>0;
+      if(paidForRefund && !['BANK','DEPOSIT'].includes(refundMethod)) throw new Error('refund_method_required');
     }
 
     let sql = '';
@@ -326,8 +347,8 @@ async function action(pool, options){
 
     /*
      * [PAID-ONLY REFUND GUARD]
-     * 미결제/입금대기/부분입금 주문은 취소만 한다.
-     * 환불방법을 만들거나 예치금으로 전환하지 않으며, 환불 상태도 NONE으로 명확히 정리한다.
+     * 실제 결제액(현금입금 + ORDER_USE)이 0원인 주문만 취소만 한다.
+     * 부분결제라도 실제 결제액이 있으면 사용자가 선택한 환불방법으로 환불한다.
      */
     if(actionName === 'direct_cancel' && !paidForRefund){
       await client.query(
