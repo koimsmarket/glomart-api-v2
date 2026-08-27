@@ -111,7 +111,7 @@ app.get('/download/android/glomart_v1.0.apk', (req, res) => {
 app.use(express.static(GM_PUBLIC_DIR));
 app.use('/public', express.static(GM_PUBLIC_DIR));
 
-/* GM_AUTO_ORDER_DASHBOARD_V006
+/* GM_AUTO_ORDER_DASHBOARD_V007
  * auto-order contains both browser-side runner files and future server-side
  * routes/services/workers. Never expose the whole auto-order directory.
  * Only the admin UI and browser runner paths below are public.

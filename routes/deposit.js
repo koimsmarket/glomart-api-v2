@@ -1,5 +1,5 @@
 /* routes/deposit.js
- * GM_DEPOSIT_V003_READ_API
+ * GM_DEPOSIT_V007_READ_API
  * Glomart 전용 예치금 조회 API.
  * Source of truth: gm_deposit_balance + gm_deposit_transaction
  */
