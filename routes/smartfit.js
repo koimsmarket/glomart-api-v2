@@ -738,24 +738,27 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     const publicReadable=template.visibility==='public' && template.search_visible==='T';
     if(!owner && !collected && !publicReadable) return fail(res,403,'template item access denied');
 
-    const params=[templateId];
-    const where=["i.template_id=$1", "i.is_active='T'", "COALESCE(i.is_deleted,'F')<>'T'"];
-    if(q){ params.push('%'+q+'%'); const p='$'+params.length; where.push(`(i.product_uid ILIKE ${p} OR COALESCE(p.product_name,'') ILIKE ${p} OR COALESCE(p.mall_product_name,'') ILIKE ${p})`); }
-    params.push(limit); const lim='$'+params.length;
-    const r=await pool.query(`SELECT
-        i.item_id, i.template_id, i.item_role, i.mall_code, COALESCE(p.product_id,'') AS product_id, i.product_uid, i.qty, i.sort_order AS sort_no,
-        p.product_name, p.mall_product_name, ''::text AS option_name, ''::text AS option_value,
-        p.mall_sale_price AS sale_price, p.final_supply_price,
-        p.product_url, p.thumb_origin_url AS thumb_url,
-        p.delivery_type, p.delivery_fee, p.delivery_eta_text, p.soldout_yn,
-        p.source_mall, p.pi_ii_vi, p.updated_at
-      FROM gm_smartfit_item i
-      LEFT JOIN gm_product p ON p.product_uid=i.product_uid
-      WHERE ${where.join(' AND ')}
-      ORDER BY i.sort_order, i.item_id
-      LIMIT ${lim}`, params);
-
-    let items=r.rows;
+    // V301: gm_smartfit_item has existed in more than one schema generation.
+    // Read through the existing compatibility loader instead of assuming
+    // product_uid/qty/sort_order/is_active/is_deleted are present.
+    const base=await loadTemplateItemsCompat(pool,templateId);
+    let items=base.rows.map((row)=>{
+      const out=Object.assign({},row);
+      if(out.qty==null) out.qty=i(out.quantity,1);
+      if(out.quantity==null) out.quantity=i(out.qty,1);
+      if(out.sort_no==null) out.sort_no=i(out.sort_order!=null?out.sort_order:out.item_id,0);
+      if(out.sort_order==null) out.sort_order=i(out.sort_no,0);
+      if(!out.product_uid) out.product_uid=s(out.source_uid||out.pi_ii_vi||'');
+      if(!out.thumb_url) out.thumb_url=s(out.thumb_origin_url||'');
+      if(out.sale_price==null) out.sale_price=i(out.amount,0);
+      return out;
+    });
+    if(q){
+      const needle=q.toLowerCase();
+      items=items.filter((row)=>[row.product_uid,row.product_name,row.mall_product_name,row.option_name,row.option_value]
+        .some((v)=>s(v).toLowerCase().includes(needle)));
+    }
+    items=items.slice(0,limit);
     const itemMeta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
     const itemMetaMap=new Map(itemMeta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
     items=items.map(row=>Object.assign({},itemMetaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
