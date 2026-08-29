@@ -410,6 +410,17 @@ async function getColumns(db, table) {
   `, [table]);
   return r.rows.map(x => x.column_name);
 }
+async function getColumnMeta(db, table) {
+  const r = await db.query(`
+    SELECT column_name, is_nullable, column_default, data_type
+    FROM information_schema.columns
+    WHERE table_schema='public' AND table_name=$1
+    ORDER BY ordinal_position
+  `, [table]);
+  const out = {};
+  for (const x of r.rows) out[x.column_name] = x;
+  return out;
+}
 function tableSpec(key) {
   return TABLES[String(key || '').trim()] || null;
 }
@@ -962,7 +973,7 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
 });
 
 
-// GM_BUILDER_FORCE_UPSERT_V002
+// GM_BUILDER_FORCE_UPSERT_V003
 // Development-only file restore.
 // Existing row: UPDATE uploaded columns directly.
 // Missing row: INSERT uploaded columns.
@@ -995,6 +1006,7 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
   try{
     const columns = await getColumns(db, spec.table);
     const colSet = new Set(columns);
+    const columnMeta = await getColumnMeta(db, spec.table);
     const client = apply ? await db.connect() : null;
 
     try{
@@ -1002,10 +1014,12 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
 
       for (const row of rows){
         processed++;
+        if (client) await client.query('SAVEPOINT gm_builder_row');
         const key = pickKey(row, spec);
         if (!key){
           skipped++;
           result.push({row_no:row.__row_no,table:spec.table,key:'',result:'SKIP',action:'',reason:'MISSING_KEY'});
+          if (client) await client.query('RELEASE SAVEPOINT gm_builder_row');
           continue;
         }
 
@@ -1020,13 +1034,28 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
         for (const [col, raw] of Object.entries(row)){
           if (col === '__row_no' || key.keys.includes(col)) continue;
           if (!colSet.has(col) || hardProtected.has(col)) continue;
+
+          const value = fileValue(raw);
+          const meta = columnMeta[col];
+
+          // Downloaded Excel represents DB empty-string values as blank cells.
+          // Writing those blanks back as NULL breaks NOT NULL columns such as
+          // gm_member.international_phone and rolls back the whole member upload.
+          // Therefore:
+          //   nullable blank     -> NULL  (e.g. friend_sync_at)
+          //   NOT NULL blank     -> keep current DB value
+          if (value === null && meta && String(meta.is_nullable).toUpperCase() === 'NO') {
+            continue;
+          }
+
           writeCols.push(col);
-          writeVals.push(fileValue(raw));
+          writeVals.push(value);
         }
 
         if (!writeCols.length){
           skipped++;
           result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'SKIP',action:'',reason:'NO_UPDATABLE_COLUMNS'});
+          if (client) await client.query('RELEASE SAVEPOINT gm_builder_row');
           continue;
         }
 
@@ -1035,37 +1064,48 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
           continue;
         }
 
-        const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
-        const exists = await client.query(
-          `SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`,
-          key.values
-        );
+        try{
+          const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+          const exists = await client.query(
+            `SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`,
+            key.values
+          );
 
-        if (exists.rows.length){
-          const setSql = writeCols.map((c,i)=>`${qIdent(c)}=$${i+1}`).join(', ');
-          const params = writeVals.concat(key.values);
-          const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${writeVals.length+i+1}`).join(' AND ');
-          const addUpdatedAt = colSet.has('updated_at') && !writeCols.includes('updated_at')
-            ? ', updated_at=NOW()' : '';
-          const ur = await client.query(
-            `UPDATE ${qIdent(spec.table)}
-                SET ${setSql}${addUpdatedAt}
-              WHERE ${where2}`,
-            params
-          );
-          updated += ur.rowCount || 0;
-          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'UPDATED',action:'UPDATE',reason:'APPLIED'});
-        }else{
-          const insertCols = key.keys.concat(writeCols);
-          const insertVals = key.values.concat(writeVals);
-          const placeholders = insertCols.map((_,i)=>'$'+(i+1)).join(', ');
-          await client.query(
-            `INSERT INTO ${qIdent(spec.table)} (${insertCols.map(qIdent).join(', ')})
-             VALUES (${placeholders})`,
-            insertVals
-          );
-          inserted++;
-          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'INSERTED',action:'INSERT',reason:'APPLIED'});
+          if (exists.rows.length){
+            const setSql = writeCols.map((c,i)=>`${qIdent(c)}=$${i+1}`).join(', ');
+            const params = writeVals.concat(key.values);
+            const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${writeVals.length+i+1}`).join(' AND ');
+            const addUpdatedAt = colSet.has('updated_at') && !writeCols.includes('updated_at')
+              ? ', updated_at=NOW()' : '';
+            const ur = await client.query(
+              `UPDATE ${qIdent(spec.table)}
+                  SET ${setSql}${addUpdatedAt}
+                WHERE ${where2}`,
+              params
+            );
+            updated += ur.rowCount || 0;
+            result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'UPDATED',action:'UPDATE',reason:'APPLIED'});
+          }else{
+            const insertCols = key.keys.concat(writeCols);
+            const insertVals = key.values.concat(writeVals);
+            const placeholders = insertCols.map((_,i)=>'$'+(i+1)).join(', ');
+            await client.query(
+              `INSERT INTO ${qIdent(spec.table)} (${insertCols.map(qIdent).join(', ')})
+               VALUES (${placeholders})`,
+              insertVals
+            );
+            inserted++;
+            result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'INSERTED',action:'INSERT',reason:'APPLIED'});
+          }
+          await client.query('RELEASE SAVEPOINT gm_builder_row');
+        }catch(rowErr){
+          await client.query('ROLLBACK TO SAVEPOINT gm_builder_row');
+          await client.query('RELEASE SAVEPOINT gm_builder_row');
+          skipped++;
+          result.push({
+            row_no:row.__row_no,table:spec.table,key:key.label,
+            result:'ERROR',action:'',reason:String(rowErr&&rowErr.message||rowErr)
+          });
         }
       }
 
