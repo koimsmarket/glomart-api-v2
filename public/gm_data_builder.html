@@ -640,7 +640,7 @@ function downloadCafe24MemberExport(){ location.href = `${API}/api/gm/builder/ca
 
 async function uploadDevOne(tableKey,file,apply,mode){
   const text=await readCsvText(file);
-  const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}`;
+  const url=`${API}/api/gm/builder/safe-update?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}&file_mode=EXACT`;
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
   if(!r.ok){
     const msg=await r.text();
@@ -654,7 +654,7 @@ async function devOverwrite(apply,button){
   if(!f){ alert('Excel 또는 CSV 파일을 선택하세요.'); return; }
   const t=document.getElementById('devTable').value;
   if(apply){
-    const x=prompt('선택한 CSV 행과 충돌하는 기존 행만 삭제 후 재삽입합니다. 실행하려면 DEV FILE RESTORE 를 입력하세요.');
+    const x=prompt('선택한 파일 값을 기준키로 UPSERT합니다. 빈 셀은 NULL 허용 컬럼이면 NULL로 반영하고, NOT NULL 컬럼이면 기존값을 유지합니다. 실행하려면 DEV FILE RESTORE 를 입력하세요.');
     if(x !== 'DEV FILE RESTORE') return;
   }
   const timed=startButtonTimer(button,apply?'강제 업로드 중':'개발 검증 중');

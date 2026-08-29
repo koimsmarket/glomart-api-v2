@@ -412,7 +412,7 @@ async function getColumns(db, table) {
 }
 async function getColumnMeta(db, table) {
   const r = await db.query(`
-    SELECT column_name, is_nullable, column_default, data_type
+    SELECT column_name, is_nullable
     FROM information_schema.columns
     WHERE table_schema='public' AND table_name=$1
     ORDER BY ordinal_position
@@ -972,171 +972,12 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
   }
 });
 
-
-// GM_BUILDER_FORCE_UPSERT_V003
-// Development-only file restore.
-// Existing row: UPDATE uploaded columns directly.
-// Missing row: INSERT uploaded columns.
-// This avoids INSERT-side NOT NULL/default validation blocking an UPDATE of an existing gm_member row.
-// gm_member is never deleted/recreated. Blank uploaded cells are written as NULL.
-router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','application/csv'], limit:'50mb' }), async (req,res)=>{
-  const spec = tableSpec(req.query.table);
-  if (!spec) return fail(res, 400, 'invalid table');
-
-  const apply = String(req.query.apply || '').toUpperCase() === 'YES';
-  const confirmed = String(req.query.confirm || '') === 'DEV FILE RESTORE';
-  if (apply && !confirmed) return fail(res, 400, 'confirmation required');
-
-  const db = dbFrom(req);
-  let rows = parseCsv(req.body);
-  if (rows.length > LIMITS.MAX_ROWS) rows = rows.slice(0, LIMITS.MAX_ROWS);
-
-  const result = [];
-  const outCols = ['row_no','table','key','result','action','reason'];
-  let processed=0, updated=0, inserted=0, skipped=0;
-
-  function fileValue(raw){
-    if (raw === undefined) return undefined;
-    if (raw === null) return null;
-    let v = String(raw);
-    if (v.length >= 2 && v[0] === '"' && v[v.length-1] === '"') v = v.slice(1,-1);
-    return v === '' ? null : v;
-  }
-
-  try{
-    const columns = await getColumns(db, spec.table);
-    const colSet = new Set(columns);
-    const columnMeta = await getColumnMeta(db, spec.table);
-    const client = apply ? await db.connect() : null;
-
-    try{
-      if (client) await client.query('BEGIN');
-
-      for (const row of rows){
-        processed++;
-        if (client) await client.query('SAVEPOINT gm_builder_row');
-        const key = pickKey(row, spec);
-        if (!key){
-          skipped++;
-          result.push({row_no:row.__row_no,table:spec.table,key:'',result:'SKIP',action:'',reason:'MISSING_KEY'});
-          if (client) await client.query('RELEASE SAVEPOINT gm_builder_row');
-          continue;
-        }
-
-        const hardProtected = new Set(
-          spec.table === 'gm_member'
-            ? ['password_hash','password_algo','password_updated_at','password_migrated','created_at']
-            : ['created_at']
-        );
-
-        const writeCols = [];
-        const writeVals = [];
-        for (const [col, raw] of Object.entries(row)){
-          if (col === '__row_no' || key.keys.includes(col)) continue;
-          if (!colSet.has(col) || hardProtected.has(col)) continue;
-
-          const value = fileValue(raw);
-          const meta = columnMeta[col];
-
-          // Downloaded Excel represents DB empty-string values as blank cells.
-          // Writing those blanks back as NULL breaks NOT NULL columns such as
-          // gm_member.international_phone and rolls back the whole member upload.
-          // Therefore:
-          //   nullable blank     -> NULL  (e.g. friend_sync_at)
-          //   NOT NULL blank     -> keep current DB value
-          if (value === null && meta && String(meta.is_nullable).toUpperCase() === 'NO') {
-            continue;
-          }
-
-          writeCols.push(col);
-          writeVals.push(value);
-        }
-
-        if (!writeCols.length){
-          skipped++;
-          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'SKIP',action:'',reason:'NO_UPDATABLE_COLUMNS'});
-          if (client) await client.query('RELEASE SAVEPOINT gm_builder_row');
-          continue;
-        }
-
-        if (!apply){
-          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'VALID',action:'UPSERT',reason:'DRY_RUN'});
-          continue;
-        }
-
-        try{
-          const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
-          const exists = await client.query(
-            `SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`,
-            key.values
-          );
-
-          if (exists.rows.length){
-            const setSql = writeCols.map((c,i)=>`${qIdent(c)}=$${i+1}`).join(', ');
-            const params = writeVals.concat(key.values);
-            const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${writeVals.length+i+1}`).join(' AND ');
-            const addUpdatedAt = colSet.has('updated_at') && !writeCols.includes('updated_at')
-              ? ', updated_at=NOW()' : '';
-            const ur = await client.query(
-              `UPDATE ${qIdent(spec.table)}
-                  SET ${setSql}${addUpdatedAt}
-                WHERE ${where2}`,
-              params
-            );
-            updated += ur.rowCount || 0;
-            result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'UPDATED',action:'UPDATE',reason:'APPLIED'});
-          }else{
-            const insertCols = key.keys.concat(writeCols);
-            const insertVals = key.values.concat(writeVals);
-            const placeholders = insertCols.map((_,i)=>'$'+(i+1)).join(', ');
-            await client.query(
-              `INSERT INTO ${qIdent(spec.table)} (${insertCols.map(qIdent).join(', ')})
-               VALUES (${placeholders})`,
-              insertVals
-            );
-            inserted++;
-            result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'INSERTED',action:'INSERT',reason:'APPLIED'});
-          }
-          await client.query('RELEASE SAVEPOINT gm_builder_row');
-        }catch(rowErr){
-          await client.query('ROLLBACK TO SAVEPOINT gm_builder_row');
-          await client.query('RELEASE SAVEPOINT gm_builder_row');
-          skipped++;
-          result.push({
-            row_no:row.__row_no,table:spec.table,key:key.label,
-            result:'ERROR',action:'',reason:String(rowErr&&rowErr.message||rowErr)
-          });
-        }
-      }
-
-      if (client) await client.query('COMMIT');
-    }catch(e){
-      if (client) await client.query('ROLLBACK').catch(()=>{});
-      throw e;
-    }finally{
-      if (client) client.release();
-    }
-
-    const csv = toCsv(result, outCols);
-    res.setHeader('Content-Type','text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition',`attachment; filename="dev_upsert_${spec.table}_${apply?'apply':'dryrun'}_${Date.now()}.csv"`);
-    res.setHeader('X-GM-Processed', String(processed));
-    res.setHeader('X-GM-Updated', String(updated));
-    res.setHeader('X-GM-Inserted', String(inserted));
-    res.setHeader('X-GM-Skipped', String(skipped));
-    return res.end(csv);
-  }catch(e){
-    return fail(res,500,'dev upsert failed',{
-      detail:String(e&&e.message||e),processed,updated,inserted,skipped
-    });
-  }
-});
-
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
 
   const apply = String(req.query.apply || '').toUpperCase() === 'YES';
+  const exactFileMode = String(req.query.file_mode || '').toUpperCase() === 'EXACT';
   const db = dbFrom(req);
 
   let rows = parseCsv(req.body);
@@ -1211,6 +1052,7 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   try {
     const columns = await getColumns(db, spec.table);
     const colSet = new Set(columns);
+    const columnMeta = exactFileMode ? await getColumnMeta(db, spec.table) : {};
     const client = apply ? await db.connect() : null;
 
     try {
@@ -1292,7 +1134,14 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
                 result.push(resultRow(row.__row_no, spec.table, key.label, 'SKIP', col, raw, v.reason));
                 break;
               }
-              if (v.action === 'KEEP_OLD') continue;
+              if (v.action === 'KEEP_OLD') {
+                const meta = columnMeta[col];
+                if (exactFileMode && meta && String(meta.is_nullable).toUpperCase() === 'YES') {
+                  params.push(null);
+                  updates.push(`${qIdent(col)}=$${params.length}`);
+                }
+                continue;
+              }
 
               params.push(v.value);
               updates.push(`${qIdent(col)}=$${params.length}`);
