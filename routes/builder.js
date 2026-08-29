@@ -961,6 +961,154 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
   }
 });
 
+
+// GM_BUILDER_DEV_OVERWRITE_V001
+// Development file force upload.
+// IMPORTANT: gm_member is NEVER deleted/truncated/recreated.
+// For gm_member, rows are matched by member_id and uploaded columns are written
+// exactly (blank => NULL), while password_* and created_at stay protected.
+router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','application/csv'], limit:'50mb' }), async (req,res)=>{
+  const spec = tableSpec(req.query.table);
+  if (!spec) return fail(res, 400, 'invalid table');
+
+  const apply = String(req.query.apply || '').toUpperCase() === 'YES';
+  const confirmed = String(req.query.confirm || '') === 'DEV FILE RESTORE';
+  if (apply && !confirmed) return fail(res, 400, 'confirmation required');
+
+  const db = dbFrom(req);
+  let rows = parseCsv(req.body);
+  if (rows.length > LIMITS.MAX_ROWS) rows = rows.slice(0, LIMITS.MAX_ROWS);
+
+  const result = [];
+  const outCols = ['row_no','table','key','result','action','column_name','value','reason'];
+  let processed=0, updated=0, inserted=0, skipped=0, failed=0;
+
+  function unquoteScalar(v){
+    if (v === undefined || v === null) return null;
+    let x = String(v);
+    // Excel round-trip can leave a literal pair of quotes around ISO timestamps.
+    if (x.length >= 2 && x[0] === '"' && x[x.length-1] === '"') x = x.slice(1,-1);
+    return x === '' ? null : x;
+  }
+
+  try{
+    const columns = await getColumns(db, spec.table);
+    const colSet = new Set(columns);
+    const client = apply ? await db.connect() : null;
+
+    try{
+      if (client) await client.query('BEGIN');
+
+      for (const row of rows){
+        processed++;
+        const key = pickKey(row, spec);
+        if (!key){
+          skipped++;
+          result.push(resultRow(row.__row_no, spec.table, '', 'SKIP', '', '', 'MISSING_KEY'));
+          continue;
+        }
+
+        // Member master is update/upsert only. Never DELETE gm_member.
+        if (spec.table === 'gm_member'){
+          const protectedCols = new Set(['created_at','password_hash','password_algo','password_updated_at','password_migrated']);
+          const writeCols = [];
+          const writeVals = [];
+
+          for (const [col, raw] of Object.entries(row)){
+            if (col === '__row_no' || key.keys.includes(col)) continue;
+            if (!colSet.has(col)){
+              result.push(resultRow(row.__row_no, spec.table, key.label, 'SKIP_CELL', col, raw, 'UNKNOWN_COLUMN'));
+              continue;
+            }
+            if (protectedCols.has(col)) continue;
+            writeCols.push(col);
+            writeVals.push(unquoteScalar(raw));
+          }
+
+          if (!writeCols.length){
+            skipped++;
+            result.push(resultRow(row.__row_no, spec.table, key.label, 'SKIP', '', '', 'NO_UPDATABLE_VALUE'));
+            continue;
+          }
+
+          if (!apply){
+            result.push(resultRow(row.__row_no, spec.table, key.label, 'VALID', '', '', 'MEMBER_FORCE_UPDATE_READY'));
+            continue;
+          }
+
+          const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+          const exists = await client.query(`SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`, key.values);
+
+          if (exists.rows.length){
+            const setSql = writeCols.map((c,i)=>`${qIdent(c)}=$${i+1}`).join(', ');
+            const params = writeVals.concat(key.values);
+            const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${writeVals.length+i+1}`).join(' AND ');
+            await client.query(`UPDATE ${qIdent(spec.table)} SET ${setSql}, updated_at=NOW() WHERE ${where2}`, params);
+            updated++;
+            result.push(resultRow(row.__row_no, spec.table, key.label, 'UPDATED', '', '', 'MEMBER_FORCE_UPDATED'));
+          }else{
+            const insertCols = key.keys.concat(writeCols);
+            const insertVals = key.values.concat(writeVals);
+            const ph = insertCols.map((_,i)=>'$'+(i+1)).join(', ');
+            await client.query(`INSERT INTO ${qIdent(spec.table)} (${insertCols.map(qIdent).join(', ')}) VALUES (${ph})`, insertVals);
+            inserted++;
+            result.push(resultRow(row.__row_no, spec.table, key.label, 'INSERTED', '', '', 'MEMBER_FORCE_INSERTED'));
+          }
+          continue;
+        }
+
+        // Other tables: force-update uploaded columns by key; no whole-table reset.
+        const writeCols = [];
+        const writeVals = [];
+        for (const [col, raw] of Object.entries(row)){
+          if (col === '__row_no' || key.keys.includes(col)) continue;
+          if (!colSet.has(col)) continue;
+          writeCols.push(col);
+          writeVals.push(unquoteScalar(raw));
+        }
+        if (!writeCols.length){
+          skipped++;
+          result.push(resultRow(row.__row_no, spec.table, key.label, 'SKIP', '', '', 'NO_UPDATABLE_VALUE'));
+          continue;
+        }
+        if (!apply){
+          result.push(resultRow(row.__row_no, spec.table, key.label, 'VALID', '', '', 'FORCE_UPDATE_READY'));
+          continue;
+        }
+        const setSql = writeCols.map((c,i)=>`${qIdent(c)}=$${i+1}`).join(', ');
+        const params = writeVals.concat(key.values);
+        const where = key.keys.map((k,i)=>`${qIdent(k)}=$${writeVals.length+i+1}`).join(' AND ');
+        const r = await client.query(`UPDATE ${qIdent(spec.table)} SET ${setSql}${colSet.has('updated_at')?', updated_at=NOW()':''} WHERE ${where}`, params);
+        if (r.rowCount){
+          updated++;
+          result.push(resultRow(row.__row_no, spec.table, key.label, 'UPDATED', '', '', 'FORCE_UPDATED'));
+        }else{
+          skipped++;
+          result.push(resultRow(row.__row_no, spec.table, key.label, 'SKIP', '', '', 'KEY_NOT_FOUND'));
+        }
+      }
+
+      if (client) await client.query('COMMIT');
+    }catch(e){
+      if (client) await client.query('ROLLBACK').catch(()=>{});
+      throw e;
+    }finally{
+      if (client) client.release();
+    }
+
+    const csv = toCsv(result, outCols);
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition',`attachment; filename="dev_force_${spec.table}_${apply?'apply':'dryrun'}_${Date.now()}.csv"`);
+    res.setHeader('X-GM-Builder-Version', VERSION);
+    res.setHeader('X-GM-Processed', String(processed));
+    res.setHeader('X-GM-Updated', String(updated));
+    res.setHeader('X-GM-Inserted', String(inserted));
+    res.end(csv);
+  }catch(e){
+    fail(res,500,'dev overwrite failed',{detail:String(e&&e.message||e),processed,updated,inserted,skipped,failed});
+  }
+});
+
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
