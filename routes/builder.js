@@ -962,11 +962,12 @@ router.get('/api/gm/builder/export-all', async (req,res)=>{
 });
 
 
-// GM_BUILDER_FORCE_UPSERT_V001
-// Development-only file restore by UPSERT.
-// The uploaded row is the source of truth for the uploaded columns.
-// Existing rows are NOT deleted first. gm_member is never deleted or recreated.
-// Blank uploaded cells are written as NULL (except key columns).
+// GM_BUILDER_FORCE_UPSERT_V002
+// Development-only file restore.
+// Existing row: UPDATE uploaded columns directly.
+// Missing row: INSERT uploaded columns.
+// This avoids INSERT-side NOT NULL/default validation blocking an UPDATE of an existing gm_member row.
+// gm_member is never deleted/recreated. Blank uploaded cells are written as NULL.
 router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','application/csv'], limit:'50mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
@@ -981,7 +982,7 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
 
   const result = [];
   const outCols = ['row_no','table','key','result','action','reason'];
-  let processed=0, upserted=0, skipped=0;
+  let processed=0, updated=0, inserted=0, skipped=0;
 
   function fileValue(raw){
     if (raw === undefined) return undefined;
@@ -1014,60 +1015,58 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
             : ['created_at']
         );
 
-        const cols = [];
-        const vals = [];
+        const writeCols = [];
+        const writeVals = [];
         for (const [col, raw] of Object.entries(row)){
-          if (col === '__row_no') continue;
-          if (!colSet.has(col)) continue;
-          if (hardProtected.has(col)) continue;
-          cols.push(col);
-          vals.push(fileValue(raw));
+          if (col === '__row_no' || key.keys.includes(col)) continue;
+          if (!colSet.has(col) || hardProtected.has(col)) continue;
+          writeCols.push(col);
+          writeVals.push(fileValue(raw));
         }
 
-        for (let i=0;i<key.keys.length;i++){
-          const k = key.keys[i];
-          const idx = cols.indexOf(k);
-          if (idx >= 0) vals[idx] = key.values[i];
-          else if (colSet.has(k)){
-            cols.push(k);
-            vals.push(key.values[i]);
-          }
-        }
-
-        if (!cols.length){
-          skipped++;
-          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'SKIP',action:'',reason:'NO_COLUMNS'});
-          continue;
-        }
-
-        const updateCols = cols.filter(c => !key.keys.includes(c));
-        if (!updateCols.length){
+        if (!writeCols.length){
           skipped++;
           result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'SKIP',action:'',reason:'NO_UPDATABLE_COLUMNS'});
           continue;
         }
 
-        if (apply){
-          const placeholders = cols.map((_,i)=>'$'+(i+1)).join(', ');
-          const updateSql = updateCols.map(c => `${qIdent(c)}=EXCLUDED.${qIdent(c)}`).join(', ');
-          await client.query(
-            `INSERT INTO ${qIdent(spec.table)} (${cols.map(qIdent).join(', ')})
-             VALUES (${placeholders})
-             ON CONFLICT (${key.keys.map(qIdent).join(', ')})
-             DO UPDATE SET ${updateSql}${colSet.has('updated_at') && !updateCols.includes('updated_at') ? ', updated_at=NOW()' : ''}`,
-            vals
-          );
+        if (!apply){
+          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'VALID',action:'UPSERT',reason:'DRY_RUN'});
+          continue;
         }
 
-        upserted++;
-        result.push({
-          row_no:row.__row_no,
-          table:spec.table,
-          key:key.label,
-          result:apply?'UPSERTED':'VALID_UPSERT',
-          action:'UPSERT',
-          reason:apply?'APPLIED':'DRY_RUN'
-        });
+        const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+        const exists = await client.query(
+          `SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`,
+          key.values
+        );
+
+        if (exists.rows.length){
+          const setSql = writeCols.map((c,i)=>`${qIdent(c)}=$${i+1}`).join(', ');
+          const params = writeVals.concat(key.values);
+          const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${writeVals.length+i+1}`).join(' AND ');
+          const addUpdatedAt = colSet.has('updated_at') && !writeCols.includes('updated_at')
+            ? ', updated_at=NOW()' : '';
+          const ur = await client.query(
+            `UPDATE ${qIdent(spec.table)}
+                SET ${setSql}${addUpdatedAt}
+              WHERE ${where2}`,
+            params
+          );
+          updated += ur.rowCount || 0;
+          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'UPDATED',action:'UPDATE',reason:'APPLIED'});
+        }else{
+          const insertCols = key.keys.concat(writeCols);
+          const insertVals = key.values.concat(writeVals);
+          const placeholders = insertCols.map((_,i)=>'$'+(i+1)).join(', ');
+          await client.query(
+            `INSERT INTO ${qIdent(spec.table)} (${insertCols.map(qIdent).join(', ')})
+             VALUES (${placeholders})`,
+            insertVals
+          );
+          inserted++;
+          result.push({row_no:row.__row_no,table:spec.table,key:key.label,result:'INSERTED',action:'INSERT',reason:'APPLIED'});
+        }
       }
 
       if (client) await client.query('COMMIT');
@@ -1082,11 +1081,14 @@ router.post('/api/gm/builder/dev-overwrite', express.text({ type:['text/*','appl
     res.setHeader('Content-Type','text/csv; charset=utf-8');
     res.setHeader('Content-Disposition',`attachment; filename="dev_upsert_${spec.table}_${apply?'apply':'dryrun'}_${Date.now()}.csv"`);
     res.setHeader('X-GM-Processed', String(processed));
-    res.setHeader('X-GM-Upserted', String(upserted));
+    res.setHeader('X-GM-Updated', String(updated));
+    res.setHeader('X-GM-Inserted', String(inserted));
     res.setHeader('X-GM-Skipped', String(skipped));
     return res.end(csv);
   }catch(e){
-    return fail(res,500,'dev upsert failed',{detail:String(e&&e.message||e),processed,upserted,skipped});
+    return fail(res,500,'dev upsert failed',{
+      detail:String(e&&e.message||e),processed,updated,inserted,skipped
+    });
   }
 });
 

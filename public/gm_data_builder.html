@@ -642,6 +642,10 @@ async function uploadDevOne(tableKey,file,apply,mode){
   const text=await readCsvText(file);
   const url=`${API}/api/gm/builder/dev-overwrite?table=${encodeURIComponent(tableKey)}&apply=${apply?'YES':'NO'}${apply?'&confirm=DEV%20FILE%20RESTORE':''}`;
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+  if(!r.ok){
+    const msg=await r.text();
+    throw new Error(`강제 업로드 실패 HTTP ${r.status}: ${msg}`);
+  }
   await downloadCsvResponse(r,(apply?'dev_file_restore':'dev_dryrun')+'_'+tableKey+'_'+Date.now()+'.csv');
   log({action:'dev-file-restore', table:tableKey, apply, status:r.status, file:file.name});
 }
