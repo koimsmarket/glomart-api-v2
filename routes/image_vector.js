@@ -1,5 +1,5 @@
-/* GM_IMAGE_VECTOR_ROUTE_V003
- * V334: 512-d MobileCLIP image embeddings only.
+/* GM_IMAGE_VECTOR_ROUTE_V004
+ * V335: 512-d MobileCLIP image embeddings only.
  * Client sends Float16 binary as base64 (exactly 1024 decoded bytes).
  * PostgreSQL stores halfvec(512) and HNSW performs cosine ANN search.
  * Legacy 16x16 REAL[] / Node.js full-scan cosine search is removed.
@@ -70,7 +70,7 @@ router.post('/api/gm/image-vector/missing',async(req,res)=>{
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!ids.length)return res.json({ok:true,missing:[],existing:[],vector_version:VECTOR_VERSION});
  try{
-  const q=await pool.query('SELECT product_uid FROM gm_product_image_vector WHERE product_uid = ANY($1::text[])',[ids]);
+  const q=await pool.query('SELECT product_uid FROM gm_product_image_vector WHERE product_uid = ANY($1::text[]) AND vector_image IS NOT NULL',[ids]);
   const have=new Set(q.rows.map(r=>C(r.product_uid)));
   return res.json({ok:true,existing:ids.filter(x=>have.has(x)),missing:ids.filter(x=>!have.has(x)),vector_version:VECTOR_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e)});}
@@ -80,7 +80,7 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!uid||!v)return res.status(400).json({ok:false,error:'product_uid/vector_base64(1024-byte Float16) required'});
  try{
-  await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::halfvec(512)) ON CONFLICT(product_uid) DO NOTHING`,[uid,vectorLiteral(v)]);
+  await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::halfvec(512)) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[uid,vectorLiteral(v)]);
   return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e)});}
 });

@@ -1,12 +1,13 @@
 -- GM_PRODUCT_IMAGE_EMBEDDING_V001
 -- Replaces legacy 16x16 REAL[] image vectors with one 512-d MobileCLIP embedding.
 -- 104_gm_product_image_vector.sql is historical and MUST NOT be edited.
--- Existing legacy vectors are intentionally discarded once when this NEW migration is applied.
--- GM_ALLOW_DESTRUCTIVE_MIGRATION
+-- Existing rows/product_uid are preserved. Only the legacy vector values are cleared
+-- while the existing vector_image column is converted to halfvec(512).
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
-TRUNCATE TABLE gm_product_image_vector;
+ALTER TABLE gm_product_image_vector
+  ALTER COLUMN vector_image DROP NOT NULL;
 
 ALTER TABLE gm_product_image_vector
   ALTER COLUMN vector_image TYPE halfvec(512)
