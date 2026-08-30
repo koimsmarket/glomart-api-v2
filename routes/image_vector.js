@@ -1,7 +1,7 @@
-/* GM_IMAGE_VECTOR_ROUTE_V006
- * V342: supports the production legacy REAL[] column before migration as well as pgvector `vector`.
- *       /missing checks 512 dimensions with the correct function for the actual column type.
- *       /upsert/search also work during the REAL[] -> vector migration window.
+/* GM_IMAGE_VECTOR_ROUTE_V007
+ * V343: deployment-verification build. No DB schema/migration changes.
+ *       Production REAL[] is handled directly with array_length(); no vector_dims(real[]) call.
+ *       Responses expose route_version so deployed code can be verified from device logs.
  * V336: 512-d MobileCLIP image embeddings using pgvector `vector` (not halfvec).
  * Existing non-512 vectors are treated as stale by /missing and are lazily rebuilt.
  * Client sends Float16 binary as base64 (exactly 1024 decoded bytes).
@@ -11,7 +11,7 @@ const express=require('express');
 const https=require('https');
 const http=require('http');
 const router=express.Router();
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2;
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V007_V343';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -88,12 +88,13 @@ router.get('/api/gm/image-vector/proxy',(req,res)=>{
  if(!u)return res.status(400).json({ok:false,error:'unsupported image url'});
  fetchImage(u,res,0);
 });
+router.get('/api/gm/image-vector/version',(req,res)=>res.json({ok:true,route_version:ROUTE_VERSION,dimensions:DIM,vector_version:VECTOR_VERSION}));
 router.post('/api/gm/image-vector/missing',async(req,res)=>{
  const pool=req.app.locals.pool;
  const raw=Array.isArray(req.body&&req.body.product_uids)?req.body.product_uids:[];
  const ids=[...new Set(raw.map(C).filter(Boolean))].slice(0,200);
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
- if(!ids.length)return res.json({ok:true,missing:[],existing:[],vector_version:VECTOR_VERSION});
+ if(!ids.length)return res.json({ok:true,missing:[],existing:[],dimensions:DIM,vector_version:VECTOR_VERSION,route_version:ROUTE_VERSION});
  try{
   const columnType=await vectorColumnType(pool);
   let sql;
@@ -102,12 +103,12 @@ router.post('/api/gm/image-vector/missing',async(req,res)=>{
   }else if(isPgVectorType(columnType)){
     sql='SELECT product_uid FROM gm_product_image_vector WHERE product_uid = ANY($1::text[]) AND vector_image IS NOT NULL AND vector_dims(vector_image) = $2';
   }else{
-    return res.json({ok:true,existing:[],missing:ids,dimensions:DIM,vector_version:VECTOR_VERSION,column_type:columnType});
+    return res.json({ok:true,existing:[],missing:ids,dimensions:DIM,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
   }
   const q=await pool.query(sql,[ids,DIM]);
   const have=new Set(q.rows.map(r=>C(r.product_uid)));
-  return res.json({ok:true,existing:ids.filter(x=>have.has(x)),missing:ids.filter(x=>!have.has(x)),dimensions:DIM,vector_version:VECTOR_VERSION,column_type:columnType});
- }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e)});}
+  return res.json({ok:true,existing:ids.filter(x=>have.has(x)),missing:ids.filter(x=>!have.has(x)),dimensions:DIM,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
+ }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/upsert',async(req,res)=>{
  const pool=req.app.locals.pool,uid=C(req.body&&req.body.product_uid),v=vectorFromBase64(req.body&&req.body.vector_base64);
@@ -122,8 +123,8 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
   }else{
     throw new Error('unsupported vector_image type '+columnType);
   }
-  return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType});
- }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e)});}
+  return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
+ }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{
  const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(20,Number(req.body&&req.body.limit||8)||8));
@@ -161,7 +162,7 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
   }
   const q=await pool.query(sql,[vectorLiteral(v),limit]);
   const matches=q.rows.map(r=>({product_uid:C(r.product_uid),score:Number(r.score||0),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code)}));
-  return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION,column_type:columnType});
- }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e)});}
+  return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
+ }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 module.exports=router;
