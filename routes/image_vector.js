@@ -1,14 +1,14 @@
-/* GM_IMAGE_VECTOR_ROUTE_V004
- * V335: 512-d MobileCLIP image embeddings only.
+/* GM_IMAGE_VECTOR_ROUTE_V005
+ * V336: 512-d MobileCLIP image embeddings using pgvector `vector` (not halfvec).
+ * Existing non-512 vectors are treated as stale by /missing and are lazily rebuilt.
  * Client sends Float16 binary as base64 (exactly 1024 decoded bytes).
- * PostgreSQL stores halfvec(512) and HNSW performs cosine ANN search.
- * Legacy 16x16 REAL[] / Node.js full-scan cosine search is removed.
+ * Legacy rows/product_uid are preserved; only a searched stale vector is replaced on upsert.
  */
 const express=require('express');
 const https=require('https');
 const http=require('http');
 const router=express.Router();
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=1;
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2;
 function C(v){return String(v==null?'':v).trim();}
 function halfToFloat(h){
   const s=(h&0x8000)?-1:1, e=(h>>10)&0x1f, f=h&0x03ff;
@@ -70,9 +70,9 @@ router.post('/api/gm/image-vector/missing',async(req,res)=>{
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!ids.length)return res.json({ok:true,missing:[],existing:[],vector_version:VECTOR_VERSION});
  try{
-  const q=await pool.query('SELECT product_uid FROM gm_product_image_vector WHERE product_uid = ANY($1::text[]) AND vector_image IS NOT NULL',[ids]);
+  const q=await pool.query('SELECT product_uid FROM gm_product_image_vector WHERE product_uid = ANY($1::text[]) AND vector_image IS NOT NULL AND vector_dims(vector_image) = $2',[ids,DIM]);
   const have=new Set(q.rows.map(r=>C(r.product_uid)));
-  return res.json({ok:true,existing:ids.filter(x=>have.has(x)),missing:ids.filter(x=>!have.has(x)),vector_version:VECTOR_VERSION});
+  return res.json({ok:true,existing:ids.filter(x=>have.has(x)),missing:ids.filter(x=>!have.has(x)),dimensions:DIM,vector_version:VECTOR_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e)});}
 });
 router.post('/api/gm/image-vector/upsert',async(req,res)=>{
@@ -80,7 +80,7 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!uid||!v)return res.status(400).json({ok:false,error:'product_uid/vector_base64(1024-byte Float16) required'});
  try{
-  await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::halfvec(512)) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[uid,vectorLiteral(v)]);
+  await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::vector) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[uid,vectorLiteral(v)]);
   return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e)});}
 });
@@ -91,11 +91,13 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
  try{
   const q=await pool.query(`
     SELECT v.product_uid,
-           1 - (v.vector_image <=> $1::halfvec(512)) AS score,
+           1 - (v.vector_image::vector(512) <=> $1::vector(512)) AS score,
            p.product_name,p.product_url,p.thumb_origin_url,p.mall_code
       FROM gm_product_image_vector v
       LEFT JOIN gm_product p ON p.product_uid=v.product_uid
-     ORDER BY v.vector_image <=> $1::halfvec(512)
+     WHERE v.vector_image IS NOT NULL
+       AND vector_dims(v.vector_image)=512
+     ORDER BY v.vector_image::vector(512) <=> $1::vector(512)
      LIMIT $2`,[vectorLiteral(v),limit]);
   const matches=q.rows.map(r=>({product_uid:C(r.product_uid),score:Number(r.score||0),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code)}));
   return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION});
