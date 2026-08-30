@@ -1,15 +1,17 @@
-/* IMAGE_WORKER_V004
+/* IMAGE_WORKER_V005
  * Glomart persistent MobileCLIP worker runtime.
  * Hosted by glomart-api-v2, executed inside the Android persistent IMAGE_WORKER WebView.
  * KT owns only lifecycle/bridge/local-model serving; processing policy stays here.
  */
 (function(){
 'use strict';
-const WORKER_VERSION='GM_IMAGE_WORKER_V004';
+const WORKER_VERSION='GM_IMAGE_WORKER_V005';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
 const MODEL_ID='Xenova/mobileclip_s0';
 const DIM=512;
 const VECTOR_VERSION=2;
+const PREFETCH_CONCURRENCY=10;
+const UPSERT_CONCURRENCY=10;
 const SCRIPT_SRC=(document.currentScript&&document.currentScript.src)||'';
 const API=(()=>{try{return new URL(SCRIPT_SRC).origin;}catch(_e){return 'https://port-0-glomart-api-v2-mordwrnh222b6c36.sel3.cloudtype.app';}})();
 let aiPromise=null;
@@ -70,16 +72,61 @@ async function upsert(item,b64){
 }
 async function processQueue(){
   if(running)return;running=true;
+  const prefetch=[];
+  const upserts=new Set();
+  function fillPrefetch(){
+    while(prefetch.length<PREFETCH_CONCURRENCY&&queue.length){
+      const item=queue.shift();
+      const fetch_started=Date.now();
+      const bitmap_promise=bitmapFromProxy(item.image_url)
+        .then(bm=>({bm,fetch_ms:Date.now()-fetch_started}))
+        .catch(error=>({error,fetch_ms:Date.now()-fetch_started}));
+      prefetch.push({item,bitmap_promise,total_started:fetch_started});
+    }
+  }
+  async function waitForUpsertSlot(){
+    while(upserts.size>=UPSERT_CONCURRENCY)await Promise.race(Array.from(upserts));
+  }
   try{
     await ai();
-    while(queue.length){
-      const item=queue.shift();let bm=null;
-      try{
-        const t0=Date.now();bm=await bitmapFromProxy(item.image_url);const b64=await inferOne(bm);await upsert(item,b64);
-        log('INDEX_OK',{product_uid:item.product_uid,mall_code:item.mall_code,dimensions:DIM,elapsed_ms:Date.now()-t0,queue_left:queue.length});
-      }catch(e){log('INDEX_FAIL',{product_uid:item.product_uid,mall_code:item.mall_code,error:c(e&&e.message||e),stack:c(e&&e.stack||'')});}
-      finally{queued.delete(item.product_uid);try{if(bm&&bm.close)bm.close();}catch(e){}}
-      await new Promise(r=>setTimeout(r,0));
+    fillPrefetch();
+    while(queue.length||prefetch.length||upserts.size){
+      fillPrefetch();
+      if(prefetch.length){
+        const entry=prefetch.shift();
+        fillPrefetch();
+        const item=entry.item;
+        let bm=null;
+        try{
+          const prepared=await entry.bitmap_promise;
+          if(prepared.error)throw prepared.error;
+          bm=prepared.bm;
+          const infer_started=Date.now();
+          const b64=await inferOne(bm);
+          const infer_ms=Date.now()-infer_started;
+          try{if(bm&&bm.close)bm.close();}catch(_e){}
+          bm=null;
+          await waitForUpsertSlot();
+          const upsert_started=Date.now();
+          let task;
+          task=upsert(item,b64)
+            .then(()=>{
+              log('INDEX_OK',{product_uid:item.product_uid,mall_code:item.mall_code,dimensions:DIM,fetch_ms:prepared.fetch_ms,infer_ms,upsert_ms:Date.now()-upsert_started,elapsed_ms:Date.now()-entry.total_started,queue_left:queue.length,prefetch_left:prefetch.length});
+            })
+            .catch(e=>{
+              log('INDEX_FAIL',{product_uid:item.product_uid,mall_code:item.mall_code,stage:'upsert',error:c(e&&e.message||e),stack:c(e&&e.stack||'')});
+            })
+            .finally(()=>{queued.delete(item.product_uid);upserts.delete(task);});
+          upserts.add(task);
+        }catch(e){
+          queued.delete(item.product_uid);
+          log('INDEX_FAIL',{product_uid:item.product_uid,mall_code:item.mall_code,stage:'fetch_or_infer',error:c(e&&e.message||e),stack:c(e&&e.stack||'')});
+          try{if(bm&&bm.close)bm.close();}catch(_e){}
+        }
+        await new Promise(r=>setTimeout(r,0));
+        continue;
+      }
+      if(upserts.size)await Promise.race(Array.from(upserts));
     }
   }finally{running=false;}
 }
@@ -90,7 +137,7 @@ window.GM_IMAGE_WORKER={
   },
   status(){return {ready:true,running,queued:queue.length,ai_ready:!!aiPromise,version:WORKER_VERSION,runtime:'server_js'};}
 };
-log('BOOT',{version:WORKER_VERSION,runtime:'server_js',api:API});
+log('BOOT',{version:WORKER_VERSION,runtime:'server_js',api:API,prefetch_concurrency:PREFETCH_CONCURRENCY,upsert_concurrency:UPSERT_CONCURRENCY});
 try{AndroidGM.gmImageWorkerReady(WORKER_VERSION);}catch(e){log('NATIVE_READY_FAIL',{error:c(e&&e.message||e)});}
 ai().catch(()=>{});
 })();
