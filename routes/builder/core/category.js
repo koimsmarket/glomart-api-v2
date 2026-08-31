@@ -3,6 +3,10 @@ const { dbFrom, fail, qIdent } = require('./common');
 const { clean, toCsv } = require('./csv');
 const { getColumns, pickKey, validateCell } = require('./schema');
 async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
+  // updated_at is owned by the server for this batch route.
+  // Keep this guard here as well as config.blocked so an uploaded file can
+  // never generate both `updated_at=$n` and `updated_at=NOW()` in one UPDATE.
+  const serverManagedColumns = new Set(['updated_at']);
   const db = dbFrom(req);
   const table = spec.table;
   const result = [];
@@ -35,7 +39,7 @@ async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
         push(row.__row_no, '', key && key.label, 'SKIP_CELL', '', col, raw, 'UNKNOWN_COLUMN');
         continue;
       }
-      if ((spec.blocked || []).includes(col)) continue;
+      if ((spec.blocked || []).includes(col) || serverManagedColumns.has(col)) continue;
       const v = validateCell(col, raw, spec);
       if (!v.ok) return { ok:false, column:col, value:raw, reason:v.reason };
       if (v.action === 'KEEP_OLD') continue;
