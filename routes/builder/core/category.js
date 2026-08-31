@@ -7,6 +7,7 @@ async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
   // Keep this guard here as well as config.blocked so an uploaded file can
   // never generate both `updated_at=$n` and `updated_at=NOW()` in one UPDATE.
   const serverManagedColumns = new Set(['updated_at']);
+  const leafOnly = String(req.query.leaf_only || '').toUpperCase() === 'YES';
   const db = dbFrom(req);
   const table = spec.table;
   const result = [];
@@ -40,6 +41,7 @@ async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
         continue;
       }
       if ((spec.blocked || []).includes(col) || serverManagedColumns.has(col)) continue;
+      if (leafOnly && col !== 'leaf_yn' && !(key && key.keys.includes(col))) continue;
       const v = validateCell(col, raw, spec);
       if (!v.ok) return { ok:false, column:col, value:raw, reason:v.reason };
       if (v.action === 'KEEP_OLD') continue;
@@ -63,7 +65,7 @@ async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
   try {
     const columns = await getColumns(db, table);
     const colSet = new Set(columns);
-    console.log(`[GM_CATEGORY_BATCH_IMPORT] start rows=${rows.length} apply=${apply ? 'Y':'N'} batch=${batchSize}`);
+    console.log(`[GM_CATEGORY_BATCH_IMPORT] start rows=${rows.length} apply=${apply ? 'Y':'N'} leafOnly=${leafOnly ? 'Y':'N'} batch=${batchSize}`);
 
     for (let start = 0; start < rows.length; start += batchSize) {
       const batch = rows.slice(start, start + batchSize);
@@ -105,9 +107,30 @@ async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
           try {
             await client.query('SAVEPOINT gm_category_row');
             const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
-            const exists = await client.query(`SELECT 1 FROM ${qIdent(table)} WHERE ${where} LIMIT 1`, key.values);
+            const exists = await client.query(
+              leafOnly
+                ? `SELECT leaf_yn FROM ${qIdent(table)} WHERE ${where} LIMIT 1`
+                : `SELECT 1 FROM ${qIdent(table)} WHERE ${where} LIMIT 1`,
+              key.values
+            );
 
             if (exists.rows.length) {
+              if (leafOnly) {
+                const expectedLeaf = String(row.leaf_yn || '').trim().toUpperCase();
+                const currentLeaf = String(exists.rows[0] && exists.rows[0].leaf_yn || '').trim().toUpperCase();
+                if (!expectedLeaf || !['Y','N'].includes(expectedLeaf)) {
+                  invalid++; skipped++;
+                  push(row.__row_no, batchNo, key.label, 'SKIP', 'LEAF_VERIFY', 'leaf_yn', expectedLeaf, `INVALID_LEAF_VALUE_${expectedLeaf}`);
+                  await client.query('RELEASE SAVEPOINT gm_category_row');
+                  continue;
+                }
+                if (currentLeaf === expectedLeaf) {
+                  skipped++;
+                  push(row.__row_no, batchNo, key.label, 'UNCHANGED', 'LEAF_VERIFY', 'leaf_yn', expectedLeaf, 'ALREADY_MATCHED');
+                  await client.query('RELEASE SAVEPOINT gm_category_row');
+                  continue;
+                }
+              }
               if (!parts.updateCols.length) {
                 skipped++;
                 push(row.__row_no, batchNo, key.label, 'SKIP', 'UPDATE', '', '', 'NO_UPDATABLE_VALUE');
@@ -116,15 +139,27 @@ async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
                 const params = parts.updateVals.slice();
                 key.values.forEach(v => params.push(v));
                 const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${parts.updateVals.length+i+1}`).join(' AND ');
-                await client.query(`UPDATE ${qIdent(table)} SET ${setSql}, updated_at=NOW() WHERE ${where2}`, params);
+                const ur = await client.query(`UPDATE ${qIdent(table)} SET ${setSql}, updated_at=NOW() WHERE ${where2} RETURNING leaf_yn`, params);
+                if (ur.rowCount !== 1) throw new Error(`UPDATE_ROWCOUNT_${ur.rowCount}`);
+                if (leafOnly) {
+                  const expectedLeaf = String(row.leaf_yn || '').trim().toUpperCase();
+                  const actualLeaf = String(ur.rows[0] && ur.rows[0].leaf_yn || '').trim().toUpperCase();
+                  if (!expectedLeaf || !['Y','N'].includes(expectedLeaf)) throw new Error(`INVALID_LEAF_VALUE_${expectedLeaf}`);
+                  if (actualLeaf !== expectedLeaf) throw new Error(`LEAF_VERIFY_FAIL_expected_${expectedLeaf}_actual_${actualLeaf}`);
+                }
                 applied++; updated++;
-                push(row.__row_no, batchNo, key.label, 'UPDATED', 'UPDATE', '', '', 'APPLIED');
+                push(row.__row_no, batchNo, key.label, 'UPDATED', leafOnly ? 'LEAF_UPDATE' : 'UPDATE', leafOnly ? 'leaf_yn' : '', leafOnly ? String(row.leaf_yn || '').trim() : '', 'APPLIED_VERIFIED');
               }
             } else {
-              const ph = parts.insertCols.map((_,i)=>'$'+(i+1)).join(', ');
-              await client.query(`INSERT INTO ${qIdent(table)} (${parts.insertCols.map(qIdent).join(', ')}) VALUES (${ph})`, parts.insertVals);
-              applied++; inserted++;
-              push(row.__row_no, batchNo, key.label, 'INSERTED', 'INSERT', '', '', 'APPLIED');
+              if (leafOnly) {
+                skipped++;
+                push(row.__row_no, batchNo, key.label, 'SKIP', 'LEAF_VERIFY', 'leaf_yn', String(row.leaf_yn || '').trim(), 'KEY_NOT_FOUND_NO_INSERT');
+              } else {
+                const ph = parts.insertCols.map((_,i)=>'$'+(i+1)).join(', ');
+                await client.query(`INSERT INTO ${qIdent(table)} (${parts.insertCols.map(qIdent).join(', ')}) VALUES (${ph})`, parts.insertVals);
+                applied++; inserted++;
+                push(row.__row_no, batchNo, key.label, 'INSERTED', 'INSERT', '', '', 'APPLIED');
+              }
             }
             await client.query('RELEASE SAVEPOINT gm_category_row');
           } catch (e) {
