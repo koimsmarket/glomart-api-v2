@@ -11,7 +11,7 @@ async function getColumns(db, table) {
 }
 async function getColumnMeta(db, table) {
   const r = await db.query(`
-    SELECT column_name, is_nullable
+    SELECT column_name, is_nullable, data_type, udt_name, character_maximum_length, numeric_precision, numeric_scale
     FROM information_schema.columns
     WHERE table_schema='public' AND table_name=$1
     ORDER BY ordinal_position

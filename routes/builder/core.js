@@ -1,4 +1,4 @@
-// GM_DATA_BUILDER_V049 - compatibility facade only.
+// GM_DATA_BUILDER_V051 - compatibility facade only.
 // Actual logic is isolated under routes/builder/core/*.js.
 module.exports = {
   ...require('./core/config'),
