@@ -7,26 +7,71 @@ function scalarUdt(m){ const u=String(m&&m.udt_name||'').toLowerCase(); return u
 function typeLabel(m){ const a=isArrayMeta(m); const u=scalarUdt(m)||String(m&&m.data_type||'').toLowerCase()||'unknown'; return a?`${u}[]`:u; }
 function isBooleanMeta(m){ return scalarUdt(m)==='bool' && !isArrayMeta(m); }
 function isJsonMeta(m){ return ['json','jsonb'].includes(scalarUdt(m)) && !isArrayMeta(m); }
+function keySummary(){
+  const info=recordMeta&&recordMeta.key_info||[];
+  if(!info.length)return '기준키 없음';
+  return info.map(x=>`${(x.columns||[]).join('+')} [${x.source||'KEY'}]`).join(' 또는 ');
+}
 async function initRecordEditor(){ await fillSelect('tableSelect'); await loadRecordMeta(); }
 async function loadRecordMeta(){
   const table=document.getElementById('tableSelect').value; if(!table)return;
   const r=await fetch(`${API}/api/gm/builder/record/meta?table=${encodeURIComponent(table)}&t=${Date.now()}`); const j=await r.json();
-  if(!r.ok||!j.ok){ log(j); return; } recordMeta=j; closeEditor();
+  if(!r.ok||!j.ok){ log(j); return; } recordMeta=j; recordItems=[]; closeEditor();
   document.getElementById('fieldSelect').innerHTML='<option value="">전체</option>'+j.columns.map(c=>`<option value="${esc(c)}">${esc(c)} · ${esc(typeLabel(metaOf(c)))}</option>`).join('');
+  document.getElementById('resultInfo').textContent=`조회 전 · 기준키: ${keySummary()}`;
+  document.getElementById('resultTable').innerHTML='<tbody><tr><td>조회 전</td></tr></tbody>';
 }
 async function searchRecords(){
   const table=document.getElementById('tableSelect').value, field=document.getElementById('fieldSelect').value, value=document.getElementById('valueInput').value, mode=document.getElementById('modeSelect').value, limit=document.getElementById('limitInput').value||50;
   if(field && !value){ log('조회 컬럼을 선택한 경우 조회값이 필요합니다.'); return; }
   const q=new URLSearchParams({table,limit,mode}); if(field){q.set('field',field);q.set('value',value);}
   const r=await fetch(`${API}/api/gm/builder/record/search?${q.toString()}`); const j=await r.json(); if(!r.ok||!j.ok){log(j);return;}
-  recordItems=j.items||[]; document.getElementById('resultInfo').textContent=`${j.table} · ${j.count}건`;
+  recordItems=j.items||[];
+  if(j.key_sets)recordMeta.key_sets=j.key_sets;
+  if(j.key_info)recordMeta.key_info=j.key_info;
+  if(j.editable)recordMeta.editable=j.editable;
+  document.getElementById('resultInfo').textContent=`${j.table} · ${j.count}건 · 기준키: ${keySummary()}`;
   renderResults(); closeEditor();
 }
 function renderResults(){
-  const t=document.getElementById('resultTable'); if(!recordItems.length){t.innerHTML='<tbody><tr><td>조회 결과 없음</td></tr></tbody>';return;}
-  const cols=recordMeta.columns; t.innerHTML=`<thead><tr><th>선택</th>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>`+recordItems.map((row,i)=>`<tr><td><button onclick="editRecord(${i})">수정</button></td>${cols.map(c=>`<td title="${esc(displayValue(row[c]))}">${esc(displayValue(row[c]))}</td>`).join('')}</tr>`).join('')+'</tbody>';
+  const t=document.getElementById('resultTable');
+  if(!recordItems.length){t.innerHTML='<tbody><tr><td>조회 결과 없음</td></tr></tbody>';return;}
+  const cols=recordMeta.columns;
+  t.innerHTML=`<thead><tr><th>삭제선택</th><th>수정</th>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>`+
+    recordItems.map((row,i)=>{
+      const key=chooseKey(row); const disabled=key?'':'disabled';
+      return `<tr><td><input type="checkbox" class="deleteCheck" data-idx="${i}" ${disabled}></td><td><button onclick="editRecord(${i})" ${disabled}>수정</button></td>${cols.map(c=>`<td title="${esc(displayValue(row[c]))}">${esc(displayValue(row[c]))}</td>`).join('')}</tr>`;
+    }).join('')+'</tbody>';
 }
-function chooseKey(row){ for(const ks of recordMeta.key_sets||[]){ if(ks.every(k=>row[k]!==null&&row[k]!==undefined&&String(row[k])!=='')){ const o={};ks.forEach(k=>o[k]=row[k]);return o; } } return null; }
+function chooseKey(row){
+  for(const ks of recordMeta.key_sets||[]){
+    if(ks.every(k=>row[k]!==null&&row[k]!==undefined&&String(row[k])!=='')){
+      const o={}; ks.forEach(k=>o[k]=row[k]); return o;
+    }
+  }
+  return null;
+}
+function toggleDeleteChecks(on){ document.querySelectorAll('.deleteCheck:not(:disabled)').forEach(x=>x.checked=!!on); }
+async function deleteSelectedRecords(){
+  const selected=[...document.querySelectorAll('.deleteCheck:checked')]
+    .map(ch=>recordItems[Number(ch.dataset.idx)])
+    .filter(Boolean)
+    .map(row=>({row,key:chooseKey(row)}))
+    .filter(x=>x.key);
+  if(!selected.length){ log('삭제할 레코드를 체크하세요.'); return; }
+  const answer=prompt(`${selected.length}개 레코드를 삭제합니다.\n실행하려면 DELETE SELECTED 를 입력하세요.`);
+  if(answer!=='DELETE SELECTED')return;
+  const table=document.getElementById('tableSelect').value;
+  const r=await fetch(`${API}/api/gm/builder/record/delete-selected`,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({table,confirm:'DELETE SELECTED',items:selected.map(x=>({key:x.key}))})
+  });
+  const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){j={ok:false,error:'NON_JSON_RESPONSE',status:r.status,text:txt.slice(0,500)};}
+  log(j);
+  if(!r.ok||!j.ok)return;
+  alert(`삭제 완료: ${j.deleted||0}건`);
+  await searchRecords();
+}
 function fieldControl(c,v,locked){
   const m=metaOf(c), nullable=m.is_nullable==='YES', type=typeLabel(m), id='fld_'+c;
   let control='';
@@ -42,7 +87,8 @@ function fieldControl(c,v,locked){
   return `<label>${esc(c)} · ${esc(type)}${locked?' · 보호':''}${esc(hint)}</label>${control}${nullCtl}`;
 }
 function editRecord(i){
-  selectedRecord=recordItems[i]; selectedKey=chooseKey(selectedRecord); if(!selectedKey){log('이 레코드는 유효한 기준키가 없어 수정할 수 없습니다.');return;}
+  selectedRecord=recordItems[i]; selectedKey=chooseKey(selectedRecord);
+  if(!selectedKey){log('이 레코드는 실제 PK/UNIQUE 또는 유효한 Builder 기준키가 없어 수정할 수 없습니다.');return;}
   const editable=new Set(recordMeta.editable||[]); document.getElementById('keyInfo').textContent='기준키: '+JSON.stringify(selectedKey);
   document.getElementById('editorFields').innerHTML=recordMeta.columns.map(c=>fieldControl(c,selectedRecord[c],!editable.has(c))).join('');
   document.getElementById('editorCard').style.display='block'; document.getElementById('editorCard').scrollIntoView({behavior:'smooth',block:'start'});
@@ -59,11 +105,9 @@ function parseTypedInput(c,text){
   if(u==='bool'){
     const s=String(text).toLowerCase(); if(s==='true')return true;if(s==='false')return false;throw new Error(`${c}: true 또는 false만 가능합니다.`);
   }
-  // pg가 number로 반환하는 기본 숫자형은 number로 비교해 불필요한 UPDATE를 막는다.
   if(['int2','int4','float4','float8'].includes(u)){
     const n=Number(String(text).replace(/,/g,'')); if(!Number.isFinite(n))throw new Error(`${c}: 올바른 숫자가 아닙니다.`); return n;
   }
-  // int8/numeric은 JS 정밀도 손실을 피하려 문자열 그대로 서버에 보내 DB 타입 기준으로 검증한다.
   return text;
 }
 function currentControlValue(c){

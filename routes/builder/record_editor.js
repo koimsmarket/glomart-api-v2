@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { dbFrom, ok, fail, qIdent, tableSpec, keySets, getColumns, getColumnMeta } = require('./core');
+const { dbFrom, ok, fail, qIdent, tableSpec, keySets, getColumns, getColumnMeta, getUniqueKeySets } = require('./core');
 
 // 인증정보는 직접 편집 화면에서도 브라우저로 내려보내지 않는다.
 const HIDDEN_COLUMNS_BY_TABLE = {
@@ -14,22 +14,39 @@ const JSON_UDT = new Set(['json','jsonb']);
 const DATE_UDT = new Set(['date','timestamp','timestamptz','time','timetz','interval']);
 
 function safeLimit(v){ return Math.min(Math.max(Number(v || 50), 1), 100); }
-function keyColumns(spec){ return [...new Set(keySets(spec).flat())]; }
 function hiddenColumns(spec){ return HIDDEN_COLUMNS_BY_TABLE[spec.table] || new Set(); }
 function visibleColumns(spec, columns){
   const hidden = hiddenColumns(spec);
   return columns.filter(c => !hidden.has(c));
 }
-function editableColumns(spec, columns){
-  const protectedSet = new Set([...(spec.blocked || []), ...keyColumns(spec)]);
+function sameKeySet(a,b){ return a.length===b.length && a.every((v,i)=>v===b[i]); }
+async function recordKeyInfo(db,spec,allColumns){
+  const dbKeys = await getUniqueKeySets(db,spec.table);
+  const info=[];
+  for(const k of dbKeys){
+    if(k.columns.every(c=>allColumns.includes(c)) && !info.some(x=>sameKeySet(x.columns,k.columns))) info.push(k);
+  }
+  // 실제 PK/UNIQUE가 없는 레거시 테이블만 기존 Builder 기준키를 보조키로 사용한다.
+  // 보조키도 UPDATE/DELETE 직전에 정확히 1건인지 다시 검증한다.
+  for(const ks of keySets(spec)){
+    if(Array.isArray(ks) && ks.length && ks.every(c=>allColumns.includes(c)) && !info.some(x=>sameKeySet(x.columns,ks))){
+      info.push({columns:ks.slice(),source:'BUILDER KEY',name:''});
+    }
+  }
+  return info;
+}
+function editableColumns(spec, columns, identityInfo){
+  const identityColumns = (identityInfo || []).flatMap(x=>x.columns || []);
+  const protectedSet = new Set([...(spec.blocked || []), ...identityColumns]);
   const hidden = hiddenColumns(spec);
   return columns.filter(c => !protectedSet.has(c) && !hidden.has(c));
 }
-function normalizeKeyObject(raw, spec){
+function normalizeKeyObject(raw, keyInfo){
   const obj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-  for(const keys of keySets(spec)){
-    if(keys.every(k => obj[k] !== undefined && obj[k] !== null && String(obj[k]) !== '')){
-      return { keys, values:keys.map(k => obj[k]) };
+  for(const info of keyInfo || []){
+    const keys=info.columns || [];
+    if(keys.length && keys.every(k => obj[k] !== undefined && obj[k] !== null && String(obj[k]) !== '')){
+      return { keys, values:keys.map(k => obj[k]), source:info.source, name:info.name };
     }
   }
   return null;
@@ -65,7 +82,6 @@ function normalizeScalarValue(column, value, meta){
     if(meta && meta.is_nullable === 'NO') throw invalidValue(column,'NULL_NOT_ALLOWED');
     return null;
   }
-
   if(BOOLEAN_UDT.has(udt)){
     if(value === true || value === false) return value;
     const s=String(value).trim().toLowerCase();
@@ -73,20 +89,16 @@ function normalizeScalarValue(column, value, meta){
     if(s === 'false') return false;
     throw invalidValue(column,'INVALID_BOOLEAN');
   }
-
   if(INTEGER_UDT.has(udt)){
     const s=String(value).trim().replace(/,/g,'');
     if(!/^[+-]?\d+$/.test(s)) throw invalidValue(column,'INVALID_INTEGER');
-    // bigint 정밀도를 잃지 않도록 문자열 그대로 pg에 넘긴다.
     return s;
   }
-
   if(DECIMAL_UDT.has(udt)){
     const s=String(value).trim().replace(/,/g,'');
     if(!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(s)) throw invalidValue(column,'INVALID_NUMBER');
     return s;
   }
-
   if(JSON_UDT.has(udt)){
     if(typeof value === 'string'){
       try{ return JSON.parse(value); }catch(_){ throw invalidValue(column,'INVALID_JSON'); }
@@ -94,22 +106,17 @@ function normalizeScalarValue(column, value, meta){
     if(typeof value === 'object') return value;
     throw invalidValue(column,'INVALID_JSON');
   }
-
   if(DATE_UDT.has(udt)){
     const s=String(value).trim();
     if(!s) throw invalidValue(column,'EMPTY_DATE_TIME');
-    // 형식 자체는 PostgreSQL이 최종 검증하되, 빈 값/비문자 값의 묵시적 변환은 막는다.
     return s;
   }
-
   if(udt === 'uuid'){
     const s=String(value).trim();
     if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s)) throw invalidValue(column,'INVALID_UUID');
     return s;
   }
-
   if(udt === 'bytea') throw invalidValue(column,'BYTEA_EDIT_NOT_SUPPORTED');
-
   if(typeof value === 'object') throw invalidValue(column,'OBJECT_NOT_ALLOWED_FOR_SCALAR');
   return String(value);
 }
@@ -140,6 +147,8 @@ function comparable(v){
   return v;
 }
 function sameValue(a,b){ return JSON.stringify(comparable(a)) === JSON.stringify(comparable(b)); }
+function keyWhere(key){ return key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND '); }
+function publicKeyInfo(info){ return info.map(x=>({columns:x.columns,source:x.source,name:x.name||''})); }
 
 router.get('/api/gm/builder/record/meta', async (req,res)=>{
   const spec = tableSpec(req.query.table);
@@ -149,11 +158,13 @@ router.get('/api/gm/builder/record/meta', async (req,res)=>{
     const allColumns = await getColumns(db,spec.table);
     const columns = visibleColumns(spec, allColumns);
     const allMeta = await getColumnMeta(db,spec.table);
+    const identity = await recordKeyInfo(db,spec,allColumns);
     const meta={}; for(const c of columns) if(allMeta[c]) meta[c]=allMeta[c];
     ok(res,{
       key:String(req.query.table), table:spec.table, columns,
-      key_sets:keySets(spec), blocked:(spec.blocked || []).filter(c=>columns.includes(c)),
-      editable:editableColumns(spec,allColumns), column_meta:meta
+      key_sets:identity.map(x=>x.columns), key_info:publicKeyInfo(identity),
+      blocked:(spec.blocked || []).filter(c=>columns.includes(c)),
+      editable:editableColumns(spec,allColumns,identity), column_meta:meta
     });
   }catch(e){ fail(res,500,'record meta failed',{detail:String(e&&e.message||e)}); }
 });
@@ -165,6 +176,7 @@ router.get('/api/gm/builder/record/search', async (req,res)=>{
   try{
     const allColumns = await getColumns(db,spec.table);
     const columns = visibleColumns(spec, allColumns);
+    const identity = await recordKeyInfo(db,spec,allColumns);
     const field = String(req.query.field || '').trim();
     const value = req.query.value;
     const mode = String(req.query.mode || 'exact').toLowerCase();
@@ -175,7 +187,6 @@ router.get('/api/gm/builder/record/search', async (req,res)=>{
       if(!columns.includes(field)) return fail(res,400,'invalid field');
       if(value === undefined || value === null || String(value) === '') return fail(res,400,'search value required');
       params.push(value);
-      // exact는 컬럼을 text로 캐스팅하지 않아 PK/인덱스를 그대로 탈 수 있게 한다.
       if(mode === 'contains') where = ` WHERE ${qIdent(field)}::text ILIKE '%' || $1::text || '%'`;
       else where = ` WHERE ${qIdent(field)} = $1`;
     }
@@ -183,7 +194,12 @@ router.get('/api/gm/builder/record/search', async (req,res)=>{
     const order = spec.order ? ` ORDER BY ${spec.order}` : '';
     const selectSql = columns.map(qIdent).join(', ');
     const r = await db.query(`SELECT ${selectSql} FROM ${qIdent(spec.table)}${where}${order} LIMIT $${params.length}`,params);
-    ok(res,{table:spec.table,count:r.rows.length,items:r.rows,key_sets:keySets(spec),blocked:(spec.blocked || []).filter(c=>columns.includes(c)),editable:editableColumns(spec,allColumns)});
+    ok(res,{
+      table:spec.table,count:r.rows.length,items:r.rows,
+      key_sets:identity.map(x=>x.columns),key_info:publicKeyInfo(identity),
+      blocked:(spec.blocked || []).filter(c=>columns.includes(c)),
+      editable:editableColumns(spec,allColumns,identity)
+    });
   }catch(e){ fail(res,500,'record search failed',{detail:String(e&&e.message||e)}); }
 });
 
@@ -191,8 +207,6 @@ router.post('/api/gm/builder/record/update', express.json({limit:'2mb'}), async 
   const tableKey = req.body && req.body.table;
   const spec = tableSpec(tableKey);
   if(!spec) return fail(res,400,'invalid table');
-  const key = normalizeKeyObject(req.body && req.body.key,spec);
-  if(!key) return fail(res,400,'valid record key required');
   const changes = req.body && req.body.changes;
   if(!changes || typeof changes !== 'object' || Array.isArray(changes)) return fail(res,400,'changes required');
   const originals = req.body && req.body.original;
@@ -203,25 +217,26 @@ router.post('/api/gm/builder/record/update', express.json({limit:'2mb'}), async 
     const allColumns = await getColumns(db,spec.table);
     const visible = visibleColumns(spec, allColumns);
     const meta = await getColumnMeta(db,spec.table);
-    const editable = new Set(editableColumns(spec,allColumns));
+    const identity = await recordKeyInfo(db,spec,allColumns);
+    const key = normalizeKeyObject(req.body && req.body.key,identity);
+    if(!key) return fail(res,400,'valid record key required');
+    const editable = new Set(editableColumns(spec,allColumns,identity));
     const rawEntries = Object.entries(changes);
     const rejected = rawEntries.map(([c])=>c).filter(c=>!editable.has(c));
     if(rejected.length) return fail(res,400,'protected or invalid column',{columns:rejected});
     if(!rawEntries.length) return fail(res,400,'no editable changes');
     const entries = rawEntries.map(([c,v])=>[c,normalizeTypedValue(c,v,meta[c])]);
 
-    // Pool이면 반드시 전용 client 하나를 잡아 BEGIN~COMMIT을 같은 연결에서 실행한다.
     handle = await acquireClient(db);
     const client = handle.client;
     await client.query('BEGIN'); inTx=true;
-    const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+    const where = keyWhere(key);
     const before = await client.query(`SELECT * FROM ${qIdent(spec.table)} WHERE ${where} FOR UPDATE`,key.values);
     if(before.rows.length !== 1){
       await client.query('ROLLBACK'); inTx=false;
       return fail(res,409,before.rows.length?'record key is not unique':'record not found',{count:before.rows.length});
     }
 
-    // 사용자가 조회한 뒤 다른 작업이 같은 컬럼을 먼저 바꿨으면 덮어쓰지 않는다.
     if(originals){
       const conflicts=[];
       for(const [c] of entries){
@@ -229,24 +244,87 @@ router.post('/api/gm/builder/record/update', express.json({limit:'2mb'}), async 
       }
       if(conflicts.length){
         await client.query('ROLLBACK'); inTx=false;
-        return fail(res,409,'record changed since search',{columns:conflicts,current:pickVisible(before.rows[0],visible)});
+        return fail(res,409,'record changed since search',{columns:conflicts});
       }
     }
 
-    const base = key.values.length;
+    const base=key.values.length;
     const setSql = entries.map(([c],i)=>`${qIdent(c)}=$${base+i+1}`).join(', ');
-    const values = [...key.values,...entries.map(([,v])=>v)];
-    const updated = await client.query(`UPDATE ${qIdent(spec.table)} SET ${setSql} WHERE ${where} RETURNING *`,values);
-    if(updated.rows.length !== 1) throw new Error('unexpected update count: '+updated.rows.length);
+    const vals=[...key.values,...entries.map(x=>x[1])];
+    const updated = await client.query(`UPDATE ${qIdent(spec.table)} SET ${setSql} WHERE ${where} RETURNING *`,vals);
+    if(updated.rows.length !== 1){
+      await client.query('ROLLBACK'); inTx=false;
+      return fail(res,409,'update affected unexpected row count',{count:updated.rows.length});
+    }
     await client.query('COMMIT'); inTx=false;
-    ok(res,{table:spec.table,key:req.body.key,changed:entries.map(([c])=>c),before:pickVisible(before.rows[0],visible),after:pickVisible(updated.rows[0],visible)});
+    ok(res,{
+      table:spec.table,key:req.body.key,changed:entries.map(x=>x[0]),
+      before:pickVisible(before.rows[0],visible),after:pickVisible(updated.rows[0],visible)
+    });
   }catch(e){
-    if(inTx && handle){ try{ await handle.client.query('ROLLBACK'); }catch(_){} }
-    if(e && e.status) return fail(res,e.status,e.publicError || 'record update failed',e.extra || {});
+    if(handle && inTx){ try{ await handle.client.query('ROLLBACK'); }catch(_){} }
+    if(e && e.status) return fail(res,e.status,e.publicError || e.message,e.extra);
     fail(res,500,'record update failed',{detail:String(e&&e.message||e)});
-  }finally{
-    if(handle) handle.release();
-  }
+  }finally{ if(handle) handle.release(); }
+});
+
+router.post('/api/gm/builder/record/delete-selected', express.json({limit:'2mb'}), async (req,res)=>{
+  const tableKey = req.body && req.body.table;
+  const spec = tableSpec(tableKey);
+  if(!spec) return fail(res,400,'invalid table');
+  const confirmText=String((req.body&&req.body.confirm)||req.query.confirm||'');
+  if(confirmText !== 'DELETE SELECTED') return fail(res,400,'confirmation required');
+  const items=req.body && req.body.items;
+  if(!Array.isArray(items) || !items.length) return fail(res,400,'selected records required');
+  if(items.length > 100) return fail(res,400,'too many selected records',{max:100});
+
+  const db=dbFrom(req);
+  let handle=null,inTx=false;
+  try{
+    const allColumns=await getColumns(db,spec.table);
+    const identity=await recordKeyInfo(db,spec,allColumns);
+    const normalized=[];
+    const seen=new Set();
+    for(const item of items){
+      const key=normalizeKeyObject(item&&item.key,identity);
+      if(!key) return fail(res,400,'valid record key required for every selected record');
+      const sig=JSON.stringify(key.keys.map((k,i)=>[k,key.values[i]]));
+      if(seen.has(sig)) continue;
+      seen.add(sig); normalized.push(key);
+    }
+    if(!normalized.length) return fail(res,400,'selected records required');
+
+    handle=await acquireClient(db);
+    const client=handle.client;
+    await client.query('BEGIN'); inTx=true;
+
+    // 먼저 선택된 모든 키를 잠그고 각각 정확히 1건인지 확인한다.
+    for(const key of normalized){
+      const where=keyWhere(key);
+      const locked=await client.query(`SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} FOR UPDATE`,key.values);
+      if(locked.rows.length !== 1){
+        await client.query('ROLLBACK'); inTx=false;
+        return fail(res,409,locked.rows.length?'record key is not unique':'record not found',{key:Object.fromEntries(key.keys.map((k,i)=>[k,key.values[i]])),count:locked.rows.length});
+      }
+    }
+
+    let deleted=0;
+    for(const key of normalized){
+      const where=keyWhere(key);
+      const d=await client.query(`DELETE FROM ${qIdent(spec.table)} WHERE ${where}`,key.values);
+      if(d.rowCount !== 1){
+        await client.query('ROLLBACK'); inTx=false;
+        return fail(res,409,'delete affected unexpected row count',{count:d.rowCount});
+      }
+      deleted += d.rowCount;
+    }
+    await client.query('COMMIT'); inTx=false;
+    ok(res,{table:spec.table,requested:items.length,deleted});
+  }catch(e){
+    if(handle && inTx){ try{ await handle.client.query('ROLLBACK'); }catch(_){} }
+    if(e && e.code === '23503') return fail(res,409,'record is referenced by other data',{detail:String(e.detail||e.message||e)});
+    fail(res,500,'record delete failed',{detail:String(e&&e.message||e)});
+  }finally{ if(handle) handle.release(); }
 });
 
 module.exports = router;

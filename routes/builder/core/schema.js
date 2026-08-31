@@ -20,6 +20,38 @@ async function getColumnMeta(db, table) {
   for (const x of r.rows) out[x.column_name] = x;
   return out;
 }
+
+async function getUniqueKeySets(db, table) {
+  const r = await db.query(`
+    SELECT
+      i.indisprimary AS is_primary,
+      idx.relname AS index_name,
+      array_agg(a.attname ORDER BY ord.n) AS columns
+    FROM pg_index i
+    JOIN pg_class tbl ON tbl.oid=i.indrelid
+    JOIN pg_namespace ns ON ns.oid=tbl.relnamespace
+    JOIN pg_class idx ON idx.oid=i.indexrelid
+    JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS ord(attnum,n) ON true
+    JOIN pg_attribute a ON a.attrelid=tbl.oid AND a.attnum=ord.attnum
+    WHERE ns.nspname='public'
+      AND tbl.relname=$1
+      AND i.indisunique
+      AND i.indisvalid
+      AND i.indisready
+      AND i.indpred IS NULL
+      AND i.indexprs IS NULL
+      AND ord.attnum > 0
+    GROUP BY i.indisprimary, idx.relname
+    ORDER BY i.indisprimary DESC, idx.relname ASC
+  `,[table]);
+  return r.rows
+    .map(x=>({
+      columns:Array.isArray(x.columns)?x.columns.map(String):[],
+      source:x.is_primary?'PRIMARY KEY':'UNIQUE',
+      name:String(x.index_name||'')
+    }))
+    .filter(x=>x.columns.length);
+}
 function tableSpec(key) {
   return TABLES[String(key || '').trim()] || null;
 }
@@ -89,4 +121,4 @@ function resultRow(rowNo, table, key, result, column, value, reason) {
 
 
 
-module.exports = { getColumns, getColumnMeta, tableSpec, keySets, pickKey, isNumberValue, normalizeNumber, validateCell, shouldStop, resultRow };
+module.exports = { getColumns, getColumnMeta, getUniqueKeySets, tableSpec, keySets, pickKey, isNumberValue, normalizeNumber, validateCell, shouldStop, resultRow };
