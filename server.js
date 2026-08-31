@@ -1901,6 +1901,12 @@ app.use(require('./routes/barcode'));
 console.log('[GM_BARCODE_ROUTE_V001] routes/barcode registered');
 app.use(require('./routes/image_vector'));
 console.log('[GM_IMAGE_VECTOR_ROUTE_V001] routes/image_vector registered');
+try {
+  app.use(require('./special/category-batch/category_batch'));
+  console.log('[GM_CATEGORY_BATCH_SPECIAL_V006] mounted');
+} catch (e) {
+  console.error('[GM_CATEGORY_BATCH_SPECIAL_V006] mount failed:', String(e && e.stack || e));
+}
 app.use(require('./routes/address_map'));
 console.log('[GM_ORDER_MAP_ADDRESS_ROUTE_V001] routes/address_map registered');
 app.use(require('./routes/smartfit_vector'));
