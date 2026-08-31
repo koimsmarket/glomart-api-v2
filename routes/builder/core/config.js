@@ -14,6 +14,8 @@ const VERSION = 'GM_SAFE_UPDATE_BUILDER_V018_MODULAR_SAFE';
 const TABLES = {
   products: {
     table: 'gm_product',
+    // Direct record editor identity. This is independent from file UPSERT key below.
+    recordKey: ['product_uid'],
     key: ['mall_code', 'pi_ii_vi'],
     order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
     critical: ['mall_code', 'pi_ii_vi', 'product_name', 'mall_sale_price'],

@@ -21,13 +21,20 @@ function visibleColumns(spec, columns){
 }
 function sameKeySet(a,b){ return a.length===b.length && a.every((v,i)=>v===b[i]); }
 async function recordKeyInfo(db,spec,allColumns){
-  const dbKeys = await getUniqueKeySets(db,spec.table);
   const info=[];
+
+  // Direct record management may have a safer identity than the file import/UPSERT key.
+  // Example: gm_product uses product_uid, while file restore continues to use mall_code+pi_ii_vi.
+  if(Array.isArray(spec.recordKey) && spec.recordKey.length && spec.recordKey.every(c=>allColumns.includes(c))){
+    info.push({columns:spec.recordKey.slice(),source:'RECORD KEY',name:''});
+  }
+
+  const dbKeys = await getUniqueKeySets(db,spec.table);
   for(const k of dbKeys){
     if(k.columns.every(c=>allColumns.includes(c)) && !info.some(x=>sameKeySet(x.columns,k.columns))) info.push(k);
   }
-  // 실제 PK/UNIQUE가 하나도 없는 레거시 테이블에만 기존 Builder 기준키를 보조키로 사용한다.
-  // DB가 보장하는 식별키가 존재하면 업로드/UPSERT용 Builder key/keyAny는 직접 편집 식별키 후보에 섞지 않는다.
+
+  // Only when no direct-record key and no DB PK/UNIQUE key exists, use Builder import keys as fallback.
   if(info.length === 0){
     for(const ks of keySets(spec)){
       if(Array.isArray(ks) && ks.length && ks.every(c=>allColumns.includes(c)) && !info.some(x=>sameKeySet(x.columns,ks))){
