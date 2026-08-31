@@ -1,5 +1,5 @@
 'use strict';
-/* GM_CATEGORY_BATCH_SPECIAL_V010
+/* GM_CATEGORY_BATCH_SPECIAL_V011
  * Special one-off category/vector preload module.
  * Existing search/vector routes are not modified.
  */
@@ -14,19 +14,22 @@ const leases=new Map();
 const cycles=new Map();
 const serverQueue=[];
 const serverQueued=new Set();
+const phoneClaims=new Map();
+const CLAIM_TTL_MS=10*60*1000;
+const BATCH_SIZE=10;
 let serverRunning=false, modelPromise=null, poolRef=null, seq=0;
 const S=v=>String(v==null?'':v).trim();
 const N=(v,d)=>Number.isFinite(Number(v))?Number(v):d;
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 function pool(req){const p=req.app&&req.app.locals&&req.app.locals.pool;if(!p)throw new Error('DB_POOL_NOT_AVAILABLE');poolRef=p;return p;}
 function auth(req,res){const m=S((req.body&&req.body.member_id)||(req.query&&req.query.member_id));if(!ADMIN_IDS.has(m)){res.status(403).json({ok:false,error:'ADMIN_ID_REQUIRED'});return null;}return m;}
-function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V010 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V011 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function splitKeywords(v){return [...new Set(S(v).split('/').map(x=>x.trim()).filter(Boolean))];}
 function batchDate(v){const x=S(v);return /^\d{4}-\d{2}-\d{2}$/.test(x)?x:new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
 function vectorValid(alias='v'){return `${alias}.vector_image IS NOT NULL AND array_length(${alias}.vector_image,1)=${DIM}`;}
 function prioritySql(){return `CASE WHEN gm_code LIKE 'FD-%' THEN 1 WHEN gm_code LIKE 'HS-%' THEN 2 ELSE 3 END`;}
 
-router.get('/api/special/category-batch/control',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V010',control});});
+router.get('/api/special/category-batch/control',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V011',control});});
 router.post('/api/special/category-batch/command',(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const cmd=S(req.body&&req.body.command);if(cmd==='#카테고리 검색#')control.mode='RUN';else if(cmd==='#카테고리 일시정지#')control.mode='PAUSE';else if(cmd==='#카테고리 중지#')control.mode='STOPPED';else return res.status(400).json({ok:false,error:'UNKNOWN_COMMAND'});if(cmd==='#카테고리 검색#')control.batch_date=batchDate(req.body&&req.body.batch_date||control.batch_date);control.updated_at=new Date().toISOString();control.updated_by=m;control.command=cmd;log('COMMAND',{member:m,mode:control.mode,batch_date:control.batch_date});res.json({ok:true,control});});
 
 async function release(deviceId,complete){const l=leases.get(deviceId);if(!l)return null;try{if(complete)await l.client.query('UPDATE gm_category SET created_at=NOW(),updated_at=NOW() WHERE category_id=$1',[l.category_id]);await l.client.query('SELECT pg_advisory_unlock($1::bigint)',[l.category_id]);}finally{l.client.release();leases.delete(deviceId);}return l.category_id;}
@@ -39,6 +42,16 @@ router.post('/api/special/category-batch/complete',async(req,res)=>{const m=auth
 router.post('/api/special/category-batch/release',async(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const d=S(req.body&&req.body.device_id),id=await release(d,false);res.json({ok:true,category_id:id});});
 
 router.get('/api/special/category-batch/search-state',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req),kw=S(req.query.keyword),st=S(req.query.started_at),rid=S(req.query.request_id);if(!st||(!kw&&!rid))return res.status(400).json({ok:false,error:'started_at and keyword/request_id required'});let q;if(rid){q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE request_id LIKE $1 AND created_at >= $2::timestamptz`,[rid+'%',st]);}else{q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE keyword=$1 AND created_at >= $2::timestamptz`,[kw,st]);}const x=q.rows[0]||{},last=x.last_created_at?new Date(x.last_created_at).getTime():0,quiet=last?Math.max(0,(Date.now()-last)/1000):0,settled=Number(x.total||0)>0&&Number(x.pending||0)===0&&Number(x.processing||0)===0&&quiet>=5;res.json({ok:true,total:+x.total||0,pending:+x.pending||0,processing:+x.processing||0,done:+x.done||0,failed:+x.failed||0,mall_count:+x.mall_count||0,keywords:x.keywords||[],quiet_sec:Math.round(quiet*10)/10,settled});});
+
+
+function cleanClaims(){const now=Date.now();for(const [uid,c] of phoneClaims){if(now-Number(c.ts||0)>CLAIM_TTL_MS)phoneClaims.delete(uid);}}
+async function vectorScope(p,kw,st){
+ const q=await p.query(`SELECT p.product_uid,p.mall_code,p.thumb_origin_url image_url,(${vectorValid('v')}) done FROM gm_product p LEFT JOIN gm_product_image_vector v ON v.product_uid=p.product_uid WHERE p.keyword=$1 AND COALESCE(p.updated_at,p.created_at)>=($2::timestamptz-interval '2 minutes') AND COALESCE(p.thumb_origin_url,'')<>'' ORDER BY COALESCE(p.updated_at,p.created_at),p.product_uid`,[kw,st]);
+ return q.rows.map(r=>({product_uid:S(r.product_uid),mall_code:S(r.mall_code),image_url:S(r.image_url),done:!!r.done}));
+}
+router.get('/api/special/category-batch/vector-summary',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req),kw=S(req.query.keyword),st=S(req.query.started_at);if(!kw||!st)return res.status(400).json({ok:false,error:'keyword/started_at required'});cleanClaims();const a=await vectorScope(p,kw,st),done=a.filter(x=>x.done).length,remaining=a.length-done;for(const x of a){if(x.done)phoneClaims.delete(x.product_uid);}res.json({ok:true,total:a.length,done,remaining,percent:a.length?done*100/a.length:100,server_queue:serverQueue.length,server_running:serverRunning,phone_claimed:[...phoneClaims.values()].filter(x=>x.keyword===kw&&x.started_at===st).length});});
+router.post('/api/special/category-batch/phone-claim',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req),kw=S(req.body&&req.body.keyword),st=S(req.body&&req.body.started_at),dev=S(req.body&&req.body.device_id),lim=Math.max(1,Math.min(10,Math.floor(N(req.body&&req.body.limit,BATCH_SIZE))));if(!kw||!st||!dev)return res.status(400).json({ok:false,error:'keyword/started_at/device_id required'});cleanClaims();const a=await vectorScope(p,kw,st),tasks=[];for(const x of a){if(x.done||serverQueued.has(x.product_uid)||phoneClaims.has(x.product_uid))continue;phoneClaims.set(x.product_uid,{keyword:kw,started_at:st,device_id:dev,ts:Date.now()});tasks.push({product_uid:x.product_uid,mall_code:x.mall_code,image_url:x.image_url});if(tasks.length>=lim)break;}res.json({ok:true,claimed:tasks.length,tasks,remaining:a.filter(x=>!x.done).length});});
+router.post('/api/special/category-batch/server-batch',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req),kw=S(req.body&&req.body.keyword),st=S(req.body&&req.body.started_at),dev=S(req.body&&req.body.device_id),lim=Math.max(1,Math.min(10,Math.floor(N(req.body&&req.body.limit,BATCH_SIZE))));if(!kw||!st||!dev)return res.status(400).json({ok:false,error:'keyword/started_at/device_id required'});cleanClaims();if(serverRunning||serverQueue.length)return res.json({ok:true,queued:0,busy:true,server_queue:serverQueue.length,server_running:serverRunning});const a=await vectorScope(p,kw,st),tasks=[];for(const x of a){if(x.done||serverQueued.has(x.product_uid)||phoneClaims.has(x.product_uid))continue;tasks.push({product_uid:x.product_uid,mall_code:x.mall_code,image_url:x.image_url});if(tasks.length>=lim)break;}const id=`S${Date.now()}_${++seq}`;enqueue(id,tasks);log('SERVER_BATCH',{device_id:dev,keyword:kw,batch:tasks.length,remaining:a.filter(x=>!x.done).length});res.json({ok:true,batch_id:id,queued:tasks.length,busy:false,remaining:a.filter(x=>!x.done).length});});
 
 function cleanupCycles(){const now=Date.now();for(const [id,c] of cycles){if(c.finished_at&&now-c.finished_at>CYCLE_TTL_MS)cycles.delete(id);}}
 async function searchKeywords(p,kw,st,rid){if(rid){const r=await p.query(`SELECT ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords FROM gm_product_upsert_queue WHERE request_id LIKE $1 AND created_at >= $2::timestamptz`,[rid+'%',st]);const a=(r.rows[0]&&r.rows[0].keywords||[]).map(S).filter(Boolean);if(a.length)return a;}return kw?[kw]:[];}
