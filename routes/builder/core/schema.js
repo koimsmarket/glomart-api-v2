@@ -31,7 +31,7 @@ async function getUniqueKeySets(db, table) {
     JOIN pg_class tbl ON tbl.oid=i.indrelid
     JOIN pg_namespace ns ON ns.oid=tbl.relnamespace
     JOIN pg_class idx ON idx.oid=i.indexrelid
-    JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS ord(attnum,n) ON true
+    JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS ord(attnum,n) ON ord.n <= i.indnkeyatts
     JOIN pg_attribute a ON a.attrelid=tbl.oid AND a.attnum=ord.attnum
     WHERE ns.nspname='public'
       AND tbl.relname=$1

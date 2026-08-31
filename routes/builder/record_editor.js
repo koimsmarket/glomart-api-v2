@@ -26,11 +26,13 @@ async function recordKeyInfo(db,spec,allColumns){
   for(const k of dbKeys){
     if(k.columns.every(c=>allColumns.includes(c)) && !info.some(x=>sameKeySet(x.columns,k.columns))) info.push(k);
   }
-  // 실제 PK/UNIQUE가 없는 레거시 테이블만 기존 Builder 기준키를 보조키로 사용한다.
-  // 보조키도 UPDATE/DELETE 직전에 정확히 1건인지 다시 검증한다.
-  for(const ks of keySets(spec)){
-    if(Array.isArray(ks) && ks.length && ks.every(c=>allColumns.includes(c)) && !info.some(x=>sameKeySet(x.columns,ks))){
-      info.push({columns:ks.slice(),source:'BUILDER KEY',name:''});
+  // 실제 PK/UNIQUE가 하나도 없는 레거시 테이블에만 기존 Builder 기준키를 보조키로 사용한다.
+  // DB가 보장하는 식별키가 존재하면 업로드/UPSERT용 Builder key/keyAny는 직접 편집 식별키 후보에 섞지 않는다.
+  if(info.length === 0){
+    for(const ks of keySets(spec)){
+      if(Array.isArray(ks) && ks.length && ks.every(c=>allColumns.includes(c)) && !info.some(x=>sameKeySet(x.columns,ks))){
+        info.push({columns:ks.slice(),source:'BUILDER KEY',name:''});
+      }
     }
   }
   return info;
