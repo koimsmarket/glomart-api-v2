@@ -1,12 +1,13 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V048</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v048"></head><body><div class="wrap">
-<div class="head"><div><h1>GM Data Builder V048</h1><div class="small">기능별 분리형 관리 화면</div></div></div>
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V049</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v049"></head><body><div class="wrap">
+<div class="head"><div><h1>GM Data Builder V049</h1><div class="small">기능별 분리형 관리 화면</div></div></div>
 <div class="warning"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
 <div class="menu">
 <a href="/builder/download.html"><b>백업 / 다운로드</b><span class="small">테이블 CSV·Excel 다운로드만 담당</span></a>
 <a href="/builder/safe_update.html"><b>안전 업데이트</b><span class="small">테이블별 보호정책 검증·적용</span></a>
 <a href="/builder/dev_restore.html"><b>개발용 파일 복원</b><span class="small">EXACT 파일 복원 기능만 분리</span></a>
 <a href="/builder/members.html"><b>Cafe24 회원</b><span class="small">회원 import/export 전용</span></a>
+<a href="/builder/record_editor.html"><b>레코드 직접 조회 / 수정</b><span class="small">필요한 레코드를 찾아 보호 컬럼을 제외하고 직접 수정</span></a>
 </div>
 <div class="card"><h2>DATABASE / QUEUE STATUS</h2><div id="statusTime" class="small">조회 전</div><div class="grid"><div><h3>테이블 레코드 수</h3><table><tbody id="tableStatus"><tr><td>조회 전</td></tr></tbody></table></div><div><h3>Queue / DB</h3><table><tbody id="queueStatus"><tr><td>조회 전</td></tr></tbody></table><div id="dbStatus" class="status">조회 전</div></div></div><button class="green" onclick="loadDashboard(false)">상태 새로고침</button><button onclick="saveSnapshot()">스냅샷 저장</button></div>
 <div class="card"><h2>로그</h2><pre id="log">준비됨</pre></div>
-</div><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v048"></script><script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v048"></script></body></html>
+</div><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v049"></script><script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v049"></script></body></html>
