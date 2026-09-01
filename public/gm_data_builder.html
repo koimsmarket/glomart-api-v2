@@ -1,4 +1,9 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V054</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v054"></head><body><div class="wrap">
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V055</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v054"><style>
+#ivBackgroundCard.iv-forced-on{border:3px solid #d71920;box-shadow:0 0 0 3px rgba(215,25,32,.12);}
+#ivForcedWarning{display:none;margin:12px 0;padding:12px 14px;border-radius:8px;background:#fff0f0;border:2px solid #d71920;color:#b00000;font-weight:800;}
+#ivBackgroundCard.iv-forced-on #ivForcedWarning{display:block;animation:ivPulse 1s steps(2,end) infinite;}
+@keyframes ivPulse{50%{opacity:.35}}
+</style></head><body><div class="wrap">
 <div class="head"><div><h1>GM Data Builder V054</h1><div class="small">기능별 분리형 관리 화면</div></div></div>
 <div class="warning"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
 <div class="menu">
@@ -10,8 +15,9 @@
 </div>
 <div class="card"><h2>DATABASE / QUEUE STATUS</h2><div id="statusTime" class="small">조회 전</div><div class="grid"><div><h3>테이블 레코드 수</h3><table><tbody id="tableStatus"><tr><td>조회 전</td></tr></tbody></table></div><div><h3>Queue / DB</h3><table><tbody id="queueStatus"><tr><td>조회 전</td></tr></tbody></table><div id="dbStatus" class="status">조회 전</div></div></div><button class="green" onclick="loadDashboard(false)">상태 새로고침</button><button onclick="saveSnapshot()">스냅샷 저장</button></div>
 
-<div class="card"><h2>IMAGE VECTOR BACKGROUND</h2>
+<div class="card" id="ivBackgroundCard"><h2>IMAGE VECTOR BACKGROUND</h2>
   <div class="small">자동검색과 완전히 분리된 서버 백그라운드 작업</div>
+  <div id="ivForcedWarning">⚠ 강제 ON 상태입니다. 시간 및 메모리 제한을 무시하고 이미지 Vector 변환을 계속 수행합니다.</div>
   <p><b>작업모드</b> &nbsp; <button id="ivModeOff" class="gray" onclick="setImageVectorMode('OFF')">OFF</button> <button id="ivModeAuto" class="gray" onclick="setImageVectorMode('AUTO')">AUTO</button> <button id="ivModeOn" class="gray" onclick="setImageVectorMode('ON')">ON</button></p>
   <div class="grid"><div><table><tbody>
     <tr><th>자동 작업시간</th><td>00:00 ~ 08:00</td></tr>
@@ -19,6 +25,11 @@
     <tr><th>자동 정지</th><td>메모리 ≥ 80%</td></tr>
   </tbody></table></div><div><table><tbody id="ivBackgroundStatus"><tr><td>조회 전</td></tr></tbody></table></div></div>
   <button class="green" onclick="loadImageVectorBackgroundStatus()">Vector 상태 새로고침</button>
+  <hr style="margin:18px 0;border:0;border-top:1px solid #ddd">
+  <h3>미수행 Queue 업로드</h3>
+  <div class="small">product_uid / image_url / updated_at CSV 또는 Excel을 업로드합니다. 기존 Queue는 삭제하지 않고 UID 기준으로 추가·갱신합니다.</div>
+  <p><input type="file" id="ivPendingFile" accept=".csv,.xlsx,.xls"> <button class="green" onclick="uploadImageVectorPending(this)">Queue 업로드</button></p>
+  <div id="ivUploadResult" class="small"></div>
 </div>
 <div class="card"><h2>로그</h2><pre id="log">준비됨</pre></div>
-</div><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v054"></script><script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v055"></script></body></html>
+</div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v054"></script><script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v056"></script></body></html>

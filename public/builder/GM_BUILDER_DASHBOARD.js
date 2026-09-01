@@ -36,12 +36,28 @@ loadDashboard(false); setInterval(()=>loadDashboard(false),60000);
 // GM_IMAGE_VECTOR_BACKGROUND_DASHBOARD_V001
 function ivFmtMb(n){ return n==null?'-':`${Number(n).toFixed(1)} MB`; }
 function ivStateText(s){ return ({OFF:'완전 정지',FORCED_ON:'강제 가동',AUTO_RUNNING:'자동 작업 중',AUTO_MEMORY_WAIT:'메모리 대기',AUTO_TIME_WAIT:'시간외 대기'})[String(s||'')]||String(s||'-'); }
+const IV_BASE_TITLE=document.title;
+let ivTitleTimer=null,ivTitleFlip=false;
+function setImageVectorForcedWarning(on){
+  const card=document.getElementById('ivBackgroundCard');
+  if(card)card.classList.toggle('iv-forced-on',!!on);
+  if(on){
+    if(!ivTitleTimer){
+      ivTitleFlip=false;
+      ivTitleTimer=setInterval(()=>{ivTitleFlip=!ivTitleFlip;document.title=ivTitleFlip?'⚠ VECTOR 강제 ON ⚠':IV_BASE_TITLE;},800);
+    }
+  }else{
+    if(ivTitleTimer){clearInterval(ivTitleTimer);ivTitleTimer=null;}
+    document.title=IV_BASE_TITLE;
+  }
+}
 function paintImageVectorMode(mode){
   ['OFF','AUTO','ON'].forEach(m=>{
     const b=document.getElementById('ivMode'+m.charAt(0)+m.slice(1).toLowerCase());
     if(!b)return;
-    b.className=(m===mode?(m==='OFF'?'red':m==='AUTO'?'green':'green'):'gray');
+    b.className=(m===mode?(m==='OFF'?'red':m==='AUTO'?'green':'red'):'gray');
   });
+  setImageVectorForcedWarning(mode==='ON');
 }
 async function loadImageVectorBackgroundStatus(){
   const body=document.getElementById('ivBackgroundStatus'); if(!body)return;
@@ -62,6 +78,7 @@ async function loadImageVectorBackgroundStatus(){
 }
 async function setImageVectorMode(mode){
   if(!['OFF','AUTO','ON'].includes(mode))return;
+  if(mode==='ON' && !confirm('강제 ON은 시간 및 메모리 제한을 무시합니다. 계속 가동할까요?'))return;
   try{
     const r=await fetch(`${API}/api/gm/background/image-vector/mode`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
     const j=await r.json();
@@ -70,6 +87,25 @@ async function setImageVectorMode(mode){
     log({action:'image-vector-background.mode',mode:j.mode,state:j.state,memory_percent:j.memory_percent,pending:j.pending});
     await loadImageVectorBackgroundStatus();
   }catch(e){ log('image-vector mode error: '+String(e&&e.message||e)); }
+}
+async function uploadImageVectorPending(button){
+  const input=document.getElementById('ivPendingFile'),out=document.getElementById('ivUploadResult');
+  const file=input&&input.files&&input.files[0];
+  if(!file){alert('Queue CSV 또는 Excel 파일을 선택하세요.');return;}
+  const timed=startButtonTimer(button,'Queue 업로드 중');
+  try{
+    const text=await readCsvText(file);
+    const first=String(text||'').split(/\r?\n/)[0]||'';
+    if(!/product_uid/i.test(first) || !/(image_url|thumb_origin_url)/i.test(first))throw new Error('필수 컬럼 product_uid, image_url 이 없습니다.');
+    const r=await fetch(`${API}/api/gm/background/image-vector/pending/import`,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    if(out)out.textContent=`업로드 완료: 유효 ${fmt(j.valid)}건 / 무효 ${fmt(j.invalid)}건 / 현재 미수행 ${fmt(j.pending)}건`;
+    log({action:'image-vector-pending.import',file:file.name,...j});
+    await loadImageVectorBackgroundStatus();
+  }catch(e){
+    const msg=String(e&&e.message||e);if(out)out.textContent='업로드 실패: '+msg;log('image-vector pending import error: '+msg);
+  }finally{stopButtonTimer(timed);}
 }
 loadImageVectorBackgroundStatus();
 setInterval(()=>loadImageVectorBackgroundStatus(),10000);
