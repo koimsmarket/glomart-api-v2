@@ -32,3 +32,44 @@ async function saveSnapshot(){
 }
 
 loadDashboard(false); setInterval(()=>loadDashboard(false),60000);
+
+// GM_IMAGE_VECTOR_BACKGROUND_DASHBOARD_V001
+function ivFmtMb(n){ return n==null?'-':`${Number(n).toFixed(1)} MB`; }
+function ivStateText(s){ return ({OFF:'완전 정지',FORCED_ON:'강제 가동',AUTO_RUNNING:'자동 작업 중',AUTO_MEMORY_WAIT:'메모리 대기',AUTO_TIME_WAIT:'시간외 대기'})[String(s||'')]||String(s||'-'); }
+function paintImageVectorMode(mode){
+  ['OFF','AUTO','ON'].forEach(m=>{
+    const b=document.getElementById('ivMode'+m.charAt(0)+m.slice(1).toLowerCase());
+    if(!b)return;
+    b.className=(m===mode?(m==='OFF'?'red':m==='AUTO'?'green':'green'):'gray');
+  });
+}
+async function loadImageVectorBackgroundStatus(){
+  const body=document.getElementById('ivBackgroundStatus'); if(!body)return;
+  try{
+    const r=await fetch(`${API}/api/gm/background/image-vector/status?t=${Date.now()}`,{cache:'no-store'});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    paintImageVectorMode(j.mode);
+    body.innerHTML=`
+      <tr><th>현재 모드</th><td><b>${j.mode}</b></td></tr>
+      <tr><th>현재 상태</th><td>${ivStateText(j.state)}</td></tr>
+      <tr><th>현재 메모리</th><td><b>${j.memory_percent}%</b> (${ivFmtMb(j.memory_used_mb)} / ${ivFmtMb(j.memory_limit_mb)})</td></tr>
+      <tr><th>미수행</th><td>${fmt(j.pending)}건</td></tr>
+      <tr><th>현재 실행</th><td>${fmt(j.active)} / ${fmt(j.max_slots)}</td></tr>
+      <tr><th>완료/실패</th><td>${fmt(j.completed)} / ${fmt(j.failed)}</td></tr>
+      <tr><th>마지막 오류</th><td>${j.last_error||'-'}</td></tr>`;
+  }catch(e){ body.innerHTML=`<tr><td>Vector Background 조회 실패: ${String(e&&e.message||e)}</td></tr>`; }
+}
+async function setImageVectorMode(mode){
+  if(!['OFF','AUTO','ON'].includes(mode))return;
+  try{
+    const r=await fetch(`${API}/api/gm/background/image-vector/mode`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    paintImageVectorMode(j.mode);
+    log({action:'image-vector-background.mode',mode:j.mode,state:j.state,memory_percent:j.memory_percent,pending:j.pending});
+    await loadImageVectorBackgroundStatus();
+  }catch(e){ log('image-vector mode error: '+String(e&&e.message||e)); }
+}
+loadImageVectorBackgroundStatus();
+setInterval(()=>loadImageVectorBackgroundStatus(),10000);

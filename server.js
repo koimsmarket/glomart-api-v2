@@ -1901,6 +1901,14 @@ app.use(require('./routes/barcode'));
 console.log('[GM_BARCODE_ROUTE_V001] routes/barcode registered');
 app.use(require('./routes/image_vector'));
 console.log('[GM_IMAGE_VECTOR_ROUTE_V001] routes/image_vector registered');
+try{
+  const imageVectorBackground=require('./background/image-vector');
+  imageVectorBackground.init(pool);
+  app.use(imageVectorBackground.router);
+  console.log('[GM_IMAGE_VECTOR_BACKGROUND_V002] background/image-vector registered');
+}catch(e){
+  console.error('[GM_IMAGE_VECTOR_BACKGROUND_MOUNT_FAIL]',String(e&&e.message||e));
+}
 try {
   app.use(require('./special/category-batch/category_batch'));
   console.log('[GM_CATEGORY_BATCH_SPECIAL_V006] mounted');
