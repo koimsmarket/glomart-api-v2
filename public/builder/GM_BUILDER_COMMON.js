@@ -3,6 +3,7 @@ const tables = {
   products:'상품 gm_product',
   product_options:'상품 옵션 gm_product_option',
   product_image_vector:'상품 이미지 Vector gm_product_image_vector',
+  image_vector_pending:'이미지 Vector 미수행 gm_image_vector_pending',
   cart:'장바구니 gm_basket',
   orders:'주문 gm_order',
   order_items:'주문상품 gm_order_item',
@@ -64,6 +65,7 @@ const tables = {
   dashboard_snapshot:'대시보드 스냅샷 gm_dashboard_snapshot'
 };
 const tableNameMap = {
+  gm_image_vector_pending:'image_vector_pending',
   gm_product_image_vector:'product_image_vector', gm_product_option:'product_options', gm_product:'products', gm_product_archive:'product_archive',
   gm_category:'category', gm_category_keyword:'category_keyword',
   gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',

@@ -40,6 +40,17 @@ const TABLES = {
     blocked: [],
     allowInsert: true
   },
+  image_vector_pending: {
+    table: 'gm_image_vector_pending',
+    key: ['product_uid'],
+    order: 'updated_at ASC, product_uid ASC',
+    critical: ['product_uid','image_url'],
+    numeric: [],
+    defaults: {},
+    enums: {},
+    blocked: [],
+    allowInsert: true
+  },
   smartfit_template_vector: {
     table: 'gm_smartfit_template_vector',
     key: ['template_id'],

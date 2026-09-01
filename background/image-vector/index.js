@@ -1,5 +1,5 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_V004
+/* GM_IMAGE_VECTOR_BACKGROUND_V005
  * Image-vector processing is completely detached from SPECIAL/category search.
  *
  * Persistent work source: gm_image_vector_pending
@@ -40,7 +40,7 @@ let mode='AUTO';
 let autoRunning=false;
 let schemaReady=false;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V004 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V005 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -70,73 +70,21 @@ function operatingDecision(mem){
 }
 async function ensureSchema(){
   if(!poolRef)return;
-  const c=await poolRef.connect();
-  try{
-    await c.query('BEGIN');
-    await c.query("SELECT pg_advisory_xact_lock(hashtext('gm_image_vector_background_schema_v2'))");
-    const existed=await c.query("SELECT to_regclass('public.gm_image_vector_pending') IS NOT NULL AS existed");
-    const wasThere=!!(existed.rows[0]&&existed.rows[0].existed);
-    await c.query(`
-      CREATE TABLE IF NOT EXISTS gm_image_vector_pending (
-        product_uid TEXT PRIMARY KEY,
-        image_url TEXT NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
-    await c.query('CREATE INDEX IF NOT EXISTS idx_gm_image_vector_pending_updated_at ON gm_image_vector_pending(updated_at ASC)');
-    await c.query(`
-      CREATE TABLE IF NOT EXISTS gm_image_vector_background_config (
-        config_id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (config_id=1),
-        mode TEXT NOT NULL DEFAULT 'AUTO' CHECK (mode IN ('OFF','AUTO','ON')),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
-    await c.query("INSERT INTO gm_image_vector_background_config(config_id,mode) VALUES(1,'AUTO') ON CONFLICT(config_id) DO NOTHING");
-    await c.query(`
-      CREATE OR REPLACE FUNCTION gm_enqueue_image_vector_pending()
-      RETURNS trigger
-      LANGUAGE plpgsql
-      AS $$
-      BEGIN
-        IF COALESCE(BTRIM(NEW.thumb_origin_url), '') = '' THEN RETURN NEW; END IF;
-        IF TG_OP = 'INSERT' OR OLD.thumb_origin_url IS DISTINCT FROM NEW.thumb_origin_url THEN
-          INSERT INTO gm_image_vector_pending(product_uid,image_url,updated_at)
-          VALUES(NEW.product_uid,NEW.thumb_origin_url,now())
-          ON CONFLICT(product_uid) DO UPDATE SET image_url=EXCLUDED.image_url,updated_at=EXCLUDED.updated_at;
-        END IF;
-        RETURN NEW;
-      END;
-      $$
-    `);
-    await c.query('DROP TRIGGER IF EXISTS trg_gm_product_image_vector_pending ON gm_product');
-    await c.query(`
-      CREATE TRIGGER trg_gm_product_image_vector_pending
-      AFTER INSERT OR UPDATE OF thumb_origin_url ON gm_product
-      FOR EACH ROW EXECUTE FUNCTION gm_enqueue_image_vector_pending()
-    `);
-    if(!wasThere){
-      const seed=await c.query(`
-        INSERT INTO gm_image_vector_pending(product_uid,image_url,updated_at)
-        SELECT p.product_uid,p.thumb_origin_url,COALESCE(p.updated_at,p.created_at,now())
-          FROM gm_product p
-          LEFT JOIN gm_product_image_vector v ON v.product_uid=p.product_uid
-         WHERE COALESCE(BTRIM(p.thumb_origin_url),'')<>''
-           AND (v.product_uid IS NULL OR v.vector_image IS NULL OR array_length(v.vector_image,1)<>${DIM})
-        ON CONFLICT(product_uid) DO UPDATE SET image_url=EXCLUDED.image_url,updated_at=EXCLUDED.updated_at
-      `);
-      log('INITIAL_SEED',{rows:seed.rowCount});
-    }
-    const cfg=await c.query('SELECT mode FROM gm_image_vector_background_config WHERE config_id=1');
-    const saved=S(cfg.rows[0]&&cfg.rows[0].mode).toUpperCase();
-    if(VALID_MODES.has(saved))mode=saved;
-    await c.query('COMMIT');
-    schemaReady=true;
-    log('SCHEMA_READY',{pending_migration:'110_gm_image_vector_pending.sql',config_migration:'111_gm_image_vector_background_config.sql',preexisting_pending:wasThere,mode});
-  }catch(e){
-    try{await c.query('ROLLBACK');}catch(_){ }
-    throw e;
-  }finally{c.release();}
+  // Schema ownership belongs ONLY to migrations/110 and 111.
+  // Runtime background code never CREATE/ALTER/DROP tables, indexes, functions or triggers.
+  // This prevents concurrent catalog updates while the migration bootstrap is running.
+  const pending=await poolRef.query("SELECT to_regclass('public.gm_image_vector_pending') AS t");
+  const config=await poolRef.query("SELECT to_regclass('public.gm_image_vector_background_config') AS t");
+  if(!(pending.rows[0]&&pending.rows[0].t) || !(config.rows[0]&&config.rows[0].t)){
+    throw new Error('BACKGROUND_SCHEMA_NOT_READY');
+  }
+  const cfg=await poolRef.query('SELECT mode FROM gm_image_vector_background_config WHERE config_id=1');
+  const saved=S(cfg.rows[0]&&cfg.rows[0].mode).toUpperCase();
+  if(VALID_MODES.has(saved))mode=saved;
+  schemaReady=true;
+  log('SCHEMA_READY',{pending_migration:'110_gm_image_vector_pending.sql',config_migration:'111_gm_image_vector_background_config.sql',mode});
 }
+
 function ensureWorker(){
   if(worker)return worker;
   worker=new Worker(path.join(__dirname,'vector_worker.js'));
@@ -222,7 +170,7 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V004',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V005',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,completed,failed,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
@@ -287,7 +235,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
     const count=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');
     const pending=Number(count.rows[0]&&count.rows[0].n||0);
     log('PENDING_IMPORT',{received:rows.length,valid:list.length,invalid,upserted,pending});
-    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V004',received:rows.length,valid:list.length,invalid,upserted,pending});
+    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V005',received:rows.length,valid:list.length,invalid,upserted,pending});
     setImmediate(()=>void pump());
   }catch(e){
     lastError=S(e&&e.message||e);log('PENDING_IMPORT_FAIL',{error:lastError});

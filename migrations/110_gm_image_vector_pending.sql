@@ -42,23 +42,6 @@ AFTER INSERT OR UPDATE OF thumb_origin_url ON gm_product
 FOR EACH ROW
 EXECUTE FUNCTION gm_enqueue_image_vector_pending();
 
--- One-time handoff for existing products that do not yet have a valid 512-D vector.
--- This does not delete or rewrite existing vector rows; the background worker will
--- upsert a valid vector and remove only the corresponding pending row after success.
-INSERT INTO gm_image_vector_pending(product_uid, image_url, updated_at)
-SELECT
-  p.product_uid,
-  p.thumb_origin_url,
-  COALESCE(p.updated_at, p.created_at, now())
-FROM gm_product p
-LEFT JOIN gm_product_image_vector v
-  ON v.product_uid = p.product_uid
-WHERE COALESCE(BTRIM(p.thumb_origin_url), '') <> ''
-  AND (
-    v.product_uid IS NULL
-    OR v.vector_image IS NULL
-    OR array_length(v.vector_image, 1) <> 512
-  )
-ON CONFLICT (product_uid) DO UPDATE
-  SET image_url = EXCLUDED.image_url,
-      updated_at = EXCLUDED.updated_at;
+-- Existing historical products are intentionally NOT scanned here.
+-- Their pending seed is imported through Builder Safe Update from the
+-- product/vector comparison CSV. New/changed products are queued by the trigger above.
