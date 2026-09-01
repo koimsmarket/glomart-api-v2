@@ -1966,6 +1966,10 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
   }
   const detail_stats = detailSignalStats(optionJson, thumbJson, detailJson || {}, p);
+  // SPECIAL V017: notify vector worker only after gm_product upsert and related save work completed.
+  try{
+    process.emit('gm:special-product-upsert',{ product_uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, image_url:thumbUrl });
+  }catch(_specialVectorNotify){}
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
