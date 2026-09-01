@@ -1,9 +1,11 @@
 'use strict';
-/* GM_CATEGORY_BATCH_SPECIAL_V017
+/* GM_CATEGORY_BATCH_SPECIAL_V018
  * Special one-off category/vector preload module.
  * Existing search/vector routes are not modified.
  */
 const express=require('express');
+const path=require('path');
+const {Worker}=require('worker_threads');
 const router=express.Router();
 const ADMIN_IDS=new Set(['derzon','derzon1287','msoon']);
 const DIM=512;
@@ -12,19 +14,21 @@ const leases=new Map();
 const serverQueue=[];
 const serverQueued=new Set();
 const serverFailUntil=new Map();
-let serverWorkers=0, serverConcurrency=15, modelPromise=null, poolRef=null;
+let serverWorkers=0, serverConcurrency=15, poolRef=null;
+let vectorThread=null, vectorTaskSeq=0;
+const vectorInflight=new Map();
 const S=v=>String(v==null?'':v).trim();
 const N=(v,d)=>Number.isFinite(Number(v))?Number(v):d;
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 function pool(req){const p=req.app&&req.app.locals&&req.app.locals.pool;if(!p)throw new Error('DB_POOL_NOT_AVAILABLE');poolRef=p;return p;}
 function auth(req,res){const m=S((req.body&&req.body.member_id)||(req.query&&req.query.member_id));if(!ADMIN_IDS.has(m)){res.status(403).json({ok:false,error:'ADMIN_ID_REQUIRED'});return null;}return m;}
-function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V017 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V018 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function splitKeywords(v){return [...new Set(S(v).split('/').map(x=>x.trim()).filter(Boolean))];}
 function batchDate(v){const x=S(v);return /^\d{4}-\d{2}-\d{2}$/.test(x)?x:new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
 function vectorValid(alias='v'){return `${alias}.vector_image IS NOT NULL AND array_length(${alias}.vector_image,1)=${DIM}`;}
 function prioritySql(){return `CASE WHEN gm_code LIKE 'FD-%' THEN 1 WHEN gm_code LIKE 'HS-%' THEN 2 ELSE 3 END`;}
 
-router.get('/api/special/category-batch/control',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V017',control});});
+router.get('/api/special/category-batch/control',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V018',control});});
 router.get('/api/special/category-batch/concurrency',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,concurrency:serverConcurrency,active:serverWorkers,queued:serverQueue.length});});
 router.post('/api/special/category-batch/concurrency',(req,res)=>{const m=auth(req,res);if(!m)return;serverConcurrency=clamp(Math.round(N(req.body&&req.body.concurrency,serverConcurrency)),1,32);log('SERVER_CONCURRENCY',{member:m,concurrency:serverConcurrency,active:serverWorkers,queued:serverQueue.length});pumpServerWorkers();res.json({ok:true,concurrency:serverConcurrency,active:serverWorkers,queued:serverQueue.length});});
 router.post('/api/special/category-batch/command',(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const cmd=S(req.body&&req.body.command);if(cmd==='#카테고리 검색#')control.mode='RUN';else if(cmd==='#카테고리 일시정지#')control.mode='PAUSE';else if(cmd==='#카테고리 중지#')control.mode='STOPPED';else return res.status(400).json({ok:false,error:'UNKNOWN_COMMAND'});if(cmd==='#카테고리 검색#')control.batch_date=batchDate(req.body&&req.body.batch_date||control.batch_date);control.updated_at=new Date().toISOString();control.updated_by=m;control.command=cmd;log('COMMAND',{member:m,mode:control.mode,batch_date:control.batch_date});res.json({ok:true,control});});
@@ -49,7 +53,7 @@ function enqueue(sourceId,items){
  }
  pumpServerWorkers();return added;
 }
-/* V017: product.js emits only after gm_product upsert has completed. SPECIAL server immediately owns vector work. */
+/* V018: product.js event is only a lightweight handoff. Heavy image/AI work runs in a Worker thread. */
 function onProductUpsert(x){
  if(control.mode!=='RUN'||!x)return;
  const item={product_uid:S(x.product_uid),mall_code:S(x.mall_code),image_url:S(x.image_url)};
@@ -60,39 +64,56 @@ function onProductUpsert(x){
 process.on('gm:special-product-upsert',onProductUpsert);
 router.get('/api/special/category-batch/vector-status',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,server_only:true,queued:serverQueue.length,active:serverWorkers,concurrency:serverConcurrency});});
 
-async function loadModel(){
- if(modelPromise)return modelPromise;
- modelPromise=(async()=>{
-  const cacheDir=process.env.GM_HF_CACHE_DIR||'/tmp/glomart-hf-cache';
-  process.env.HF_HOME=process.env.HF_HOME||cacheDir;
-  process.env.TRANSFORMERS_CACHE=process.env.TRANSFORMERS_CACHE||cacheDir;
-  log('SERVER_AI_LOAD_START',{model:'Xenova/mobileclip_s0',cache_dir:cacheDir});
-  const T=await import('@huggingface/transformers');
-  if(T.env){T.env.cacheDir=cacheDir;T.env.useBrowserCache=false;}
-  const processor=await T.AutoProcessor.from_pretrained('Xenova/mobileclip_s0');
-  const Model=T.CLIPVisionModelWithProjection||T.AutoModel;
-  const model=await Model.from_pretrained('Xenova/mobileclip_s0',{quantized:true,device:'cpu'});
-  log('SERVER_AI_READY',{dim:DIM,cache_dir:cacheDir});return {T,processor,model};
- })().catch(e=>{modelPromise=null;log('SERVER_AI_LOAD_FAIL',{error:S(e&&e.message||e)});throw e;});
- return modelPromise;
+function ensureVectorThread(){
+ if(vectorThread)return vectorThread;
+ const workerPath=path.join(__dirname,'vector_worker.js');
+ const w=new Worker(workerPath);
+ vectorThread=w;
+ w.on('online',()=>{log('VECTOR_THREAD_ONLINE',{concurrency:serverConcurrency});try{w.postMessage({type:'config',concurrency:serverConcurrency});}catch(_){} });
+ w.on('message',msg=>{if(!msg||msg.type!=='result')return;void finishVectorTask(msg);});
+ w.on('error',e=>{log('VECTOR_THREAD_ERROR',{error:S(e&&e.message||e)});});
+ w.on('exit',code=>{
+   log('VECTOR_THREAD_EXIT',{code,inflight:vectorInflight.size});
+   vectorThread=null;
+   const pending=[...vectorInflight.values()].map(x=>x.job);vectorInflight.clear();serverWorkers=Math.max(0,serverWorkers-pending.length);
+   for(const j of pending)retryOrFail(j,new Error('VECTOR_THREAD_EXIT_'+code));
+   if(serverQueue.length)setTimeout(pumpServerWorkers,100);
+ });
+ return w;
 }
-async function infer(url){const A=await loadModel(),r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0','Accept':'image/*,*/*;q=0.8'},redirect:'follow'});if(!r.ok)throw new Error('image HTTP '+r.status);const blob=await r.blob(),raw=await A.T.RawImage.fromBlob(blob),inputs=await A.processor(raw),o=await A.model(inputs),t=o.image_embeds||o.image_embedding||o.pooler_output;if(!t||!t.data||t.data.length!==DIM)throw new Error('embedding dimension '+(t&&t.data&&t.data.length||0));const v=new Array(DIM);let n=0;for(let i=0;i<DIM;i++){const x=Number(t.data[i])||0;v[i]=x;n+=x*x;}n=Math.sqrt(n)||1;for(let i=0;i<DIM;i++)v[i]/=n;return v;}
-async function serverWorker(){
- serverWorkers++;
+function retryOrFail(j,e){
+ if(j.retry<2){j.retry++;serverQueue.push(j);}else{serverQueued.delete(j.item.product_uid);serverFailUntil.set(j.item.product_uid,Date.now()+60000);}
+ log('SERVER_VECTOR_FAIL',{cycle_id:j.cycle_id,product_uid:j.item.product_uid,retry:j.retry,error:S(e&&e.message||e),workers:serverWorkers,concurrency:serverConcurrency});
+}
+function markVectorOk(j,elapsedMs){
+ serverQueued.delete(j.item.product_uid);
+ log('SERVER_VECTOR_OK',{cycle_id:j.cycle_id,product_uid:j.item.product_uid,elapsed_ms:elapsedMs,queue_left:serverQueue.length,workers:serverWorkers,concurrency:serverConcurrency});
+}
+async function finishVectorTask(msg){
+ const rec=vectorInflight.get(msg.task_id);if(!rec)return;
+ vectorInflight.delete(msg.task_id);const j=rec.job;
  try{
-  while(serverQueue.length){
-   const j=serverQueue.shift(),t=Date.now();
-   try{
-    const ex=await poolRef.query(`SELECT 1 FROM gm_product_image_vector WHERE product_uid=$1 AND ${vectorValid('gm_product_image_vector')} LIMIT 1`,[j.item.product_uid]);
-    if(!ex.rowCount){const v=await infer(j.item.image_url);await poolRef.query('INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image',[j.item.product_uid,v]);}
-    serverQueued.delete(j.item.product_uid);log('SERVER_VECTOR_OK',{cycle_id:j.cycle_id,product_uid:j.item.product_uid,elapsed_ms:Date.now()-t,queue_left:serverQueue.length,workers:serverWorkers,concurrency:serverConcurrency});
-   }catch(e){
-    if(j.retry<2){j.retry++;serverQueue.push(j);}else{serverQueued.delete(j.item.product_uid);serverFailUntil.set(j.item.product_uid,Date.now()+60000);}
-    log('SERVER_VECTOR_FAIL',{cycle_id:j.cycle_id,product_uid:j.item.product_uid,retry:j.retry,error:S(e&&e.message||e),workers:serverWorkers,concurrency:serverConcurrency});
-   }
-   await new Promise(r=>setTimeout(r,0));
-  }
- }finally{serverWorkers--;if(serverQueue.length)pumpServerWorkers();}
+   if(!msg.ok)throw new Error(S(msg.error)||'VECTOR_WORKER_FAIL');
+   const v=Array.isArray(msg.vector)?msg.vector:null;
+   if(!v||v.length!==DIM)throw new Error('embedding dimension '+(v&&v.length||0));
+   await poolRef.query('INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image',[j.item.product_uid,v]);
+   markVectorOk(j,Date.now()-rec.started_at);
+ }catch(e){retryOrFail(j,e);}
+ finally{serverWorkers=Math.max(0,serverWorkers-1);pumpServerWorkers();}
 }
-function pumpServerWorkers(){while(serverQueue.length&&serverWorkers<serverConcurrency)serverWorker();}
+async function dispatchVectorJob(j){
+ serverWorkers++;const started=Date.now();
+ try{
+   const ex=await poolRef.query(`SELECT 1 FROM gm_product_image_vector WHERE product_uid=$1 AND ${vectorValid('gm_product_image_vector')} LIMIT 1`,[j.item.product_uid]);
+   if(ex.rowCount){markVectorOk(j,Date.now()-started);serverWorkers--;pumpServerWorkers();return;}
+   const taskId=++vectorTaskSeq;
+   vectorInflight.set(taskId,{job:j,started_at:started});
+   const w=ensureVectorThread();
+   w.postMessage({type:'task',task_id:taskId,product_uid:j.item.product_uid,image_url:j.item.image_url});
+ }catch(e){serverWorkers=Math.max(0,serverWorkers-1);retryOrFail(j,e);pumpServerWorkers();}
+}
+function pumpServerWorkers(){
+ while(serverQueue.length&&serverWorkers<serverConcurrency){const j=serverQueue.shift();void dispatchVectorJob(j);}
+ if(vectorThread){try{vectorThread.postMessage({type:'config',concurrency:serverConcurrency});}catch(_){} }
+}
 module.exports=router;
