@@ -33,7 +33,7 @@ async function saveSnapshot(){
 
 loadDashboard(false); setInterval(()=>loadDashboard(false),60000);
 
-// GM_IMAGE_VECTOR_BACKGROUND_DASHBOARD_V001
+// GM_IMAGE_VECTOR_BACKGROUND_DASHBOARD_V004
 function ivFmtMb(n){ return n==null?'-':`${Number(n).toFixed(1)} MB`; }
 function ivStateText(s){ return ({OFF:'완전 정지',FORCED_ON:'강제 가동',AUTO_RUNNING:'자동 작업 중',AUTO_MEMORY_WAIT:'메모리 대기',AUTO_TIME_WAIT:'시간외 대기'})[String(s||'')]||String(s||'-'); }
 const IV_BASE_TITLE=document.title;

@@ -1,5 +1,5 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_V002
+/* GM_IMAGE_VECTOR_BACKGROUND_V004
  * Image-vector processing is completely detached from SPECIAL/category search.
  *
  * Persistent work source: gm_image_vector_pending
@@ -21,6 +21,7 @@ const os=require('os');
 const path=require('path');
 const {Worker}=require('worker_threads');
 const router=express.Router();
+const {parseCsv}=require('../../routes/builder/core');
 const DIM=512;
 const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
 const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLOTS||4)));
@@ -39,7 +40,7 @@ let mode='AUTO';
 let autoRunning=false;
 let schemaReady=false;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V002 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V004 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -221,7 +222,7 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V002',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V004',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,completed,failed,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
@@ -242,6 +243,56 @@ router.get('/api/gm/background/image-vector/status',async(req,res)=>{
 router.post('/api/gm/background/image-vector/mode',express.json(),async(req,res)=>{
   if(!poolRef||!schemaReady)return res.status(503).json({ok:false,error:'BACKGROUND_NOT_READY'});
   try{await setMode(req.body&&req.body.mode);res.json(await statusPayload());}catch(e){res.status(e&&e.message==='INVALID_MODE'?400:500).json({ok:false,error:S(e&&e.message||e)});}
+});
+
+router.post('/api/gm/background/image-vector/pending/import',express.text({type:['text/*','application/csv'],limit:'30mb'}),async(req,res)=>{
+  if(!poolRef||!schemaReady)return res.status(503).json({ok:false,error:'BACKGROUND_NOT_READY'});
+  try{
+    const rows=parseCsv(req.body||'');
+    const dedup=new Map();
+    let invalid=0;
+    for(const row of rows){
+      const uid=S(row.product_uid),url=S(row.image_url||row.thumb_origin_url),raw=S(row.updated_at);
+      if(!uid||!url){invalid++;continue;}
+      let updatedAt=raw;
+      if(!updatedAt||!Number.isFinite(Date.parse(updatedAt)))updatedAt=new Date().toISOString();
+      else updatedAt=new Date(updatedAt).toISOString();
+      dedup.set(uid,{product_uid:uid,image_url:url,updated_at:updatedAt});
+    }
+    const list=[...dedup.values()];
+    if(!list.length)return res.status(400).json({ok:false,error:'NO_VALID_ROWS',received:rows.length,invalid});
+    let upserted=0;
+    const batchSize=500;
+    const client=await poolRef.connect();
+    try{
+      await client.query('BEGIN');
+      for(let i=0;i<list.length;i+=batchSize){
+        const part=list.slice(i,i+batchSize);
+        const uids=part.map(x=>x.product_uid),urls=part.map(x=>x.image_url),dates=part.map(x=>x.updated_at);
+        const q=await client.query(`
+          INSERT INTO gm_image_vector_pending(product_uid,image_url,updated_at)
+          SELECT * FROM UNNEST($1::text[],$2::text[],$3::timestamptz[])
+          ON CONFLICT(product_uid) DO UPDATE
+            SET image_url=EXCLUDED.image_url,
+                updated_at=EXCLUDED.updated_at
+          WHERE EXCLUDED.updated_at >= gm_image_vector_pending.updated_at
+        `,[uids,urls,dates]);
+        upserted+=q.rowCount;
+      }
+      await client.query('COMMIT');
+    }catch(e){
+      try{await client.query('ROLLBACK');}catch(_){ }
+      throw e;
+    }finally{client.release();}
+    const count=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');
+    const pending=Number(count.rows[0]&&count.rows[0].n||0);
+    log('PENDING_IMPORT',{received:rows.length,valid:list.length,invalid,upserted,pending});
+    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V004',received:rows.length,valid:list.length,invalid,upserted,pending});
+    setImmediate(()=>void pump());
+  }catch(e){
+    lastError=S(e&&e.message||e);log('PENDING_IMPORT_FAIL',{error:lastError});
+    res.status(500).json({ok:false,error:lastError});
+  }
 });
 function shutdown(){
   if(timer){clearInterval(timer);timer=null;}
