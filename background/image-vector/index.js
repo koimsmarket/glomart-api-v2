@@ -1,5 +1,5 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_V006
+/* GM_IMAGE_VECTOR_BACKGROUND_V008
  * Image-vector processing is completely detached from SPECIAL/category search.
  *
  * Persistent work source: gm_image_vector_pending
@@ -27,6 +27,8 @@ const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
 const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLOTS||4)));
 const FETCH_WINDOW=Math.max(8,Math.min(100,Number(process.env.GM_IMAGE_VECTOR_FETCH_WINDOW||30)));
 const FAIL_COOLDOWN_MS=Math.max(60000,Number(process.env.GM_IMAGE_VECTOR_FAIL_COOLDOWN_MS||600000));
+// Vector is always lowest priority, even in ON mode. Product/search saves get a quiet window first.
+const FOREGROUND_QUIET_MS=Math.max(3000,Number(process.env.GM_IMAGE_VECTOR_FOREGROUND_QUIET_MS||10000));
 const AUTO_START_HOUR=0;
 const AUTO_END_HOUR=8;
 const AUTO_START_RATIO=0.70;
@@ -39,8 +41,10 @@ let completed=0,failed=0,lastError='',lastMemory=null;
 let mode='AUTO';
 let autoRunning=false;
 let schemaReady=false;
+let foregroundQuietUntil=0;
+let foregroundEventCount=0;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V006 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V008 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -92,18 +96,32 @@ async function ensureSchema(){
   log('SCHEMA_READY',{pending_migration:'110_gm_image_vector_pending.sql',config_migration:'111_gm_image_vector_background_config.sql',mode});
 }
 
+
+function markForegroundActivity(info){
+  const now=Date.now();
+  foregroundQuietUntil=Math.max(foregroundQuietUntil,now+FOREGROUND_QUIET_MS);
+  foregroundEventCount++;
+  log('FOREGROUND_PRIORITY',{quiet_ms:FOREGROUND_QUIET_MS,quiet_until:new Date(foregroundQuietUntil).toISOString(),product_uid:S(info&&info.product_uid),mall_code:S(info&&info.mall_code)});
+}
+function foregroundQuietRemaining(){return Math.max(0,foregroundQuietUntil-Date.now());}
+
 function ensureWorker(){
   if(worker&&worker.connected)return worker;
-  worker=fork(path.join(__dirname,'vector_worker.js'),[],{
+  const child=fork(path.join(__dirname,'vector_worker.js'),[],{
     stdio:['ignore','inherit','inherit','ipc'],
     env:Object.assign({},process.env,{GM_IMAGE_VECTOR_CHILD:'1'})
   });
-  worker.once('spawn',()=>log('WORKER_ONLINE',{pid:worker&&worker.pid||null,runtime:'child_process'}));
-  worker.on('message',msg=>{if(msg&&msg.type==='result')void finish(msg);});
-  worker.on('error',e=>{lastError=S(e&&e.message||e);log('WORKER_ERROR',{error:lastError});});
-  worker.on('exit',(code,signal)=>{
+  worker=child;
+  child.once('spawn',()=>{
+    let nice=null;
+    try{os.setPriority(child.pid,19);nice=os.getPriority(child.pid);}catch(e){log('LOW_PRIORITY_FAIL',{pid:child.pid,error:S(e&&e.message||e)});}
+    log('WORKER_ONLINE',{pid:child.pid||null,runtime:'child_process',nice_priority:nice,policy:'LOWEST_BACKGROUND'});
+  });
+  child.on('message',msg=>{if(msg&&msg.type==='result')void finish(msg);});
+  child.on('error',e=>{lastError=S(e&&e.message||e);log('WORKER_ERROR',{error:lastError});});
+  child.on('exit',(code,signal)=>{
     log('WORKER_EXIT',{code,signal:signal||null,inflight:inflight.size});
-    worker=null;
+    if(worker===child)worker=null;
     const now=Date.now();
     for(const rec of inflight.values())failUntil.set(rec.product_uid,now+FAIL_COOLDOWN_MS);
     inflight.clear();
@@ -150,6 +168,13 @@ async function pump(){
       if(inflight.size===0)releaseIdleWorker(decision.state);
       return;
     }
+    const quietMs=foregroundQuietRemaining();
+    if(quietMs>0){
+      // Never kill an inference already in progress; just stop taking new work.
+      // The child runs at OS nice=19 so foreground/server work preempts its CPU time.
+      log('YIELD_FOREGROUND',{mode,state:decision.state,quiet_remaining_ms:quietMs,active:inflight.size,memory_percent:mem.percent});
+      return;
+    }
     const free=Math.max(0,MAX_SLOTS-inflight.size);
     if(free<=0)return;
     const jobs=await pickJobs(free);
@@ -182,15 +207,16 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V006',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',completed,failed,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
   poolRef=pool;
+  process.on('gm:special-product-upsert',markForegroundActivity);
   void ensureSchema().then(()=>{
     timer=setInterval(()=>void pump(),TICK_MS);if(timer&&typeof timer.unref==='function')timer.unref();
     setTimeout(()=>void pump(),Math.min(5000,TICK_MS));
-    log('INIT',{tick_ms:TICK_MS,max_slots:MAX_SLOTS,mode,auto_window:'00:00~08:00',start_percent:70,stop_percent:80});
+    log('INIT',{tick_ms:TICK_MS,max_slots:MAX_SLOTS,mode,auto_window:'00:00~08:00',start_percent:70,stop_percent:80,foreground_quiet_ms:FOREGROUND_QUIET_MS,worker_priority:'nice 19'});
   }).catch(e=>{
     lastError=S(e&&e.message||e);log('SCHEMA_FAIL',{error:lastError});
     const retry=setInterval(()=>{void ensureSchema().then(()=>{clearInterval(retry);if(!timer){timer=setInterval(()=>void pump(),TICK_MS);if(timer&&typeof timer.unref==='function')timer.unref();}void pump();}).catch(err=>{lastError=S(err&&err.message||err);log('SCHEMA_RETRY_FAIL',{error:lastError});});},30000);
@@ -247,7 +273,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
     const count=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');
     const pending=Number(count.rows[0]&&count.rows[0].n||0);
     log('PENDING_IMPORT',{received:rows.length,valid:list.length,invalid,upserted,pending});
-    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V006',received:rows.length,valid:list.length,invalid,upserted,pending});
+    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',received:rows.length,valid:list.length,invalid,upserted,pending});
     setImmediate(()=>void pump());
   }catch(e){
     lastError=S(e&&e.message||e);log('PENDING_IMPORT_FAIL',{error:lastError});
@@ -255,6 +281,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
   }
 });
 function shutdown(){
+  process.removeListener('gm:special-product-upsert',markForegroundActivity);
   if(timer){clearInterval(timer);timer=null;}
   if(worker){try{worker.disconnect();}catch(_){ }try{worker.kill('SIGTERM');}catch(_){ }worker=null;}
 }
