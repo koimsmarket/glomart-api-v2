@@ -1,5 +1,5 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_V005
+/* GM_IMAGE_VECTOR_BACKGROUND_V006
  * Image-vector processing is completely detached from SPECIAL/category search.
  *
  * Persistent work source: gm_image_vector_pending
@@ -8,18 +8,18 @@
  *
  * Operating mode (persisted in gm_image_vector_background_config):
  *   OFF  = never start new vector jobs
- *   AUTO = 00:00~08:00 Asia/Seoul only. Start at RSS <= 70%, stop at RSS >= 80%.
+ *   AUTO = 00:00~08:00 Asia/Seoul only. Start at container memory <= 70%, stop at >= 80%.
  *          70~80% is hysteresis: keep the current run/stop state.
  *   ON   = force run regardless of time and memory.
  *
- * Memory percentage is process RSS / container memory limit. Worker-thread/model
- * memory belongs to this Node process and is included in RSS.
+ * Memory percentage uses cgroup container usage / container limit when available.
+ * This includes the persistent MobileCLIP child-process memory.
  */
 const express=require('express');
 const fs=require('fs');
 const os=require('os');
 const path=require('path');
-const {Worker}=require('worker_threads');
+const {fork}=require('child_process');
 const router=express.Router();
 const {parseCsv}=require('../../routes/builder/core');
 const DIM=512;
@@ -40,7 +40,7 @@ let mode='AUTO';
 let autoRunning=false;
 let schemaReady=false;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V005 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V006 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -51,11 +51,18 @@ function containerLimit(){
   }
   return limit;
 }
+function containerUsage(){
+  let used=readNumber('/sys/fs/cgroup/memory.current');
+  if(!used)used=readNumber('/sys/fs/cgroup/memory/memory.usage_in_bytes');
+  if(!used)used=Number(process.memoryUsage().rss||0);
+  return used;
+}
 function memorySnapshot(){
-  const rss=Number(process.memoryUsage().rss||0);
+  const used=containerUsage();
   const limit=containerLimit();
-  const ratio=limit>0?rss/limit:1;
-  return {used_bytes:rss,total_bytes:limit,ratio,percent:Math.round(ratio*1000)/10,source:'process_rss/container_limit'};
+  const ratio=limit>0?used/limit:1;
+  const source=(readNumber('/sys/fs/cgroup/memory.current')||readNumber('/sys/fs/cgroup/memory/memory.usage_in_bytes'))?'cgroup_usage/container_limit':'process_rss/container_limit_fallback';
+  return {used_bytes:used,total_bytes:limit,ratio,percent:Math.round(ratio*1000)/10,source};
 }
 function kstHour(){return new Date(Date.now()+9*60*60*1000).getUTCHours();}
 function inAutoWindow(){const h=kstHour();return h>=AUTO_START_HOUR&&h<AUTO_END_HOUR;}
@@ -86,13 +93,16 @@ async function ensureSchema(){
 }
 
 function ensureWorker(){
-  if(worker)return worker;
-  worker=new Worker(path.join(__dirname,'vector_worker.js'));
-  worker.on('online',()=>log('WORKER_ONLINE',{}));
+  if(worker&&worker.connected)return worker;
+  worker=fork(path.join(__dirname,'vector_worker.js'),[],{
+    stdio:['ignore','inherit','inherit','ipc'],
+    env:Object.assign({},process.env,{GM_IMAGE_VECTOR_CHILD:'1'})
+  });
+  worker.once('spawn',()=>log('WORKER_ONLINE',{pid:worker&&worker.pid||null,runtime:'child_process'}));
   worker.on('message',msg=>{if(msg&&msg.type==='result')void finish(msg);});
   worker.on('error',e=>{lastError=S(e&&e.message||e);log('WORKER_ERROR',{error:lastError});});
-  worker.on('exit',code=>{
-    log('WORKER_EXIT',{code,inflight:inflight.size});
+  worker.on('exit',(code,signal)=>{
+    log('WORKER_EXIT',{code,signal:signal||null,inflight:inflight.size});
     worker=null;
     const now=Date.now();
     for(const rec of inflight.values())failUntil.set(rec.product_uid,now+FAIL_COOLDOWN_MS);
@@ -103,7 +113,8 @@ function ensureWorker(){
 function releaseIdleWorker(reason){
   if(worker&&inflight.size===0){
     const w=worker;worker=null;
-    try{void w.terminate();}catch(_){ }
+    try{w.disconnect();}catch(_){ }
+    try{w.kill('SIGTERM');}catch(_){ }
     log('WORKER_RELEASE',{reason});
   }
 }
@@ -148,7 +159,8 @@ async function pump(){
       const taskId=++seq;
       const rec={task_id:taskId,product_uid:S(row.product_uid),image_url:S(row.image_url),updated_at:new Date(row.updated_at).toISOString()};
       inflight.set(taskId,rec);
-      w.postMessage({type:'task',...rec});
+      if(!w.connected)throw new Error('VECTOR_CHILD_NOT_CONNECTED');
+      w.send({type:'task',...rec});
     }
     log('DISPATCH',{mode,state:decision.state,memory_percent:mem.percent,max_slots:MAX_SLOTS,dispatched:jobs.length,active:inflight.size});
   }catch(e){lastError=S(e&&e.message||e);log('PUMP_FAIL',{error:lastError});}
@@ -170,7 +182,7 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V005',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V006',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,completed,failed,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
@@ -235,7 +247,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
     const count=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');
     const pending=Number(count.rows[0]&&count.rows[0].n||0);
     log('PENDING_IMPORT',{received:rows.length,valid:list.length,invalid,upserted,pending});
-    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V005',received:rows.length,valid:list.length,invalid,upserted,pending});
+    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V006',received:rows.length,valid:list.length,invalid,upserted,pending});
     setImmediate(()=>void pump());
   }catch(e){
     lastError=S(e&&e.message||e);log('PENDING_IMPORT_FAIL',{error:lastError});
@@ -244,6 +256,6 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
 });
 function shutdown(){
   if(timer){clearInterval(timer);timer=null;}
-  if(worker){try{worker.terminate();}catch(_){ }worker=null;}
+  if(worker){try{worker.disconnect();}catch(_){ }try{worker.kill('SIGTERM');}catch(_){ }worker=null;}
 }
 module.exports={router,init,shutdown};

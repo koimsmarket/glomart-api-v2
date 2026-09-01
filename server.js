@@ -1905,7 +1905,7 @@ try{
   const imageVectorBackground=require('./background/image-vector');
   imageVectorBackground.init(pool);
   app.use(imageVectorBackground.router);
-  console.log('[GM_IMAGE_VECTOR_BACKGROUND_V005] background/image-vector registered');
+  console.log('[GM_IMAGE_VECTOR_BACKGROUND_V006] background/image-vector registered');
 }catch(e){
   console.error('[GM_IMAGE_VECTOR_BACKGROUND_MOUNT_FAIL]',String(e&&e.message||e));
 }

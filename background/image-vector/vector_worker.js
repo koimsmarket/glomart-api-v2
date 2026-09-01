@@ -1,9 +1,8 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_WORKER_V002
+/* GM_IMAGE_VECTOR_BACKGROUND_WORKER_V003_CHILD
  * Heavy MobileCLIP work lives outside category-batch.
  * The parent scheduler dispatches only the number of jobs allowed by memory.
  */
-const { parentPort } = require('worker_threads');
 const DIM=512;
 const S=v=>String(v==null?'':v).trim();
 let modelPromise=null;
@@ -42,14 +41,16 @@ async function infer(url){
   for(let i=0;i<DIM;i++)v[i]/=norm;
   return v;
 }
-parentPort.on('message',async msg=>{
+process.on('message',async msg=>{
   if(!msg||msg.type!=='task')return;
   const started=Date.now();
   const taskId=msg.task_id,productUid=S(msg.product_uid),imageUrl=S(msg.image_url),updatedAt=S(msg.updated_at);
   try{
     const vector=await infer(imageUrl);
-    parentPort.postMessage({type:'result',task_id:taskId,product_uid:productUid,image_url:imageUrl,updated_at:updatedAt,ok:true,vector,elapsed_ms:Date.now()-started});
+    if(process.send)process.send({type:'result',task_id:taskId,product_uid:productUid,image_url:imageUrl,updated_at:updatedAt,ok:true,vector,elapsed_ms:Date.now()-started});
   }catch(e){
-    parentPort.postMessage({type:'result',task_id:taskId,product_uid:productUid,image_url:imageUrl,updated_at:updatedAt,ok:false,error:S(e&&e.message||e),elapsed_ms:Date.now()-started});
+    if(process.send)process.send({type:'result',task_id:taskId,product_uid:productUid,image_url:imageUrl,updated_at:updatedAt,ok:false,error:S(e&&e.message||e),elapsed_ms:Date.now()-started});
   }
 });
+
+process.on('disconnect',()=>process.exit(0));
