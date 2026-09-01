@@ -1,5 +1,5 @@
 'use strict';
-/* GM_CATEGORY_BATCH_SPECIAL_V014
+/* GM_CATEGORY_BATCH_SPECIAL_V015
  * Special one-off category/vector preload module.
  * Existing search/vector routes are not modified.
  */
@@ -14,19 +14,19 @@ const leases=new Map();
 const cycles=new Map();
 const serverQueue=[];
 const serverQueued=new Set();
-let serverWorkers=0, serverConcurrency=10, modelPromise=null, poolRef=null, seq=0;
+let serverWorkers=0, serverConcurrency=15, modelPromise=null, poolRef=null, seq=0;
 const S=v=>String(v==null?'':v).trim();
 const N=(v,d)=>Number.isFinite(Number(v))?Number(v):d;
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
 function pool(req){const p=req.app&&req.app.locals&&req.app.locals.pool;if(!p)throw new Error('DB_POOL_NOT_AVAILABLE');poolRef=p;return p;}
 function auth(req,res){const m=S((req.body&&req.body.member_id)||(req.query&&req.query.member_id));if(!ADMIN_IDS.has(m)){res.status(403).json({ok:false,error:'ADMIN_ID_REQUIRED'});return null;}return m;}
-function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V014 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V015 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function splitKeywords(v){return [...new Set(S(v).split('/').map(x=>x.trim()).filter(Boolean))];}
 function batchDate(v){const x=S(v);return /^\d{4}-\d{2}-\d{2}$/.test(x)?x:new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
 function vectorValid(alias='v'){return `${alias}.vector_image IS NOT NULL AND array_length(${alias}.vector_image,1)=${DIM}`;}
 function prioritySql(){return `CASE WHEN gm_code LIKE 'FD-%' THEN 1 WHEN gm_code LIKE 'HS-%' THEN 2 ELSE 3 END`;}
 
-router.get('/api/special/category-batch/control',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V014',control});});
+router.get('/api/special/category-batch/control',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V015',control});});
 router.get('/api/special/category-batch/concurrency',(req,res)=>{const m=auth(req,res);if(!m)return;res.json({ok:true,concurrency:serverConcurrency,active:serverWorkers,queued:serverQueue.length});});
 router.post('/api/special/category-batch/concurrency',(req,res)=>{const m=auth(req,res);if(!m)return;serverConcurrency=clamp(Math.round(N(req.body&&req.body.concurrency,serverConcurrency)),1,32);log('SERVER_CONCURRENCY',{member:m,concurrency:serverConcurrency,active:serverWorkers,queued:serverQueue.length});pumpServerWorkers();res.json({ok:true,concurrency:serverConcurrency,active:serverWorkers,queued:serverQueue.length});});
 router.post('/api/special/category-batch/command',(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const cmd=S(req.body&&req.body.command);if(cmd==='#카테고리 검색#')control.mode='RUN';else if(cmd==='#카테고리 일시정지#')control.mode='PAUSE';else if(cmd==='#카테고리 중지#')control.mode='STOPPED';else return res.status(400).json({ok:false,error:'UNKNOWN_COMMAND'});if(cmd==='#카테고리 검색#')control.batch_date=batchDate(req.body&&req.body.batch_date||control.batch_date);control.updated_at=new Date().toISOString();control.updated_by=m;control.command=cmd;log('COMMAND',{member:m,mode:control.mode,batch_date:control.batch_date});res.json({ok:true,control});});
