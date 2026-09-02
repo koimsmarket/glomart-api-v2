@@ -2,6 +2,42 @@ const express = require('express');
 const router = express.Router();
 const { LIMITS, tableSpec, dbFrom, fail, parseCsv, getColumns, getColumnMeta, pickKey, qIdent, validateCell, shouldStop, resultRow, safeUpdateCategoryBatch, mapCafe24Member, cafe24ImportResultRow, upsertObject, toCsv } = require('./core');
 
+
+// GM_PRODUCT_SAFE_KEY_V001
+// Product rows are validated against the external mall identifiers before UPDATE.
+// - CPKR: mall_code + product_id(PID) + item_id(IID) + vendor_item_id(VID) are all required.
+// - ALKR: item_id is legitimately blank in current exports. The blank IID is still part of
+//   the comparison and matches DB NULL/blank via COALESCE; it is not ignored.
+function cleanKeyValue(v) {
+  return String(v == null ? '' : v).trim();
+}
+function pickProductSafeKey(row) {
+  const mall = cleanKeyValue(row.mall_code).toUpperCase();
+  const pid = cleanKeyValue(row.product_id);
+  const iid = cleanKeyValue(row.item_id);
+  const vid = cleanKeyValue(row.vendor_item_id);
+
+  if (!mall || !pid || !vid) return null;
+  if (mall === 'CPKR' && !iid) return null;
+
+  const keys = ['mall_code','product_id','item_id','vendor_item_id'];
+  const values = [mall,pid,iid,vid];
+  return {
+    keys,
+    values,
+    label: values.join('+'),
+    blankComparable: new Set(iid === '' ? ['item_id'] : [])
+  };
+}
+function buildSafeWhere(key) {
+  return key.keys.map((k,i)=>{
+    if (key.blankComparable && key.blankComparable.has(k)) {
+      return `COALESCE(${qIdent(k)}::text,'')=$${i+1}`;
+    }
+    return `${qIdent(k)}=$${i+1}`;
+  }).join(' AND ');
+}
+
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
@@ -90,12 +126,12 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
 
       for (const row of rows) {
         processed++;
-        const key = pickKey(row, spec);
+        const key = spec.table === 'gm_product' ? pickProductSafeKey(row) : pickKey(row, spec);
         if (!key) {
           invalid++; skipped++;
           result.push(resultRow(row.__row_no, spec.table, '', 'SKIP', '', '', 'MISSING_KEY'));
         } else {
-          const where = key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+          const where = spec.table === 'gm_product' ? buildSafeWhere(key) : key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
           const exist = await (client || db).query(`SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`, key.values);
 
           if (!exist.rows.length) {

@@ -16,9 +16,12 @@ const TABLES = {
     table: 'gm_product',
     // Direct record editor identity. This is independent from file UPSERT key below.
     recordKey: ['product_uid'],
-    key: ['mall_code', 'pi_ii_vi'],
+    // File Safe Update uses the actual external product/option identifiers.
+    // CPKR requires mall_code + PID + IID + VID.
+    // ALKR may legitimately have blank IID; safe_update.js still compares IID as blank/NULL.
+    key: ['mall_code', 'product_id', 'item_id', 'vendor_item_id'],
     order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
-    critical: ['mall_code', 'pi_ii_vi', 'product_name', 'mall_sale_price'],
+    critical: ['mall_code', 'product_id', 'product_name', 'mall_sale_price'],
     numeric: ['mall_sale_price','customer_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','unit_price_value','unit_base_qty','unit_norm_qty','unit_norm_price','option_count','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
     defaults: { mall_code:'CPKR', currency:'KRW', sale_status:'active', collect_status:'ok', unit_sortable_yn:'N', unit_parse_status:'failed', return_available_yn:'Y', exchange_available_yn:'Y' },
     enums: {
