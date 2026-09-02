@@ -88,6 +88,31 @@ async function setImageVectorMode(mode){
     await loadImageVectorBackgroundStatus();
   }catch(e){ log('image-vector mode error: '+String(e&&e.message||e)); }
 }
+async function syncImageVectorProducts(button){
+  const out=document.getElementById('ivProductSyncResult');
+  if(!confirm('현재 상품에 없는 이미지 Vector를 삭제합니다. 상품 테이블은 변경하지 않습니다. 계속할까요?'))return;
+  const timed=startButtonTimer(button,'상품 동기화 중');
+  try{
+    const r=await fetch(`${API}/api/gm/builder/image-vector/sync-products`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:'{}'
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    const text=`동기화 완료: 상품 ${fmt(j.product_count)}건 / 삭제 Vector ${fmt(j.deleted)}건 / 잔여 Vector ${fmt(j.vector_after)}건`;
+    if(out)out.textContent=text;
+    log({action:'image-vector.sync-products',...j});
+    await loadDashboard(false);
+  }catch(e){
+    const msg=String(e&&e.message||e);
+    if(out)out.textContent='동기화 실패: '+msg;
+    log('image-vector product sync error: '+msg);
+  }finally{
+    stopButtonTimer(timed);
+  }
+}
+
 async function uploadImageVectorPending(button){
   const input=document.getElementById('ivPendingFile'),out=document.getElementById('ivUploadResult');
   const file=input&&input.files&&input.files[0];
