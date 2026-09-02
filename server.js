@@ -1897,6 +1897,8 @@ app.use(require('./routes/event'));
 console.log('[EVENT_ROUTE_V009] routes/event registered');
 app.use(require('./routes/search_keyword'));
 console.log('[GM_SEARCH_KEYWORD_ROUTE_V002] routes/search_keyword registered');
+app.use(require('./routes/search_local'));
+console.log('[GM_SEARCH_LOCAL_V001] routes/search_local registered');
 app.use(require('./routes/barcode'));
 console.log('[GM_BARCODE_ROUTE_V001] routes/barcode registered');
 app.use(require('./routes/image_vector'));
