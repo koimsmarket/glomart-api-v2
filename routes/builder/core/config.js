@@ -16,9 +16,9 @@ const TABLES = {
     table: 'gm_product',
     // Direct record editor identity. This is independent from file UPSERT key below.
     recordKey: ['product_uid'],
-    // File Safe Update uses the actual external product/option identifiers.
-    // CPKR requires mall_code + PID + IID + VID.
-    // ALKR may legitimately have blank IID; safe_update.js still compares IID as blank/NULL.
+    // Safe Update product identity verification.
+    // CPKR: mall_code + PID + IID + VID.
+    // ALKR: IID may be blank; safe_update.js compares DB NULL/blank exactly.
     key: ['mall_code', 'product_id', 'item_id', 'vendor_item_id'],
     order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
     critical: ['mall_code', 'product_id', 'product_name', 'mall_sale_price'],

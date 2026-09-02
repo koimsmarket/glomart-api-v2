@@ -3,38 +3,35 @@ const router = express.Router();
 const { LIMITS, tableSpec, dbFrom, fail, parseCsv, getColumns, getColumnMeta, pickKey, qIdent, validateCell, shouldStop, resultRow, safeUpdateCategoryBatch, mapCafe24Member, cafe24ImportResultRow, upsertObject, toCsv } = require('./core');
 
 
-// GM_PRODUCT_SAFE_KEY_V001
-// Product rows are validated against the external mall identifiers before UPDATE.
-// - CPKR: mall_code + product_id(PID) + item_id(IID) + vendor_item_id(VID) are all required.
-// - ALKR: item_id is legitimately blank in current exports. The blank IID is still part of
-//   the comparison and matches DB NULL/blank via COALESCE; it is not ignored.
-function cleanKeyValue(v) {
+// GM_PRODUCT_ETA_SAFE_UPDATE_V001
+// Full product CSV may be supplied for identity verification, but for this maintenance
+// import only delivery_eta_text is mutable. Other product columns are neither validated
+// nor updated, preventing unrelated historical enum/value differences from blocking ETA.
+const PRODUCT_ETA_MUTABLE = new Set(['delivery_eta_text']);
+
+function cleanProductKey(v) {
   return String(v == null ? '' : v).trim();
 }
 function pickProductSafeKey(row) {
-  const mall = cleanKeyValue(row.mall_code).toUpperCase();
-  const pid = cleanKeyValue(row.product_id);
-  const iid = cleanKeyValue(row.item_id);
-  const vid = cleanKeyValue(row.vendor_item_id);
-
+  const mall = cleanProductKey(row.mall_code).toUpperCase();
+  const pid = cleanProductKey(row.product_id);
+  const iid = cleanProductKey(row.item_id);
+  const vid = cleanProductKey(row.vendor_item_id);
   if (!mall || !pid || !vid) return null;
   if (mall === 'CPKR' && !iid) return null;
-
-  const keys = ['mall_code','product_id','item_id','vendor_item_id'];
-  const values = [mall,pid,iid,vid];
   return {
-    keys,
-    values,
-    label: values.join('+'),
-    blankComparable: new Set(iid === '' ? ['item_id'] : [])
+    keys:['mall_code','product_id','item_id','vendor_item_id'],
+    values:[mall,pid,iid,vid],
+    label:[mall,pid,iid,vid].join('+'),
+    blankComparable: iid === '' ? new Set(['item_id']) : new Set()
   };
 }
-function buildSafeWhere(key) {
+function productSafeWhere(key, startIndex=1) {
   return key.keys.map((k,i)=>{
-    if (key.blankComparable && key.blankComparable.has(k)) {
-      return `COALESCE(${qIdent(k)}::text,'')=$${i+1}`;
-    }
-    return `${qIdent(k)}=$${i+1}`;
+    const p = '$' + (startIndex+i);
+    return key.blankComparable && key.blankComparable.has(k)
+      ? `COALESCE(${qIdent(k)}::text,'')=${p}`
+      : `${qIdent(k)}=${p}`;
   }).join(' AND ');
 }
 
@@ -131,7 +128,7 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
           invalid++; skipped++;
           result.push(resultRow(row.__row_no, spec.table, '', 'SKIP', '', '', 'MISSING_KEY'));
         } else {
-          const where = spec.table === 'gm_product' ? buildSafeWhere(key) : key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+          const where = spec.table === 'gm_product' ? productSafeWhere(key, 1) : key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
           const exist = await (client || db).query(`SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`, key.values);
 
           if (!exist.rows.length) {
@@ -144,6 +141,11 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
               let rowInvalid = false;
               for (const [col, raw] of Object.entries(row)) {
                 if (col === '__row_no') continue;
+                // ETA maintenance upload: full source row is accepted for safe identity
+                // verification, but unrelated product fields must not be validated/updated.
+                if (spec.table === 'gm_product' &&
+                    !key.keys.includes(col) &&
+                    !PRODUCT_ETA_MUTABLE.has(col)) continue;
                 if (!colSet.has(col)) {
                   skipped++;
                   result.push(resultRow(row.__row_no, spec.table, key.label, 'SKIP_CELL', col, raw, 'UNKNOWN_COLUMN'));
@@ -216,8 +218,11 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
             if (updates.length) {
               if (apply) {
                 key.values.forEach(v=>params.push(v));
+                const updateWhere = spec.table === 'gm_product'
+                  ? productSafeWhere(key, params.length-key.values.length+1)
+                  : where.replace(/\$(\d+)/g, (_,n)=>'$'+(params.length-key.values.length+Number(n)));
                 await client.query(
-                  `UPDATE ${qIdent(spec.table)} SET ${updates.join(', ')} WHERE ${where.replace(/\$(\d+)/g, (_,n)=>'$'+(params.length-key.values.length+Number(n)))}`,
+                  `UPDATE ${qIdent(spec.table)} SET ${updates.join(', ')} WHERE ${updateWhere}`,
                   params
                 );
               }
