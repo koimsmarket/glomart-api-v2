@@ -144,7 +144,7 @@ async function finish(msg){
     const v=Array.isArray(msg.vector)?msg.vector:null;
     if(!v||v.length!==DIM)throw new Error('embedding dimension '+(v&&v.length||0));
     await poolRef.query('INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image',[rec.product_uid,v]);
-    const del=await poolRef.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2 AND updated_at=$3::timestamptz',[rec.product_uid,rec.image_url,rec.updated_at]);
+    const del=await poolRef.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2',[rec.product_uid,rec.image_url]);
     completed++;failUntil.delete(rec.product_uid);
     log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),pending_deleted:del.rowCount,active:inflight.size});
   }catch(e){
