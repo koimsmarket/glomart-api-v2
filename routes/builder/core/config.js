@@ -16,17 +16,14 @@ const TABLES = {
     table: 'gm_product',
     // Direct record editor identity. This is independent from file UPSERT key below.
     recordKey: ['product_uid'],
-    // Safe Update product identity verification.
-    // CPKR: mall_code + PID + IID + VID.
-    // ALKR: IID may be blank; safe_update.js compares DB NULL/blank exactly.
     key: ['mall_code', 'product_id', 'item_id', 'vendor_item_id'],
     order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
     critical: ['mall_code', 'product_id', 'product_name', 'mall_sale_price'],
     numeric: ['mall_sale_price','customer_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','unit_price_value','unit_base_qty','unit_norm_qty','unit_norm_price','option_count','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
     defaults: { mall_code:'CPKR', currency:'KRW', sale_status:'active', collect_status:'ok', unit_sortable_yn:'N', unit_parse_status:'failed', return_available_yn:'Y', exchange_available_yn:'Y' },
     enums: {
-      delivery_type:['seller','bundle','fresh','rocket','rocket_fresh','unknown'],
-      sale_status:['active','soldout','unavailable','deleted','collect_failed'],
+      delivery_type:['seller','bundle','fresh','rocket','rocket_fresh','unknown','ROCKET','ROCKET_FRESH','ROCKET_MERCHANT','판매자배송','로켓배송','로켓프레시'],
+      sale_status:['active','soldout','unavailable','deleted','collect_failed','STOPPED'],
       collect_status:['ok','option_failed','price_failed','page_failed','etc'],
       unit_sortable_yn:['Y','N'], return_available_yn:['Y','N'], exchange_available_yn:['Y','N']
     },

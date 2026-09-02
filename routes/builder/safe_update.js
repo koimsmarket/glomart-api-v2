@@ -3,36 +3,24 @@ const router = express.Router();
 const { LIMITS, tableSpec, dbFrom, fail, parseCsv, getColumns, getColumnMeta, pickKey, qIdent, validateCell, shouldStop, resultRow, safeUpdateCategoryBatch, mapCafe24Member, cafe24ImportResultRow, upsertObject, toCsv } = require('./core');
 
 
-// GM_PRODUCT_ETA_SAFE_UPDATE_V001
-// Full product CSV may be supplied for identity verification, but for this maintenance
-// import only delivery_eta_text is mutable. Other product columns are neither validated
-// nor updated, preventing unrelated historical enum/value differences from blocking ETA.
-const PRODUCT_ETA_MUTABLE = new Set(['delivery_eta_text']);
-
-function cleanProductKey(v) {
-  return String(v == null ? '' : v).trim();
+// GM_PRODUCT_SAFE_KEY_V002
+// gm_product export reality:
+// CPKR has PID/IID/VID; ALKR legitimately stores blank IID.
+// For ALKR blank IID is still compared to DB NULL/blank, never ignored.
+function cleanProductKey(v){ return String(v == null ? '' : v).trim(); }
+function pickProductSafeKey(row){
+  const mall=cleanProductKey(row.mall_code).toUpperCase();
+  const pid=cleanProductKey(row.product_id);
+  const iid=cleanProductKey(row.item_id);
+  const vid=cleanProductKey(row.vendor_item_id);
+  if(!mall || !pid || !vid) return null;
+  if(mall==='CPKR' && !iid) return null;
+  return {keys:['mall_code','product_id','item_id','vendor_item_id'], values:[mall,pid,iid,vid], label:[mall,pid,iid,vid].join('+'), blankComparable:iid===''?new Set(['item_id']):new Set()};
 }
-function pickProductSafeKey(row) {
-  const mall = cleanProductKey(row.mall_code).toUpperCase();
-  const pid = cleanProductKey(row.product_id);
-  const iid = cleanProductKey(row.item_id);
-  const vid = cleanProductKey(row.vendor_item_id);
-  if (!mall || !pid || !vid) return null;
-  if (mall === 'CPKR' && !iid) return null;
-  return {
-    keys:['mall_code','product_id','item_id','vendor_item_id'],
-    values:[mall,pid,iid,vid],
-    label:[mall,pid,iid,vid].join('+'),
-    blankComparable: iid === '' ? new Set(['item_id']) : new Set()
-  };
-}
-function productSafeWhere(key, startIndex=1) {
-  return key.keys.map((k,i)=>{
-    const p = '$' + (startIndex+i);
-    return key.blankComparable && key.blankComparable.has(k)
-      ? `COALESCE(${qIdent(k)}::text,'')=${p}`
-      : `${qIdent(k)}=${p}`;
-  }).join(' AND ');
+function productSafeWhere(key,startIndex=1){
+  return key.keys.map((k,i)=> key.blankComparable && key.blankComparable.has(k)
+    ? `COALESCE(${qIdent(k)}::text,'')=$${startIndex+i}`
+    : `${qIdent(k)}=$${startIndex+i}`).join(' AND ');
 }
 
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
@@ -128,7 +116,7 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
           invalid++; skipped++;
           result.push(resultRow(row.__row_no, spec.table, '', 'SKIP', '', '', 'MISSING_KEY'));
         } else {
-          const where = spec.table === 'gm_product' ? productSafeWhere(key, 1) : key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+          const where = spec.table === 'gm_product' ? productSafeWhere(key,1) : key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
           const exist = await (client || db).query(`SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`, key.values);
 
           if (!exist.rows.length) {
@@ -141,11 +129,6 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
               let rowInvalid = false;
               for (const [col, raw] of Object.entries(row)) {
                 if (col === '__row_no') continue;
-                // ETA maintenance upload: full source row is accepted for safe identity
-                // verification, but unrelated product fields must not be validated/updated.
-                if (spec.table === 'gm_product' &&
-                    !key.keys.includes(col) &&
-                    !PRODUCT_ETA_MUTABLE.has(col)) continue;
                 if (!colSet.has(col)) {
                   skipped++;
                   result.push(resultRow(row.__row_no, spec.table, key.label, 'SKIP_CELL', col, raw, 'UNKNOWN_COLUMN'));
