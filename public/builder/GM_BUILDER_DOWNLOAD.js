@@ -65,6 +65,30 @@ async function saveCsvStream(table,filename,directoryHandle){
       if(directoryHandle){
         return await writeResponseToDirectory(response,filename,directoryHandle);
       }
+      if(table==='product_image_vector' && window.showSaveFilePicker && response.body && typeof response.body.getReader==='function'){
+        const handle=await window.showSaveFilePicker({
+          suggestedName:filename,
+          types:[{description:'CSV',accept:{'text/csv':['.csv']}}]
+        });
+        const writable=await handle.createWritable();
+        let bytes=0;
+        try{
+          const reader=response.body.getReader();
+          while(true){
+            const {done,value}=await reader.read();
+            if(done) break;
+            if(value && value.byteLength){
+              await writable.write(value);
+              bytes+=value.byteLength;
+            }
+          }
+          await writable.close();
+        }catch(e){
+          try{ await writable.abort(); }catch(_){ }
+          throw e;
+        }
+        return {filename,bytes,verified:true,streamed:true};
+      }
       const blob=await response.blob();
       await saveBlobAsFile(blob,filename,null);
       return {filename,bytes:blob.size,verified:false,streamed:false};
@@ -80,7 +104,10 @@ async function saveCsvStream(table,filename,directoryHandle){
 }
 async function exportTableToFile(table,format,directoryHandle){
   const stamp=Date.now();
-  const actualFormat=(table==='products' && format==='xlsx') ? 'csv' : format;
+  // Large vector table only: browser-side XLSX conversion duplicates the entire 512D CSV
+  // in memory. Save as streamed CSV instead; Excel opens it normally.
+  // Every other table keeps the existing behavior unchanged.
+  const actualFormat=((table==='products' || table==='product_image_vector') && format==='xlsx') ? 'csv' : format;
   if(actualFormat==='csv'){
     const filename=`${table}_${stamp}.csv`;
     const saved=await saveCsvStream(table,filename,directoryHandle);
