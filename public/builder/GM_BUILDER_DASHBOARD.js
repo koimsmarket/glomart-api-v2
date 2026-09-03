@@ -134,3 +134,58 @@ async function uploadImageVectorPending(button){
 }
 loadImageVectorBackgroundStatus();
 setInterval(()=>loadImageVectorBackgroundStatus(),10000);
+
+// GM_RUNTIME_CONFIG_DEVICE_LANG_DASHBOARD_V001
+function cfgEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function cfgRowValue(items,key){const x=(items||[]).find(r=>r.config_key===key);return x?x.config_value:'-';}
+function paintRuntimeSummary(items){
+  const el=document.getElementById('runtimeVersionSummary');if(!el)return;
+  el.innerHTML=`<tr><th>gm_v1</th><td>${cfgEsc(cfgRowValue(items,'gm_v1'))}</td></tr><tr><th>gm_v2</th><td>${cfgEsc(cfgRowValue(items,'gm_v2'))}</td></tr><tr><th>DEVICE_LANG</th><td>${cfgEsc(cfgRowValue(items,'device_lang_enabled'))}</td></tr><tr><th>생성모드</th><td>${cfgEsc(cfgRowValue(items,'device_lang_background_mode'))}</td></tr>`;
+}
+async function loadRuntimeConfig(){
+  const tb=document.getElementById('runtimeConfigRows');if(!tb)return;
+  try{
+    const r=await fetch(`${API}/api/gm/builder/config?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    const items=j.items||[];paintRuntimeSummary(items);
+    tb.innerHTML=items.map(x=>{const protectedKey=x.config_key==='gm_v1'||x.config_key==='gm_v2';return `<tr data-key="${cfgEsc(x.config_key)}"><td>${cfgEsc(x.category)}</td><td><b>${cfgEsc(x.config_key)}</b></td><td><input class="c-val" value="${cfgEsc(x.config_value)}" ${protectedKey?'readonly':''}></td><td><input class="c-type" value="${cfgEsc(x.value_type)}" ${protectedKey?'readonly':''}></td><td><input class="c-mode" value="${cfgEsc(x.mode)}" ${protectedKey?'readonly':''}></td><td><input class="c-on" type="checkbox" ${x.enabled?'checked':''} ${protectedKey?'disabled':''}></td><td><input class="c-desc" value="${cfgEsc(x.description||'')}" ${protectedKey?'readonly':''}></td><td>${protectedKey?'-':`<button onclick="saveRuntimeRow(this)">저장</button>`}</td></tr>`;}).join('');
+  }catch(e){tb.innerHTML=`<tr><td colspan="8">설정 조회 실패: ${cfgEsc(e&&e.message||e)}</td></tr>`;}
+}
+async function saveRuntimeRow(btn){
+  const tr=btn.closest('tr');const body={config_key:tr.dataset.key,config_value:tr.querySelector('.c-val').value,value_type:tr.querySelector('.c-type').value,category:tr.children[0].textContent.trim(),mode:tr.querySelector('.c-mode').value,enabled:tr.querySelector('.c-on').checked,description:tr.querySelector('.c-desc').value};
+  const r=await fetch(`${API}/api/gm/builder/config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'runtime-config.saved',key:body.config_key,value:body.config_value});await loadRuntimeConfig();
+}
+async function addRuntimeConfig(){
+  const body={config_key:document.getElementById('cfgKey').value.trim(),config_value:document.getElementById('cfgValue').value.trim(),category:document.getElementById('cfgCategory').value.trim(),value_type:document.getElementById('cfgType').value,mode:document.getElementById('cfgMode').value.trim(),description:document.getElementById('cfgDesc').value.trim(),enabled:true};
+  if(!body.config_key){alert('config_key를 입력하세요.');return;}
+  const r=await fetch(`${API}/api/gm/builder/config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'runtime-config.added',key:body.config_key});await loadRuntimeConfig();
+}
+async function nextGmV2(){const r=await fetch(`${API}/api/gm/builder/config/gm-v2/next`,{method:'POST'});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'gm_v2.next',value:j.item&&j.item.config_value});await loadRuntimeConfig();}
+function pair(a,b){return `${fmt(a)} / ${fmt(b)}`;}
+function dlAction(x){
+  const lang=cfgEsc(x.lang_code),st=String(x.status||'');
+  if(st==='BUILTIN')return '기존팩';
+  let h='';
+  if(st==='NEW'||st==='FAILED')h+=`<button onclick="generateDeviceLang('${lang}')">생성</button> `;
+  if(st==='GENERATED'||st==='APPROVED')h+=`<button onclick="exportDeviceLang('${lang}')">CSV</button> `;
+  if(st==='GENERATED'||st==='APPROVED')h+=`<input type="file" id="dlFile_${lang}" accept=".csv" style="max-width:140px"> <button onclick="importDeviceLang('${lang}')">업로드</button> `;
+  if(st==='GENERATED')h+=`<button class="green" onclick="approveDeviceLang('${lang}')">승인</button>`;
+  return h||'-';
+}
+async function loadDeviceLanguages(){
+  const tb=document.getElementById('deviceLangRows'),gs=document.getElementById('deviceLangGenerator');if(!tb)return;
+  try{
+    const r=await fetch(`${API}/api/gm/builder/device-lang?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    const g=j.generator||{};if(gs)gs.innerHTML=`생성기: <b>${cfgEsc(g.mode||'-')}</b> / ${cfgEsc(g.state||'-')} / 메모리 ${cfgEsc(g.memory_percent==null?'-':g.memory_percent+'%')} / UI 원본 ${fmt(j.source_count)}건`;
+    tb.innerHTML=(j.items||[]).map(x=>`<tr><td><b>${cfgEsc(String(x.lang_code||'').toUpperCase())}</b></td><td>${cfgEsc(x.status)}</td><td>v${fmt(x.pack_version)} / ${fmt(x.pack_count)}</td><td>${pair(x.visit_day_count,x.visit_yesterday_count)}</td><td>${pair(x.visit_month_count,x.visit_last_month_count)}</td><td>${pair(x.visit_year_count,x.visit_last_year_count)}</td><td>${fmt(x.visit_total_count)}</td><td>${fmt(x.download_count)}</td><td>${dlAction(x)}</td></tr>`).join('')||'<tr><td colspan="9">데이터 없음</td></tr>';
+  }catch(e){tb.innerHTML=`<tr><td colspan="9">언어 조회 실패: ${cfgEsc(e&&e.message||e)}</td></tr>`;}
+}
+async function generateDeviceLang(lang){if(!confirm(`${lang.toUpperCase()} UI 사전을 지금 생성할까요? AUTO 모드에서는 야간에 자동 생성됩니다.`))return;const r=await fetch(`${API}/api/gm/builder/device-lang/${encodeURIComponent(lang)}/generate`,{method:'POST'});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||j.detail||`HTTP ${r.status}`);return;}log({action:'device-lang.generated',lang,...j.result});await loadDeviceLanguages();}
+function exportDeviceLang(lang){window.location.href=`${API}/api/gm/builder/device-lang/${encodeURIComponent(lang)}/export?t=${Date.now()}`;}
+async function importDeviceLang(lang){const el=document.getElementById(`dlFile_${lang}`),file=el&&el.files&&el.files[0];if(!file){alert('교정 CSV를 선택하세요.');return;}const fd=new FormData();fd.append('file',file,file.name);const r=await fetch(`${API}/api/gm/builder/device-lang/${encodeURIComponent(lang)}/import`,{method:'POST',body:fd});const j=await r.json();if(!r.ok||!j.ok){alert((j.error||`HTTP ${r.status}`)+(j.issue_count?` / 오류 ${j.issue_count}건`:''));return;}log({action:'device-lang.imported',lang,pack_count:j.pack_count});await loadDeviceLanguages();}
+async function approveDeviceLang(lang){if(!confirm(`${lang.toUpperCase()} 언어팩을 APPROVED로 배포할까요? 다음 방문부터 DEVICE 사용자가 다운로드합니다.`))return;const r=await fetch(`${API}/api/gm/builder/device-lang/${encodeURIComponent(lang)}/approve`,{method:'POST'});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'device-lang.approved',lang,version:j.item&&j.item.pack_version});await loadDeviceLanguages();}
+async function loadCountryStats(){
+  const tb=document.getElementById('countryStatRows');if(!tb)return;
+  try{const r=await fetch(`${API}/api/gm/builder/country-stat?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);tb.innerHTML=(j.items||[]).map(x=>`<tr><td><b>${cfgEsc(x.country_code)}</b></td><td>${fmt(x.member_count)}</td><td>${pair(x.visit_day_count,x.visit_yesterday_count)}</td><td>${pair(x.visit_month_count,x.visit_last_month_count)}</td><td>${pair(x.visit_year_count,x.visit_last_year_count)}</td><td>${fmt(x.visit_total_count)}</td></tr>`).join('')||'<tr><td colspan="6">데이터 없음</td></tr>';}catch(e){tb.innerHTML=`<tr><td colspan="6">국가 조회 실패: ${cfgEsc(e&&e.message||e)}</td></tr>`;}
+}
+loadRuntimeConfig();loadDeviceLanguages();loadCountryStats();
+setInterval(()=>{loadDeviceLanguages();loadCountryStats();},60000);

@@ -7,5 +7,7 @@ router.use(require('./safe_update'));
 router.use(require('./members'));
 router.use(require('./record_editor'));
 router.use(require('./vector_sync'));
+router.use(require('./runtime_config'));
+router.use(require('./device_lang'));
 
 module.exports = router;

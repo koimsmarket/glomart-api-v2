@@ -15,6 +15,34 @@
 </div>
 <div class="card"><h2>DATABASE / QUEUE STATUS</h2><div id="statusTime" class="small">조회 전</div><div class="grid"><div><h3>테이블 레코드 수</h3><table><tbody id="tableStatus"><tr><td>조회 전</td></tr></tbody></table></div><div><h3>Queue / DB</h3><table><tbody id="queueStatus"><tr><td>조회 전</td></tr></tbody></table><div id="dbStatus" class="status">조회 전</div></div></div><button class="green" onclick="loadDashboard(false)">상태 새로고침</button><button onclick="saveSnapshot()">스냅샷 저장</button></div>
 
+
+<div class="card" id="runtimeConfigCard">
+  <h2>CENTRAL RUNTIME CONFIG</h2>
+  <div class="small">운영 설정은 컬럼 추가가 아니라 <b>한 설정 = 한 행</b>으로 관리합니다. gm_v1은 1분 동적값, gm_v2는 +1 순차 버전입니다.</div>
+  <div class="grid" style="margin-top:12px"><div><table><tbody id="runtimeVersionSummary"><tr><td>설정 조회 전</td></tr></tbody></table></div><div>
+    <button class="green" onclick="loadRuntimeConfig()">설정 새로고침</button> <button onclick="nextGmV2()">gm_v2 +1</button>
+  </div></div>
+  <div style="overflow:auto;max-height:420px;margin-top:12px"><table><thead><tr><th>Category</th><th>Key</th><th>Value</th><th>Type</th><th>Mode</th><th>ON</th><th>Description</th><th>저장</th></tr></thead><tbody id="runtimeConfigRows"><tr><td colspan="8">조회 전</td></tr></tbody></table></div>
+  <h3>새 설정 추가</h3>
+  <div class="grid"><div><label>config_key</label><input id="cfgKey"><label>config_value</label><input id="cfgValue"><label>category</label><input id="cfgCategory" value="SYSTEM"></div><div><label>value_type</label><select id="cfgType"><option>STRING</option><option>NUMBER</option><option>BOOLEAN</option><option>VERSION</option><option>JSON</option></select><label>mode</label><input id="cfgMode" value="FIXED"><label>description</label><input id="cfgDesc"></div></div>
+  <button class="green" onclick="addRuntimeConfig()">설정 추가</button>
+</div>
+
+<div class="card" id="deviceLangCard">
+  <h2>DEVICE LANGUAGE / EXTENSION PACK</h2>
+  <div class="small">기본 25개 언어는 기존 사전을 그대로 사용합니다. 그 밖의 실제 방문 언어만 NEW → GENERATING → GENERATED → APPROVED 순서로 승격합니다. 다운로드 CSV는 기계검사/외부검토 후 교정본을 다시 업로드할 수 있습니다.</div>
+  <div id="deviceLangGenerator" class="status" style="margin-top:10px">조회 전</div>
+  <button class="green" onclick="loadDeviceLanguages()">언어 새로고침</button>
+  <div style="overflow:auto;max-height:520px;margin-top:12px"><table><thead><tr><th>언어</th><th>상태</th><th>팩</th><th>오늘/어제</th><th>이번달/지난달</th><th>올해/작년</th><th>총방문</th><th>다운로드</th><th>검토/승인</th></tr></thead><tbody id="deviceLangRows"><tr><td colspan="9">조회 전</td></tr></tbody></table></div>
+</div>
+
+<div class="card" id="countryStatCard">
+  <h2>COUNTRY VISIT / MEMBER</h2>
+  <div class="small">언어와 국가는 독립 집계합니다. 국가는 접속 IP의 ISO 2자리 국가코드 기준이며 IP 자체는 저장하지 않습니다. 회원수는 가입 당시 가입지 국가로 고정됩니다.</div>
+  <button class="green" onclick="loadCountryStats()">국가 새로고침</button>
+  <div style="overflow:auto;max-height:420px;margin-top:12px"><table><thead><tr><th>국가</th><th>회원</th><th>오늘/어제</th><th>이번달/지난달</th><th>올해/작년</th><th>총방문</th></tr></thead><tbody id="countryStatRows"><tr><td colspan="6">조회 전</td></tr></tbody></table></div>
+</div>
+
 <div class="card" id="ivBackgroundCard"><h2>IMAGE VECTOR BACKGROUND</h2>
   <div class="small">자동검색과 완전히 분리된 서버 백그라운드 작업</div>
   <div id="ivForcedWarning">⚠ 강제 ON 상태입니다. 시간 및 메모리 제한을 무시하고 이미지 Vector 변환을 계속 수행합니다.</div>
@@ -34,4 +62,4 @@
   <div id="ivUploadResult" class="small"></div>
 </div>
 <div class="card"><h2>로그</h2><pre id="log">준비됨</pre></div>
-</div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v055"></script><script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v058"></script></body></html>
+</div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v055"></script><script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v059"></script></body></html>
