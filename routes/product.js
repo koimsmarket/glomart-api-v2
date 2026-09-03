@@ -1686,9 +1686,9 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_COUPANG_IID_REFRESH_ERROR]', Object.assign({ product_uid:id.uid, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId }, compactError(e)));
   }
 
-  // 검색결과가 서버를 경유해도 구버전 Runtime 결과와 동일하게 실제 상세 URL을 보존한다.
-  // 원본 product_url을 최우선으로 사용하고, 없을 때만 mall/id 기반 canonical URL을 보완한다.
-  const productUrl = normalizeUrl(pickProductUrl(p) || buildProductUrlFromId(id));
+  // product_url 저장 중단: 필요 시 아래 줄을 부활한다.
+  // const productUrl = normalizeUrl(buildProductUrlFromId(id) || pickProductUrl(p));
+  const productUrl = '';
   const thumbUrl = pickThumbUrl(p);
   const sourceMall = sourceMallFrom(p, p.source_uid || p.sourceUid, productUrl, id.mallCode);
   const sourceMallStored = cleanText(sourceMall).toUpperCase() === cleanText(id.mallCode).toUpperCase() ? '' : sourceMall;
@@ -1861,8 +1861,8 @@ async function upsertProduct(pool, raw, parent={}){
       supplier_phone=COALESCE(NULLIF(EXCLUDED.supplier_phone,''), gm_product.supplier_phone),
       supplier_email=COALESCE(NULLIF(EXCLUDED.supplier_email,''), gm_product.supplier_email),
       supplier_address=COALESCE(NULLIF(EXCLUDED.supplier_address,''), gm_product.supplier_address),
-      -- 새 검색결과에 상세 URL이 있으면 갱신하고, 비어 있으면 기존 정상 URL을 보존한다.
-      product_url=COALESCE(NULLIF(EXCLUDED.product_url,''), gm_product.product_url),
+      -- product_url 저장 중단: 필요 시 위 insert 값과 함께 부활
+      product_url=gm_product.product_url,
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
       soldout_yn=EXCLUDED.soldout_yn,
       sale_status=EXCLUDED.sale_status,
