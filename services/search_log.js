@@ -129,6 +129,44 @@ module.exports = function installSearchLogService(deps){
     }
   }
 
+  async function upsertCategoryKeywordLearning(p, original, canonical, meta){
+    if(!(await tableExists('gm_category_keyword'))) return {saved:false,reason:'table_missing'};
+    const originalKey=normalizeKeywordForStat(original);
+    const canonicalText=cleanText(canonical);
+    const canonicalKey=normalizeKeywordForStat(canonicalText);
+    if(!originalKey||!canonicalText||originalKey===canonicalKey) return {saved:false,reason:'same_or_empty'};
+    const rawLang=cleanText(meta.lang_code||'').toLowerCase().replace('_','-');
+    const lang0=rawLang.split('-')[0];
+    const lang=({kr:'ko',cn:'zh',jp:'ja',vn:'vi'}[lang0]||lang0);
+    const country=cleanText(meta.country_code||'');
+    const categoryNo=cleanText(meta.category_no||'');
+    const ex=await dbQuery(`SELECT keyword_id,status FROM gm_category_keyword
+      WHERE keyword_normalized=$1
+        AND COALESCE(lang_code,'')=$2
+        AND COALESCE(country_code,'')=$3
+        AND COALESCE(category_no,'')=$4
+      ORDER BY updated_at DESC NULLS LAST, keyword_id DESC LIMIT 1`,[originalKey,lang,country,categoryNo]);
+    const row=ex.rows[0];
+    const raw=JSON.stringify({source:'coupang_corrected_query',keyword_original:cleanText(original),keyword_canonical:canonicalText,search_event_id:cleanText(p.search_event_id||p.searchEventId||p.request_id||p.requestId||''),mall_code:cleanText(p.mall_code||p.mallCode||'')});
+    if(row){
+      if(['disabled','excluded'].includes(cleanText(row.status).toLowerCase())) return {saved:false,reason:'disabled_or_excluded',keyword_id:row.keyword_id};
+      await dbQuery(`UPDATE gm_category_keyword SET
+        keyword_original=$2,keyword_canonical=$3,
+        category_code=COALESCE(NULLIF($4,''),category_code),
+        category_name=COALESCE(NULLIF($5,''),category_name),
+        confidence_score=GREATEST(COALESCE(confidence_score,0),1.0),
+        search_count=COALESCE(search_count,0)+1,last_seen_at=now(),raw_json=COALESCE(raw_json,'{}'::jsonb)||$6::jsonb,updated_at=now()
+        WHERE keyword_id=$1`,[row.keyword_id,cleanText(original),canonicalText,cleanText(meta.category_code||''),cleanText(meta.category_name||''),raw]);
+      return {saved:true,action:'updated',keyword_id:row.keyword_id};
+    }
+    const ins=await dbQuery(`INSERT INTO gm_category_keyword
+      (keyword_original,keyword_normalized,keyword_canonical,category_no,category_code,category_name,lang_code,country_code,source,status,confidence_score,search_count,last_seen_at,raw_json,created_at,updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'auto','auto',1.0,1,now(),$9::jsonb,now(),now()) RETURNING keyword_id`,
+      [cleanText(original),originalKey,canonicalText,categoryNo,cleanText(meta.category_code||''),cleanText(meta.category_name||''),lang,country,raw]);
+    return {saved:true,action:'inserted',keyword_id:ins.rows[0]&&ins.rows[0].keyword_id};
+  }
+
+
   const handleSearchLog = async (req,res)=>{
     try{
       if(!(await tableExists('gm_search_log'))) return fail(res,500,'gm_search_log table not found');
@@ -138,16 +176,25 @@ module.exports = function installSearchLogService(deps){
       const existing=await dbQuery(`SELECT * FROM gm_search_log WHERE search_event_id=$1 LIMIT 1`,[eventId]);
       const old=existing.rows[0]||null;
       const original=cleanText(p.keyword_original||p.keyword||p.origin||(old&&old.keyword_original)||'');
-      // 후속 CPKR/ALKR 갱신에 정제어가 없더라도 이미 확정된 정제어를 원문으로 되돌리지 않는다.
+      const originalNormalized=normalizeKeywordForStat(original);
+      // correctedQuery는 모바일에서 keyword_normalized/normalizedKeyword로도 들어온다.
+      // 같은 event의 후속 mall 로그가 원문을 다시 보내더라도 한번 확인된 정제어는 원문으로 되돌리지 않는다.
+      const explicitCanonical=cleanText(p.correctedQuery||p.corrected_query||p.correctedKeyword||p.corrected_keyword||p.keyword_canonical||p.keywordCanonical||'');
       const explicitNormalized=cleanText(p.keyword_normalized||p.normalizedKeyword||'');
-      const normalized=normalizeKeywordForStat(explicitNormalized||(old&&old.keyword_normalized)||original);
+      const explicitNormalizedKey=normalizeKeywordForStat(explicitNormalized);
+      const oldNormalized=cleanText(old&&old.keyword_normalized||'');
+      const oldCanonical=cleanText(old&&old.keyword_canonical||'');
+      const oldHasCorrection=!!(oldCanonical&&normalizeKeywordForStat(oldCanonical)!==originalNormalized);
+      const incomingRevertsToOriginal=!!(oldHasCorrection&&explicitNormalizedKey&&explicitNormalizedKey===originalNormalized&&!explicitCanonical);
+      const normalized=normalizeKeywordForStat(incomingRevertsToOriginal?(oldNormalized||oldCanonical):(explicitNormalized||oldNormalized||original));
       const uiLang=cleanText(p.ui_lang_code||p.uiLangCode||p.lang_code||p.langCode||(old&&old.ui_lang_code)||'');
       const keywordLang=cleanText(p.keyword_lang_code||p.keywordLangCode||(old&&old.keyword_lang_code)||uiLang);
-      let canonical=cleanText(p.keyword_canonical||p.keywordCanonical||(old&&old.keyword_canonical)||'');
+      const normalizedCorrection=explicitNormalizedKey&&explicitNormalizedKey!==originalNormalized?explicitNormalized:'';
+      let canonical=cleanText(explicitCanonical||normalizedCorrection||oldCanonical||'');
       let categoryNo=cleanText(p.category_no||p.categoryNo||(old&&old.category_no)||'');
       let categoryCode=cleanText(p.category_code||p.categoryCode||(old&&old.category_code)||'');
       let categoryName=cleanText(p.category_name||p.categoryName||(old&&old.category_name)||'');
-      const match=await findCategoryKeywordMatch(normalized,uiLang);
+      const match=await findCategoryKeywordMatch(originalNormalized||normalized,uiLang);
       if(match){
         if(!canonical) canonical=cleanText(match.keyword_canonical||match.keyword_normalized||normalized);
         if(!categoryNo) categoryNo=cleanText(match.category_no||'');
@@ -179,6 +226,8 @@ module.exports = function installSearchLogService(deps){
       let identity=(!old || memberArrivedLate || guestArrivedLate || keywordChanged)?await latestIdentity(memberId,guestKey,normalized):null;
       if(identity) identity=await linkMobileGuest(memberId,guestKey,dev,identity);
       const row={keyword_original:original,keyword_normalized:normalized,keyword_canonical:canonical,lang_code:uiLang,country_code:cleanText(p.country_code||p.countryCode||(old&&old.country_code)||''),member_country_code:cleanText(p.member_country_code||p.memberCountryCode||(old&&old.member_country_code)||''),category_no:categoryNo,category_code:categoryCode,category_name:categoryName,cache_used:cacheFlag(p.cache_used||p.cacheUsed||(old&&old.cache_used)),gmkr_result_count:counts.gmkr,cpkr_result_count:counts.cpkr,alkr_result_count:counts.alkr,smartfit_result_count:counts.smartfit,db_insert_count:dbInsert,queue_send_count:queueSend};
+      let categoryKeywordLearning=null;
+      try{ categoryKeywordLearning=await upsertCategoryKeywordLearning(p,original,canonical,{lang_code:uiLang,country_code:cleanText(p.country_code||p.countryCode||(old&&old.country_code)||''),category_no:categoryNo,category_code:categoryCode,category_name:categoryName}); }catch(e){ console.error('[GM_CATEGORY_KEYWORD_LEARN_ERROR]',String(e&&e.message||e)); }
       let saved;
       if(!old){
         // 같은 사용자 직전 검색에 후속 검색 정보를 기록한다.
@@ -214,7 +263,7 @@ module.exports = function installSearchLogService(deps){
       }
       let relationResult=null;
       try{ relationResult=await keywordRelationService.saveRelations(pool,{gm_lang:keywordLang||uiLang||'ko',keyword_ko:cleanText(p.keyword_ko||p.keywordKo||canonical||normalized||original),relatedKeywords:p.related_keywords||p.relatedKeywords||[]}); }catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_ERROR]',String(e&&e.message||e)); }
-      ok(res,{action:'search.log',inserted:!old,updated:!!old,search_id:nowRow.search_id,search_event_id:eventId,keyword_relation:relationResult});
+      ok(res,{action:'search.log',inserted:!old,updated:!!old,search_id:nowRow.search_id,search_event_id:eventId,keyword_relation:relationResult,category_keyword_learning:categoryKeywordLearning});
     }catch(e){ fail(res,500,'search log failed',{detail:String(e&&e.message||e)}); }
   };
 

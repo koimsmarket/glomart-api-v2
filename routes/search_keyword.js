@@ -9,6 +9,7 @@ const keywordRelation = require('../services/keyword_relation');
  * - Does not touch product.js, internal product search, or GM_SEARCH_CATEGORY_ENGINE.
  *
  * Priority:
+ * 0) gm_category_keyword learned original -> canonical
  * 1) gm_category name_[gm_lang] exact match -> name_ko
  * 2) gm_keyword_translate keyword_[gm_lang] / input_keyword exact match -> main_keyword_ko or keyword_ko
  * 3) fallback original keyword
@@ -70,6 +71,41 @@ function buildCandidate(source, searchKeywordKo, matchedValue, row, score){
     score: Number(score || 0),
     row: row || {}
   };
+}
+
+async function matchCategoryKeyword(pool, input, lang){
+  const l = normalizeLang(lang);
+  const key = cleanText(input).toLowerCase().replace(/\s+/g, '');
+  if(!key) return null;
+  let r;
+  try{
+    r = await safeQuery(pool, `
+      SELECT keyword_id, keyword_original, keyword_normalized, keyword_canonical,
+             category_no, category_code, category_name, lang_code, country_code,
+             source, status, confidence_score, search_count, last_seen_at, updated_at
+        FROM gm_category_keyword
+       WHERE keyword_normalized=$1
+         AND status IN ('active','confirmed','auto')
+         AND ($2='' OR COALESCE(lang_code,'')='' OR lang_code=$2)
+       ORDER BY
+         CASE WHEN lang_code=$2 THEN 0 ELSE 1 END,
+         confidence_score DESC NULLS LAST,
+         updated_at DESC NULLS LAST
+       LIMIT 1`, [key,l]);
+  }catch(e){
+    if(String(e&&e.code||'')==='42P01') return null;
+    throw e;
+  }
+  if(!r.rows.length) return null;
+  const row=r.rows[0];
+  const canonical=cleanText(row.keyword_canonical||row.keyword_normalized||'');
+  if(!canonical) return null;
+  try{
+    await safeQuery(pool, `UPDATE gm_category_keyword
+      SET search_count=COALESCE(search_count,0)+1,last_seen_at=now()
+      WHERE keyword_id=$1`, [row.keyword_id]);
+  }catch(_touch){}
+  return buildCandidate('gm_category_keyword', canonical, row.keyword_original||input, row, 1000);
 }
 
 async function matchCategory(pool, input, lang){
@@ -141,18 +177,21 @@ async function normalizeKeyword(pool, params){
   }
 
   const candidates = [];
+  const learned = await matchCategoryKeyword(pool, input, lang); if(learned) candidates.push(learned);
   const overrideKo = koOverride(input);
   if(overrideKo) candidates.push(buildCandidate('local_ko_override', overrideKo, input, {}, 80));
   const c1 = await matchCategory(pool, input, lang); if(c1) candidates.push(c1);
   const c3 = await matchKeywordTranslate(pool, input, lang); if(c3) candidates.push(c3);
 
-  const priority = { gm_category:1, gm_keyword_translate:2, local_ko_override:3, fallback:9 };
+  const priority = { gm_category_keyword:0.5, gm_category:1, gm_keyword_translate:2, local_ko_override:3, fallback:9 };
   candidates.sort((a,b)=> (priority[a.source] || 99) - (priority[b.source] || 99) || b.score - a.score);
 
   const best = candidates[0] || buildCandidate('fallback', input, input, {}, 0);
   const fallback = best.source === 'fallback';
-  const ko = fallback ? koOrEmpty(input) : koOrEmpty(best.search_keyword_ko || input);
-  const searchText = ko || input;
+  const learnedDictionary = best.source === 'gm_category_keyword';
+  const resolved = cleanText(best.search_keyword_ko || input);
+  const ko = learnedDictionary ? (hasKo(resolved)?resolved:'') : (fallback ? koOrEmpty(input) : koOrEmpty(resolved));
+  const searchText = learnedDictionary ? (resolved || input) : (ko || input);
 
   return {
     ok:true,

@@ -22,6 +22,24 @@ function productSafeWhere(key,startIndex=1){
     ? `COALESCE(${qIdent(k)}::text,'')=$${startIndex+i}`
     : `${qIdent(k)}=$${startIndex+i}`).join(' AND ');
 }
+function pickCategoryKeywordSafeKey(row){
+  const keyword=cleanProductKey(row.keyword_normalized);
+  if(!keyword) return null;
+  const lang=cleanProductKey(row.lang_code);
+  const country=cleanProductKey(row.country_code);
+  const categoryNo=cleanProductKey(row.category_no);
+  return {
+    keys:['keyword_normalized','lang_code','country_code','category_no'],
+    values:[keyword,lang,country,categoryNo],
+    label:[keyword,lang,country,categoryNo].join('+'),
+    blankComparable:new Set(['lang_code','country_code','category_no'])
+  };
+}
+function safeKeyWhere(key,startIndex=1){
+  return key.keys.map((k,i)=> key.blankComparable && key.blankComparable.has(k)
+    ? `COALESCE(${qIdent(k)}::text,'')=$${startIndex+i}`
+    : `${qIdent(k)}=$${startIndex+i}`).join(' AND ');
+}
 
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
@@ -111,12 +129,12 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
 
       for (const row of rows) {
         processed++;
-        const key = spec.table === 'gm_product' ? pickProductSafeKey(row) : pickKey(row, spec);
+        const key = spec.table === 'gm_product' ? pickProductSafeKey(row) : (spec.table === 'gm_category_keyword' ? pickCategoryKeywordSafeKey(row) : pickKey(row, spec));
         if (!key) {
           invalid++; skipped++;
           result.push(resultRow(row.__row_no, spec.table, '', 'SKIP', '', '', 'MISSING_KEY'));
         } else {
-          const where = spec.table === 'gm_product' ? productSafeWhere(key,1) : key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND ');
+          const where = spec.table === 'gm_product' ? productSafeWhere(key,1) : (spec.table === 'gm_category_keyword' ? safeKeyWhere(key,1) : key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND '));
           const exist = await (client || db).query(`SELECT 1 FROM ${qIdent(spec.table)} WHERE ${where} LIMIT 1`, key.values);
 
           if (!exist.rows.length) {
@@ -201,9 +219,10 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
             if (updates.length) {
               if (apply) {
                 key.values.forEach(v=>params.push(v));
+                const startKeyParam=params.length-key.values.length+1;
                 const updateWhere = spec.table === 'gm_product'
-                  ? productSafeWhere(key, params.length-key.values.length+1)
-                  : where.replace(/\$(\d+)/g, (_,n)=>'$'+(params.length-key.values.length+Number(n)));
+                  ? productSafeWhere(key, startKeyParam)
+                  : (spec.table === 'gm_category_keyword' ? safeKeyWhere(key,startKeyParam) : where.replace(/\$(\d+)/g, (_,n)=>'$'+(params.length-key.values.length+Number(n))));
                 await client.query(
                   `UPDATE ${qIdent(spec.table)} SET ${updates.join(', ')} WHERE ${updateWhere}`,
                   params

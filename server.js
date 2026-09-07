@@ -423,6 +423,7 @@ function migrationIsDestructive(sql){
     /\bTRUNCATE\s+TABLE\b/.test(s) ||
     /\bDROP\s+TABLE\b/.test(s) ||
     /\bDROP\s+SCHEMA\b/.test(s) ||
+    /\bDROP\s+COLUMN\b/.test(s) ||
     /\bDELETE\s+FROM\b(?![\s\S]*\bWHERE\b)/.test(s);
 
   const explicitlyAllowed = /GM_ALLOW_DESTRUCTIVE_MIGRATION/i.test(String(sql || ''));
@@ -747,8 +748,9 @@ const GM_RESET_TARGETS = [
   'gm_category_country_sales_monthly',
   'gm_category_country_sales_yearly',
   'gm_sales_aggregate_event',
-  'gm_category_keyword',
-  'gm_category',
+  // Persistent master/learning data. Search/category learning must survive maintenance reset.
+  // 'gm_category_keyword',
+  // 'gm_category',
   'gm_product_archive',
   'gm_basket',
   'gm_order',
@@ -906,7 +908,7 @@ app.post('/api/gm/db/reset', async (req,res)=>{
       return ok(res, { action:'db.reset', truncated:[], before, after:{}, detail:'no target gm_* tables found' });
     }
     const quoted = tables.map(t => '"' + String(t).replace(/"/g, '""') + '"').join(', ');
-    await dbQuery('TRUNCATE TABLE ' + quoted + ' RESTART IDENTITY CASCADE');
+    await dbQuery('TRUNCATE TABLE ' + quoted + ' RESTART IDENTITY');
     const after = await tableCounts(GM_RESET_TARGETS);
     ok(res, { action:'db.reset', truncated:tables, before, after });
   }catch(e){
