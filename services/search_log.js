@@ -182,14 +182,22 @@ module.exports = function installSearchLogService(deps){
       const explicitCanonical=cleanText(p.correctedQuery||p.corrected_query||p.correctedKeyword||p.corrected_keyword||p.keyword_canonical||p.keywordCanonical||'');
       const explicitNormalized=cleanText(p.keyword_normalized||p.normalizedKeyword||'');
       const explicitNormalizedKey=normalizeKeywordForStat(explicitNormalized);
+      // 일부 클라이언트는 Coupang correctedQuery 전체가 아니라 교정된 마지막 토큰만
+      // keyword_normalized/normalizedKeyword 로 보낼 수 있다. 원 검색어가 여러 단어이고
+      // 별도 correctedQuery 전체값이 없을 때만 마지막 토큰을 교체해 전체 검색어를 복원한다.
+      const originalTokens=original.split(/\s+/).map(v=>cleanText(v)).filter(Boolean);
+      const normalizedTokens=explicitNormalized.split(/\s+/).map(v=>cleanText(v)).filter(Boolean);
+      const expandedNormalized=(!explicitCanonical && originalTokens.length>1 && normalizedTokens.length===1 && explicitNormalizedKey!==originalNormalized)
+        ? [...originalTokens.slice(0,-1), explicitNormalized].join(' ')
+        : explicitNormalized;
       const oldNormalized=cleanText(old&&old.keyword_normalized||'');
       const oldCanonical=cleanText(old&&old.keyword_canonical||'');
       const oldHasCorrection=!!(oldCanonical&&normalizeKeywordForStat(oldCanonical)!==originalNormalized);
       const incomingRevertsToOriginal=!!(oldHasCorrection&&explicitNormalizedKey&&explicitNormalizedKey===originalNormalized&&!explicitCanonical);
-      const normalized=normalizeKeywordForStat(incomingRevertsToOriginal?(oldNormalized||oldCanonical):(explicitNormalized||oldNormalized||original));
+      const normalized=normalizeKeywordForStat(incomingRevertsToOriginal?(oldNormalized||oldCanonical):(expandedNormalized||oldNormalized||original));
       const uiLang=cleanText(p.ui_lang_code||p.uiLangCode||p.lang_code||p.langCode||(old&&old.ui_lang_code)||'');
       const keywordLang=cleanText(p.keyword_lang_code||p.keywordLangCode||(old&&old.keyword_lang_code)||uiLang);
-      const normalizedCorrection=explicitNormalizedKey&&explicitNormalizedKey!==originalNormalized?explicitNormalized:'';
+      const normalizedCorrection=explicitNormalizedKey&&explicitNormalizedKey!==originalNormalized?expandedNormalized:'';
       let canonical=cleanText(explicitCanonical||normalizedCorrection||oldCanonical||'');
       let categoryNo=cleanText(p.category_no||p.categoryNo||(old&&old.category_no)||'');
       let categoryCode=cleanText(p.category_code||p.categoryCode||(old&&old.category_code)||'');
