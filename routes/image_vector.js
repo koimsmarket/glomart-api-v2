@@ -1,4 +1,7 @@
-/* GM_IMAGE_VECTOR_ROUTE_V008
+/* GM_IMAGE_VECTOR_ROUTE_V010
+ * V345: REAL[] exact search uses a process-memory vector index/cache instead of SQL unnest cosine.
+ *       The cache is warmed opportunistically by /missing, refreshed after writes, and searched in Node.
+ *       No DB schema/migration changes. Existing REAL[] vectors remain the source of truth.
  * V344: REAL[] search no longer depends on pgvector. Cosine similarity is calculated directly from REAL[] values.
  *       No DB schema/migration changes.
  * V343: deployment-verification build. No DB schema/migration changes.
@@ -13,7 +16,8 @@ const express=require('express');
 const https=require('https');
 const http=require('http');
 const router=express.Router();
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V008_V344';
+const {encodeCandidateVector,BYTE_LEN:CANDIDATE_BYTES}=require('../services/image_candidate_vector');
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V010_V346';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -58,6 +62,99 @@ function vectorFromBase64(raw){
   }catch(_e){return null;}
 }
 function vectorLiteral(a){return '['+a.map(v=>Number(v).toPrecision(9)).join(',')+']';}
+
+// REAL[] production search index. This is an exact in-memory cosine index, not an
+// approximate HNSW index: DB rows remain authoritative and no schema/extension is required.
+// Keeping normalized Float32 vectors in process memory avoids PostgreSQL unnest(512) work
+// on every search. /missing is hit frequently by the image worker, so it also warms this cache.
+const REAL_INDEX_REFRESH_MS=Math.max(60_000,Number(process.env.GM_IMAGE_VECTOR_INDEX_REFRESH_MS||300_000)||300_000);
+const realIndex={items:new Map(),ready:false,loadedAt:0,loading:null,lastError:'',loadMs:0};
+
+function normalizedFloat32(raw){
+  if(!Array.isArray(raw)||raw.length!==DIM)return null;
+  const a=new Float32Array(DIM); let norm=0;
+  for(let i=0;i<DIM;i++){const x=Number(raw[i]);if(!Number.isFinite(x))return null;a[i]=x;norm+=x*x;}
+  if(!(norm>0))return null;
+  const inv=1/Math.sqrt(norm);
+  for(let i=0;i<DIM;i++)a[i]*=inv;
+  return a;
+}
+function metaFromRow(r){
+  return {
+    product_uid:C(r.product_uid),
+    product_name:C(r.product_name),
+    product_url:C(r.product_url),
+    image_url:C(r.thumb_origin_url),
+    mall_code:C(r.mall_code),
+    keyword:C(r.keyword),
+    category_keyword:C(r.category_keyword)
+  };
+}
+async function loadRealIndex(pool,force){
+  const now=Date.now();
+  if(!force&&realIndex.ready&&(now-realIndex.loadedAt)<REAL_INDEX_REFRESH_MS)return realIndex;
+  if(realIndex.loading)return realIndex.loading;
+  realIndex.loading=(async()=>{
+    const started=Date.now();
+    try{
+      const q=await pool.query(`
+        SELECT v.product_uid,v.vector_image,
+               p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
+          FROM gm_product_image_vector v
+          LEFT JOIN gm_product p ON p.product_uid=v.product_uid
+         WHERE v.vector_image IS NOT NULL
+           AND array_length(v.vector_image,1)=$1`,[DIM]);
+      const next=new Map();
+      for(const r of q.rows||[]){
+        const vec=normalizedFloat32(r.vector_image);
+        const uid=C(r.product_uid);
+        if(uid&&vec)next.set(uid,{...metaFromRow(r),vec});
+      }
+      realIndex.items=next; realIndex.ready=true; realIndex.loadedAt=Date.now();
+      realIndex.loadMs=realIndex.loadedAt-started; realIndex.lastError='';
+      console.log('[GM_IMAGE_VECTOR_INDEX_READY]',JSON.stringify({count:next.size,load_ms:realIndex.loadMs,route_version:ROUTE_VERSION}));
+      return realIndex;
+    }catch(e){
+      realIndex.lastError=C(e&&e.message||e);
+      console.error('[GM_IMAGE_VECTOR_INDEX_FAIL]',realIndex.lastError);
+      throw e;
+    }finally{realIndex.loading=null;}
+  })();
+  return realIndex.loading;
+}
+function warmRealIndex(pool){
+  if(!pool)return;
+  loadRealIndex(pool,false).catch(()=>{});
+}
+async function upsertRealIndexItem(pool,uid,vector){
+  if(!realIndex.ready)return;
+  const vec=normalizedFloat32(vector); if(!vec)return;
+  try{
+    const q=await pool.query(`SELECT product_uid,product_name,product_url,thumb_origin_url,mall_code,keyword,category_keyword FROM gm_product WHERE product_uid=$1 LIMIT 1`,[uid]);
+    const r=(q.rows&&q.rows[0])||{product_uid:uid};
+    realIndex.items.set(uid,{...metaFromRow(r),product_uid:uid,vec});
+  }catch(_e){
+    realIndex.items.set(uid,{product_uid:uid,product_name:'',product_url:'',image_url:'',mall_code:'',keyword:'',category_keyword:'',vec});
+  }
+}
+function searchRealIndex(queryVector,limit){
+  const q=normalizedFloat32(queryVector); if(!q)return [];
+  const best=[];
+  for(const item of realIndex.items.values()){
+    const v=item.vec; let score=0;
+    for(let i=0;i<DIM;i++)score+=q[i]*v[i];
+    if(best.length<limit){
+      best.push({item,score});
+      best.sort((a,b)=>a.score-b.score);
+    }else if(score>best[0].score){
+      best[0]={item,score};
+      best.sort((a,b)=>a.score-b.score);
+    }
+  }
+  best.sort((a,b)=>b.score-a.score);
+  return best.map(x=>({...x.item,score:x.score}));
+}
+
 function allowedImageUrl(raw){
  try{
   const u=new URL(C(raw));
@@ -101,6 +198,7 @@ router.post('/api/gm/image-vector/missing',async(req,res)=>{
   const columnType=await vectorColumnType(pool);
   let sql;
   if(isArrayVectorType(columnType)){
+    warmRealIndex(pool);
     sql='SELECT product_uid FROM gm_product_image_vector WHERE product_uid = ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1) = $2';
   }else if(isPgVectorType(columnType)){
     sql='SELECT product_uid FROM gm_product_image_vector WHERE product_uid = ANY($1::text[]) AND vector_image IS NOT NULL AND vector_dims(vector_image) = $2';
@@ -119,65 +217,54 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
  try{
   const columnType=await vectorColumnType(pool);
   if(isArrayVectorType(columnType)){
-    await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[uid,v]);
+    const candidate=encodeCandidateVector(v);
+    if(!candidate)throw new Error('candidate vector encode failed');
+    await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image,candidate_vector) VALUES($1,$2::real[],$3::bytea) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image,candidate_vector=EXCLUDED.candidate_vector`,[uid,v,candidate]);
+    await upsertRealIndexItem(pool,uid,v);
   }else if(isPgVectorType(columnType)){
-    await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::vector) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[uid,vectorLiteral(v)]);
+    const candidate=encodeCandidateVector(v);
+    if(!candidate)throw new Error('candidate vector encode failed');
+    await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image,candidate_vector) VALUES($1,$2::vector,$3::bytea) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image,candidate_vector=EXCLUDED.candidate_vector`,[uid,vectorLiteral(v),candidate]);
   }else{
     throw new Error('unsupported vector_image type '+columnType);
   }
-  return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
+  return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,candidate_bytes:CANDIDATE_BYTES,candidate_format:'INT8_V1',vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{
  const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(20,Number(req.body&&req.body.limit||8)||8));
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!v)return res.status(400).json({ok:false,error:'vector_base64(1024-byte Float16) required'});
+ const started=Date.now();
  try{
   const columnType=await vectorColumnType(pool);
-  let sql;
   if(isArrayVectorType(columnType)){
-    // Production schema stores embeddings as REAL[]. Do not cast to pgvector here:
-    // pgvector extension is not required for the REAL[] schema. Calculate cosine
-    // similarity directly and keep only valid 512-dimensional rows.
-    sql=`
-      WITH query_vector AS (
-        SELECT $1::real[] AS vec,
-               sqrt((SELECT sum(x*x) FROM unnest($1::real[]) AS q(x))) AS norm
-      )
-      SELECT v.product_uid,
-             sim.score,
-             p.product_name,p.product_url,p.thumb_origin_url,p.mall_code
-        FROM gm_product_image_vector v
-        CROSS JOIN query_vector qv
-        CROSS JOIN LATERAL (
-          SELECT sum(pv.x * qv.vec[pv.i::int]) /
-                 NULLIF(sqrt(sum(pv.x * pv.x)) * qv.norm, 0) AS score
-            FROM unnest(v.vector_image) WITH ORDINALITY AS pv(x,i)
-        ) sim
-        LEFT JOIN gm_product p ON p.product_uid=v.product_uid
-       WHERE v.vector_image IS NOT NULL
-         AND array_length(v.vector_image,1)=$3
-         AND sim.score IS NOT NULL
-       ORDER BY sim.score DESC
-       LIMIT $2`;
-  }else if(isPgVectorType(columnType)){
-    sql=`
+    await loadRealIndex(pool,false);
+    const matches=searchRealIndex(v,limit).map(r=>({
+      product_uid:C(r.product_uid),score:Number(r.score||0),product_name:C(r.product_name),
+      product_url:C(r.product_url),image_url:C(r.image_url),mall_code:C(r.mall_code),
+      keyword:C(r.keyword),category_keyword:C(r.category_keyword)
+    }));
+    const searchMs=Date.now()-started;
+    console.log('[GM_IMAGE_VECTOR_SEARCH_FAST]',JSON.stringify({count:matches.length,index_count:realIndex.items.size,search_ms:searchMs,index_load_ms:realIndex.loadMs,route_version:ROUTE_VERSION}));
+    return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'real_array_memory_exact',search_ms:searchMs,index_count:realIndex.items.size,index_loaded_at:realIndex.loadedAt,index_load_ms:realIndex.loadMs});
+  }
+  if(isPgVectorType(columnType)){
+    const sql=`
       SELECT v.product_uid,
              1 - (v.vector_image::vector(512) <=> $1::vector(512)) AS score,
-             p.product_name,p.product_url,p.thumb_origin_url,p.mall_code
+             p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
         FROM gm_product_image_vector v
         LEFT JOIN gm_product p ON p.product_uid=v.product_uid
        WHERE v.vector_image IS NOT NULL
          AND vector_dims(v.vector_image)=512
        ORDER BY v.vector_image::vector(512) <=> $1::vector(512)
        LIMIT $2`;
-  }else{
-    throw new Error('unsupported vector_image type '+columnType);
+    const q=await pool.query(sql,[vectorLiteral(v),limit]);
+    const matches=q.rows.map(r=>({product_uid:C(r.product_uid),score:Number(r.score||0),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code),keyword:C(r.keyword),category_keyword:C(r.category_keyword)}));
+    return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'pgvector',search_ms:Date.now()-started});
   }
-  const params=isArrayVectorType(columnType)?[v,limit,DIM]:[vectorLiteral(v),limit];
-  const q=await pool.query(sql,params);
-  const matches=q.rows.map(r=>({product_uid:C(r.product_uid),score:Number(r.score||0),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code)}));
-  return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
- }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
+  throw new Error('unsupported vector_image type '+columnType);
+ }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION,search_ms:Date.now()-started});}
 });
 module.exports=router;
