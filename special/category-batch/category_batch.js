@@ -70,7 +70,41 @@ router.post('/api/special/category-batch/next',async(req,res)=>{const m=auth(req
 router.post('/api/special/category-batch/complete',async(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const d=S(req.body&&req.body.device_id),id=Number(req.body&&req.body.category_id||0),l=leases.get(d);if(!l||Number(l.category_id)!==id)return res.status(409).json({ok:false,error:'LEASE_MISMATCH'});let keywordSync=null;try{keywordSync=await syncLearnedCategoryKeywords(l);}catch(e){keywordSync={applied:false,error:S(e&&e.message||e)};log('KEYWORD_SYNC_ERROR',{device_id:d,category_id:id,error:keywordSync.error});}await release(d,true);log('CATEGORY_DONE',{device_id:d,category_id:id,keyword_sync:keywordSync});res.json({ok:true,category_id:id,keyword_sync:keywordSync});});
 router.post('/api/special/category-batch/release',async(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const d=S(req.body&&req.body.device_id),id=await release(d,false);res.json({ok:true,category_id:id});});
 
-router.get('/api/special/category-batch/search-state',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req),kw=S(req.query.keyword),st=S(req.query.started_at),rid=S(req.query.request_id);if(!st||(!kw&&!rid))return res.status(400).json({ok:false,error:'started_at and keyword/request_id required'});let q;if(rid){q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE request_id LIKE $1 AND created_at >= $2::timestamptz`,[rid+'%',st]);}else{q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE keyword=$1 AND created_at >= $2::timestamptz`,[kw,st]);}const x=q.rows[0]||{},last=x.last_created_at?new Date(x.last_created_at).getTime():0,quiet=last?Math.max(0,(Date.now()-last)/1000):0,settled=Number(x.total||0)>0&&Number(x.pending||0)===0&&Number(x.processing||0)===0&&quiet>=5;res.json({ok:true,total:+x.total||0,pending:+x.pending||0,processing:+x.processing||0,done:+x.done||0,failed:+x.failed||0,mall_count:+x.mall_count||0,keywords:x.keywords||[],quiet_sec:Math.round(quiet*10)/10,settled});});
+router.get('/api/special/category-batch/search-state',async(req,res)=>{
+ const m=auth(req,res);if(!m)return;
+ const p=pool(req),kw=S(req.query.keyword),st=S(req.query.started_at),rid=S(req.query.request_id);
+ if(!st||(!kw&&!rid))return res.status(400).json({ok:false,error:'started_at and keyword/request_id required'});
+ let q;
+ if(rid){
+  q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE request_id LIKE $1 AND created_at >= $2::timestamptz`,[rid+'%',st]);
+ }else{
+  q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE keyword=$1 AND created_at >= $2::timestamptz`,[kw,st]);
+ }
+ const x=q.rows[0]||{};
+ const total=Number(x.total||0),pending=Number(x.pending||0),processing=Number(x.processing||0);
+ let last=x.last_created_at?new Date(x.last_created_at).getTime():0;
+ let logCount=0;
+ // request_id 검색에서 결과가 0건이면 queue row 자체가 생기지 않는다.
+ // 예전 코드는 total>0 조건 때문에 correctedQuery/대체검색 0건에서 영구 대기했다.
+ // gm_search_log에 동일 request_id 검색이 도착한 뒤 5초간 추가 활동이 없으면
+ // "정상적인 0건 검색 완료"로 간주한다. keyword 문자열로 완료 여부를 판단하지 않는다.
+ if(rid&&total===0){
+  try{
+   const lq=await p.query(`SELECT COUNT(*)::int log_count,MAX(COALESCE(updated_at,search_at,created_at)) last_log_at FROM gm_search_log WHERE search_event_id LIKE $1 AND search_at >= $2::timestamptz`,[rid+'%',st]);
+   const lx=lq.rows[0]||{};
+   logCount=Number(lx.log_count||0);
+   const ll=lx.last_log_at?new Date(lx.last_log_at).getTime():0;
+   if(ll>last)last=ll;
+  }catch(e){
+   log('SEARCH_STATE_LOG_FALLBACK_ERROR',{request_id:rid,error:S(e&&e.message||e)});
+  }
+ }
+ const quiet=last?Math.max(0,(Date.now()-last)/1000):0;
+ const queueSettled=total>0&&pending===0&&processing===0&&quiet>=5;
+ const zeroResultSettled=!!(rid&&total===0&&logCount>0&&quiet>=5);
+ const settled=queueSettled||zeroResultSettled;
+ res.json({ok:true,total,pending,processing,done:+x.done||0,failed:+x.failed||0,mall_count:+x.mall_count||0,keywords:x.keywords||[],quiet_sec:Math.round(quiet*10)/10,search_log_count:logCount,zero_result:zeroResultSettled,settled});
+});
 
 // V019: category SPECIAL no longer owns image-vector queues or workers.
 // Keep the old status URL as a harmless compatibility response for older controllers.
