@@ -1,4 +1,6 @@
-/* GM_IMAGE_VECTOR_ROUTE_V007
+/* GM_IMAGE_VECTOR_ROUTE_V008
+ * V344: REAL[] search no longer depends on pgvector. Cosine similarity is calculated directly from REAL[] values.
+ *       No DB schema/migration changes.
  * V343: deployment-verification build. No DB schema/migration changes.
  *       Production REAL[] is handled directly with array_length(); no vector_dims(real[]) call.
  *       Responses expose route_version so deployed code can be verified from device logs.
@@ -11,7 +13,7 @@ const express=require('express');
 const https=require('https');
 const http=require('http');
 const router=express.Router();
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V007_V343';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V008_V344';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -134,17 +136,29 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
   const columnType=await vectorColumnType(pool);
   let sql;
   if(isArrayVectorType(columnType)){
-    // Transitional REAL[] path. Convert only valid 512-d rows to pgvector for comparison.
-    // This is indexless but keeps image search functional until migration 109 is executed.
+    // Production schema stores embeddings as REAL[]. Do not cast to pgvector here:
+    // pgvector extension is not required for the REAL[] schema. Calculate cosine
+    // similarity directly and keep only valid 512-dimensional rows.
     sql=`
+      WITH query_vector AS (
+        SELECT $1::real[] AS vec,
+               sqrt((SELECT sum(x*x) FROM unnest($1::real[]) AS q(x))) AS norm
+      )
       SELECT v.product_uid,
-             1 - ((('[' || array_to_string(v.vector_image, ',') || ']')::vector(512)) <=> $1::vector(512)) AS score,
+             sim.score,
              p.product_name,p.product_url,p.thumb_origin_url,p.mall_code
         FROM gm_product_image_vector v
+        CROSS JOIN query_vector qv
+        CROSS JOIN LATERAL (
+          SELECT sum(pv.x * qv.vec[pv.i::int]) /
+                 NULLIF(sqrt(sum(pv.x * pv.x)) * qv.norm, 0) AS score
+            FROM unnest(v.vector_image) WITH ORDINALITY AS pv(x,i)
+        ) sim
         LEFT JOIN gm_product p ON p.product_uid=v.product_uid
        WHERE v.vector_image IS NOT NULL
-         AND array_length(v.vector_image,1)=512
-       ORDER BY (('[' || array_to_string(v.vector_image, ',') || ']')::vector(512)) <=> $1::vector(512)
+         AND array_length(v.vector_image,1)=$3
+         AND sim.score IS NOT NULL
+       ORDER BY sim.score DESC
        LIMIT $2`;
   }else if(isPgVectorType(columnType)){
     sql=`
@@ -160,7 +174,8 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
   }else{
     throw new Error('unsupported vector_image type '+columnType);
   }
-  const q=await pool.query(sql,[vectorLiteral(v),limit]);
+  const params=isArrayVectorType(columnType)?[v,limit,DIM]:[vectorLiteral(v),limit];
+  const q=await pool.query(sql,params);
   const matches=q.rows.map(r=>({product_uid:C(r.product_uid),score:Number(r.score||0),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code)}));
   return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
