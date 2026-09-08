@@ -1798,17 +1798,49 @@ async function upsertProduct(pool, raw, parent={}){
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
+      -- 모든 수집 경로 공통 정책: 검색 keyword는 덮어쓰지 않고 | 구분자로 누적한다.
+      -- 기존/신규 양쪽이 이미 | 목록이어도 토큰 단위로 합치고, 공백/대소문자 정규화 기준 중복은 제거한다.
       keyword=CASE
         WHEN NULLIF(BTRIM(COALESCE(EXCLUDED.keyword,'')),'') IS NULL THEN gm_product.keyword
-        WHEN POSITION('|' IN COALESCE(gm_product.keyword,''))>0
-         AND EXISTS (
-           SELECT 1 FROM unnest(string_to_array(gm_product.keyword,'|')) AS gm_kw_alias
-           WHERE lower(regexp_replace(BTRIM(gm_kw_alias),'\s+','','g')) = lower(regexp_replace(BTRIM(EXCLUDED.keyword),'\s+','','g'))
-         )
-        THEN gm_product.keyword
-        ELSE EXCLUDED.keyword
+        WHEN NULLIF(BTRIM(COALESCE(gm_product.keyword,'')),'') IS NULL THEN EXCLUDED.keyword
+        ELSE (
+          SELECT string_agg(d.val,'|' ORDER BY d.first_ord)
+          FROM (
+            SELECT
+              (array_agg(t.val ORDER BY t.ord))[1] AS val,
+              MIN(t.ord) AS first_ord
+            FROM (
+              SELECT BTRIM(x) AS val, ord,
+                     lower(regexp_replace(BTRIM(x),'[[:space:]]+','','g')) AS norm
+              FROM unnest(string_to_array(COALESCE(gm_product.keyword,'') || '|' || COALESCE(EXCLUDED.keyword,''),'|'))
+                   WITH ORDINALITY AS u(x,ord)
+              WHERE NULLIF(BTRIM(x),'') IS NOT NULL
+            ) t
+            GROUP BY t.norm
+          ) d
+        )
       END,
-      mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
+      -- mall_category는 계산값이 아닌 문자형 카테고리 번호 이력이다.
+      -- 번호가 새로 확보될 때 기존 번호를 지우지 않고 | 구분자로 중복 없이 누적한다.
+      mall_category=CASE
+        WHEN NULLIF(BTRIM(COALESCE(EXCLUDED.mall_category,'')),'') IS NULL THEN gm_product.mall_category
+        WHEN NULLIF(BTRIM(COALESCE(gm_product.mall_category,'')),'') IS NULL THEN EXCLUDED.mall_category
+        ELSE (
+          SELECT string_agg(d.val,'|' ORDER BY d.first_ord)
+          FROM (
+            SELECT
+              (array_agg(t.val ORDER BY t.ord))[1] AS val,
+              MIN(t.ord) AS first_ord
+            FROM (
+              SELECT BTRIM(x) AS val, ord, lower(BTRIM(x)) AS norm
+              FROM unnest(string_to_array(COALESCE(gm_product.mall_category,'') || '|' || COALESCE(EXCLUDED.mall_category,''),'|'))
+                   WITH ORDINALITY AS u(x,ord)
+              WHERE NULLIF(BTRIM(x),'') IS NOT NULL
+            ) t
+            GROUP BY t.norm
+          ) d
+        )
+      END,
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_selected_code=CASE
         WHEN NULLIF(EXCLUDED.cp_selected_code,'') IS NOT NULL THEN EXCLUDED.cp_selected_code

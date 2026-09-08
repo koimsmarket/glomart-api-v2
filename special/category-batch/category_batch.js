@@ -42,17 +42,10 @@ async function syncLearnedCategoryKeywords(lease,opt){
  const merged=out.join('/');
  let categoryUpdated=0;
  if(merged&&merged!==S(row.keyword)){const cr=await c.query('UPDATE gm_category SET keyword=$2,updated_at=now() WHERE category_id=$1',[row.category_id,merged]);categoryUpdated=Number(cr.rowCount||0);}
- let productUpdated=0;
- if(opt.products!==false&&mappings.length){
-  const since=new Date(Number(lease.leased_at||Date.now())-5000);
-  for(const m of mappings){
-   const pr=await c.query(`UPDATE gm_product SET keyword=$1,updated_at=now()
-     WHERE last_seen_at >= $2::timestamptz
-       AND (category_keyword=$3 OR category_keyword=$4 OR category_keyword=$1)
-       AND (keyword=$3 OR keyword=$4 OR keyword=$1)`,[m.pair,since,m.canonical,m.original]);
-   productUpdated+=Number(pr.rowCount||0);
-  }
- }
+ // 상품 keyword는 스페셜 완료 시 일괄 덮어쓰지 않는다.
+ // routes/product.js 공통 UPSERT가 실제로 해당 상품이 잡힌 검색어만 | 로 누적한다.
+ // 이렇게 해야 1차 검색에만 나온 상품/2차 검색에만 나온 상품/양쪽에 나온 상품을 정확히 구분한다.
+ const productUpdated=0;
  log('KEYWORD_SYNC',{stage:S(opt.stage)||'complete',category_id:row.category_id,before:S(row.keyword),after:merged,mappings,category_updated:categoryUpdated,product_updated:productUpdated});
  return {applied:!!mappings.length,category_id:row.category_id,keyword:merged,mappings,category_updated:categoryUpdated,product_updated:productUpdated};
 }
