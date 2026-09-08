@@ -1,5 +1,5 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_V009
+/* GM_IMAGE_VECTOR_BACKGROUND_V010
  * Image-vector processing is completely detached from SPECIAL/category search.
  *
  * Persistent work source: gm_image_vector_pending
@@ -23,6 +23,7 @@ const {fork}=require('child_process');
 const router=express.Router();
 const {parseCsv}=require('../../routes/builder/core');
 const {encodeCandidateVector,BYTE_LEN:CANDIDATE_BYTES}=require('../../services/image_candidate_vector');
+const imageAnn=require('../../services/image_ann_index');
 const DIM=512;
 const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
 const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLOTS||4)));
@@ -49,7 +50,7 @@ let candidateCursor='';
 let candidateBackfillComplete=false;
 let candidateConverted=0;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V009_BULK_CANDIDATE '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V010_ANN_SYNC '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -161,6 +162,7 @@ async function finish(msg){
     const candidate=encodeCandidateVector(v);
     if(!candidate)throw new Error('candidate vector encode failed');
     await poolRef.query('INSERT INTO gm_product_image_vector(product_uid,vector_image,candidate_vector) VALUES($1,$2::real[],$3::bytea) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image,candidate_vector=EXCLUDED.candidate_vector',[rec.product_uid,v,candidate]);
+    imageAnn.markDirty();
     const del=await poolRef.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2',[rec.product_uid,rec.image_url]);
     completed++;failUntil.delete(rec.product_uid);
     log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),candidate_bytes:candidate.length,pending_deleted:del.rowCount,active:inflight.size});
@@ -209,6 +211,7 @@ async function backfillCandidateBatch(){
        AND v.candidate_vector IS NULL`,[uids,candidates]);
   const writeMs=Date.now()-writeStarted;
   candidateConverted+=u.rowCount;
+  if(u.rowCount>0)imageAnn.markDirty();
   log('CANDIDATE_BACKFILL',{read:rows.length,converted:u.rowCount,total_converted:candidateConverted,cursor:candidateCursor,candidate_bytes:CANDIDATE_BYTES,batch:CANDIDATE_BATCH,read_ms:readMs,encode_ms:encodeMs,write_ms:writeMs,elapsed_ms:Date.now()-started});
   return u.rowCount;
 }
@@ -269,7 +272,7 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V009',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',candidate_format:'INT8_V1',candidate_bytes:CANDIDATE_BYTES,candidate_backfill_complete:candidateBackfillComplete,candidate_converted:candidateConverted,completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V010',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',candidate_format:'INT8_V1',candidate_bytes:CANDIDATE_BYTES,candidate_backfill_complete:candidateBackfillComplete,candidate_converted:candidateConverted,completed,failed,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
@@ -335,7 +338,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
     const count=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');
     const pending=Number(count.rows[0]&&count.rows[0].n||0);
     log('PENDING_IMPORT',{received:rows.length,valid:list.length,invalid,upserted,pending});
-    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V009',received:rows.length,valid:list.length,invalid,upserted,pending});
+    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V010',received:rows.length,valid:list.length,invalid,upserted,pending});
     setImmediate(()=>void pump());
   }catch(e){
     lastError=S(e&&e.message||e);log('PENDING_IMPORT_FAIL',{error:lastError});
