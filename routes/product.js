@@ -1798,7 +1798,16 @@ async function upsertProduct(pool, raw, parent={}){
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
-      keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
+      keyword=CASE
+        WHEN NULLIF(BTRIM(COALESCE(EXCLUDED.keyword,'')),'') IS NULL THEN gm_product.keyword
+        WHEN POSITION('|' IN COALESCE(gm_product.keyword,''))>0
+         AND EXISTS (
+           SELECT 1 FROM unnest(string_to_array(gm_product.keyword,'|')) AS gm_kw_alias
+           WHERE lower(regexp_replace(BTRIM(gm_kw_alias),'\s+','','g')) = lower(regexp_replace(BTRIM(EXCLUDED.keyword),'\s+','','g'))
+         )
+        THEN gm_product.keyword
+        ELSE EXCLUDED.keyword
+      END,
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_selected_code=CASE
