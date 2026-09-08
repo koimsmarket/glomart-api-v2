@@ -27,7 +27,7 @@ const DIM=512;
 const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
 const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLOTS||4)));
 const FETCH_WINDOW=Math.max(8,Math.min(100,Number(process.env.GM_IMAGE_VECTOR_FETCH_WINDOW||30)));
-const CANDIDATE_BATCH=Math.max(20,Math.min(1000,Number(process.env.GM_IMAGE_VECTOR_CANDIDATE_BATCH||200)));
+const CANDIDATE_BATCH=Math.max(100,Math.min(2000,Number(process.env.GM_IMAGE_VECTOR_CANDIDATE_BATCH||1000)));
 const FAIL_COOLDOWN_MS=Math.max(60000,Number(process.env.GM_IMAGE_VECTOR_FAIL_COOLDOWN_MS||600000));
 // Vector is always lowest priority, even in ON mode. Product/search saves get a quiet window first.
 const FOREGROUND_QUIET_MS=Math.max(3000,Number(process.env.GM_IMAGE_VECTOR_FOREGROUND_QUIET_MS||10000));
@@ -49,7 +49,7 @@ let candidateCursor='';
 let candidateBackfillComplete=false;
 let candidateConverted=0;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V008 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V009_BULK_CANDIDATE '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -172,6 +172,8 @@ async function finish(msg){
 }
 async function backfillCandidateBatch(){
   if(candidateBackfillComplete||!poolRef)return 0;
+  const started=Date.now();
+  const readStarted=Date.now();
   const q=await poolRef.query(`
     SELECT product_uid,vector_image
       FROM gm_product_image_vector
@@ -181,33 +183,33 @@ async function backfillCandidateBatch(){
        AND array_length(vector_image,1)=$2
      ORDER BY product_uid ASC
      LIMIT $3`,[candidateCursor,DIM,CANDIDATE_BATCH]);
+  const readMs=Date.now()-readStarted;
   const rows=q.rows||[];
   if(!rows.length){
     candidateBackfillComplete=true;
-    log('CANDIDATE_BACKFILL_COMPLETE',{converted:candidateConverted,candidate_bytes:CANDIDATE_BYTES});
+    log('CANDIDATE_BACKFILL_COMPLETE',{converted:candidateConverted,candidate_bytes:CANDIDATE_BYTES,elapsed_ms:Date.now()-started});
     return 0;
   }
   candidateCursor=S(rows[rows.length-1].product_uid);
-  const pairs=[];
+  const encodeStarted=Date.now();
+  const uids=[];const candidates=[];
   for(const row of rows){
     const uid=S(row.product_uid),candidate=encodeCandidateVector(row.vector_image);
-    if(uid&&candidate)pairs.push([uid,candidate]);
+    if(uid&&candidate){uids.push(uid);candidates.push(candidate);}
   }
-  if(!pairs.length)return 0;
-  const values=[];const params=[];
-  for(const [uid,candidate] of pairs){
-    const n=params.length;
-    params.push(uid,candidate);
-    values.push(`($${n+1}::text,$${n+2}::bytea)`);
-  }
+  const encodeMs=Date.now()-encodeStarted;
+  if(!uids.length)return 0;
+  const writeStarted=Date.now();
+  // One DB round trip per batch. UNNEST avoids one UPDATE/parameter pair per row.
   const u=await poolRef.query(`
     UPDATE gm_product_image_vector v
        SET candidate_vector=x.candidate_vector
-      FROM (VALUES ${values.join(',')}) AS x(product_uid,candidate_vector)
+      FROM UNNEST($1::text[],$2::bytea[]) AS x(product_uid,candidate_vector)
      WHERE v.product_uid=x.product_uid
-       AND v.candidate_vector IS NULL`,params);
+       AND v.candidate_vector IS NULL`,[uids,candidates]);
+  const writeMs=Date.now()-writeStarted;
   candidateConverted+=u.rowCount;
-  log('CANDIDATE_BACKFILL',{read:rows.length,converted:u.rowCount,total_converted:candidateConverted,cursor:candidateCursor,candidate_bytes:CANDIDATE_BYTES});
+  log('CANDIDATE_BACKFILL',{read:rows.length,converted:u.rowCount,total_converted:candidateConverted,cursor:candidateCursor,candidate_bytes:CANDIDATE_BYTES,batch:CANDIDATE_BATCH,read_ms:readMs,encode_ms:encodeMs,write_ms:writeMs,elapsed_ms:Date.now()-started});
   return u.rowCount;
 }
 async function pickJobs(limit){
