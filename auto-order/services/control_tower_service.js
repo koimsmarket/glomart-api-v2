@@ -118,6 +118,42 @@ async function resolvePurchaseIdentity(client,row,mall){
   }
   return {pi_ii_vi:clean(row.pi_ii_vi),source_uid:clean(row.source_uid||row.product_uid),source:'unresolved'};
 }
+function normalizeTaxType(v){
+  const s=upper(v);
+  if(!s) return '';
+  if(s==='TAXABLE'||s==='TAX'||s==='과세'||/부가세\s*포함|VAT\s*INCLUDED/i.test(s)) return 'TAXABLE';
+  if(s==='EXEMPT'||s==='면세'||/면세/.test(s)) return 'EXEMPT';
+  if(s==='ZERO'||s==='ZERO_RATED'||s==='영세'||/영세/.test(s)) return 'ZERO';
+  return '';
+}
+function splitTaxIncludedAmount(total,taxType){
+  const gross=Number(total);
+  const type=normalizeTaxType(taxType);
+  if(!Number.isFinite(gross)||gross<0||!type) return {supply_amount:null,vat_amount:null};
+  const won=Math.round(gross);
+  if(type==='EXEMPT'||type==='ZERO') return {supply_amount:won,vat_amount:0};
+  const supply=Math.ceil((won*10)/11);
+  return {supply_amount:supply,vat_amount:won-supply};
+}
+function purchaseGross(row){
+  const qty=Math.max(1,int(row&&row.quantity,1));
+  const unit=num(row&&(row.final_supply_price||row.mall_sale_price));
+  return unit>0?Math.round(unit*qty):null;
+}
+function groupTaxTotals(items){
+  let supply=0,vat=0,known=0;
+  for(const row of items||[]){
+    const type=normalizeTaxType(row&&row.tax_type);
+    const gross=purchaseGross(row);
+    const split=splitTaxIncludedAmount(gross,type);
+    if(type&&split.supply_amount!==null&&split.vat_amount!==null){
+      known++; supply+=split.supply_amount; vat+=split.vat_amount;
+    }
+  }
+  const total=(items||[]).length;
+  return {complete:total>0&&known===total,supply_amount:(total>0&&known===total)?supply:null,vat_amount:(total>0&&known===total)?vat:null,known_count:known,total_count:total};
+}
+
 function itemPrice(row){
   const qty = Math.max(1,int(row.quantity,1));
   const explicit = num(row.product_amount || row.total_price || row.line_amount);
@@ -246,6 +282,7 @@ async function ingestOrder(pool, orderNo, meta){
       const protectedWork = previousWork && !['WAIT_PAYMENT','READY','PENDING'].includes(upper(previousWork.work_status));
 
       const productTotal = items.reduce((sum,row)=>sum+itemPrice(row),0);
+      const taxTotals = groupTaxTotals(items);
       const itemDelivery = items.reduce((sum,row)=>sum + num(row.delivery_fee || row.total_delivery_fee),0);
       const singleMall = groups.size === 1;
       const deliveryFee = itemDelivery > 0
@@ -262,13 +299,13 @@ async function ingestOrder(pool, orderNo, meta){
           received_item_count,ordered_item_count,
           order_status,process_status,
           total_product_price,total_delivery_fee,extra_area_delivery_fee,
-          actual_payment_amount,payment_method,payment_completed_at,
+          actual_payment_amount,supply_amount,vat_amount,payment_method,payment_completed_at,
           created_at,updated_at
         ) VALUES (
           $1,$2,COALESCE($3::date,CURRENT_DATE),$4,$5,'SEMI_AUTO',
           $6,0,'NOT_ORDERED',$7,
-          $8,$9,$10,$11,$12,
-          CASE WHEN $13::boolean THEN COALESCE($14::timestamp,now()) ELSE NULL END,
+          $8,$9,$10,$11,$12,$13,$14,
+          CASE WHEN $15::boolean THEN COALESCE($16::timestamp,now()) ELSE NULL END,
           now(),now()
         )
         ON CONFLICT (auto_order_no) DO UPDATE SET
@@ -278,6 +315,8 @@ async function ingestOrder(pool, orderNo, meta){
           total_delivery_fee=EXCLUDED.total_delivery_fee,
           extra_area_delivery_fee=EXCLUDED.extra_area_delivery_fee,
           actual_payment_amount=EXCLUDED.actual_payment_amount,
+          supply_amount=EXCLUDED.supply_amount,
+          vat_amount=EXCLUDED.vat_amount,
           payment_method=EXCLUDED.payment_method,
           payment_completed_at=CASE
             WHEN gm_auto_order.payment_completed_at IS NOT NULL THEN gm_auto_order.payment_completed_at
@@ -301,6 +340,8 @@ async function ingestOrder(pool, orderNo, meta){
         deliveryFee,
         extraFee,
         actualPayment,
+        taxTotals.supply_amount,
+        taxTotals.vat_amount,
         clean(order.payment_method || order.payment_method_display),
         paid,
         order.payment_completed_at || order.updated_at || null
@@ -313,15 +354,18 @@ async function ingestOrder(pool, orderNo, meta){
         for(const row of items){
           const qty = Math.max(1,int(row.quantity,1));
           const identity = await resolvePurchaseIdentity(client,row,mall);
+          const itemTaxType = normalizeTaxType(row.tax_type);
+          const itemTax = splitTaxIncludedAmount(purchaseGross(row), itemTaxType);
           await client.query(`
             INSERT INTO gm_auto_order_item (
               auto_order_no,order_no,pi_ii_vi,mall_code,source_uid,
               product_name,option_name,option_value,
               quantity,ordered_quantity,mall_sale_price,product_amount,
+              tax_type,supply_amount,vat_amount,
               item_order_status,process_status,created_at,updated_at
             ) VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10,$11,
-              'NOT_ORDERED',$12,now(),now()
+              $1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10,$11,$12,$13,$14,
+              'NOT_ORDERED',$15,now(),now()
             )
           `,[
             aoNo,
@@ -335,6 +379,9 @@ async function ingestOrder(pool, orderNo, meta){
             qty,
             num(row.mall_sale_price || row.final_supply_price || row.customer_order_price),
             itemPrice(row),
+            itemTaxType || null,
+            itemTax.supply_amount,
+            itemTax.vat_amount,
             workTarget
           ]);
           itemsWritten += 1;

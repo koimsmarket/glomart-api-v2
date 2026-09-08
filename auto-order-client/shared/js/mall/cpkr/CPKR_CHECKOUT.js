@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const U = window.GMAO_UTIL;
-  const VERSION = '022';
+  const VERSION = '023';
 
   function docs() {
     const out = [document];
@@ -40,6 +40,24 @@
 
   function txt(el) { return U.norm(el && el.textContent || ''); }
   function firstVisible(sel) { return all(sel).find(visible) || null; }
+  function inspectTaxEvidence() {
+    const out = [];
+    const seen = new Set();
+    const rx = /(면세|과세|영세|부가세|VAT)/i;
+    const candidates = all('div,section,article,li,dl,dt,dd,table,tr,th,td,span,p,strong,b');
+    for (const el of candidates) {
+      if (!visible(el)) continue;
+      let t = txt(el);
+      if (!t || !rx.test(t)) continue;
+      if (t.length > 180) t = t.slice(0, 180);
+      if (seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= 20) break;
+    }
+    return out;
+  }
+
   function buttonByText(texts) {
     const pats = Array.isArray(texts) ? texts : [texts];
     for (const el of all('button,a,[role="button"],span')) {
@@ -653,8 +671,10 @@
       const finalBtn = await U.waitFor(() => DOM.payButton(), { timeout: 10000, label: '결제하기 button' });
       finalBtn.style.outline = '4px solid red';
       finalBtn.style.boxShadow = '0 0 0 4px rgba(255,0,0,.25)';
+      const taxEvidence = inspectTaxEvidence();
+      try { U.log('CPKR checkout tax evidence', taxEvidence); } catch (_) {}
       U.warn('배송지 적용 완료. 결제하기 직전 정지. 결제하기는 자동 클릭하지 않음.');
-      return { ok: true, stopped: true, address_result: addressResult };
+      return { ok: true, stopped: true, address_result: addressResult, tax_evidence: taxEvidence };
     },
     DOM
   };

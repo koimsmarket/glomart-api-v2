@@ -312,6 +312,76 @@ function sourcePiKey(v, mall){
   if(m && key.toUpperCase().indexOf(m + '_') === 0) key = key.slice(m.length + 1);
   return key;
 }
+
+function normalizeTaxType(v){
+  const s = clean(v).toUpperCase();
+  if(!s) return '';
+  if(s === 'TAXABLE' || s === 'TAX' || s === '과세' || /부가세\s*포함|VAT\s*INCLUDED/i.test(s)) return 'TAXABLE';
+  if(s === 'EXEMPT' || s === '면세' || /면세/.test(s)) return 'EXEMPT';
+  if(s === 'ZERO' || s === 'ZERO_RATED' || s === '영세' || /영세/.test(s)) return 'ZERO';
+  return '';
+}
+function splitTaxIncludedAmount(total, taxType){
+  const gross = Math.max(0, money(total, 0));
+  const type = normalizeTaxType(taxType);
+  if(!type) return { supply_amount:null, vat_amount:null };
+  if(type === 'EXEMPT' || type === 'ZERO') return { supply_amount:gross, vat_amount:0 };
+  // VAT 포함 총액. 원 단위에서 VAT가 공급가액의 10%를 넘지 않도록 공급가액을 올림한다.
+  // 예: 10,000원 -> 공급가 9,091 / VAT 909. 합계는 항상 gross와 일치한다.
+  const supply = Math.ceil((gross * 10) / 11);
+  return { supply_amount:supply, vat_amount:gross - supply };
+}
+async function resolveOrderTaxType(client, src, mallCode, sourceMall, sourceUid, pi){
+  const explicit = normalizeTaxType(itemVal(src, ['tax_type','taxType','vat_type','vatType','tax_text','taxText','vat_text','vatText'], ''));
+  if(explicit) return { tax_type:explicit, source:'ORDER_PAYLOAD' };
+
+  const mall = clean(sourceMall || mallCode).toUpperCase();
+  const full=[]; const stripped=[];
+  function add(v){
+    const x=clean(v); if(!x) return;
+    if(!full.includes(x)) full.push(x);
+    const y=sourcePiKey(x,mall); if(y && !stripped.includes(y)) stripped.push(y);
+  }
+  add(sourceUid);
+  add(itemVal(src,['source_uid','sourceUid','product_uid','productUid','uid'],''));
+  add(itemVal(src,['pi_ii_vi','piIiVi'],''));
+  add(pi);
+  if(!full.length && !stripped.length) return { tax_type:'', source:'NO_IDENTITY' };
+
+  const r = await client.query(`
+    SELECT tax_type, product_uid, source_uid, pi_ii_vi
+      FROM gm_product
+     WHERE NULLIF(BTRIM(COALESCE(tax_type,'')),'') IS NOT NULL
+       AND (
+         product_uid = ANY($1::text[])
+         OR source_uid = ANY($1::text[])
+         OR pi_ii_vi = ANY($2::text[])
+       )
+       AND ($3='' OR UPPER(COALESCE(mall_code,''))=$3 OR UPPER(COALESCE(source_mall,''))=$3)
+     ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+     LIMIT 1
+  `,[full,stripped,mall]);
+  const row=r.rows[0];
+  const type=normalizeTaxType(row && row.tax_type);
+  return { tax_type:type, source:type?'GM_PRODUCT':'PRODUCT_TAX_EMPTY' };
+}
+async function updateOrderTaxTotals(client, orderNo){
+  const r=await client.query(`
+    SELECT COUNT(*)::int AS total_count,
+           COUNT(*) FILTER (WHERE tax_type IN ('TAXABLE','EXEMPT','ZERO') AND supply_amount IS NOT NULL AND vat_amount IS NOT NULL)::int AS known_count,
+           COALESCE(SUM(supply_amount),0)::bigint AS supply_sum,
+           COALESCE(SUM(vat_amount),0)::bigint AS vat_sum
+      FROM gm_order_item
+     WHERE order_no=$1
+  `,[orderNo]);
+  const x=r.rows[0]||{};
+  const complete=Number(x.total_count)>0 && Number(x.total_count)===Number(x.known_count);
+  await client.query(`UPDATE gm_order SET supply_amount=$2, vat_amount=$3, updated_at=$4 WHERE order_no=$1`,[
+    orderNo, complete?Number(x.supply_sum):null, complete?Number(x.vat_sum):null, nowKst()
+  ]);
+  return { complete, supply_amount:complete?Number(x.supply_sum):null, vat_amount:complete?Number(x.vat_sum):null, total_count:Number(x.total_count)||0, known_count:Number(x.known_count)||0 };
+}
+
 async function resolveSupplyPriceFromExactOption(client, src, mallCode, sourceMall, sourceUid, pi){
   const mall = clean(sourceMall || mallCode).toUpperCase();
   if(!mall || mall === 'GMKR' || mall === 'CAFE24' || mall === 'INTERNAL'){
@@ -556,15 +626,21 @@ async function replaceOrderItems(client, orderRow, inputItems){
         lookup_key:supply.key || ''
       }));
     }catch(_supplyLog){}
+    const tax = await resolveOrderTaxType(client, src, mallCode, sourceMall, sourceUid, pi);
+    const taxAmounts = splitTaxIncludedAmount(amount, tax.tax_type);
+    try{
+      console.log('[GM_ORDER_TAX_SNAPSHOT]',JSON.stringify({order_no:orderRow.order_no,pi_ii_vi:pi,source_mall:sourceMall,tax_type:tax.tax_type||null,tax_source:tax.source,supply_amount:taxAmounts.supply_amount,vat_amount:taxAmounts.vat_amount,product_amount:amount}));
+    }catch(_taxLog){}
     const inserted = await client.query(`
       INSERT INTO gm_order_item (
         order_no, pi_ii_vi, product_name, option_name, option_value, quantity,
         mall_sale_price, customer_order_price, final_supply_price, product_amount,
         delivery_type, delivery_fee, extra_area_delivery_fee, mall_code, supplier_id, supplier_name,
         product_url, thumb_file_name, hs_code, origin_country, carrier_name, tracking_number,
-        item_order_status, item_shipping_status, created_at, updated_at, cafe24_order_no, source_mall, source_uid
+        item_order_status, item_shipping_status, created_at, updated_at, cafe24_order_no, source_mall, source_uid,
+        tax_type, supply_amount, vat_amount
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25,$26,$27,$28
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25,$26,$27,$28,$29,$30,$31
       )
       RETURNING *
     `, [
@@ -579,7 +655,8 @@ async function replaceOrderItems(client, orderRow, inputItems){
       clean(itemVal(src, ['hs_code','hsCode'], '')), clean(itemVal(src, ['origin_country','origin','country'], '')),
       clean(itemVal(src, ['carrier_name','carrier'], '')), clean(itemVal(src, ['tracking_number','tracking'], '')),
       'READY_TO_ORDER', clean(itemVal(src, ['item_shipping_status','shipping_status'], 'pending')),
-      nowKst(), orderRow.cafe24_order_no || null, sourceMall, sourceUid
+      nowKst(), orderRow.cafe24_order_no || null, sourceMall, sourceUid,
+      tax.tax_type || null, taxAmounts.supply_amount, taxAmounts.vat_amount
     ]);
     itemCount++;
     if(inserted.rows[0]) savedItems.push(inserted.rows[0]);
@@ -791,6 +868,7 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
 
     const action=await upsertOrder(client,row);
     const itemResult=await replaceOrderItems(client,row,items);
+    const taxTotals=await updateOrderTaxTotals(client,row.order_no);
 
     await client.query(`
       UPDATE gm_order_item
@@ -813,7 +891,7 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
 
     await client.query('COMMIT');
     console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({
-      order_no:orderNo,cafe24_order_no:cafeNo,items:itemResult.itemCount,action,basket_deleted:basketDeleted
+      order_no:orderNo,cafe24_order_no:cafeNo,items:itemResult.itemCount,action,basket_deleted:basketDeleted,tax_complete:taxTotals.complete,supply_amount:taxTotals.supply_amount,vat_amount:taxTotals.vat_amount
     }));
     ok(res,{
       action:'order.cafe24-confirm',
@@ -889,6 +967,7 @@ router.post('/api/gm/order/create', async (req, res) => {
 
     const orderAction = await upsertOrder(client, orderRow);
     const itemResult = await replaceOrderItems(client, orderRow, inputItems);
+    const taxTotals = await updateOrderTaxTotals(client, orderRow.order_no);
 
     /* 외부 단독 주문은 결과 페이지 JavaScript에 의존하지 않고 주문 저장 트랜잭션 안에서
        이번 주문에 실제 저장된 상품만 gm_basket에서 삭제한다. 혼합 주문은 Cafe24 확정 전이므로
@@ -935,7 +1014,7 @@ router.post('/api/gm/order/create', async (req, res) => {
       remain:basketRemain,
       deleted_keys:basketDeletedRows.map(row=>row.cart_item_key||((row.mall_code||'')+'_'+(row.pi_ii_vi||'')))
     }));
-    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price, basket_deleted:basketDeleted, basket_remain:basketRemain }));
+    console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price, tax_complete:taxTotals.complete, supply_amount:taxTotals.supply_amount, vat_amount:taxTotals.vat_amount, basket_deleted:basketDeleted, basket_remain:basketRemain }));
     ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price, basket_deleted:basketDeleted, basket_before:basketBefore, basket_remain:basketRemain });
     // 혼합 주문은 Cafe24 내부상품이 합쳐지기 전이므로 여기서 집계하지 않는다.
     // 외부 전용 주문만 저장 완료 직후 직접 집계하고, 실패할 때만 큐로 넘긴다.
