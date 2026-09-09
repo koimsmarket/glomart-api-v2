@@ -93,27 +93,63 @@ function exactCosine(queryNorm,raw){
   let dot=0;for(let i=0;i<DIM;i++)dot+=queryNorm[i]*v[i];return dot;
 }
 function metaFromRow(r){
-  return {product_uid:C(r.product_uid),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code),keyword:C(r.keyword),category_keyword:C(r.category_keyword)};
+  return {product_uid:C(r.product_uid),product_id:C(r.product_id),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code),keyword:C(r.keyword),category_keyword:C(r.category_keyword)};
+}
+function pidFromVectorUid(raw){
+  // Existing image-vector rows may contain the option identity PID_IID_VID.
+  // gm_product is keyed separately and the stable PID is stored in product_id.
+  // Never persist keyword/product metadata in the vector table; resolve it fresh by PID.
+  const s=C(raw);if(!s)return '';
+  let m=s.match(/^(?:CPKR_|ALKR_)?(\d+)(?:_|$)/i);
+  if(m)return C(m[1]);
+  return s;
+}
+function mallHintFromVectorUid(raw){
+  const s=C(raw);
+  if(/^CPKR_/i.test(s))return 'CPKR';
+  if(/^ALKR_/i.test(s))return 'ALKR';
+  if(/^\d+_\d+_\d+$/.test(s))return 'CPKR';
+  return '';
 }
 async function fetchProductMetadata(pool,productUids){
-  // IMPORTANT: vector table stores only PID + vectors. Product/search text is always read
-  // fresh from gm_product AFTER the final 512-d exact ranking has fixed the PIDs.
-  // WITH ORDINALITY preserves the exact image-similarity order while doing one DB lookup.
-  const ids=[...new Set((productUids||[]).map(C).filter(Boolean))];
-  if(!ids.length)return {byUid:new Map(),rows:[]};
+  // Final 512-d image matches are vector-table identities. Resolve CURRENT product text
+  // from gm_product by PID(product_id), not by gm_product.product_uid.
+  // Example: 9591328187_28631524894_95574594581 -> PID 9591328187 -> CPKR_9591328187.
+  const wanted=[];const seen=new Set();
+  for(const raw of productUids||[]){
+    const vectorUid=C(raw);if(!vectorUid||seen.has(vectorUid))continue;seen.add(vectorUid);
+    wanted.push({vector_uid:vectorUid,product_id:pidFromVectorUid(vectorUid),mall_code:mallHintFromVectorUid(vectorUid)});
+  }
+  if(!wanted.length)return {byUid:new Map(),rows:[]};
+  const vectorUids=wanted.map(x=>x.vector_uid),pids=wanted.map(x=>x.product_id),malls=wanted.map(x=>x.mall_code);
   const q=await pool.query(`
     WITH wanted AS (
-      SELECT product_uid, ord
-        FROM unnest($1::text[]) WITH ORDINALITY AS x(product_uid,ord)
+      SELECT vector_uid, product_id, mall_code, ord
+        FROM unnest($1::text[],$2::text[],$3::text[]) WITH ORDINALITY AS x(vector_uid,product_id,mall_code,ord)
     )
-    SELECT w.ord,w.product_uid AS wanted_product_uid,
-           p.product_uid,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
+    SELECT w.ord,w.vector_uid AS wanted_product_uid,w.product_id AS wanted_product_id,
+           p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
       FROM wanted w
-      LEFT JOIN gm_product p ON p.product_uid=w.product_uid
-     ORDER BY w.ord`,[ids]);
+      LEFT JOIN LATERAL (
+        SELECT p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
+               p.updated_at,p.last_seen_at
+          FROM gm_product p
+         WHERE p.product_id=w.product_id
+           AND (w.mall_code='' OR p.mall_code=w.mall_code)
+         ORDER BY
+           CASE WHEN COALESCE(p.sale_status,'active')='active' AND COALESCE(p.soldout_yn,'N')<>'Y' THEN 0 ELSE 1 END,
+           COALESCE(p.updated_at,p.last_seen_at) DESC NULLS LAST,
+           p.product_uid ASC
+         LIMIT 1
+      ) p ON TRUE
+     ORDER BY w.ord`,[vectorUids,pids,malls]);
   const byUid=new Map();
   for(const r of q.rows||[]){
-    if(C(r.product_uid))byUid.set(C(r.wanted_product_uid),metaFromRow(r));
+    if(C(r.product_uid)){
+      const m=metaFromRow(r);
+      m.lookup_pid=C(r.wanted_product_id);
+      byUid.set(C(r.wanted_product_uid),m);
+    }
   }
   return {byUid,rows:q.rows||[]};
 }
