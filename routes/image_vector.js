@@ -18,7 +18,7 @@ const http=require('http');
 const router=express.Router();
 const {encodeCandidateVector,HEADER_BYTES:CANDIDATE_HEADER_BYTES,BYTE_LEN:CANDIDATE_BYTES}=require('../services/image_candidate_vector');
 const imageAnn=require('../services/image_ann_index');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V015_V351';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V016_V352';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -69,7 +69,8 @@ function vectorLiteral(a){return '['+a.map(v=>Number(v).toPrecision(9)).join(','
 // shortlisted rows are read back from PostgreSQL, then candidate cosine and
 // exact REAL[] cosine reranking are applied in two stages.
 const ANN_SIGNATURE_LIMIT=Math.max(100,Math.min(2000,Number(process.env.GM_IMAGE_ANN_SIGNATURE_LIMIT||400)||400));
-const ANN_EXACT_LIMIT=Math.max(20,Math.min(500,Number(process.env.GM_IMAGE_ANN_EXACT_LIMIT||100)||100));
+const ANN_EXACT_LIMIT=Math.max(20,Math.min(2000,Number(process.env.GM_IMAGE_ANN_EXACT_LIMIT||400)||400));
+const KEYWORD_SCAN_LIMIT=Math.max(8,Math.min(100,Number(process.env.GM_IMAGE_KEYWORD_SCAN_LIMIT||30)||30));
 
 function normalizedFloat32(raw){
   if(!Array.isArray(raw)||raw.length!==DIM)return null;
@@ -171,6 +172,8 @@ async function searchCandidateAnn(pool,queryVector,limit){
     approx.push({product_uid:C(r.product_uid),score,signature_distance:signatureDistance.get(C(r.product_uid))??64});
   }
   approx.sort((a,b)=>b.score-a.score||a.signature_distance-b.signature_distance);
+  // V352: the 512-d authoritative vectors must decide the order across the whole ANN shortlist.
+  // Do not throw away lower candidate-vector ranks before exact comparison.
   const exactIds=approx.slice(0,Math.max(limit,ANN_EXACT_LIMIT)).map(x=>x.product_uid);
   timings.candidate_rerank_ms=Date.now()-t;
   if(!exactIds.length)return {matches:[],timings,ann_count:imageAnn.status().count,signature_candidates:ids.length,exact_candidates:0,product_rows:0};
@@ -193,7 +196,9 @@ async function searchCandidateAnn(pool,queryVector,limit){
     const score=exactCosine(qn,r.vector_image);if(Number.isFinite(score))exact.push({product_uid:C(r.product_uid),score});
   }
   exact.sort((a,b)=>b.score-a.score);
-  const top=exact.slice(0,limit);
+  // Keep scanning exact-ranked products until the client can form five DISTINCT keywords.
+  // 8 is no longer a hard product cutoff; it is only a diagnostic display size.
+  const top=exact.slice(0,Math.max(limit,KEYWORD_SCAN_LIMIT));
   timings.exact_rerank_ms=Date.now()-t;
 
   // Stage 4: after the final 512-d top PIDs are fixed, resolve CURRENT product data
@@ -290,7 +295,7 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{
- const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(20,Number(req.body&&req.body.limit||8)||8));
+ const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(8,Math.min(100,Number(req.body&&req.body.limit||30)||30));
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!v)return res.status(400).json({ok:false,error:'vector_base64(1024-byte Float16) required'});
  const started=Date.now();
