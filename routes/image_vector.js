@@ -18,7 +18,7 @@ const http=require('http');
 const router=express.Router();
 const {encodeCandidateVector,HEADER_BYTES:CANDIDATE_HEADER_BYTES,BYTE_LEN:CANDIDATE_BYTES}=require('../services/image_candidate_vector');
 const imageAnn=require('../services/image_ann_index');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V011_V347';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V012_V348';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -95,12 +95,23 @@ function exactCosine(queryNorm,raw){
 function metaFromRow(r){
   return {product_uid:C(r.product_uid),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code),keyword:C(r.keyword),category_keyword:C(r.category_keyword)};
 }
+async function fetchProductMetadata(pool,productUids){
+  const ids=[...new Set((productUids||[]).map(C).filter(Boolean))];
+  if(!ids.length)return new Map();
+  const q=await pool.query(`
+    SELECT product_uid,product_name,product_url,thumb_origin_url,mall_code,keyword,category_keyword
+      FROM gm_product
+     WHERE product_uid=ANY($1::text[])`,[ids]);
+  const byUid=new Map();
+  for(const r of q.rows||[])byUid.set(C(r.product_uid),metaFromRow(r));
+  return byUid;
+}
 async function searchCandidateAnn(pool,queryVector,limit){
-  const timings={ann_build_ms:0,ann_ms:0,candidate_fetch_ms:0,candidate_rerank_ms:0,exact_fetch_ms:0,exact_rerank_ms:0};
+  const timings={ann_build_ms:0,ann_ms:0,candidate_fetch_ms:0,candidate_rerank_ms:0,exact_fetch_ms:0,exact_rerank_ms:0,product_fetch_ms:0};
   const queryCandidate=encodeCandidateVector(queryVector);if(!queryCandidate)throw new Error('candidate vector encode failed');
   let t=Date.now();await imageAnn.build(pool,false);timings.ann_build_ms=Date.now()-t;
   t=Date.now();const ann=imageAnn.search(queryCandidate,ANN_SIGNATURE_LIMIT);timings.ann_ms=Date.now()-t;
-  if(!ann.length)return {matches:[],timings,ann_count:imageAnn.status().count,signature_candidates:0,exact_candidates:0};
+  if(!ann.length)return {matches:[],timings,ann_count:imageAnn.status().count,signature_candidates:0,exact_candidates:0,product_rows:0};
   const signatureDistance=new Map(ann.map(x=>[C(x.product_uid),Number(x.signature_distance||0)]));
   const ids=ann.map(x=>C(x.product_uid)).filter(Boolean);
   t=Date.now();
@@ -115,24 +126,36 @@ async function searchCandidateAnn(pool,queryVector,limit){
   approx.sort((a,b)=>b.score-a.score||a.signature_distance-b.signature_distance);
   const exactIds=approx.slice(0,Math.max(limit,ANN_EXACT_LIMIT)).map(x=>x.product_uid);
   timings.candidate_rerank_ms=Date.now()-t;
-  if(!exactIds.length)return {matches:[],timings,ann_count:imageAnn.status().count,signature_candidates:ids.length,exact_candidates:0};
+  if(!exactIds.length)return {matches:[],timings,ann_count:imageAnn.status().count,signature_candidates:ids.length,exact_candidates:0,product_rows:0};
+
+  // Stage 3: exact similarity uses only the authoritative 512-d REAL[] vectors.
+  // Product metadata is intentionally NOT joined here because keyword/category_keyword
+  // can change independently from the image vector table.
   t=Date.now();
   const eq=await pool.query(`
-    SELECT v.product_uid,v.vector_image,
-           p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
-      FROM gm_product_image_vector v
-      LEFT JOIN gm_product p ON p.product_uid=v.product_uid
-     WHERE v.product_uid=ANY($1::text[])
-       AND v.vector_image IS NOT NULL
-       AND array_length(v.vector_image,1)=$2`,[exactIds,DIM]);
+    SELECT product_uid,vector_image
+      FROM gm_product_image_vector
+     WHERE product_uid=ANY($1::text[])
+       AND vector_image IS NOT NULL
+       AND array_length(vector_image,1)=$2`,[exactIds,DIM]);
   timings.exact_fetch_ms=Date.now()-t;
   t=Date.now();
   const qn=normalizedFloat32(queryVector);if(!qn)throw new Error('invalid query vector');
   const exact=[];
-  for(const r of eq.rows||[]){const score=exactCosine(qn,r.vector_image);if(Number.isFinite(score))exact.push({...metaFromRow(r),score});}
+  for(const r of eq.rows||[]){
+    const score=exactCosine(qn,r.vector_image);if(Number.isFinite(score))exact.push({product_uid:C(r.product_uid),score});
+  }
   exact.sort((a,b)=>b.score-a.score);
+  const top=exact.slice(0,limit);
   timings.exact_rerank_ms=Date.now()-t;
-  return {matches:exact.slice(0,limit),timings,ann_count:imageAnn.status().count,signature_candidates:ids.length,exact_candidates:exactIds.length};
+
+  // Stage 4: after the final 512-d top PIDs are fixed, resolve CURRENT product data
+  // from gm_product by product_uid. Nothing is copied into gm_product_image_vector.
+  t=Date.now();
+  const meta=await fetchProductMetadata(pool,top.map(x=>x.product_uid));
+  timings.product_fetch_ms=Date.now()-t;
+  const matches=top.map(x=>Object.assign({},meta.get(x.product_uid)||{product_uid:x.product_uid,product_name:'',product_url:'',image_url:'',mall_code:'',keyword:'',category_keyword:''},{product_uid:x.product_uid,score:x.score}));
+  return {matches,timings,ann_count:imageAnn.status().count,signature_candidates:ids.length,exact_candidates:exactIds.length,product_rows:meta.size};
 }
 
 function allowedImageUrl(raw){
@@ -221,8 +244,9 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
   if(isArrayVectorType(columnType)){
     const out=await searchCandidateAnn(pool,v,limit);
     const searchMs=Date.now()-started,idx=imageAnn.status();
-    console.log('[GM_IMAGE_VECTOR_SEARCH_ANN]',JSON.stringify({count:out.matches.length,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,search_ms:searchMs,timings:out.timings,route_version:ROUTE_VERSION}));
-    return res.json({ok:true,count:out.matches.length,matches:out.matches,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'candidate_lsh_ann_exact_rerank',search_ms:searchMs,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,timings:out.timings,index:idx});
+    const metaReady=out.matches.filter(m=>C(m.keyword||m.category_keyword||m.product_name)).length;
+    console.log('[GM_IMAGE_VECTOR_SEARCH_ANN]',JSON.stringify({count:out.matches.length,metadata_ready:metaReady,product_rows:out.product_rows,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,search_ms:searchMs,timings:out.timings,route_version:ROUTE_VERSION}));
+    return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,product_rows:out.product_rows,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'candidate_lsh_ann_exact_rerank_pid_product_lookup',search_ms:searchMs,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,timings:out.timings,index:idx});
   }
   if(isPgVectorType(columnType)){
     const sql=`
