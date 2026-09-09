@@ -18,7 +18,7 @@ const http=require('http');
 const router=express.Router();
 const {encodeCandidateVector,HEADER_BYTES:CANDIDATE_HEADER_BYTES,BYTE_LEN:CANDIDATE_BYTES}=require('../services/image_candidate_vector');
 const imageAnn=require('../services/image_ann_index');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V013_V349';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V015_V351';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -301,6 +301,7 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
     const searchMs=Date.now()-started,idx=imageAnn.status();
     const metaReady=out.matches.filter(m=>C(m.keyword||m.category_keyword||m.product_name)).length;
     console.log('[GM_IMAGE_VECTOR_SEARCH_ANN]',JSON.stringify({count:out.matches.length,metadata_ready:metaReady,product_rows:out.product_rows,product_lookup_rows:out.product_lookup_rows,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,search_ms:searchMs,timings:out.timings,route_version:ROUTE_VERSION}));
+    console.log('[GM_IMAGE_VECTOR_TOP8]',JSON.stringify(out.matches.slice(0,8).map((m,i)=>({rank:i+1,score:Number(Number(m.score||0).toFixed(6)),vector_uid:C(m.product_uid),pid:C(m.lookup_pid),product_name:C(m.product_name),keyword:C(m.keyword),category_keyword:C(m.category_keyword),search_keyword:C(m.search_keyword),image_url:C(m.image_url)}))));
     return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,product_rows:out.product_rows,product_lookup_rows:out.product_lookup_rows,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'candidate_lsh_ann_exact_rerank_pid_product_lookup',search_ms:searchMs,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,timings:out.timings,index:idx});
   }
   if(isPgVectorType(columnType)){
