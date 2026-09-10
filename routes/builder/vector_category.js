@@ -1,5 +1,5 @@
 'use strict';
-// GM_VECTOR_CATEGORY_GROUP_UPLOAD_V001
+// GM_VECTOR_CATEGORY_GROUP_UPLOAD_V002
 // Dedicated UPDATE-ONLY importer for the small file:
 //   product_uid,category_group
 // It never inserts vectors and never touches vector_image/candidate_vector/class_id.
@@ -12,6 +12,9 @@ function clean(v){ return String(v == null ? '' : v).trim(); }
 router.post('/api/gm/builder/image-vector/category-group/import',
   express.text({type:['text/*','application/csv'], limit:'15mb'}), async (req,res)=>{
     const db=dbFrom(req);
+    const started=Date.now();
+    const batch=String(req.query.batch||''); const batches=String(req.query.batches||'');
+    console.log('[GM_VECTOR_CATEGORY_GROUP_UPLOAD_V002 REQUEST]', JSON.stringify({apply:req.query.apply||'',batch,batches,content_length:req.headers['content-length']||null}));
     const apply=String(req.query.apply||'').toUpperCase()==='YES';
     let rows;
     try{ rows=parseCsv(req.body); }
@@ -52,9 +55,12 @@ router.post('/api/gm/builder/image-vector/category-group/import',
         updated=r.rowCount||0;
       }
       await client.query(apply?'COMMIT':'ROLLBACK');
-      return res.json({ok:true,apply,input_rows:rows.length,valid:valid.length,invalid:issues.length,matched,not_found,updated,issues:issues.slice(0,100)});
+      const payload={ok:true,apply,input_rows:rows.length,valid:valid.length,invalid:issues.length,matched,not_found,updated,issues:issues.slice(0,100)};
+      console.log('[GM_VECTOR_CATEGORY_GROUP_UPLOAD_V002 COMPLETE]', JSON.stringify({batch,batches,ms:Date.now()-started,...payload,issues:undefined}));
+      return res.json(payload);
     }catch(e){
       await client.query('ROLLBACK').catch(()=>{});
+      console.error('[GM_VECTOR_CATEGORY_GROUP_UPLOAD_V002 ERROR]', JSON.stringify({batch,batches,ms:Date.now()-started,error:String(e&&e.message||e)}));
       return res.status(500).json({ok:false,error:'VECTOR_CATEGORY_GROUP_IMPORT_FAILED',detail:String(e&&e.message||e)});
     }finally{client.release();}
   });

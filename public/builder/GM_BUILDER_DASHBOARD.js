@@ -116,6 +116,8 @@ async function syncImageVectorProducts(button){
 async function uploadImageVectorPending(button){
   const input=document.getElementById('ivPendingFile'),out=document.getElementById('ivUploadResult');
   const file=input&&input.files&&input.files[0];
+  if(out)out.textContent='V024: 버튼 실행 확인 · 파일 확인 중...';
+  console.log('[GM_VECTOR_CATEGORY_UI_V003 CLICK]',{apply,file:file&&file.name,size:file&&file.size});
   if(!file){alert('Queue CSV 또는 Excel 파일을 선택하세요.');return;}
   const timed=startButtonTimer(button,'Queue 업로드 중');
   try{
@@ -190,17 +192,20 @@ async function loadCountryStats(){
 loadRuntimeConfig();loadDeviceLanguages();loadCountryStats();
 setInterval(()=>{loadDeviceLanguages();loadCountryStats();},60000);
 
-// GM_VECTOR_CATEGORY_GROUP_BUILDER_UI_V002
+// GM_VECTOR_CATEGORY_GROUP_BUILDER_UI_V003
 // Large category-group uploads are split in the browser into 10,000-row requests.
 // This avoids one long HTTP request while keeping the dedicated server importer unchanged.
 async function uploadVectorCategoryGroup(apply,button){
   const input=document.getElementById('ivCategoryGroupFile'),out=document.getElementById('ivCategoryGroupResult');
   const file=input&&input.files&&input.files[0];
+  if(out)out.textContent='V024: 버튼 실행 확인 · 파일 확인 중...';
+  console.log('[GM_VECTOR_CATEGORY_UI_V003 CLICK]',{apply,file:file&&file.name,size:file&&file.size});
   if(!file){alert('product_uid,category_group CSV 파일을 선택하세요.');return;}
   if(!/\.csv$/i.test(file.name)){alert('이 업로드는 CSV 파일만 사용합니다.');return;}
   if(apply && !confirm('기존 이미지 Vector의 category_group 2자리 코드를 적용할까요? vector_image/class_id는 변경하지 않습니다.'))return;
   const timed=startButtonTimer(button,apply?'카테고리 적용 중':'카테고리 검증 중');
   try{
+    if(out)out.textContent='V024: CSV 읽는 중...';
     const text=(await file.text()).replace(/^\uFEFF/,'');
     const lines=text.split(/\r?\n/);
     const header=String(lines.shift()||'').trim();
@@ -210,6 +215,8 @@ async function uploadVectorCategoryGroup(apply,button){
 
     const CHUNK_SIZE=10000;
     const totalChunks=Math.ceil(dataLines.length/CHUNK_SIZE);
+    if(out)out.textContent=`V024: ${fmt(dataLines.length)}건 확인 · ${totalChunks} batch 전송 시작`;
+    console.log('[GM_VECTOR_CATEGORY_UI_V003 FILE_READY]',{rows:dataLines.length,batches:totalChunks});
     const total={input_rows:0,valid:0,invalid:0,matched:0,not_found:0,updated:0,issues:[]};
 
     for(let chunkNo=0;chunkNo<totalChunks;chunkNo++){
@@ -218,10 +225,13 @@ async function uploadVectorCategoryGroup(apply,button){
       const body=header+'\n'+chunkLines.join('\n')+'\n';
       if(out)out.textContent=`${apply?'적용':'검증'} 중: ${fmt(Math.min(from,dataLines.length))} / ${fmt(dataLines.length)}건 · ${chunkNo+1}/${totalChunks} batch`;
 
-      const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}`,{
+      console.log('[GM_VECTOR_CATEGORY_UI_V003 SEND]',{batch:chunkNo+1,totalChunks,rows:chunkLines.length});
+      const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}&batch=${chunkNo+1}&batches=${totalChunks}`,{
         method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body
       });
-      const j=await r.json().catch(()=>({}));
+      const raw=await r.text();
+      let j={}; try{j=raw?JSON.parse(raw):{};}catch(_){throw new Error(`batch ${chunkNo+1}/${totalChunks}: 응답 JSON 아님 · HTTP ${r.status} · ${raw.slice(0,160)}`);}
+      console.log('[GM_VECTOR_CATEGORY_UI_V003 RESPONSE]',{batch:chunkNo+1,status:r.status,ok:r.ok,result:j});
       if(!r.ok||!j.ok)throw new Error(`batch ${chunkNo+1}/${totalChunks}: `+(j.detail||j.error||`HTTP ${r.status}`));
 
       for(const k of ['input_rows','valid','invalid','matched','not_found','updated']) total[k]+=Number(j[k]||0);
