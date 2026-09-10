@@ -1,6 +1,6 @@
 'use strict';
 /*
- * GM_VECTOR_CLASSIFICATION_BUILD_V004
+ * GM_VECTOR_CLASSIFICATION_BUILD_V005
  *
  * 목적
  * - gm_product_image_vector.vector_image(원본 512차원)만 사용해 재생성 가능한 시각 분류 트리를 만든다.
@@ -37,6 +37,13 @@ const GROUPS = String(process.env.GM_VECTOR_CLASS_GROUPS || 'FD')
 const APPLY = String(process.env.GM_VECTOR_CLASS_APPLY || '') === '1';
 
 const pool = new Pool();
+
+// Optional IPC for Builder. Standalone CLI behavior is unchanged.
+function emitIpc(phase, extra={}) {
+  if (typeof process.send !== 'function') return;
+  try { process.send({ source:'GM_VECTOR_CLASS_BUILD_V005', phase, ...extra }); } catch (_) {}
+}
+
 
 function norm(v) {
   let ss = 0;
@@ -202,6 +209,9 @@ function buildNode(indices, vecs, parent, childNo, depth, tree) {
     indices: null
   };
   tree.nodes.push(node);
+  if (tree.nodes.length === 1 || tree.nodes.length % 25 === 0) {
+    emitIpc('BUILDING', { progress:{ nodes:tree.nodes.length, leaf_assigned:tree.leafAssigned, current_depth:depth } });
+  }
 
   const stopByDepth = depth >= MAX_DEPTH;
   const stopBySmall = indices.length < MIN_SPLIT_SIZE;
@@ -379,7 +389,8 @@ async function applyTree(tree, uids) {
   const totalStarted = Date.now();
 
   try {
-    console.log('[GM_VECTOR_CLASS_BUILD_V004] START', {
+    emitIpc('START', { progress:{ nodes:0, leaf_assigned:0, current_depth:0 } });
+    console.log('[GM_VECTOR_CLASS_BUILD_V005] START', {
       scope: GROUPS.join(','),
       apply: APPLY,
       leaf_max: LEAF_MAX,
@@ -392,14 +403,16 @@ async function applyTree(tree, uids) {
     });
 
     const scope = await validateScope();
-    console.log('[GM_VECTOR_CLASS_BUILD_V004] PRODUCT_SCOPE', scope);
+    console.log('[GM_VECTOR_CLASS_BUILD_V005] PRODUCT_SCOPE', scope);
+    emitIpc('PRODUCT_SCOPE', { scope });
 
     const loadStarted = Date.now();
     const { uids, vecs } = await load();
-    console.log('[GM_VECTOR_CLASS_BUILD_V004] LOADED', {
+    console.log('[GM_VECTOR_CLASS_BUILD_V005] LOADED', {
       vectors: vecs.length,
       elapsed_ms: Date.now() - loadStarted
     });
+    emitIpc('LOADED', { progress:{ vectors:vecs.length, nodes:0, leaf_assigned:0, current_depth:0 } });
 
     if (!vecs.length) {
       throw new Error(
@@ -437,22 +450,26 @@ async function applyTree(tree, uids) {
       throw new Error(`LEAF_ASSIGN_COUNT_MISMATCH: expected=${vecs.length} actual=${tree.leafAssigned}`);
     }
 
-    console.log('[GM_VECTOR_CLASS_BUILD_V004] RESULT', result);
+    console.log('[GM_VECTOR_CLASS_BUILD_V005] RESULT', result);
+    emitIpc('RESULT', { result, progress:{ vectors:vecs.length, nodes:tree.nodes.length, leaf_assigned:tree.leafAssigned, current_depth:result.max_depth } });
 
     if (!APPLY) {
       console.log(
-        '[GM_VECTOR_CLASS_BUILD_V004] DRY_RUN_ONLY: review RESULT, then set GM_VECTOR_CLASS_APPLY=1'
+        '[GM_VECTOR_CLASS_BUILD_V005] DRY_RUN_ONLY: review RESULT, then set GM_VECTOR_CLASS_APPLY=1'
       );
       return;
     }
 
     const applied = await applyTree(tree, uids);
-    console.log('[GM_VECTOR_CLASS_BUILD_V004] APPLIED', applied);
-    console.log('[GM_VECTOR_CLASS_BUILD_V004] COMPLETE', {
+    console.log('[GM_VECTOR_CLASS_BUILD_V005] APPLIED', applied);
+    emitIpc('APPLIED', { applied });
+    console.log('[GM_VECTOR_CLASS_BUILD_V005] COMPLETE', {
       total_elapsed_ms: Date.now() - totalStarted
     });
+    emitIpc('COMPLETE', { result, applied: APPLY ? applied : null });
   } catch (e) {
-    console.error('[GM_VECTOR_CLASS_BUILD_V004] FAIL', e && e.stack || e);
+    console.error('[GM_VECTOR_CLASS_BUILD_V005] FAIL', e && e.stack || e);
+    emitIpc('FAILED', { error:String(e && e.message || e) });
     process.exitCode = 1;
   } finally {
     await pool.end();
