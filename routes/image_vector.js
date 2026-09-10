@@ -1,4 +1,5 @@
-/* GM_IMAGE_VECTOR_ROUTE_V010
+/* GM_IMAGE_VECTOR_ROUTE_V017
+ * V017: classification-tree Leaf search and explicit parent-ring expansion. Root/full vector search is blocked.
  * V345: REAL[] exact search uses a process-memory vector index/cache instead of SQL unnest cosine.
  *       The cache is warmed opportunistically by /missing, refreshed after writes, and searched in Node.
  *       No DB schema/migration changes. Existing REAL[] vectors remain the source of truth.
@@ -18,7 +19,7 @@ const http=require('http');
 const router=express.Router();
 const {encodeCandidateVector,HEADER_BYTES:CANDIDATE_HEADER_BYTES,BYTE_LEN:CANDIDATE_BYTES}=require('../services/image_candidate_vector');
 const imageAnn=require('../services/image_ann_index');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V016_V352';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V017_CLASS_TREE';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -218,6 +219,98 @@ async function searchCandidateAnn(pool,queryVector,limit){
   return {matches,timings,ann_count:imageAnn.status().count,signature_candidates:ids.length,exact_candidates:exactIds.length,product_rows:meta.size,product_lookup_rows:productLookup.rows.length};
 }
 
+
+// V017 classification-tree search.
+// Important operating rule: product vectors are NEVER searched globally.
+// Initial search is the selected Leaf only. Further expansion is explicit,
+// one parent level at a time. The production root is blocked because its
+// subtree is the whole classified population.
+async function classificationPath(pool,queryVector){
+  const qn=normalizedFloat32(queryVector);if(!qn)throw new Error('invalid query vector');
+  const path=[];let parentId=null;
+  for(let guard=0;guard<64;guard++){
+    const q=parentId==null
+      ? await pool.query(`SELECT id,parent_id,child_no,vector_center,is_leaf,product_count FROM gm_vector_category WHERE parent_id IS NULL ORDER BY child_no,id`)
+      : await pool.query(`SELECT id,parent_id,child_no,vector_center,is_leaf,product_count FROM gm_vector_category WHERE parent_id=$1 ORDER BY child_no,id`,[parentId]);
+    const rows=q.rows||[];if(!rows.length)break;
+    let best=null,bestScore=-Infinity;
+    for(const r of rows){const sc=exactCosine(qn,r.vector_center);if(sc>bestScore){bestScore=sc;best=r;}}
+    if(!best)break;
+    path.push({id:Number(best.id),parent_id:best.parent_id==null?null:Number(best.parent_id),child_no:Number(best.child_no||0),is_leaf:!!best.is_leaf,product_count:Number(best.product_count||0),center_score:Number(bestScore)});
+    if(best.is_leaf)return {path,query_norm:qn};
+    parentId=Number(best.id);
+  }
+  throw new Error(path.length?'classification path ended before leaf':'gm_vector_category is empty');
+}
+async function classificationLevelSearch(pool,queryVector,level,limit){
+  const traversed=await classificationPath(pool,queryVector),path=traversed.path,qn=traversed.query_norm;
+  const ascent=Math.max(0,Math.floor(Number(level)||0));
+  const targetIndex=path.length-1-ascent;
+  if(targetIndex<0)return {root_blocked:true,reason:'ABOVE_ROOT',path,search_level:ascent,matches:[]};
+  const target=path[targetIndex];
+  // Never scan the root subtree. That is equivalent to a full product-vector search.
+  if(target.parent_id==null){
+    return {root_blocked:true,reason:'ROOT_FULL_SEARCH_BLOCKED',path,search_level:ascent,target,candidate_count:Number(target.product_count||0),matches:[]};
+  }
+  const t0=Date.now();
+  // LEVEL 0 searches the selected Leaf. Upper levels search only the newly
+  // exposed sibling area, excluding the child subtree already searched below.
+  // This prevents duplicate work and makes each level's best candidate meaningful.
+  const excludedChild=ascent>0?path[targetIndex+1]:null;
+  const q=excludedChild
+    ? await pool.query(`
+        WITH RECURSIVE target_subtree AS (
+          SELECT id,is_leaf FROM gm_vector_category WHERE id=$1
+          UNION ALL
+          SELECT c.id,c.is_leaf FROM gm_vector_category c JOIN target_subtree s ON c.parent_id=s.id
+        ), excluded_subtree AS (
+          SELECT id,is_leaf FROM gm_vector_category WHERE id=$2
+          UNION ALL
+          SELECT c.id,c.is_leaf FROM gm_vector_category c JOIN excluded_subtree s ON c.parent_id=s.id
+        ), leaf_ids AS (
+          SELECT id FROM target_subtree WHERE is_leaf=true
+          EXCEPT
+          SELECT id FROM excluded_subtree WHERE is_leaf=true
+        )
+        SELECT v.product_uid,v.vector_image
+          FROM gm_product_image_vector v
+          JOIN leaf_ids l ON l.id=v.class_id
+         WHERE v.vector_image IS NOT NULL
+           AND array_length(v.vector_image,1)=$3`,[target.id,excludedChild.id,DIM])
+    : await pool.query(`
+        SELECT v.product_uid,v.vector_image
+          FROM gm_product_image_vector v
+         WHERE v.class_id=$1
+           AND v.vector_image IS NOT NULL
+           AND array_length(v.vector_image,1)=$2`,[target.id,DIM]);
+  const fetchMs=Date.now()-t0,t1=Date.now(),exact=[];
+  for(const r of q.rows||[]){const score=exactCosine(qn,r.vector_image);if(Number.isFinite(score))exact.push({product_uid:C(r.product_uid),score});}
+  exact.sort((a,b)=>b.score-a.score);
+  const ranked=exact.slice(0,Math.max(1,limit));
+  const rerankMs=Date.now()-t1,t2=Date.now();
+  const productLookup=await fetchProductMetadata(pool,ranked.map(x=>x.product_uid));
+  const meta=productLookup.byUid;
+  const matches=ranked.map((x,idx)=>{
+    const m=Object.assign({},meta.get(x.product_uid)||{product_uid:x.product_uid,product_name:'',product_url:'',image_url:'',mall_code:'',keyword:'',category_keyword:''},{product_uid:x.product_uid,score:x.score});
+    const aliases=C(m.keyword).split('|').map(C).filter(Boolean);
+    m.search_keyword=C(aliases[0]||m.category_keyword||m.product_name);
+    m.level_best=idx===0;
+    return m;
+  });
+  const productMs=Date.now()-t2;
+  const nextIndex=targetIndex-1;
+  const nextTarget=nextIndex>=0?path[nextIndex]:null;
+  const canSearchUpper=!!(nextTarget&&nextTarget.parent_id!=null);
+  return {
+    path,search_level:ascent,target,target_depth:targetIndex,excluded_child_class_id:excludedChild?excludedChild.id:null,
+    candidate_count:exact.length,matches,
+    can_search_upper:canSearchUpper,
+    next_is_root:!!(nextTarget&&nextTarget.parent_id==null),
+    root_blocked:false,
+    timings:{tree_ms:0,vector_fetch_ms:fetchMs,exact_rerank_ms:rerankMs,product_fetch_ms:productMs}
+  };
+}
+
 function allowedImageUrl(raw){
  try{
   const u=new URL(C(raw));
@@ -295,36 +388,26 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{
- const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(8,Math.min(100,Number(req.body&&req.body.limit||30)||30));
+ const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(30,Number(req.body&&req.body.limit||30)||30)),searchLevel=Math.max(0,Math.min(63,Number(req.body&&req.body.search_level||0)||0));
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!v)return res.status(400).json({ok:false,error:'vector_base64(1024-byte Float16) required'});
  const started=Date.now();
  try{
   const columnType=await vectorColumnType(pool);
-  if(isArrayVectorType(columnType)){
-    const out=await searchCandidateAnn(pool,v,limit);
-    const searchMs=Date.now()-started,idx=imageAnn.status();
-    const metaReady=out.matches.filter(m=>C(m.keyword||m.category_keyword||m.product_name)).length;
-    console.log('[GM_IMAGE_VECTOR_SEARCH_ANN]',JSON.stringify({count:out.matches.length,metadata_ready:metaReady,product_rows:out.product_rows,product_lookup_rows:out.product_lookup_rows,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,search_ms:searchMs,timings:out.timings,route_version:ROUTE_VERSION}));
-    console.log('[GM_IMAGE_VECTOR_TOP8]',JSON.stringify(out.matches.slice(0,8).map((m,i)=>({rank:i+1,score:Number(Number(m.score||0).toFixed(6)),vector_uid:C(m.product_uid),pid:C(m.lookup_pid),product_name:C(m.product_name),keyword:C(m.keyword),category_keyword:C(m.category_keyword),search_keyword:C(m.search_keyword),image_url:C(m.image_url)}))));
-    return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,product_rows:out.product_rows,product_lookup_rows:out.product_lookup_rows,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'candidate_lsh_ann_exact_rerank_pid_product_lookup',search_ms:searchMs,index_count:out.ann_count,signature_candidates:out.signature_candidates,exact_candidates:out.exact_candidates,timings:out.timings,index:idx});
+  if(!isArrayVectorType(columnType)){
+    // Do not fall back to pgvector ORDER BY over the whole table. Full vector search is forbidden.
+    return res.status(409).json({ok:false,error:'classification search requires REAL[] production vectors; full-vector fallback is disabled',column_type:columnType,route_version:ROUTE_VERSION,search_ms:Date.now()-started});
   }
-  if(isPgVectorType(columnType)){
-    const sql=`
-      SELECT v.product_uid,
-             1 - (v.vector_image::vector(512) <=> $1::vector(512)) AS score,
-             p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
-        FROM gm_product_image_vector v
-        LEFT JOIN gm_product p ON p.product_uid=v.product_uid
-       WHERE v.vector_image IS NOT NULL
-         AND vector_dims(v.vector_image)=512
-       ORDER BY v.vector_image::vector(512) <=> $1::vector(512)
-       LIMIT $2`;
-    const q=await pool.query(sql,[vectorLiteral(v),limit]);
-    const matches=q.rows.map(r=>({product_uid:C(r.product_uid),score:Number(r.score||0),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code),keyword:C(r.keyword),category_keyword:C(r.category_keyword)}));
-    return res.json({ok:true,count:matches.length,matches,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'pgvector',search_ms:Date.now()-started});
+  const out=await classificationLevelSearch(pool,v,searchLevel,limit);
+  const searchMs=Date.now()-started;
+  if(out.root_blocked){
+    console.log('[GM_IMAGE_VECTOR_CLASS_ROOT_BLOCK]',JSON.stringify({search_level:searchLevel,reason:out.reason,candidate_count:out.candidate_count||0,search_ms:searchMs,route_version:ROUTE_VERSION}));
+    return res.json({ok:true,count:0,matches:[],vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'classification_tree_manual_parent',search_level:searchLevel,root_blocked:true,root_block_reason:out.reason,candidate_count:out.candidate_count||0,can_search_upper:false,path:out.path,search_ms:searchMs});
   }
-  throw new Error('unsupported vector_image type '+columnType);
+  const metaReady=out.matches.filter(m=>C(m.keyword||m.category_keyword||m.product_name)).length;
+  console.log('[GM_IMAGE_VECTOR_CLASS_SEARCH]',JSON.stringify({search_level:out.search_level,target_class_id:out.target&&out.target.id,target_depth:out.target_depth,candidate_count:out.candidate_count,count:out.matches.length,best_score:out.matches[0]?Number(Number(out.matches[0].score||0).toFixed(6)):null,can_search_upper:out.can_search_upper,next_is_root:out.next_is_root,search_ms:searchMs,timings:out.timings,route_version:ROUTE_VERSION}));
+  return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:'classification_tree_manual_parent',search_level:out.search_level,target_class_id:out.target&&out.target.id,target_depth:out.target_depth,excluded_child_class_id:out.excluded_child_class_id,candidate_count:out.candidate_count,can_search_upper:out.can_search_upper,next_is_root:out.next_is_root,root_blocked:false,path:out.path,search_ms:searchMs,timings:out.timings});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION,search_ms:Date.now()-started});}
 });
+
 module.exports=router;
