@@ -190,7 +190,9 @@ async function loadCountryStats(){
 loadRuntimeConfig();loadDeviceLanguages();loadCountryStats();
 setInterval(()=>{loadDeviceLanguages();loadCountryStats();},60000);
 
-// GM_VECTOR_CATEGORY_GROUP_BUILDER_UI_V001
+// GM_VECTOR_CATEGORY_GROUP_BUILDER_UI_V002
+// Large category-group uploads are split in the browser into 10,000-row requests.
+// This avoids one long HTTP request while keeping the dedicated server importer unchanged.
 async function uploadVectorCategoryGroup(apply,button){
   const input=document.getElementById('ivCategoryGroupFile'),out=document.getElementById('ivCategoryGroupResult');
   const file=input&&input.files&&input.files[0];
@@ -199,14 +201,43 @@ async function uploadVectorCategoryGroup(apply,button){
   if(apply && !confirm('기존 이미지 Vector의 category_group 2자리 코드를 적용할까요? vector_image/class_id는 변경하지 않습니다.'))return;
   const timed=startButtonTimer(button,apply?'카테고리 적용 중':'카테고리 검증 중');
   try{
-    const text=await file.text();
-    const first=String(text||'').replace(/^\uFEFF/,'').split(/\r?\n/)[0]||'';
-    if(!/product_uid/i.test(first)||!/category_group/i.test(first))throw new Error('필수 컬럼 product_uid, category_group 이 없습니다.');
-    const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}`,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
-    if(out)out.textContent=`${apply?'적용':'검증'} 완료: 입력 ${fmt(j.input_rows)} / 유효 ${fmt(j.valid)} / Vector 매칭 ${fmt(j.matched)} / 미매칭 ${fmt(j.not_found)} / 무효 ${fmt(j.invalid)} / 실제 변경 ${fmt(j.updated)}`;
-    log({action:apply?'vector-category-group.apply':'vector-category-group.dryrun',file:file.name,...j});
-  }catch(e){const msg=String(e&&e.message||e);if(out)out.textContent='실패: '+msg;log('vector category group import error: '+msg);}
-  finally{stopButtonTimer(timed);}
+    const text=(await file.text()).replace(/^\uFEFF/,'');
+    const lines=text.split(/\r?\n/);
+    const header=String(lines.shift()||'').trim();
+    if(!/product_uid/i.test(header)||!/category_group/i.test(header))throw new Error('필수 컬럼 product_uid, category_group 이 없습니다.');
+    const dataLines=lines.filter(x=>String(x||'').trim()!=='');
+    if(!dataLines.length)throw new Error('업로드할 데이터가 없습니다.');
+
+    const CHUNK_SIZE=10000;
+    const totalChunks=Math.ceil(dataLines.length/CHUNK_SIZE);
+    const total={input_rows:0,valid:0,invalid:0,matched:0,not_found:0,updated:0,issues:[]};
+
+    for(let chunkNo=0;chunkNo<totalChunks;chunkNo++){
+      const from=chunkNo*CHUNK_SIZE;
+      const chunkLines=dataLines.slice(from,from+CHUNK_SIZE);
+      const body=header+'\n'+chunkLines.join('\n')+'\n';
+      if(out)out.textContent=`${apply?'적용':'검증'} 중: ${fmt(Math.min(from,dataLines.length))} / ${fmt(dataLines.length)}건 · ${chunkNo+1}/${totalChunks} batch`;
+
+      const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}`,{
+        method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body
+      });
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||!j.ok)throw new Error(`batch ${chunkNo+1}/${totalChunks}: `+(j.detail||j.error||`HTTP ${r.status}`));
+
+      for(const k of ['input_rows','valid','invalid','matched','not_found','updated']) total[k]+=Number(j[k]||0);
+      if(Array.isArray(j.issues)&&total.issues.length<100){
+        const room=100-total.issues.length;
+        total.issues.push(...j.issues.slice(0,room).map(x=>({...x,batch:chunkNo+1})));
+      }
+      if(out)out.textContent=`${apply?'적용':'검증'} 중: ${fmt(Math.min(from+chunkLines.length,dataLines.length))} / ${fmt(dataLines.length)}건 · ${chunkNo+1}/${totalChunks} batch 완료 · 실제 변경 ${fmt(total.updated)}`;
+    }
+
+    const result={ok:true,apply,batches:totalChunks,...total};
+    if(out)out.textContent=`${apply?'적용':'검증'} 완료: 입력 ${fmt(total.input_rows)} / 유효 ${fmt(total.valid)} / Vector 매칭 ${fmt(total.matched)} / 미매칭 ${fmt(total.not_found)} / 무효 ${fmt(total.invalid)} / 실제 변경 ${fmt(total.updated)} / ${totalChunks} batch`;
+    log({action:apply?'vector-category-group.apply':'vector-category-group.dryrun',file:file.name,...result});
+  }catch(e){
+    const msg=String(e&&e.message||e);
+    if(out)out.textContent='실패: '+msg;
+    log('vector category group import error: '+msg);
+  }finally{stopButtonTimer(timed);}
 }
