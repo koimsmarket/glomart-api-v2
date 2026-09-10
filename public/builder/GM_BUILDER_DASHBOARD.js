@@ -189,3 +189,24 @@ async function loadCountryStats(){
 }
 loadRuntimeConfig();loadDeviceLanguages();loadCountryStats();
 setInterval(()=>{loadDeviceLanguages();loadCountryStats();},60000);
+
+// GM_VECTOR_CATEGORY_GROUP_BUILDER_UI_V001
+async function uploadVectorCategoryGroup(apply,button){
+  const input=document.getElementById('ivCategoryGroupFile'),out=document.getElementById('ivCategoryGroupResult');
+  const file=input&&input.files&&input.files[0];
+  if(!file){alert('product_uid,category_group CSV 파일을 선택하세요.');return;}
+  if(!/\.csv$/i.test(file.name)){alert('이 업로드는 CSV 파일만 사용합니다.');return;}
+  if(apply && !confirm('기존 이미지 Vector의 category_group 2자리 코드를 적용할까요? vector_image/class_id는 변경하지 않습니다.'))return;
+  const timed=startButtonTimer(button,apply?'카테고리 적용 중':'카테고리 검증 중');
+  try{
+    const text=await file.text();
+    const first=String(text||'').replace(/^\uFEFF/,'').split(/\r?\n/)[0]||'';
+    if(!/product_uid/i.test(first)||!/category_group/i.test(first))throw new Error('필수 컬럼 product_uid, category_group 이 없습니다.');
+    const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}`,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    if(out)out.textContent=`${apply?'적용':'검증'} 완료: 입력 ${fmt(j.input_rows)} / 유효 ${fmt(j.valid)} / Vector 매칭 ${fmt(j.matched)} / 미매칭 ${fmt(j.not_found)} / 무효 ${fmt(j.invalid)} / 실제 변경 ${fmt(j.updated)}`;
+    log({action:apply?'vector-category-group.apply':'vector-category-group.dryrun',file:file.name,...j});
+  }catch(e){const msg=String(e&&e.message||e);if(out)out.textContent='실패: '+msg;log('vector category group import error: '+msg);}
+  finally{stopButtonTimer(timed);}
+}
