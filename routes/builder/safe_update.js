@@ -41,7 +41,7 @@ function safeKeyWhere(key,startIndex=1){
     : `${qIdent(k)}=$${startIndex+i}`).join(' AND ');
 }
 
-// GM_SAFE_UPDATE_VECTOR_ROWS_V021
+// GM_SAFE_UPDATE_VECTOR_ROWS_V022_COMMON_200K_BATCH
 // gm_product_image_vector may be managed in 100k-row partitions. Do not silently cut it at the global 50k limit.
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'100mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);

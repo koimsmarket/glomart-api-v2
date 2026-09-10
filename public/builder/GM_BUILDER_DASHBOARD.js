@@ -190,7 +190,9 @@ async function loadCountryStats(){
 loadRuntimeConfig();loadDeviceLanguages();loadCountryStats();
 setInterval(()=>{loadDeviceLanguages();loadCountryStats();},60000);
 
-// GM_VECTOR_CATEGORY_GROUP_BUILDER_UI_V001
+// GM_VECTOR_CATEGORY_GROUP_BUILDER_UI_V003_COMMON_SAFE_UPDATE
+// Use the same common Safe Update path that previously processed 50,000 rows successfully.
+// The common MAX_ROWS is now 200,000 and gm_product_image_vector category_group is batched server-side.
 async function uploadVectorCategoryGroup(apply,button){
   const input=document.getElementById('ivCategoryGroupFile'),out=document.getElementById('ivCategoryGroupResult');
   const file=input&&input.files&&input.files[0];
@@ -202,11 +204,21 @@ async function uploadVectorCategoryGroup(apply,button){
     const text=await file.text();
     const first=String(text||'').replace(/^\uFEFF/,'').split(/\r?\n/)[0]||'';
     if(!/product_uid/i.test(first)||!/category_group/i.test(first))throw new Error('필수 컬럼 product_uid, category_group 이 없습니다.');
-    const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}`,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
-    if(out)out.textContent=`${apply?'적용':'검증'} 완료: 입력 ${fmt(j.input_rows)} / 유효 ${fmt(j.valid)} / Vector 매칭 ${fmt(j.matched)} / 미매칭 ${fmt(j.not_found)} / 무효 ${fmt(j.invalid)} / 실제 변경 ${fmt(j.updated)}`;
-    log({action:apply?'vector-category-group.apply':'vector-category-group.dryrun',file:file.name,...j});
-  }catch(e){const msg=String(e&&e.message||e);if(out)out.textContent='실패: '+msg;log('vector category group import error: '+msg);}
+    const url=`${API}/api/gm/builder/safe-update?table=product_image_vector&apply=${apply?'YES':'NO'}`;
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+    if(!r.ok){const body=await r.text();throw new Error(`HTTP ${r.status}: ${body.slice(0,500)}`);}
+    const csv=await r.text();
+    const inputRows=Number(r.headers.get('X-GM-Input-Rows')||0);
+    const matchedRows=Number(r.headers.get('X-GM-Matched-Rows')||0);
+    const updatedRows=Number(r.headers.get('X-GM-Updated-Rows')||0);
+    if(out)out.textContent=`${apply?'적용':'검증'} 완료: 입력 ${fmt(inputRows)} / Vector 매칭 ${fmt(matchedRows)} / 실제 변경 ${fmt(updatedRows)}`;
+    const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=`${apply?'apply':'dryrun'}_result_product_image_vector_${Date.now()}.csv`;
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    log({action:apply?'vector-category-group.apply.common-safe-update':'vector-category-group.dryrun.common-safe-update',file:file.name,input_rows:inputRows,matched_rows:matchedRows,updated_rows:updatedRows});
+  }catch(e){const msg=String(e&&e.message||e);if(out)out.textContent='실패: '+msg;log('vector category group safe-update error: '+msg);}
   finally{stopButtonTimer(timed);}
 }
