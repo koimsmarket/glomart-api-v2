@@ -1,5 +1,5 @@
 'use strict';
-// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V002
+// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V003
 //
 // PURPOSE
 //   Builder control plane for periodic visual-vector classification.
@@ -28,7 +28,7 @@ const path = require('path');
 const { fork } = require('child_process');
 const { dbFrom } = require('../core');
 
-const VERSION = 'GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V002';
+const VERSION = 'GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V003';
 const BUILD_SCRIPT = path.resolve(__dirname, '../../../tools/vector-classification/build.js');
 const LOG_LIMIT = 160;
 
@@ -241,7 +241,7 @@ router.post('/api/gm/builder/image-vector/classification/start', express.json({l
   child.stdout.on('data',b=>String(b).split(/\r?\n/).forEach(pushLog));
   child.stderr.on('data',b=>String(b).split(/\r?\n/).forEach(pushLog));
   child.on('message',msg=>{
-    if(!msg||msg.source!=='GM_VECTOR_CLASS_BUILD_V006')return;
+    if(!msg||msg.source!=='GM_VECTOR_CLASS_BUILD_V007')return;
     if(msg.phase)state.phase=msg.phase;
     if(msg.progress)state.progress=msg.progress;
     if(msg.result)state.result=msg.result;

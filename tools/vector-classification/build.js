@@ -1,6 +1,6 @@
 'use strict';
 /*
- * GM_VECTOR_CLASSIFICATION_BUILD_V006 (V032)
+ * GM_VECTOR_CLASSIFICATION_BUILD_V007 (V033)
  *
  * PURPOSE
  *   Build a visual category tree from ORIGINAL 512D vector_image data and write
@@ -39,9 +39,26 @@ const LOAD_PAGE=Math.max(100,Math.min(10000,Number(process.env.GM_VECTOR_CLASS_L
 const STAGE_BATCH=Math.max(100,Math.min(10000,Number(process.env.GM_VECTOR_CLASS_STAGE_BATCH||5000)));
 const GROUPS=String(process.env.GM_VECTOR_CLASS_GROUPS||'FD').split(',').map(s=>s.trim().toUpperCase()).filter(Boolean);
 const JOB_ID=String(process.env.GM_VECTOR_CLASS_JOB_ID||'').trim();
-const pool=new Pool();
+// IMPORTANT: use the EXACT same PostgreSQL connection policy as server.js::makePool().
+// Do not rely on pg's implicit environment parsing here. The main Glomart server
+// supplies explicit fallbacks (notably user='root' when no connection URL exists),
+// so the classification child must do the same or it can fail before any query.
+function makePool(){
+  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.PG_URL || '';
+  if(connectionString){
+    return new Pool({ connectionString, ssl: process.env.PGSSL === '1' ? { rejectUnauthorized:false } : false });
+  }
+  return new Pool({
+    host: process.env.PGHOST || process.env.POSTGRES_HOST || 'postgresql',
+    port: Number(process.env.PGPORT || process.env.POSTGRES_PORT || 5432),
+    user: process.env.PGUSER || process.env.POSTGRES_USER || 'root',
+    password: process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD || process.env.POSTGRESQL_PASSWORD || '',
+    database: process.env.PGDATABASE || process.env.POSTGRES_DB || 'postgres'
+  });
+}
+const pool=makePool();
 
-function emitIpc(phase,extra={}){if(typeof process.send!=='function')return;try{process.send({source:'GM_VECTOR_CLASS_BUILD_V006',phase,...extra});}catch(_){}}
+function emitIpc(phase,extra={}){if(typeof process.send!=='function')return;try{process.send({source:'GM_VECTOR_CLASS_BUILD_V007',phase,...extra});}catch(_){}}
 function vecOffset(ix){return ix*DIM;}
 function dotIndex(buf,ix,center){let s=0,o=vecOffset(ix);for(let d=0;d<DIM;d++)s+=buf[o+d]*center[d];return s;}
 function normArrayInto(src,buf,ix){
@@ -116,13 +133,13 @@ async function writeStage(tree,uids){
 
 (async()=>{const started=Date.now();try{
   if(!JOB_ID)throw new Error('GM_VECTOR_CLASS_JOB_ID_REQUIRED');
-  emitIpc('START',{progress:{nodes:0,leaf_assigned:0,current_depth:0}});console.log('[GM_VECTOR_CLASS_BUILD_V006] START',{job_id:JOB_ID,scope:GROUPS.join(','),leaf_max:LEAF_MAX,max_depth:MAX_DEPTH,min_split_size:MIN_SPLIT_SIZE,cohesion_stop:COHESION_STOP,min_split_gain:MIN_SPLIT_GAIN,iter:ITER,train_sample_max:TRAIN_SAMPLE_MAX,load_page:LOAD_PAGE});
-  await ensureStageSchema();const scope=await validateScope();console.log('[GM_VECTOR_CLASS_BUILD_V006] PRODUCT_SCOPE',scope);emitIpc('PRODUCT_SCOPE',{scope});
+  emitIpc('START',{progress:{nodes:0,leaf_assigned:0,current_depth:0}});console.log('[GM_VECTOR_CLASS_BUILD_V007] START',{job_id:JOB_ID,scope:GROUPS.join(','),leaf_max:LEAF_MAX,max_depth:MAX_DEPTH,min_split_size:MIN_SPLIT_SIZE,cohesion_stop:COHESION_STOP,min_split_gain:MIN_SPLIT_GAIN,iter:ITER,train_sample_max:TRAIN_SAMPLE_MAX,load_page:LOAD_PAGE});
+  await ensureStageSchema();const scope=await validateScope();console.log('[GM_VECTOR_CLASS_BUILD_V007] PRODUCT_SCOPE',scope);emitIpc('PRODUCT_SCOPE',{scope});
   const expected=await validCount();if(!expected)throw new Error('NO_VECTORS_IN_SCOPE');
-  const loadStarted=Date.now(),{uids,buf}=await loadBounded(expected);console.log('[GM_VECTOR_CLASS_BUILD_V006] LOADED',{vectors:uids.length,buffer_mib:Number((buf.byteLength/1024/1024).toFixed(2)),elapsed_ms:Date.now()-loadStarted});emitIpc('LOADED',{progress:{vectors:uids.length,nodes:0,leaf_assigned:0,current_depth:0}});
+  const loadStarted=Date.now(),{uids,buf}=await loadBounded(expected);console.log('[GM_VECTOR_CLASS_BUILD_V007] LOADED',{vectors:uids.length,buffer_mib:Number((buf.byteLength/1024/1024).toFixed(2)),elapsed_ms:Date.now()-loadStarted});emitIpc('LOADED',{progress:{vectors:uids.length,nodes:0,leaf_assigned:0,current_depth:0}});
   const all=Array.from({length:uids.length},(_,i)=>i),tree={nodes:[],value:0,leafAssigned:0},buildStarted=Date.now();buildNode(all,buf,null,1,0,tree);
   const leaves=tree.nodes.filter(n=>n.leaf),depths=leaves.map(n=>n.depth),sizes=leaves.map(n=>n.count);if(tree.leafAssigned!==uids.length)throw new Error(`LEAF_ASSIGN_COUNT_MISMATCH expected=${uids.length} actual=${tree.leafAssigned}`);
   const result={job_id:JOB_ID,vectors:uids.length,nodes:tree.nodes.length,leaves:leaves.length,max_depth:Math.max(...depths),avg_leaf:Number((sizes.reduce((a,b)=>a+b,0)/sizes.length).toFixed(2)),min_leaf:Math.min(...sizes),max_leaf:Math.max(...sizes),avg_leaf_cohesion:Number((leaves.reduce((a,n)=>a+n.cohesion,0)/leaves.length).toFixed(4)),assigned_check:tree.leafAssigned,build_elapsed_ms:Date.now()-buildStarted,total_elapsed_ms:Date.now()-started};
-  console.log('[GM_VECTOR_CLASS_BUILD_V006] RESULT',result);emitIpc('RESULT',{result,progress:{vectors:uids.length,nodes:tree.nodes.length,leaf_assigned:tree.leafAssigned,current_depth:result.max_depth}});
-  const staged=await writeStage(tree,uids);console.log('[GM_VECTOR_CLASS_BUILD_V006] STAGED',staged);emitIpc('STAGED',{result:{...result,stage:staged}});console.log('[GM_VECTOR_CLASS_BUILD_V006] COMPLETE',{job_id:JOB_ID,total_elapsed_ms:Date.now()-started});
-}catch(e){console.error('[GM_VECTOR_CLASS_BUILD_V006] FAIL',e&&e.stack||e);emitIpc('FAILED',{error:String(e&&e.message||e)});process.exitCode=1;}finally{await pool.end();}})();
+  console.log('[GM_VECTOR_CLASS_BUILD_V007] RESULT',result);emitIpc('RESULT',{result,progress:{vectors:uids.length,nodes:tree.nodes.length,leaf_assigned:tree.leafAssigned,current_depth:result.max_depth}});
+  const staged=await writeStage(tree,uids);console.log('[GM_VECTOR_CLASS_BUILD_V007] STAGED',staged);emitIpc('STAGED',{result:{...result,stage:staged}});console.log('[GM_VECTOR_CLASS_BUILD_V007] COMPLETE',{job_id:JOB_ID,total_elapsed_ms:Date.now()-started});
+}catch(e){console.error('[GM_VECTOR_CLASS_BUILD_V007] FAIL',e&&e.stack||e);emitIpc('FAILED',{error:String(e&&e.message||e)});process.exitCode=1;}finally{await pool.end();}})();
