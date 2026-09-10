@@ -1,5 +1,5 @@
 'use strict';
-// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V003
+// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V004
 //
 // PURPOSE
 //   Builder control plane for periodic visual-vector classification.
@@ -26,9 +26,10 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const { fork } = require('child_process');
+const os = require('os');
 const { dbFrom } = require('../core');
 
-const VERSION = 'GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V003';
+const VERSION = 'GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V004';
 const BUILD_SCRIPT = path.resolve(__dirname, '../../../tools/vector-classification/build.js');
 const LOG_LIMIT = 160;
 
@@ -46,8 +47,13 @@ const state = {
   result: null,
   applied: null,
   error: null,
-  logs: []
+  logs: [],
+  // Cached DB summary is used while the child is running so status polling
+  // never competes with the classification job for PostgreSQL/CPU.
+  database_snapshot: null
 };
+
+let activeChild = null;
 
 function nowIso(){ return new Date().toISOString(); }
 function compactTs(){
@@ -192,12 +198,29 @@ router.get('/api/gm/builder/image-vector/classification/status', async (req,res)
   let groups;
   try { groups = parseGroups(req.query.groups || (state.groups.length ? state.groups.join(',') : 'FD')); }
   catch (e) { return res.status(400).json({ok:false,version:VERSION,error:String(e.message||e)}); }
+
+  // CRITICAL V034 RULE:
+  // While classification is running, STATUS MUST NOT execute COUNT/JOIN queries
+  // against gm_product_image_vector or STAGING. The child is already reading and
+  // classifying large 512D vectors. Polling those tables every 3 seconds made the
+  // Builder appear frozen and could starve the parent API process.
+  if (state.running) {
+    return res.json({
+      ok:true,
+      version:VERSION,
+      state:{...state,logs:state.logs.slice(-100)},
+      database:{groups,...(state.database_snapshot||{})},
+      stage:{job_id:state.job_id,nodes:0,leaves:0,leaf_product_count:0,assignments:0,orphan_assignments:0,duplicate_assignments:0,building:true}
+    });
+  }
+
   try {
     const db=dbFrom(req);
     await ensureStageSchema(db);
     const latest=await latestStageJob(db);
     const jobId=state.job_id || (latest&&latest.job_id) || null;
     const [summary,stage] = await Promise.all([databaseSummary(db,groups),stageSummary(db,jobId)]);
+    state.database_snapshot = summary;
     res.json({ok:true,version:VERSION,state:{...state,logs:state.logs.slice(-100)},database:{groups,...summary},stage});
   } catch (e) {
     res.status(500).json({ok:false,version:VERSION,error:'STATUS_FAILED',detail:String(e&&e.message||e),state});
@@ -237,7 +260,10 @@ router.post('/api/gm/builder/image-vector/classification/start', express.json({l
     env:{...process.env,GM_VECTOR_CLASS_GROUPS:groups.join(','),GM_VECTOR_CLASS_JOB_ID:jobId,GM_VECTOR_CLASS_IPC:'1'},
     silent:true
   });
+  activeChild=child;
   state.pid=child.pid;
+  // Keep Builder/API responsive even during CPU-heavy visual clustering.
+  try { os.setPriority(child.pid, 19); pushLog(`[GM_VECTOR_CLASS_CONTROL] child_nice=19 pid=${child.pid}`); } catch (_) {}
   child.stdout.on('data',b=>String(b).split(/\r?\n/).forEach(pushLog));
   child.stderr.on('data',b=>String(b).split(/\r?\n/).forEach(pushLog));
   child.on('message',msg=>{
@@ -249,12 +275,32 @@ router.post('/api/gm/builder/image-vector/classification/start', express.json({l
   });
   child.on('error',e=>{state.error=String(e&&e.message||e);state.phase='FAILED';});
   child.on('exit',code=>{
+    if(activeChild===child)activeChild=null;
     state.running=false;state.exit_code=code;state.finished_at=nowIso();
     if(code===0)state.phase='STAGED';
     else{state.phase='FAILED';if(!state.error)state.error=`PROCESS_EXIT_${code}`;}
   });
 
   res.json({ok:true,version:VERSION,started:true,mode:state.mode,groups,job_id:jobId,pid:state.pid,started_at:state.started_at});
+});
+
+// Emergency/manual stop for the classification child only.
+// Production tables are never touched by STAGING build, so stopping here is safe.
+// Any in-flight STAGING transaction is rolled back when the child connection closes.
+router.post('/api/gm/builder/image-vector/classification/cancel', express.json({limit:'16kb'}), async (req,res) => {
+  if(!state.running || !activeChild){
+    return res.json({ok:true,version:VERSION,cancelled:false,reason:'NOT_RUNNING',state:{...state,logs:state.logs.slice(-50)}});
+  }
+  const pid=activeChild.pid;
+  state.phase='CANCELLING';
+  pushLog(`[GM_VECTOR_CLASS_CONTROL] cancel_requested pid=${pid}`);
+  try{
+    activeChild.kill('SIGTERM');
+    return res.json({ok:true,version:VERSION,cancelled:true,pid});
+  }catch(e){
+    state.error=String(e&&e.message||e);
+    return res.status(500).json({ok:false,version:VERSION,error:'CANCEL_FAILED',detail:state.error,pid});
+  }
 });
 
 // Copy the fully verified STAGING result to production in ONE transaction.

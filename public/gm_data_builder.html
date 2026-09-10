@@ -68,7 +68,7 @@
 </div>
 <div class="card" id="ivClassificationCard"><h2>IMAGE VECTOR CLASSIFICATION</h2>
   <div class="small"><b>대분류 스페셜 작업 완료 시 실행하는 주기적 재분류</b>입니다. 먼저 STAGING에 카테고리와 PUID→카테고리코드를 모두 만든 뒤 검증하고, APPLY 때만 운영 DB에 함께 반영합니다. STAGING은 APPLY 후에도 보존되며 <b>다음 분류 시작 직전 자동 삭제</b>됩니다. 필요하면 수동 삭제할 수 있습니다.</div>
-  <p><label><b>대상 category_group</b></label> <input id="ivClassGroups" value="FD" style="width:180px" placeholder="FD 또는 FD,HS"> <button id="ivClassBuild" class="gray" onclick="startImageVectorClassification(this)">카테고리 생성 (STAGING)</button> <button id="ivClassApply" class="green" onclick="applyImageVectorClassification(this)">운영 DB 적용 (APPLY)</button> <button id="ivClassClearStage" onclick="clearImageVectorClassificationStage(this)">STAGING 삭제</button> <button onclick="loadImageVectorClassificationStatus()">상태 새로고침</button></p>
+  <p><label><b>대상 category_group</b></label> <input id="ivClassGroups" value="FD" style="width:180px" placeholder="FD 또는 FD,HS"> <button id="ivClassBuild" class="gray" onclick="startImageVectorClassification(this)">카테고리 생성 (STAGING)</button> <button id="ivClassApply" class="green" onclick="applyImageVectorClassification(this)">운영 DB 적용 (APPLY)</button> <button id="ivClassClearStage" onclick="clearImageVectorClassificationStage(this)">STAGING 삭제</button> <button id="ivClassCancel" class="gray" onclick="cancelImageVectorClassification(this)" disabled>분류 중지</button> <button onclick="loadImageVectorClassificationStatus()">상태 새로고침</button></p>
   <div id="ivClassResult" class="small"></div>
   <div class="grid" style="margin-top:12px"><div><table><tbody id="ivClassStatus"><tr><td>조회 전</td></tr></tbody></table></div><div>
     <h3>검증용 경량 다운로드</h3>
@@ -85,4 +85,4 @@
 <script src="/builder/GM_BUILDER_RUNTIME_CONFIG.js?v=gm_builder_v062"></script>
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v062"></script>
 <script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v063"></script>
-<script src="/builder/GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION.js?v=gm_builder_v064"></script></body></html>
+<script src="/builder/GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION.js?v=gm_builder_v065"></script></body></html>

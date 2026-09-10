@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_UI_V002
+// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_UI_V003
 // V032 Classification UI only.
 // - 분류 생성 = 운영 DB를 건드리지 않고 STAGING 결과를 만든다.
 // - APPLY = 검증된 STAGING을 운영 gm_vector_category + class_id에 함께 반영한다.
@@ -9,7 +9,7 @@
 let ivClassPollTimer=null;
 function ivClassGroups(){const el=document.getElementById('ivClassGroups');return String(el&&el.value||'FD').trim().toUpperCase();}
 function ivClassFmtState(s){return({IDLE:'대기',STARTING:'시작 중',START:'시작',PRODUCT_SCOPE:'대상 확인',LOADING:'Vector 배치 로드',LOADED:'Vector 로드 완료',BUILDING:'카테고리 생성 중',RESULT:'분류 계산 완료',STAGING:'STAGING 기록 중',STAGED:'STAGING 완료',APPLIED:'운영 DB 적용 완료',COMPLETE:'완료',FAILED:'실패'})[String(s||'')]||String(s||'-');}
-function ivClassSetButtons(running){['ivClassBuild','ivClassApply','ivClassClearStage'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!!running;});}
+function ivClassSetButtons(running){['ivClassBuild','ivClassApply','ivClassClearStage'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!!running;});const c=document.getElementById('ivClassCancel');if(c)c.disabled=!running;}
 function ivClassRender(j){
   const s=j&&j.state||{},d=j&&j.database||{},st=j&&j.stage||{},r=s.result||{},p=s.progress||{};
   const status=document.getElementById('ivClassStatus');if(status)status.innerHTML=`
@@ -27,12 +27,39 @@ function ivClassRender(j){
     <tr><th>오류</th><td>${s.error||'-'}</td></tr>`;
   ivClassSetButtons(!!s.running);const logEl=document.getElementById('ivClassLog');if(logEl)logEl.textContent=(s.logs||[]).slice(-60).join('\n')||'분류 로그 없음';
 }
-async function loadImageVectorClassificationStatus(){try{const groups=encodeURIComponent(ivClassGroups());const r=await fetch(`${API}/api/gm/builder/image-vector/classification/status?groups=${groups}&t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);ivClassRender(j);if(j.state&&j.state.running){if(!ivClassPollTimer)ivClassPollTimer=setInterval(loadImageVectorClassificationStatus,3000);}else if(ivClassPollTimer){clearInterval(ivClassPollTimer);ivClassPollTimer=null;}}catch(e){const out=document.getElementById('ivClassResult');if(out)out.textContent='분류 상태 조회 실패: '+String(e&&e.message||e);}}
+let ivClassStatusBusy=false;
+async function loadImageVectorClassificationStatus(){
+  if(ivClassStatusBusy)return;
+  ivClassStatusBusy=true;
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),8000);
+  try{
+    const groups=encodeURIComponent(ivClassGroups());
+    const r=await fetch(`${API}/api/gm/builder/image-vector/classification/status?groups=${groups}&t=${Date.now()}`,{cache:'no-store',signal:ctl.signal});
+    const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    ivClassRender(j);
+    if(j.state&&j.state.running){if(!ivClassPollTimer)ivClassPollTimer=setInterval(loadImageVectorClassificationStatus,5000);}else if(ivClassPollTimer){clearInterval(ivClassPollTimer);ivClassPollTimer=null;}
+  }catch(e){const out=document.getElementById('ivClassResult');if(out)out.textContent='분류 상태 조회 실패: '+(e&&e.name==='AbortError'?'8초 응답시간 초과':String(e&&e.message||e));}
+  finally{clearTimeout(timer);ivClassStatusBusy=false;}
+}
 async function startImageVectorClassification(button){
   const groups=ivClassGroups();if(!groups){alert('대상 대분류 코드를 입력하세요. 예: FD 또는 FD,HS');return;}
   if(!confirm(`${groups} 범위의 새 STAGING 분류를 시작합니다.\n\n직전 STAGING 데이터는 이 시점에 삭제되고 새 결과로 교체됩니다.\n운영 카테고리/class_id는 아직 변경하지 않습니다.\n\n계속할까요?`))return;
   const timed=startButtonTimer(button,'STAGING 분류 시작'),out=document.getElementById('ivClassResult');try{const r=await fetch(`${API}/api/gm/builder/image-vector/classification/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({groups})});const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);if(out)out.textContent=`STAGING 분류 시작: ${groups} / JOB ${j.job_id||'-'} / PID ${j.pid||'-'}`;log({action:'image-vector.classification.stage.start',...j});await loadImageVectorClassificationStatus();}catch(e){const msg=String(e&&e.message||e);if(out)out.textContent='분류 시작 실패: '+msg;log('image-vector classification error: '+msg);}finally{stopButtonTimer(timed);}
 }
+
+async function cancelImageVectorClassification(button){
+  if(!confirm('현재 STAGING 분류 작업만 중지합니다.\n운영 카테고리/class_id는 변경하지 않습니다.\n\n중지할까요?'))return;
+  const out=document.getElementById('ivClassResult');
+  try{
+    const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),8000);
+    const r=await fetch(`${API}/api/gm/builder/image-vector/classification/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:ctl.signal});
+    clearTimeout(timer);
+    const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    if(out)out.textContent=j.cancelled?`분류 중지 요청 완료 / PID ${j.pid||'-'}`:'실행 중인 분류 작업 없음';
+    setTimeout(loadImageVectorClassificationStatus,500);
+  }catch(e){if(out)out.textContent='분류 중지 실패: '+String(e&&e.message||e);}
+}
+
 async function applyImageVectorClassification(button){
   const groups=ivClassGroups();if(!confirm(`${groups} STAGING 결과를 운영 DB에 적용합니다.\n\n1) gm_vector_category 재생성\n2) gm_product_image_vector.class_id 기록\n을 한 트랜잭션으로 처리합니다.\nSTAGING은 적용 후에도 보존됩니다.\n\n계속할까요?`))return;
   const timed=startButtonTimer(button,'운영 DB 적용'),out=document.getElementById('ivClassResult');try{const r=await fetch(`${API}/api/gm/builder/image-vector/classification/apply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({groups})});const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);if(out)out.textContent=`APPLY 완료: ${fmt(j.applied&&j.applied.assigned||0)}건 / STAGING 보존`;log({action:'image-vector.classification.apply',...j});await loadImageVectorClassificationStatus();}catch(e){const msg=String(e&&e.message||e);if(out)out.textContent='APPLY 실패: '+msg;log('image-vector classification apply error: '+msg);}finally{stopButtonTimer(timed);}
