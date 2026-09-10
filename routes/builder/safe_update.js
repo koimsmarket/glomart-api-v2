@@ -52,9 +52,8 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   const db = dbFrom(req);
 
   let rows = parseCsv(req.body);
-  const maxRows = spec.table === 'gm_product_image_vector' ? 200000 : LIMITS.MAX_ROWS;
-  if (rows.length > maxRows) {
-    return res.status(400).json({ok:false,error:'TOO_MANY_ROWS',table:spec.table,input_rows:rows.length,limit:maxRows});
+  if (rows.length > LIMITS.MAX_ROWS) {
+    return res.status(400).json({ok:false,error:'TOO_MANY_ROWS',table:spec.table,input_rows:rows.length,limit:LIMITS.MAX_ROWS});
   }
 
   // Fast UPDATE-only path for category-group files accidentally/optionally uploaded
