@@ -1,0 +1,145 @@
+// GM_BUILDER_IMAGE_VECTOR_UI_V005_DOMAIN_SPLIT
+// Image Vector UI only: background worker, product sync, pending queue, category_group import.
+// All /api/gm/builder/image-vector/* calls must originate from this file.
+
+function ivFmtMb(n){ return n==null?'-':`${Number(n).toFixed(1)} MB`; }
+function ivStateText(s){ return ({OFF:'완전 정지',FORCED_ON:'강제 가동',AUTO_RUNNING:'자동 작업 중',AUTO_MEMORY_WAIT:'메모리 대기',AUTO_TIME_WAIT:'시간외 대기'})[String(s||'')]||String(s||'-'); }
+const IV_BASE_TITLE=document.title;
+let ivTitleTimer=null,ivTitleFlip=false;
+function setImageVectorForcedWarning(on){
+  const card=document.getElementById('ivBackgroundCard');
+  if(card)card.classList.toggle('iv-forced-on',!!on);
+  if(on){
+    if(!ivTitleTimer){
+      ivTitleFlip=false;
+      ivTitleTimer=setInterval(()=>{ivTitleFlip=!ivTitleFlip;document.title=ivTitleFlip?'⚠ VECTOR 강제 ON ⚠':IV_BASE_TITLE;},800);
+    }
+  }else{
+    if(ivTitleTimer){clearInterval(ivTitleTimer);ivTitleTimer=null;}
+    document.title=IV_BASE_TITLE;
+  }
+}
+function paintImageVectorMode(mode){
+  ['OFF','AUTO','ON'].forEach(m=>{
+    const b=document.getElementById('ivMode'+m.charAt(0)+m.slice(1).toLowerCase());
+    if(!b)return;
+    b.className=(m===mode?(m==='OFF'?'red':m==='AUTO'?'green':'red'):'gray');
+  });
+  setImageVectorForcedWarning(mode==='ON');
+}
+async function loadImageVectorBackgroundStatus(){
+  const body=document.getElementById('ivBackgroundStatus'); if(!body)return;
+  try{
+    const r=await fetch(`${API}/api/gm/background/image-vector/status?t=${Date.now()}`,{cache:'no-store'});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    paintImageVectorMode(j.mode);
+    body.innerHTML=`
+      <tr><th>현재 모드</th><td><b>${j.mode}</b></td></tr>
+      <tr><th>현재 상태</th><td>${ivStateText(j.state)}</td></tr>
+      <tr><th>현재 메모리</th><td><b>${j.memory_percent}%</b> (${ivFmtMb(j.memory_used_mb)} / ${ivFmtMb(j.memory_limit_mb)})</td></tr>
+      <tr><th>미수행</th><td>${fmt(j.pending)}건</td></tr>
+      <tr><th>현재 실행</th><td>${fmt(j.active)} / ${fmt(j.max_slots)}</td></tr>
+      <tr><th>완료/실패</th><td>${fmt(j.completed)} / ${fmt(j.failed)}</td></tr>
+      <tr><th>마지막 오류</th><td>${j.last_error||'-'}</td></tr>`;
+  }catch(e){ body.innerHTML=`<tr><td>Vector Background 조회 실패: ${String(e&&e.message||e)}</td></tr>`; }
+}
+async function setImageVectorMode(mode){
+  if(!['OFF','AUTO','ON'].includes(mode))return;
+  if(mode==='ON' && !confirm('강제 ON은 시간 및 메모리 제한을 무시합니다. 계속 가동할까요?'))return;
+  try{
+    const r=await fetch(`${API}/api/gm/background/image-vector/mode`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    paintImageVectorMode(j.mode);
+    log({action:'image-vector-background.mode',mode:j.mode,state:j.state,memory_percent:j.memory_percent,pending:j.pending});
+    await loadImageVectorBackgroundStatus();
+  }catch(e){ log('image-vector mode error: '+String(e&&e.message||e)); }
+}
+async function syncImageVectorProducts(button){
+  const out=document.getElementById('ivProductSyncResult');
+  if(!confirm('현재 상품에 없는 이미지 Vector를 삭제합니다. 상품 테이블은 변경하지 않습니다. 계속할까요?'))return;
+  const timed=startButtonTimer(button,'상품 동기화 중');
+  try{
+    const r=await fetch(`${API}/api/gm/builder/image-vector/sync-products`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:'{}'
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    const text=`동기화 완료: 상품 ${fmt(j.product_count)}건 / 삭제 Vector ${fmt(j.deleted)}건 / 잔여 Vector ${fmt(j.vector_after)}건`;
+    if(out)out.textContent=text;
+    log({action:'image-vector.sync-products',...j});
+    await loadDashboard(false);
+  }catch(e){
+    const msg=String(e&&e.message||e);
+    if(out)out.textContent='동기화 실패: '+msg;
+    log('image-vector product sync error: '+msg);
+  }finally{
+    stopButtonTimer(timed);
+  }
+}
+
+async function uploadImageVectorPending(button){
+  const input=document.getElementById('ivPendingFile'),out=document.getElementById('ivUploadResult');
+  const file=input&&input.files&&input.files[0];
+  if(!file){alert('Queue CSV 또는 Excel 파일을 선택하세요.');return;}
+  const timed=startButtonTimer(button,'Queue 업로드 중');
+  try{
+    const text=await readCsvText(file);
+    const first=String(text||'').split(/\r?\n/)[0]||'';
+    if(!/product_uid/i.test(first) || !/(image_url|thumb_origin_url)/i.test(first))throw new Error('필수 컬럼 product_uid, image_url 이 없습니다.');
+    const r=await fetch(`${API}/api/gm/background/image-vector/pending/import`,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    if(out)out.textContent=`업로드 완료: 유효 ${fmt(j.valid)}건 / 무효 ${fmt(j.invalid)}건 / 현재 미수행 ${fmt(j.pending)}건`;
+    log({action:'image-vector-pending.import',file:file.name,...j});
+    await loadImageVectorBackgroundStatus();
+  }catch(e){
+    const msg=String(e&&e.message||e);if(out)out.textContent='업로드 실패: '+msg;log('image-vector pending import error: '+msg);
+  }finally{stopButtonTimer(timed);}
+}
+loadImageVectorBackgroundStatus();
+setInterval(()=>loadImageVectorBackgroundStatus(),10000);
+
+// GM_BUILDER_IMAGE_VECTOR_CATEGORY_GROUP_UI_V003
+// Dedicated image-vector category_group importer.
+// IMPORTANT: this never calls /safe-update. Server ownership is image_vector/category_group.js.
+async function uploadVectorCategoryGroup(apply,button){
+  const input=document.getElementById('ivCategoryGroupFile');
+  const out=document.getElementById('ivCategoryGroupResult');
+  const file=input&&input.files&&input.files[0];
+  if(!file){alert('product_uid,category_group CSV 파일을 선택하세요.');return;}
+  if(apply && !confirm('기존 이미지 Vector의 category_group 2자리 코드를 적용할까요? vector_image/candidate_vector/class_id는 변경하지 않습니다.'))return;
+
+  const timed=startButtonTimer(button,apply?'Category Group 적용 중':'Category Group 검증 중');
+  try{
+    if(out)out.textContent='CSV 읽는 중...';
+    const text=await readCsvText(file);
+    const first=String(text||'').split(/\r?\n/)[0]||'';
+    const cols=first.replace(/^\uFEFF/,'').split(',').map(x=>x.trim().replace(/^"|"$/g,'').toLowerCase());
+    if(cols.length!==2 || !cols.includes('product_uid') || !cols.includes('category_group')){
+      throw new Error('CSV 컬럼은 product_uid,category_group 두 개만 허용합니다.');
+    }
+
+    if(out)out.textContent=`${apply?'적용':'검증'} 요청 전송 중...`;
+    const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}`,{
+      method:'POST',
+      headers:{'Content-Type':'text/csv; charset=utf-8'},
+      body:text
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+
+    const msg=`${apply?'적용':'검증'} 완료: 입력 ${fmt(j.input_rows)} / 유효 ${fmt(j.valid)} / 매칭 ${fmt(j.matched)} / 변경 ${fmt(j.updated)} / 동일 ${fmt(j.unchanged)} / 미매칭 ${fmt(j.not_found)} / 무효 ${fmt(j.invalid)} / ${fmt(j.batches)} batch / ${fmt(j.elapsed_ms)} ms`;
+    if(out)out.textContent=msg;
+    log({action:apply?'image-vector.category-group.apply':'image-vector.category-group.dryrun',file:file.name,...j});
+  }catch(e){
+    const msg=String(e&&e.message||e);
+    if(out)out.textContent='실패: '+msg;
+    log('image-vector category_group error: '+msg);
+  }finally{
+    stopButtonTimer(timed);
+  }
+}

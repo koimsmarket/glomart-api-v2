@@ -1,4 +1,4 @@
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V021_MAX200K';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V021_SPLIT_DOMAIN';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -300,6 +300,8 @@ const TABLES = {
   }
 };
 
+// Generic safe-update ceiling only. Domain builders define their own limits locally.
+// 200,000 allows 100k+ partition files without forcing users to split source files.
 const LIMITS = {
   MAX_ROWS: 200000,
   BATCH_SIZE: 300,
