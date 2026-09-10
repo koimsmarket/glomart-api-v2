@@ -1,5 +1,5 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V005_DOMAIN_SPLIT
-// Image Vector UI only: background worker, product sync, pending queue, category_group import.
+// GM_BUILDER_IMAGE_VECTOR_UI_V006_HNSW_TRANSITION
+// Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
 function ivFmtMb(n){ return n==null?'-':`${Number(n).toFixed(1)} MB`; }
@@ -102,44 +102,3 @@ async function uploadImageVectorPending(button){
 }
 loadImageVectorBackgroundStatus();
 setInterval(()=>loadImageVectorBackgroundStatus(),10000);
-
-// GM_BUILDER_IMAGE_VECTOR_CATEGORY_GROUP_UI_V003
-// Dedicated image-vector category_group importer.
-// IMPORTANT: this never calls /safe-update. Server ownership is image_vector/category_group.js.
-async function uploadVectorCategoryGroup(apply,button){
-  const input=document.getElementById('ivCategoryGroupFile');
-  const out=document.getElementById('ivCategoryGroupResult');
-  const file=input&&input.files&&input.files[0];
-  if(!file){alert('product_uid,category_group CSV 파일을 선택하세요.');return;}
-  if(apply && !confirm('기존 이미지 Vector의 category_group 2자리 코드를 적용할까요? vector_image/candidate_vector/class_id는 변경하지 않습니다.'))return;
-
-  const timed=startButtonTimer(button,apply?'Category Group 적용 중':'Category Group 검증 중');
-  try{
-    if(out)out.textContent='CSV 읽는 중...';
-    const text=await readCsvText(file);
-    const first=String(text||'').split(/\r?\n/)[0]||'';
-    const cols=first.replace(/^\uFEFF/,'').split(',').map(x=>x.trim().replace(/^"|"$/g,'').toLowerCase());
-    if(cols.length!==2 || !cols.includes('product_uid') || !cols.includes('category_group')){
-      throw new Error('CSV 컬럼은 product_uid,category_group 두 개만 허용합니다.');
-    }
-
-    if(out)out.textContent=`${apply?'적용':'검증'} 요청 전송 중...`;
-    const r=await fetch(`${API}/api/gm/builder/image-vector/category-group/import?apply=${apply?'YES':'NO'}`,{
-      method:'POST',
-      headers:{'Content-Type':'text/csv; charset=utf-8'},
-      body:text
-    });
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
-
-    const msg=`${apply?'적용':'검증'} 완료: 입력 ${fmt(j.input_rows)} / 유효 ${fmt(j.valid)} / 매칭 ${fmt(j.matched)} / 변경 ${fmt(j.updated)} / 동일 ${fmt(j.unchanged)} / 미매칭 ${fmt(j.not_found)} / 무효 ${fmt(j.invalid)} / ${fmt(j.batches)} batch / ${fmt(j.elapsed_ms)} ms`;
-    if(out)out.textContent=msg;
-    log({action:apply?'image-vector.category-group.apply':'image-vector.category-group.dryrun',file:file.name,...j});
-  }catch(e){
-    const msg=String(e&&e.message||e);
-    if(out)out.textContent='실패: '+msg;
-    log('image-vector category_group error: '+msg);
-  }finally{
-    stopButtonTimer(timed);
-  }
-}
