@@ -41,7 +41,9 @@ function safeKeyWhere(key,startIndex=1){
     : `${qIdent(k)}=$${startIndex+i}`).join(' AND ');
 }
 
-router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'30mb' }), async (req,res)=>{
+// GM_SAFE_UPDATE_VECTOR_ROWS_V021
+// gm_product_image_vector may be managed in 100k-row partitions. Do not silently cut it at the global 50k limit.
+router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'100mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
 
@@ -50,8 +52,57 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   const db = dbFrom(req);
 
   let rows = parseCsv(req.body);
-  if (rows.length > LIMITS.MAX_ROWS) {
-    rows = rows.slice(0, LIMITS.MAX_ROWS);
+  const maxRows = spec.table === 'gm_product_image_vector' ? 200000 : LIMITS.MAX_ROWS;
+  if (rows.length > maxRows) {
+    return res.status(400).json({ok:false,error:'TOO_MANY_ROWS',table:spec.table,input_rows:rows.length,limit:maxRows});
+  }
+
+  // Fast UPDATE-only path for category-group files accidentally/optionally uploaded
+  // through the normal product_image_vector Safe Update card.
+  // This keeps 100k+ metadata updates out of the legacy per-row SELECT/UPDATE loop.
+  if (spec.table === 'gm_product_image_vector' && rows.length &&
+      rows.every(r => Object.keys(r).filter(k=>k !== '__row_no').every(k => k === 'product_uid' || k === 'category_group'))) {
+    const seen=new Set(), valid=[], issues=[];
+    for(const row of rows){
+      const uid=String(row.product_uid==null?'':row.product_uid).trim();
+      const group=String(row.category_group==null?'':row.category_group).trim().toUpperCase();
+      if(!uid){ issues.push(resultRow(row.__row_no,'gm_product_image_vector','','INVALID','','','MISSING_PRODUCT_UID')); continue; }
+      if(!/^[A-Z]{2}$/.test(group)){ issues.push(resultRow(row.__row_no,'gm_product_image_vector',uid,'INVALID','category_group',group,'INVALID_CATEGORY_GROUP')); continue; }
+      if(seen.has(uid)){ issues.push(resultRow(row.__row_no,'gm_product_image_vector',uid,'INVALID','','','DUPLICATE_PRODUCT_UID')); continue; }
+      seen.add(uid); valid.push([row.__row_no,uid,group]);
+    }
+    const result=[...issues];
+    let matched=0, updated=0;
+    const client=await db.connect();
+    try{
+      if(apply) await client.query('BEGIN');
+      const batchSize=10000;
+      for(let off=0; off<valid.length; off+=batchSize){
+        const part=valid.slice(off,off+batchSize);
+        const uids=part.map(x=>x[1]), groups=part.map(x=>x[2]);
+        const found=await client.query('SELECT product_uid, category_group::text AS category_group FROM gm_product_image_vector WHERE product_uid = ANY($1::text[])',[uids]);
+        const old=new Map(found.rows.map(x=>[String(x.product_uid),String(x.category_group||'').trim()]));
+        matched += found.rows.length;
+        if(apply){
+          const q=await client.query(`UPDATE gm_product_image_vector v SET category_group=x.category_group::char(2) FROM UNNEST($1::text[],$2::text[]) AS x(product_uid,category_group) WHERE v.product_uid=x.product_uid AND v.category_group IS DISTINCT FROM x.category_group::char(2)`,[uids,groups]);
+          updated += q.rowCount||0;
+        }
+        for(const [rowNo,uid,group] of part){
+          if(!old.has(uid)) result.push(resultRow(rowNo,'gm_product_image_vector',uid,'SKIP','','','KEY_NOT_FOUND'));
+          else result.push(resultRow(rowNo,'gm_product_image_vector',uid,apply?'UPDATED':'VALID','category_group',group,apply?'APPLIED':'DRY_RUN'));
+        }
+      }
+      if(apply) await client.query('COMMIT');
+      result.sort((a,b)=>Number(a.row_no||0)-Number(b.row_no||0));
+      res.setHeader('Content-Type','text/csv; charset=utf-8');
+      res.setHeader('X-GM-Input-Rows',String(rows.length));
+      res.setHeader('X-GM-Matched-Rows',String(matched));
+      res.setHeader('X-GM-Updated-Rows',String(updated));
+      return res.send('\uFEFF'+toCsv(result));
+    }catch(e){
+      if(apply) await client.query('ROLLBACK').catch(()=>{});
+      return res.status(500).json({ok:false,error:'VECTOR_CATEGORY_GROUP_SAFE_UPDATE_FAILED',detail:String(e&&e.message||e)});
+    }finally{client.release();}
   }
 
   // Cafe24 회원명부를 일반 gm_member safe-update에 넣어도 자동으로 전용 import로 처리한다.
