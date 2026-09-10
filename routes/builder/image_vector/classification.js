@@ -1,5 +1,5 @@
 'use strict';
-// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V004
+// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V005
 //
 // PURPOSE
 //   Builder control plane for periodic visual-vector classification.
@@ -29,7 +29,7 @@ const { fork } = require('child_process');
 const os = require('os');
 const { dbFrom } = require('../core');
 
-const VERSION = 'GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V004';
+const VERSION = 'GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_V005';
 const BUILD_SCRIPT = path.resolve(__dirname, '../../../tools/vector-classification/build.js');
 const LOG_LIMIT = 160;
 
@@ -48,9 +48,9 @@ const state = {
   applied: null,
   error: null,
   logs: [],
-  // Cached DB summary is used while the child is running so status polling
-  // never competes with the classification job for PostgreSQL/CPU.
-  database_snapshot: null
+  // Heavy DB verification is intentionally separated from lightweight status.
+  // Only the last explicitly requested verification result is cached here.
+  verification: null
 };
 
 let activeChild = null;
@@ -194,36 +194,67 @@ async function databaseSummary(db, groups) {
   return q.rows[0] || {};
 }
 
-router.get('/api/gm/builder/image-vector/classification/status', async (req,res) => {
+// LIGHTWEIGHT STATUS ONLY.
+// IMPORTANT: this endpoint must remain DB-free. Builder loads/polls this route,
+// so it returns only the small in-process job state emitted by the child.
+// Heavy COUNT/DISTINCT/NOT EXISTS checks live in /verify and run only on demand.
+router.get('/api/gm/builder/image-vector/classification/status', (req,res) => {
   let groups;
   try { groups = parseGroups(req.query.groups || (state.groups.length ? state.groups.join(',') : 'FD')); }
   catch (e) { return res.status(400).json({ok:false,version:VERSION,error:String(e.message||e)}); }
 
-  // CRITICAL V034 RULE:
-  // While classification is running, STATUS MUST NOT execute COUNT/JOIN queries
-  // against gm_product_image_vector or STAGING. The child is already reading and
-  // classifying large 512D vectors. Polling those tables every 3 seconds made the
-  // Builder appear frozen and could starve the parent API process.
-  if (state.running) {
-    return res.json({
-      ok:true,
-      version:VERSION,
-      state:{...state,logs:state.logs.slice(-100)},
-      database:{groups,...(state.database_snapshot||{})},
-      stage:{job_id:state.job_id,nodes:0,leaves:0,leaf_product_count:0,assignments:0,orphan_assignments:0,duplicate_assignments:0,building:true}
-    });
-  }
+  const result=state.result||{};
+  const staged=result.stage||{};
+  const lightweightStage={
+    job_id: state.job_id || staged.job_id || null,
+    nodes: Number(staged.nodes||result.nodes||0),
+    leaves: Number(staged.leaves||result.leaves||0),
+    leaf_product_count: Number(staged.leaf_product_count||0),
+    assignments: Number(staged.assignments||result.assigned_check||0),
+    orphan_assignments: Number(staged.orphan_assignments||0),
+    duplicate_assignments: 0,
+    building: !!state.running,
+    source: 'JOB_STATE'
+  };
+  return res.json({
+    ok:true,
+    version:VERSION,
+    lightweight:true,
+    state:{...state,logs:state.logs.slice(-100)},
+    database:{groups},
+    stage:lightweightStage,
+    verification:state.verification
+  });
+});
 
+// PRECISE VERIFICATION ONLY.
+// This route intentionally performs the expensive DB scans and is never called
+// by Builder page load or the 5-second job polling loop. The user invokes it
+// explicitly after STAGING is complete (or whenever a precise DB audit is needed).
+router.get('/api/gm/builder/image-vector/classification/verify', async (req,res) => {
+  if(state.running)return res.status(409).json({ok:false,version:VERSION,error:'CLASSIFICATION_RUNNING'});
+  let groups;
+  try { groups = parseGroups(req.query.groups || (state.groups.length ? state.groups.join(',') : 'FD')); }
+  catch (e) { return res.status(400).json({ok:false,version:VERSION,error:String(e.message||e)}); }
   try {
     const db=dbFrom(req);
     await ensureStageSchema(db);
     const latest=await latestStageJob(db);
-    const jobId=state.job_id || (latest&&latest.job_id) || null;
+    const jobId=String(req.query.job_id || state.job_id || (latest&&latest.job_id) || '').trim() || null;
+    const started=Date.now();
     const [summary,stage] = await Promise.all([databaseSummary(db,groups),stageSummary(db,jobId)]);
-    state.database_snapshot = summary;
-    res.json({ok:true,version:VERSION,state:{...state,logs:state.logs.slice(-100)},database:{groups,...summary},stage});
+    const verification={
+      job_id:jobId,
+      groups,
+      database:summary,
+      stage,
+      verified_at:nowIso(),
+      elapsed_ms:Date.now()-started
+    };
+    state.verification=verification;
+    return res.json({ok:true,version:VERSION,verification});
   } catch (e) {
-    res.status(500).json({ok:false,version:VERSION,error:'STATUS_FAILED',detail:String(e&&e.message||e),state});
+    return res.status(500).json({ok:false,version:VERSION,error:'VERIFY_FAILED',detail:String(e&&e.message||e)});
   }
 });
 
@@ -253,6 +284,7 @@ router.post('/api/gm/builder/image-vector/classification/start', express.json({l
   state.result=null;
   state.applied=null;
   state.error=null;
+  state.verification=null;
   state.logs=[];
 
   const child=fork(BUILD_SCRIPT,[],{
@@ -402,7 +434,7 @@ router.post('/api/gm/builder/image-vector/classification/stage/clear', express.j
   if(state.running)return res.status(409).json({ok:false,version:VERSION,error:'CLASSIFICATION_RUNNING'});
   try{
     const deleted=await clearStage(dbFrom(req));
-    state.job_id=null;state.result=null;state.progress=null;state.phase='IDLE';
+    state.job_id=null;state.result=null;state.progress=null;state.verification=null;state.phase='IDLE';
     pushLog(`[${VERSION}] STAGING MANUAL CLEAR categories=${deleted.categories_deleted} assignments=${deleted.assignments_deleted}`);
     res.json({ok:true,version:VERSION,...deleted});
   }catch(e){res.status(500).json({ok:false,version:VERSION,error:'STAGE_CLEAR_FAILED',detail:String(e&&e.message||e)});}

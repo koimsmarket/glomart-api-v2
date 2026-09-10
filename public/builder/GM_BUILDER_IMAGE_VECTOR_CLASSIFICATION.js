@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_UI_V003
+// GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION_UI_V004
 // V032 Classification UI only.
 // - 분류 생성 = 운영 DB를 건드리지 않고 STAGING 결과를 만든다.
 // - APPLY = 검증된 STAGING을 운영 gm_vector_category + class_id에 함께 반영한다.
@@ -9,9 +9,9 @@
 let ivClassPollTimer=null;
 function ivClassGroups(){const el=document.getElementById('ivClassGroups');return String(el&&el.value||'FD').trim().toUpperCase();}
 function ivClassFmtState(s){return({IDLE:'대기',STARTING:'시작 중',START:'시작',PRODUCT_SCOPE:'대상 확인',LOADING:'Vector 배치 로드',LOADED:'Vector 로드 완료',BUILDING:'카테고리 생성 중',RESULT:'분류 계산 완료',STAGING:'STAGING 기록 중',STAGED:'STAGING 완료',APPLIED:'운영 DB 적용 완료',COMPLETE:'완료',FAILED:'실패'})[String(s||'')]||String(s||'-');}
-function ivClassSetButtons(running){['ivClassBuild','ivClassApply','ivClassClearStage'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!!running;});const c=document.getElementById('ivClassCancel');if(c)c.disabled=!running;}
+function ivClassSetButtons(running){['ivClassBuild','ivClassApply','ivClassClearStage','ivClassVerify'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!!running;});const c=document.getElementById('ivClassCancel');if(c)c.disabled=!running;}
 function ivClassRender(j){
-  const s=j&&j.state||{},d=j&&j.database||{},st=j&&j.stage||{},r=s.result||{},p=s.progress||{};
+  const s=j&&j.state||{},v=j&&j.verification||s.verification||{},d=(v&&v.database)||j&&j.database||{},st=(v&&v.stage)||j&&j.stage||{},r=s.result||{},p=s.progress||{};
   const status=document.getElementById('ivClassStatus');if(status)status.innerHTML=`
     <tr><th>대상 대분류</th><td><b>${(d.groups||s.groups||[]).join(', ')||'-'}</b></td></tr>
     <tr><th>현재 상태</th><td><b>${ivClassFmtState(s.phase)}</b>${s.running?' · 실행중':''}</td></tr>
@@ -19,11 +19,12 @@ function ivClassRender(j){
     <tr><th>대상 원본512</th><td>${fmt(d.total||p.total_vectors||p.vectors||0)}건</td></tr>
     <tr><th>STAGING 카테고리</th><td>Node ${fmt(st.nodes||0)} / Leaf ${fmt(st.leaves||0)}</td></tr>
     <tr><th>STAGING PUID 배정</th><td>${fmt(st.assignments||0)} / Leaf 합계 ${fmt(st.leaf_product_count||0)} ${Number(st.assignments||0)===Number(st.leaf_product_count||0)&&Number(st.assignments||0)>0?'✓':''}</td></tr>
-    <tr><th>STAGING 오류</th><td>참조 ${fmt(st.orphan_assignments||0)} / 중복 ${fmt(st.duplicate_assignments||0)}</td></tr>
+    <tr><th>STAGING 오류</th><td>참조 ${fmt(st.orphan_assignments||0)} / 중복 ${fmt(st.duplicate_assignments||0)}${v&&v.verified_at?' · 정밀검증 완료':' · 정밀검증 전'}</td></tr>
     <tr><th>운영 카테고리</th><td>Node ${fmt(d.nodes||0)} / Leaf ${fmt(d.leaves||0)}</td></tr>
     <tr><th>운영 class_id</th><td>선택범위 ${fmt(d.assigned||0)} / 미기록 ${fmt(d.unassigned||0)} / 참조오류 ${fmt(d.orphan_assignments||0)}</td></tr>
     <tr><th>진행</th><td>Vector ${fmt(p.vectors||0)}${p.total_vectors?` / ${fmt(p.total_vectors)}`:''} · Node ${fmt(p.nodes||0)} · Leaf배정 ${fmt(p.leaf_assigned||0)} · Depth ${p.current_depth==null?'-':p.current_depth}</td></tr>
     <tr><th>분류 결과</th><td>${r.vectors!=null?`Vector ${fmt(r.vectors)} / Node ${fmt(r.nodes)} / Leaf ${fmt(r.leaves)} / Max depth ${r.max_depth} / 평균 Leaf ${r.avg_leaf} / 최대 Leaf ${r.max_leaf} / cohesion ${r.avg_leaf_cohesion} / assigned ${fmt(r.assigned_check)} / ${fmt(r.total_elapsed_ms)} ms`:'-'}</td></tr>
+    <tr><th>정밀검증</th><td>${v&&v.verified_at?`${v.verified_at} · ${fmt(v.elapsed_ms||0)} ms`:'수동 실행 전'}</td></tr>
     <tr><th>오류</th><td>${s.error||'-'}</td></tr>`;
   ivClassSetButtons(!!s.running);const logEl=document.getElementById('ivClassLog');if(logEl)logEl.textContent=(s.logs||[]).slice(-60).join('\n')||'분류 로그 없음';
 }
@@ -58,6 +59,25 @@ async function cancelImageVectorClassification(button){
     if(out)out.textContent=j.cancelled?`분류 중지 요청 완료 / PID ${j.pid||'-'}`:'실행 중인 분류 작업 없음';
     setTimeout(loadImageVectorClassificationStatus,500);
   }catch(e){if(out)out.textContent='분류 중지 실패: '+String(e&&e.message||e);}
+}
+
+async function verifyImageVectorClassification(button){
+  const groups=ivClassGroups();
+  const timed=startButtonTimer(button,'STAGING 정밀검증'),out=document.getElementById('ivClassResult');
+  try{
+    const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),180000);
+    const r=await fetch(`${API}/api/gm/builder/image-vector/classification/verify?groups=${encodeURIComponent(groups)}&t=${Date.now()}`,{cache:'no-store',signal:ctl.signal});
+    clearTimeout(timer);
+    const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    const v=j.verification||{},st=v.stage||{};
+    if(out)out.textContent=`정밀검증 완료: STAGING ${fmt(st.assignments||0)}건 / Node ${fmt(st.nodes||0)} / ${fmt(v.elapsed_ms||0)} ms`;
+    log({action:'image-vector.classification.verify',...j});
+    await loadImageVectorClassificationStatus();
+  }catch(e){
+    const msg=(e&&e.name==='AbortError')?'정밀검증 180초 응답시간 초과':String(e&&e.message||e);
+    if(out)out.textContent='정밀검증 실패: '+msg;
+    log('image-vector classification verify error: '+msg);
+  }finally{stopButtonTimer(timed);}
 }
 
 async function applyImageVectorClassification(button){
