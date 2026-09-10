@@ -1,477 +1,128 @@
 'use strict';
 /*
- * GM_VECTOR_CLASSIFICATION_BUILD_V005
+ * GM_VECTOR_CLASSIFICATION_BUILD_V006 (V032)
  *
- * 목적
- * - gm_product_image_vector.vector_image(원본 512차원)만 사용해 재생성 가능한 시각 분류 트리를 만든다.
- * - category_group은 "현재 학습에 포함할 상위 그룹" 선택용이다. 의미 분류 코드가 아니다.
- * - gm_vector_category와 class_id는 파생 데이터이며 언제든 다시 생성할 수 있다.
+ * PURPOSE
+ *   Build a visual category tree from ORIGINAL 512D vector_image data and write
+ *   the COMPLETE result to persistent STAGING tables only.
  *
- * 안전 원칙
- * 1) 기본은 DRY RUN. GM_VECTOR_CLASS_APPLY=1 일 때만 DB 반영.
- * 2) vector_image / candidate_vector / category_group은 절대 수정하지 않는다.
- * 3) APPLY는 트랜잭션 안에서 기존 파생 트리와 class_id를 교체한다.
- * 4) 현재 기본 범위는 FD. 향후 HS 완료 후 GM_VECTOR_CLASS_GROUPS=FD,HS 로 전체 재학습한다.
+ * MEMORY POLICY
+ *   - DB rows are read in bounded keyset pages.
+ *   - One contiguous Float32Array is preallocated after COUNT(*).
+ *   - PostgreSQL's large JS row array is never held for the whole dataset.
+ *   - For 62,476 vectors the raw normalized vector buffer is ~122 MiB.
+ *   - For future 200k vectors it is ~391 MiB, so this algorithm is still not an
+ *     unlimited-memory design; however it removes the much larger duplicate
+ *     pg-row/JS-array peak present in V031.
  *
- * 성능 보완(V004)
- * - V003은 각 노드에서 전체 벡터로 여러 회 k-means를 반복하여 6만~10만 건에서 지나치게 느릴 수 있었다.
- * - V004는 각 노드의 center 학습은 결정론적 표본(TRAIN_SAMPLE_MAX)으로 하고,
- *   최종 소속 배정과 cohesion 계산은 반드시 원본 512차원 전체 벡터로 수행한다.
- * - 즉 candidate_vector/ANN/축소벡터를 사용하지 않는다.
- * - 분류 결과의 각 노드 vector_center 역시 원본 512차원의 실제 평균 중심이다.
+ * STAGING POLICY
+ *   gm_vector_category_stage : complete tree for GM_VECTOR_CLASS_JOB_ID
+ *   gm_vector_class_stage    : product_uid -> temp_class_id
+ *   Production tables are NEVER modified by this process.
+ *
+ * APPLY is intentionally owned by Builder classification.js after staging
+ * verification. This separation guarantees a failed/odd classification cannot
+ * partially alter the production category tree.
  */
 
 const { Pool } = require('pg');
+const DIM=512;
+const LEAF_MAX=Math.max(10,Number(process.env.GM_VECTOR_CLASS_LEAF_MAX||100));
+const MAX_DEPTH=Math.max(2,Number(process.env.GM_VECTOR_CLASS_MAX_DEPTH||12));
+const MAX_CHILDREN=Math.max(2,Math.min(1000,Number(process.env.GM_VECTOR_CLASS_MAX_CHILDREN||1000)));
+const ITER=Math.max(2,Math.min(12,Number(process.env.GM_VECTOR_CLASS_ITER||4)));
+const TRAIN_SAMPLE_MAX=Math.max(256,Number(process.env.GM_VECTOR_CLASS_TRAIN_SAMPLE_MAX||1024));
+const MIN_SPLIT_SIZE=Math.max(10,Number(process.env.GM_VECTOR_CLASS_MIN_SPLIT_SIZE||40));
+const COHESION_STOP=Math.max(-1,Math.min(1,Number(process.env.GM_VECTOR_CLASS_COHESION_STOP||0.82)));
+const MIN_SPLIT_GAIN=Math.max(0,Number(process.env.GM_VECTOR_CLASS_MIN_SPLIT_GAIN||0.015));
+const LOAD_PAGE=Math.max(100,Math.min(10000,Number(process.env.GM_VECTOR_CLASS_LOAD_PAGE||1000)));
+const STAGE_BATCH=Math.max(100,Math.min(10000,Number(process.env.GM_VECTOR_CLASS_STAGE_BATCH||5000)));
+const GROUPS=String(process.env.GM_VECTOR_CLASS_GROUPS||'FD').split(',').map(s=>s.trim().toUpperCase()).filter(Boolean);
+const JOB_ID=String(process.env.GM_VECTOR_CLASS_JOB_ID||'').trim();
+const pool=new Pool();
 
-const DIM = 512;
-const LEAF_MAX = Math.max(20, Number(process.env.GM_VECTOR_CLASS_LEAF_MAX || 100));
-const MAX_DEPTH = Math.max(2, Number(process.env.GM_VECTOR_CLASS_MAX_DEPTH || 12));
-const MAX_CHILDREN = Math.max(2, Math.min(1000, Number(process.env.GM_VECTOR_CLASS_MAX_CHILDREN || 1000)));
-const ITER = Math.max(2, Math.min(12, Number(process.env.GM_VECTOR_CLASS_ITER || 4)));
-const TRAIN_SAMPLE_MAX = Math.max(256, Number(process.env.GM_VECTOR_CLASS_TRAIN_SAMPLE_MAX || 1024));
-const MIN_SPLIT_SIZE = Math.max(10, Number(process.env.GM_VECTOR_CLASS_MIN_SPLIT_SIZE || 40));
-const COHESION_STOP = Math.max(-1, Math.min(1, Number(process.env.GM_VECTOR_CLASS_COHESION_STOP || 0.82)));
-const MIN_SPLIT_GAIN = Math.max(0, Number(process.env.GM_VECTOR_CLASS_MIN_SPLIT_GAIN || 0.015));
-const GROUPS = String(process.env.GM_VECTOR_CLASS_GROUPS || 'FD')
-  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
-const APPLY = String(process.env.GM_VECTOR_CLASS_APPLY || '') === '1';
-
-const pool = new Pool();
-
-// Optional IPC for Builder. Standalone CLI behavior is unchanged.
-function emitIpc(phase, extra={}) {
-  if (typeof process.send !== 'function') return;
-  try { process.send({ source:'GM_VECTOR_CLASS_BUILD_V005', phase, ...extra }); } catch (_) {}
+function emitIpc(phase,extra={}){if(typeof process.send!=='function')return;try{process.send({source:'GM_VECTOR_CLASS_BUILD_V006',phase,...extra});}catch(_){}}
+function vecOffset(ix){return ix*DIM;}
+function dotIndex(buf,ix,center){let s=0,o=vecOffset(ix);for(let d=0;d<DIM;d++)s+=buf[o+d]*center[d];return s;}
+function normArrayInto(src,buf,ix){
+  let ss=0;for(let d=0;d<DIM;d++){const x=Number(src[d]);if(!Number.isFinite(x))return false;ss+=x*x;}
+  const inv=1/(Math.sqrt(ss)||1),o=vecOffset(ix);for(let d=0;d<DIM;d++)buf[o+d]=Number(src[d])*inv;return true;
 }
-
-
-function norm(v) {
-  let ss = 0;
-  for (let i = 0; i < DIM; i++) ss += v[i] * v[i];
-  const d = Math.sqrt(ss) || 1;
-  const out = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) out[i] = v[i] / d;
-  return out;
-}
-
-function dot(a, b) {
-  let s = 0;
-  // 단순 루프가 V8에서 가장 안정적이며 512차원 전체를 사용한다.
-  for (let i = 0; i < DIM; i++) s += a[i] * b[i];
-  return s;
-}
-
-function mean(indices, vecs) {
-  const c = new Float32Array(DIM);
-  for (const ix of indices) {
-    const v = vecs[ix];
-    for (let d = 0; d < DIM; d++) c[d] += v[d];
-  }
-  if (indices.length) {
-    const inv = 1 / indices.length;
-    for (let d = 0; d < DIM; d++) c[d] *= inv;
-  }
-  return norm(c);
-}
-
-function cohesion(indices, vecs, center) {
-  if (!indices.length) return 1;
-  let s = 0;
-  for (const ix of indices) s += dot(vecs[ix], center);
-  return s / indices.length;
-}
-
-function splitK(n) {
-  return Math.max(2, Math.min(MAX_CHILDREN, Math.ceil(Math.sqrt(Math.max(2, n) / LEAF_MAX))));
-}
-
-/*
- * 결정론적 균등 표본.
- * 랜덤 샘플링으로 실행마다 트리가 달라지지 않게 한다.
- */
-function sampleIndices(indices, maxN) {
-  if (indices.length <= maxN) return indices.slice();
-  const out = new Array(maxN);
-  const step = indices.length / maxN;
-  for (let i = 0; i < maxN; i++) {
-    out[i] = indices[Math.min(indices.length - 1, Math.floor((i + 0.5) * step))];
-  }
-  return out;
-}
-
-function seededCenters(train, vecs, k, seed) {
-  let x = (seed >>> 0) || 1;
-  const used = new Set();
-  const centers = [];
-  while (centers.length < k) {
-    x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
-    const ix = train[x % train.length];
-    if (used.has(ix)) continue;
-    used.add(ix);
-    centers.push(Float32Array.from(vecs[ix]));
+function centerFromIndex(buf,ix){const out=new Float32Array(DIM),o=vecOffset(ix);for(let d=0;d<DIM;d++)out[d]=buf[o+d];return out;}
+function normalizeCenter(c){let ss=0;for(let d=0;d<DIM;d++)ss+=c[d]*c[d];const inv=1/(Math.sqrt(ss)||1);for(let d=0;d<DIM;d++)c[d]*=inv;return c;}
+function mean(indices,buf){const c=new Float32Array(DIM);for(const ix of indices){let o=vecOffset(ix);for(let d=0;d<DIM;d++)c[d]+=buf[o+d];}if(indices.length){const inv=1/indices.length;for(let d=0;d<DIM;d++)c[d]*=inv;}return normalizeCenter(c);}
+function cohesion(indices,buf,center){if(!indices.length)return 1;let s=0;for(const ix of indices)s+=dotIndex(buf,ix,center);return s/indices.length;}
+function splitK(n){return Math.max(2,Math.min(MAX_CHILDREN,Math.ceil(Math.sqrt(Math.max(2,n)/LEAF_MAX))));}
+function sampleIndices(indices,maxN){if(indices.length<=maxN)return indices.slice();const out=new Array(maxN),step=indices.length/maxN;for(let i=0;i<maxN;i++)out[i]=indices[Math.min(indices.length-1,Math.floor((i+0.5)*step))];return out;}
+function seededCenters(train,buf,k,seed){let x=(seed>>>0)||1;const used=new Set(),centers=[];while(centers.length<k){x=(Math.imul(x,1664525)+1013904223)>>>0;const ix=train[x%train.length];if(used.has(ix))continue;used.add(ix);centers.push(centerFromIndex(buf,ix));}return centers;}
+function trainCenters(indices,buf,k,seed){
+  const train=sampleIndices(indices,TRAIN_SAMPLE_MAX);let centers=seededCenters(train,buf,k,seed);const assign=new Int32Array(train.length);assign.fill(-1);
+  for(let it=0;it<ITER;it++){
+    const sums=Array.from({length:k},()=>new Float32Array(DIM)),counts=new Int32Array(k);let changed=0;
+    for(let p=0;p<train.length;p++){
+      const ix=train[p];let best=0,bestScore=-Infinity;for(let c=0;c<k;c++){const score=dotIndex(buf,ix,centers[c]);if(score>bestScore){bestScore=score;best=c;}}
+      if(assign[p]!==best){assign[p]=best;changed++;}counts[best]++;const sum=sums[best],o=vecOffset(ix);for(let d=0;d<DIM;d++)sum[d]+=buf[o+d];
+    }
+    for(let c=0;c<k;c++){
+      if(!counts[c]){centers[c]=centerFromIndex(buf,train[(c*997+it*37)%train.length]);continue;}
+      const inv=1/counts[c];for(let d=0;d<DIM;d++)sums[c][d]*=inv;centers[c]=normalizeCenter(sums[c]);
+    }
+    if(!changed)break;
   }
   return centers;
 }
-
-/*
- * 표본으로 spherical k-means center를 학습한다.
- * 학습 데이터도 원본 512차원 벡터다.
- */
-function trainCenters(indices, vecs, k, seed) {
-  const train = sampleIndices(indices, TRAIN_SAMPLE_MAX);
-  let centers = seededCenters(train, vecs, k, seed);
-  const assign = new Int32Array(train.length);
-  assign.fill(-1);
-
-  for (let it = 0; it < ITER; it++) {
-    const sums = Array.from({ length: k }, () => new Float32Array(DIM));
-    const counts = new Int32Array(k);
-    let changed = 0;
-
-    for (let p = 0; p < train.length; p++) {
-      const v = vecs[train[p]];
-      let best = 0;
-      let bestScore = -Infinity;
-
-      for (let c = 0; c < k; c++) {
-        const score = dot(v, centers[c]);
-        if (score > bestScore) {
-          bestScore = score;
-          best = c;
-        }
-      }
-
-      if (assign[p] !== best) {
-        assign[p] = best;
-        changed++;
-      }
-
-      counts[best]++;
-      const sum = sums[best];
-      for (let d = 0; d < DIM; d++) sum[d] += v[d];
-    }
-
-    for (let c = 0; c < k; c++) {
-      if (!counts[c]) {
-        centers[c] = Float32Array.from(vecs[train[(c * 997 + it * 37) % train.length]]);
-        continue;
-      }
-      const inv = 1 / counts[c];
-      for (let d = 0; d < DIM; d++) sums[c][d] *= inv;
-      centers[c] = norm(sums[c]);
-    }
-
-    if (!changed) break;
+function assignAll(indices,buf,centers){const groups=Array.from({length:centers.length},()=>[]);for(const ix of indices){let best=0,bestScore=-Infinity;for(let c=0;c<centers.length;c++){const score=dotIndex(buf,ix,centers[c]);if(score>bestScore){bestScore=score;best=c;}}groups[best].push(ix);}return groups.filter(g=>g.length);}
+function buildNode(indices,buf,parent,childNo,depth,tree){
+  const id=++tree.value,started=Date.now(),center=mean(indices,buf),coh=cohesion(indices,buf,center);
+  const node={tmp_id:id,parent_tmp_id:parent?parent.tmp_id:null,child_no:childNo,depth,count:indices.length,center,cohesion:coh,leaf:false,indices:null};
+  tree.nodes.push(node);if(tree.nodes.length===1||tree.nodes.length%25===0)emitIpc('BUILDING',{progress:{nodes:tree.nodes.length,leaf_assigned:tree.leafAssigned,current_depth:depth}});
+  const stopByDepth=depth>=MAX_DEPTH,stopBySmall=indices.length<MIN_SPLIT_SIZE,stopByGoodLeaf=indices.length<=LEAF_MAX&&coh>=COHESION_STOP;
+  if(stopByDepth||stopBySmall||stopByGoodLeaf){node.leaf=true;node.indices=indices;tree.leafAssigned+=indices.length;console.log('[GM_VECTOR_CLASS_NODE]',{id,depth,count:indices.length,cohesion:Number(coh.toFixed(4)),leaf:true,reason:stopByDepth?'MAX_DEPTH':stopBySmall?'MIN_SPLIT_SIZE':'COHESION_STOP',elapsed_ms:Date.now()-started});return node;}
+  const k=splitK(indices.length),centers=trainCenters(indices,buf,k,(id*2654435761)>>>0),groups=assignAll(indices,buf,centers);
+  if(groups.length<=1){node.leaf=true;node.indices=indices;tree.leafAssigned+=indices.length;console.log('[GM_VECTOR_CLASS_NODE]',{id,depth,count:indices.length,cohesion:Number(coh.toFixed(4)),leaf:true,reason:'NO_EFFECTIVE_SPLIT',elapsed_ms:Date.now()-started});return node;}
+  let childWeighted=0;const stats=[];for(const g of groups){const cc=mean(g,buf),gc=cohesion(g,buf,cc);childWeighted+=gc*g.length;stats.push({group:g,cohesion:gc});}childWeighted/=indices.length;
+  const gain=childWeighted-coh;if(indices.length<=LEAF_MAX&&gain<MIN_SPLIT_GAIN){node.leaf=true;node.indices=indices;tree.leafAssigned+=indices.length;console.log('[GM_VECTOR_CLASS_NODE]',{id,depth,count:indices.length,cohesion:Number(coh.toFixed(4)),leaf:true,reason:'LOW_SPLIT_GAIN',split_gain:Number(gain.toFixed(4)),elapsed_ms:Date.now()-started});return node;}
+  stats.sort((a,b)=>b.group.length-a.group.length);console.log('[GM_VECTOR_CLASS_NODE]',{id,depth,count:indices.length,cohesion:Number(coh.toFixed(4)),leaf:false,children:stats.length,split_gain:Number(gain.toFixed(4)),elapsed_ms:Date.now()-started});
+  for(let i=0;i<stats.length;i++)buildNode(stats[i].group,buf,node,i+1,depth+1,tree);return node;
+}
+function pgArray(v){return '{'+Array.from(v,x=>Number(x).toPrecision(9)).join(',')+'}';}
+async function ensureStageSchema(){
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_vector_category_stage(job_id text NOT NULL,temp_class_id bigint NOT NULL,parent_temp_class_id bigint NULL,child_no integer NOT NULL,depth integer NOT NULL DEFAULT 0,vector_center real[] NOT NULL,is_leaf boolean NOT NULL,product_count integer NOT NULL DEFAULT 0,cohesion real NULL,created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(job_id,temp_class_id))`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_vector_class_stage(job_id text NOT NULL,product_uid text NOT NULL,temp_class_id bigint NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(job_id,product_uid))`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_vector_class_stage_job_class ON gm_vector_class_stage(job_id,temp_class_id)`);
+}
+async function validateScope(){const q=await pool.query(`SELECT category_group,COUNT(*)::int AS n FROM gm_product_image_vector WHERE category_group=ANY($1::text[]) GROUP BY category_group ORDER BY category_group`,[GROUPS]);return q.rows;}
+async function validCount(){const q=await pool.query(`SELECT COUNT(*)::int AS n FROM gm_product_image_vector WHERE category_group=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=512`,[GROUPS]);return Number(q.rows[0]&&q.rows[0].n||0);}
+async function loadBounded(expected){
+  const uids=new Array(expected),buf=new Float32Array(expected*DIM);let loaded=0,last='';
+  while(true){
+    const q=await pool.query(`SELECT product_uid,vector_image FROM gm_product_image_vector WHERE category_group=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=512 AND product_uid>$2 ORDER BY product_uid LIMIT $3`,[GROUPS,last,LOAD_PAGE]);
+    if(!q.rows.length)break;
+    for(const r of q.rows){const a=Array.isArray(r.vector_image)?r.vector_image:null;if(!a||a.length!==DIM||!normArrayInto(a,buf,loaded))throw new Error(`INVALID_VECTOR product_uid=${r.product_uid}`);uids[loaded]=String(r.product_uid);loaded++;}
+    last=String(q.rows[q.rows.length-1].product_uid);emitIpc('LOADING',{progress:{vectors:loaded,total_vectors:expected,nodes:0,leaf_assigned:0,current_depth:0}});console.log('[GM_VECTOR_CLASS_LOAD_BATCH]',{loaded,total:expected,last_uid:last});if(q.rows.length<LOAD_PAGE)break;
   }
-
-  return centers;
+  if(loaded!==expected)throw new Error(`LOAD_COUNT_MISMATCH expected=${expected} actual=${loaded}`);return{uids,buf};
+}
+async function writeStage(tree,uids){
+  const c=await pool.connect();try{
+    await c.query('BEGIN');await c.query(`DELETE FROM gm_vector_class_stage WHERE job_id=$1`,[JOB_ID]);await c.query(`DELETE FROM gm_vector_category_stage WHERE job_id=$1`,[JOB_ID]);
+    for(const n of tree.nodes){await c.query(`INSERT INTO gm_vector_category_stage(job_id,temp_class_id,parent_temp_class_id,child_no,depth,vector_center,is_leaf,product_count,cohesion) VALUES($1,$2,$3,$4,$5,$6::real[],$7,$8,$9)`,[JOB_ID,n.tmp_id,n.parent_tmp_id,n.child_no,n.depth,pgArray(n.center),n.leaf,n.count,n.cohesion]);}
+    let done=0;for(const n of tree.nodes){if(!n.leaf||!n.indices)continue;for(let i=0;i<n.indices.length;i+=STAGE_BATCH){const part=n.indices.slice(i,i+STAGE_BATCH);await c.query(`INSERT INTO gm_vector_class_stage(job_id,product_uid,temp_class_id) SELECT $1,x.uid,$2 FROM UNNEST($3::text[]) AS x(uid)`,[JOB_ID,n.tmp_id,part.map(ix=>uids[ix])]);done+=part.length;emitIpc('STAGING',{progress:{vectors:uids.length,nodes:tree.nodes.length,leaf_assigned:done,current_depth:n.depth}});}}
+    const v=await c.query(`WITH t AS (SELECT COUNT(*)::int nodes,COUNT(*) FILTER(WHERE is_leaf)::int leaves,COALESCE(SUM(product_count) FILTER(WHERE is_leaf),0)::bigint leaf_sum FROM gm_vector_category_stage WHERE job_id=$1),a AS (SELECT COUNT(*)::int assignments,COUNT(DISTINCT product_uid)::int distinct_products FROM gm_vector_class_stage WHERE job_id=$1),o AS (SELECT COUNT(*)::int orphan FROM gm_vector_class_stage s WHERE s.job_id=$1 AND NOT EXISTS(SELECT 1 FROM gm_vector_category_stage c WHERE c.job_id=s.job_id AND c.temp_class_id=s.temp_class_id AND c.is_leaf=true)) SELECT * FROM t CROSS JOIN a CROSS JOIN o`,[JOB_ID]);const vr=v.rows[0]||{};
+    if(Number(vr.assignments)!==uids.length||Number(vr.distinct_products)!==uids.length||Number(vr.leaf_sum)!==uids.length||Number(vr.orphan)!==0)throw new Error(`STAGE_VERIFY_FAILED assignments=${vr.assignments} distinct=${vr.distinct_products} leaf_sum=${vr.leaf_sum} orphan=${vr.orphan} expected=${uids.length}`);
+    await c.query('COMMIT');return{job_id:JOB_ID,nodes:Number(vr.nodes||0),leaves:Number(vr.leaves||0),assignments:Number(vr.assignments||0),leaf_product_count:Number(vr.leaf_sum||0),orphan_assignments:Number(vr.orphan||0)};
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
 
-/*
- * 중요한 단계:
- * 표본으로 center를 학습했더라도 모든 상품의 최종 child 선택은
- * 원본 512차원 벡터와 center의 cosine(dot)으로 정확히 수행한다.
- */
-function assignAll(indices, vecs, centers) {
-  const groups = Array.from({ length: centers.length }, () => []);
-  for (const ix of indices) {
-    const v = vecs[ix];
-    let best = 0;
-    let bestScore = -Infinity;
-    for (let c = 0; c < centers.length; c++) {
-      const score = dot(v, centers[c]);
-      if (score > bestScore) {
-        bestScore = score;
-        best = c;
-      }
-    }
-    groups[best].push(ix);
-  }
-  return groups.filter(g => g.length);
-}
-
-function buildNode(indices, vecs, parent, childNo, depth, tree) {
-  const id = ++tree.value;
-  const started = Date.now();
-
-  const center = mean(indices, vecs);
-  const coh = cohesion(indices, vecs, center);
-
-  const node = {
-    tmp_id: id,
-    parent_tmp_id: parent ? parent.tmp_id : null,
-    child_no: childNo,
-    depth,
-    count: indices.length,
-    center,
-    cohesion: coh,
-    leaf: false,
-    indices: null
-  };
-  tree.nodes.push(node);
-  if (tree.nodes.length === 1 || tree.nodes.length % 25 === 0) {
-    emitIpc('BUILDING', { progress:{ nodes:tree.nodes.length, leaf_assigned:tree.leafAssigned, current_depth:depth } });
-  }
-
-  const stopByDepth = depth >= MAX_DEPTH;
-  const stopBySmall = indices.length < MIN_SPLIT_SIZE;
-  const stopByGoodLeaf = indices.length <= LEAF_MAX && coh >= COHESION_STOP;
-
-  if (stopByDepth || stopBySmall || stopByGoodLeaf) {
-    node.leaf = true;
-    node.indices = indices;
-    tree.leafAssigned += indices.length;
-    console.log('[GM_VECTOR_CLASS_NODE]', {
-      id, depth, count: indices.length, cohesion: Number(coh.toFixed(4)),
-      leaf: true, reason: stopByDepth ? 'MAX_DEPTH' : stopBySmall ? 'MIN_SPLIT_SIZE' : 'COHESION_STOP',
-      elapsed_ms: Date.now() - started
-    });
-    return node;
-  }
-
-  const k = splitK(indices.length);
-  const centers = trainCenters(indices, vecs, k, (id * 2654435761) >>> 0);
-  const groups = assignAll(indices, vecs, centers);
-
-  if (groups.length <= 1) {
-    node.leaf = true;
-    node.indices = indices;
-    tree.leafAssigned += indices.length;
-    console.log('[GM_VECTOR_CLASS_NODE]', {
-      id, depth, count: indices.length, cohesion: Number(coh.toFixed(4)),
-      leaf: true, reason: 'NO_EFFECTIVE_SPLIT', elapsed_ms: Date.now() - started
-    });
-    return node;
-  }
-
-  let childWeighted = 0;
-  const groupStats = [];
-  for (const g of groups) {
-    const cc = mean(g, vecs);
-    const gc = cohesion(g, vecs, cc);
-    childWeighted += gc * g.length;
-    groupStats.push({ group: g, cohesion: gc });
-  }
-  childWeighted /= indices.length;
-
-  const gain = childWeighted - coh;
-  if (indices.length <= LEAF_MAX && gain < MIN_SPLIT_GAIN) {
-    node.leaf = true;
-    node.indices = indices;
-    tree.leafAssigned += indices.length;
-    console.log('[GM_VECTOR_CLASS_NODE]', {
-      id, depth, count: indices.length, cohesion: Number(coh.toFixed(4)),
-      leaf: true, reason: 'LOW_SPLIT_GAIN', split_gain: Number(gain.toFixed(4)),
-      elapsed_ms: Date.now() - started
-    });
-    return node;
-  }
-
-  groupStats.sort((a, b) => b.group.length - a.group.length);
-
-  console.log('[GM_VECTOR_CLASS_NODE]', {
-    id, depth, count: indices.length, cohesion: Number(coh.toFixed(4)),
-    leaf: false, children: groupStats.length, split_gain: Number(gain.toFixed(4)),
-    elapsed_ms: Date.now() - started
-  });
-
-  for (let i = 0; i < groupStats.length; i++) {
-    buildNode(groupStats[i].group, vecs, node, i + 1, depth + 1, tree);
-  }
-
-  return node;
-}
-
-function pgArray(v) {
-  return '{' + Array.from(v, x => Number(x).toPrecision(9)).join(',') + '}';
-}
-
-async function validateScope() {
-  const q = await pool.query(`
-    SELECT category_group, COUNT(*)::int AS n
-      FROM gm_product_image_vector
-     WHERE category_group = ANY($1::text[])
-     GROUP BY category_group
-     ORDER BY category_group
-  `, [GROUPS]);
-  return q.rows;
-}
-
-async function load() {
-  const q = await pool.query(`
-    SELECT product_uid, vector_image, category_group
-      FROM gm_product_image_vector
-     WHERE category_group = ANY($1::text[])
-       AND vector_image IS NOT NULL
-       AND array_length(vector_image,1) = 512
-     ORDER BY product_uid
-  `, [GROUPS]);
-
-  const uids = [];
-  const vecs = [];
-
-  for (const r of q.rows) {
-    const a = Array.isArray(r.vector_image) ? r.vector_image.map(Number) : null;
-    if (!a || a.length !== DIM || a.some(x => !Number.isFinite(x))) continue;
-    uids.push(r.product_uid);
-    vecs.push(norm(a));
-  }
-
-  return { uids, vecs };
-}
-
-async function applyTree(tree, uids) {
-  const c = await pool.connect();
-  try {
-    await c.query('BEGIN');
-
-    /*
-     * gm_vector_category/class_id는 파생 데이터이므로 전체 교체한다.
-     * 원본 vector_image/category_group/candidate_vector에는 손대지 않는다.
-     */
-    await c.query(`UPDATE gm_product_image_vector SET class_id = NULL WHERE class_id IS NOT NULL`);
-    await c.query(`DELETE FROM gm_vector_category`);
-
-    const realId = new Map();
-
-    // parent_id가 실제 DB id를 참조하므로 부모→자식 순서로 삽입한다.
-    for (const n of tree.nodes) {
-      const parent = n.parent_tmp_id ? realId.get(n.parent_tmp_id) : null;
-      const r = await c.query(`
-        INSERT INTO gm_vector_category
-          (parent_id, child_no, vector_center, is_leaf, product_count)
-        VALUES ($1, $2, $3::real[], $4, $5)
-        RETURNING id
-      `, [parent, n.child_no, pgArray(n.center), n.leaf, n.count]);
-
-      realId.set(n.tmp_id, Number(r.rows[0].id));
-    }
-
-    const pairs = [];
-    for (const n of tree.nodes) {
-      if (!n.leaf || !n.indices) continue;
-      const classId = realId.get(n.tmp_id);
-      for (const ix of n.indices) pairs.push([uids[ix], classId]);
-    }
-
-    // class_id 연결은 set-based UNNEST batch.
-    const BATCH = 10000;
-    for (let i = 0; i < pairs.length; i += BATCH) {
-      const p = pairs.slice(i, i + BATCH);
-      await c.query(`
-        UPDATE gm_product_image_vector v
-           SET class_id = x.class_id
-          FROM (
-            SELECT *
-              FROM UNNEST($1::text[], $2::bigint[])
-                   AS t(product_uid, class_id)
-          ) x
-         WHERE v.product_uid = x.product_uid
-      `, [p.map(x => x[0]), p.map(x => x[1])]);
-
-      console.log('[GM_VECTOR_CLASS_APPLY_BATCH]', {
-        done: Math.min(i + p.length, pairs.length),
-        total: pairs.length
-      });
-    }
-
-    await c.query('COMMIT');
-    return { assigned: pairs.length, nodes: tree.nodes.length };
-  } catch (e) {
-    await c.query('ROLLBACK');
-    throw e;
-  } finally {
-    c.release();
-  }
-}
-
-(async () => {
-  const totalStarted = Date.now();
-
-  try {
-    emitIpc('START', { progress:{ nodes:0, leaf_assigned:0, current_depth:0 } });
-    console.log('[GM_VECTOR_CLASS_BUILD_V005] START', {
-      scope: GROUPS.join(','),
-      apply: APPLY,
-      leaf_max: LEAF_MAX,
-      max_depth: MAX_DEPTH,
-      min_split_size: MIN_SPLIT_SIZE,
-      cohesion_stop: COHESION_STOP,
-      min_split_gain: MIN_SPLIT_GAIN,
-      iter: ITER,
-      train_sample_max: TRAIN_SAMPLE_MAX
-    });
-
-    const scope = await validateScope();
-    console.log('[GM_VECTOR_CLASS_BUILD_V005] PRODUCT_SCOPE', scope);
-    emitIpc('PRODUCT_SCOPE', { scope });
-
-    const loadStarted = Date.now();
-    const { uids, vecs } = await load();
-    console.log('[GM_VECTOR_CLASS_BUILD_V005] LOADED', {
-      vectors: vecs.length,
-      elapsed_ms: Date.now() - loadStarted
-    });
-    emitIpc('LOADED', { progress:{ vectors:vecs.length, nodes:0, leaf_assigned:0, current_depth:0 } });
-
-    if (!vecs.length) {
-      throw new Error(
-        'NO_VECTORS_IN_SCOPE: gm_product_image_vector.category_group must contain selected top-level codes, e.g. FD'
-      );
-    }
-
-    const all = Array.from({ length: vecs.length }, (_, i) => i);
-    const tree = { nodes: [], value: 0, leafAssigned: 0 };
-
-    const buildStarted = Date.now();
-    buildNode(all, vecs, null, 1, 0, tree);
-
-    const leaves = tree.nodes.filter(n => n.leaf);
-    const depths = leaves.map(n => n.depth);
-    const sizes = leaves.map(n => n.count);
-
-    const result = {
-      vectors: vecs.length,
-      nodes: tree.nodes.length,
-      leaves: leaves.length,
-      max_depth: Math.max(...depths),
-      avg_leaf: Number((sizes.reduce((a, b) => a + b, 0) / sizes.length).toFixed(2)),
-      min_leaf: Math.min(...sizes),
-      max_leaf: Math.max(...sizes),
-      avg_leaf_cohesion: Number(
-        (leaves.reduce((a, n) => a + n.cohesion, 0) / leaves.length).toFixed(4)
-      ),
-      assigned_check: tree.leafAssigned,
-      build_elapsed_ms: Date.now() - buildStarted,
-      total_elapsed_ms: Date.now() - totalStarted
-    };
-
-    if (tree.leafAssigned !== vecs.length) {
-      throw new Error(`LEAF_ASSIGN_COUNT_MISMATCH: expected=${vecs.length} actual=${tree.leafAssigned}`);
-    }
-
-    console.log('[GM_VECTOR_CLASS_BUILD_V005] RESULT', result);
-    emitIpc('RESULT', { result, progress:{ vectors:vecs.length, nodes:tree.nodes.length, leaf_assigned:tree.leafAssigned, current_depth:result.max_depth } });
-
-    if (!APPLY) {
-      console.log(
-        '[GM_VECTOR_CLASS_BUILD_V005] DRY_RUN_ONLY: review RESULT, then set GM_VECTOR_CLASS_APPLY=1'
-      );
-      return;
-    }
-
-    const applied = await applyTree(tree, uids);
-    console.log('[GM_VECTOR_CLASS_BUILD_V005] APPLIED', applied);
-    emitIpc('APPLIED', { applied });
-    console.log('[GM_VECTOR_CLASS_BUILD_V005] COMPLETE', {
-      total_elapsed_ms: Date.now() - totalStarted
-    });
-    emitIpc('COMPLETE', { result, applied: APPLY ? applied : null });
-  } catch (e) {
-    console.error('[GM_VECTOR_CLASS_BUILD_V005] FAIL', e && e.stack || e);
-    emitIpc('FAILED', { error:String(e && e.message || e) });
-    process.exitCode = 1;
-  } finally {
-    await pool.end();
-  }
-})();
+(async()=>{const started=Date.now();try{
+  if(!JOB_ID)throw new Error('GM_VECTOR_CLASS_JOB_ID_REQUIRED');
+  emitIpc('START',{progress:{nodes:0,leaf_assigned:0,current_depth:0}});console.log('[GM_VECTOR_CLASS_BUILD_V006] START',{job_id:JOB_ID,scope:GROUPS.join(','),leaf_max:LEAF_MAX,max_depth:MAX_DEPTH,min_split_size:MIN_SPLIT_SIZE,cohesion_stop:COHESION_STOP,min_split_gain:MIN_SPLIT_GAIN,iter:ITER,train_sample_max:TRAIN_SAMPLE_MAX,load_page:LOAD_PAGE});
+  await ensureStageSchema();const scope=await validateScope();console.log('[GM_VECTOR_CLASS_BUILD_V006] PRODUCT_SCOPE',scope);emitIpc('PRODUCT_SCOPE',{scope});
+  const expected=await validCount();if(!expected)throw new Error('NO_VECTORS_IN_SCOPE');
+  const loadStarted=Date.now(),{uids,buf}=await loadBounded(expected);console.log('[GM_VECTOR_CLASS_BUILD_V006] LOADED',{vectors:uids.length,buffer_mib:Number((buf.byteLength/1024/1024).toFixed(2)),elapsed_ms:Date.now()-loadStarted});emitIpc('LOADED',{progress:{vectors:uids.length,nodes:0,leaf_assigned:0,current_depth:0}});
+  const all=Array.from({length:uids.length},(_,i)=>i),tree={nodes:[],value:0,leafAssigned:0},buildStarted=Date.now();buildNode(all,buf,null,1,0,tree);
+  const leaves=tree.nodes.filter(n=>n.leaf),depths=leaves.map(n=>n.depth),sizes=leaves.map(n=>n.count);if(tree.leafAssigned!==uids.length)throw new Error(`LEAF_ASSIGN_COUNT_MISMATCH expected=${uids.length} actual=${tree.leafAssigned}`);
+  const result={job_id:JOB_ID,vectors:uids.length,nodes:tree.nodes.length,leaves:leaves.length,max_depth:Math.max(...depths),avg_leaf:Number((sizes.reduce((a,b)=>a+b,0)/sizes.length).toFixed(2)),min_leaf:Math.min(...sizes),max_leaf:Math.max(...sizes),avg_leaf_cohesion:Number((leaves.reduce((a,n)=>a+n.cohesion,0)/leaves.length).toFixed(4)),assigned_check:tree.leafAssigned,build_elapsed_ms:Date.now()-buildStarted,total_elapsed_ms:Date.now()-started};
+  console.log('[GM_VECTOR_CLASS_BUILD_V006] RESULT',result);emitIpc('RESULT',{result,progress:{vectors:uids.length,nodes:tree.nodes.length,leaf_assigned:tree.leafAssigned,current_depth:result.max_depth}});
+  const staged=await writeStage(tree,uids);console.log('[GM_VECTOR_CLASS_BUILD_V006] STAGED',staged);emitIpc('STAGED',{result:{...result,stage:staged}});console.log('[GM_VECTOR_CLASS_BUILD_V006] COMPLETE',{job_id:JOB_ID,total_elapsed_ms:Date.now()-started});
+}catch(e){console.error('[GM_VECTOR_CLASS_BUILD_V006] FAIL',e&&e.stack||e);emitIpc('FAILED',{error:String(e&&e.message||e)});process.exitCode=1;}finally{await pool.end();}})();

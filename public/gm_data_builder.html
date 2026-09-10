@@ -67,13 +67,14 @@
   <div id="ivCategoryGroupResult" class="small"></div>
 </div>
 <div class="card" id="ivClassificationCard"><h2>IMAGE VECTOR CLASSIFICATION</h2>
-  <div class="small"><b>대분류 스페셜 작업이 완료될 때만 실행하는 주기적 재분류</b>입니다. 위 IMAGE VECTOR BACKGROUND의 OFF/AUTO/ON과는 별개입니다. DRY RUN은 DB를 변경하지 않으며, APPLY는 <b>gm_vector_category 생성 + gm_product_image_vector.class_id 기록</b>을 한 트랜잭션에서 함께 처리합니다.</div>
-  <p><label><b>대상 category_group</b></label> <input id="ivClassGroups" value="FD" style="width:180px" placeholder="FD 또는 FD,HS"> <button id="ivClassDryRun" class="gray" onclick="startImageVectorClassification(false,this)">분류 검증 (DRY RUN)</button> <button id="ivClassApply" class="green" onclick="startImageVectorClassification(true,this)">분류 적용 (APPLY)</button> <button onclick="loadImageVectorClassificationStatus()">상태 새로고침</button></p>
+  <div class="small"><b>대분류 스페셜 작업 완료 시 실행하는 주기적 재분류</b>입니다. 먼저 STAGING에 카테고리와 PUID→카테고리코드를 모두 만든 뒤 검증하고, APPLY 때만 운영 DB에 함께 반영합니다. STAGING은 APPLY 후에도 보존되며 <b>다음 분류 시작 직전 자동 삭제</b>됩니다. 필요하면 수동 삭제할 수 있습니다.</div>
+  <p><label><b>대상 category_group</b></label> <input id="ivClassGroups" value="FD" style="width:180px" placeholder="FD 또는 FD,HS"> <button id="ivClassBuild" class="gray" onclick="startImageVectorClassification(this)">카테고리 생성 (STAGING)</button> <button id="ivClassApply" class="green" onclick="applyImageVectorClassification(this)">운영 DB 적용 (APPLY)</button> <button id="ivClassClearStage" onclick="clearImageVectorClassificationStage(this)">STAGING 삭제</button> <button onclick="loadImageVectorClassificationStatus()">상태 새로고침</button></p>
   <div id="ivClassResult" class="small"></div>
   <div class="grid" style="margin-top:12px"><div><table><tbody id="ivClassStatus"><tr><td>조회 전</td></tr></tbody></table></div><div>
     <h3>검증용 경량 다운로드</h3>
-    <div class="small">512차원 Vector는 내려받지 않습니다. 카테고리 파일은 vector_center를 제외하고, 상품 파일은 <b>product_uid,class_id</b> 두 컬럼만 내려받아 서로 비교할 수 있습니다.</div>
-    <p><button onclick="downloadVectorClassCategories()">Vector 카테고리 다운로드</button> <button onclick="downloadVectorClassAssignments()">PUID + 카테고리코드 다운로드</button></p>
+    <div class="small">512차원 Vector는 내려받지 않습니다. STAGING/최종 모두 카테고리는 vector_center를 제외하고, 상품 파일은 <b>product_uid,class_id</b>만 내려받습니다.</div>
+    <p><button onclick="downloadVectorClassStageCategories()">STAGING 카테고리</button> <button onclick="downloadVectorClassStageAssignments()">STAGING PUID+코드</button></p>
+    <p><button onclick="downloadVectorClassCategories()">최종 카테고리</button> <button onclick="downloadVectorClassAssignments()">최종 PUID+코드</button></p>
     <pre id="ivClassLog" style="max-height:220px;overflow:auto">분류 로그 없음</pre>
   </div></div>
 </div>
@@ -84,4 +85,4 @@
 <script src="/builder/GM_BUILDER_RUNTIME_CONFIG.js?v=gm_builder_v062"></script>
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v062"></script>
 <script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v063"></script>
-<script src="/builder/GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION.js?v=gm_builder_v063"></script></body></html>
+<script src="/builder/GM_BUILDER_IMAGE_VECTOR_CLASSIFICATION.js?v=gm_builder_v064"></script></body></html>
