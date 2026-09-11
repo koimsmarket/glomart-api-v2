@@ -44,7 +44,7 @@
 </div>
 
 <div class="card" id="ivRepresentativeCard"><h2>REPRESENTATIVE IMAGE VECTOR</h2>
-  <div class="small">카테고리별 대표이미지 관계를 계산합니다. RUN과 기준 유사율을 여기서 직접 입력·저장할 수 있습니다. 현재 RUN을 실행하면 그 RUN의 기존 결과만 삭제한 뒤 대표번호 #1부터 다시 계산합니다. 다른 RUN과 run_no=0 자료는 보존합니다.</div>
+  <div class="small">카테고리별 대표이미지 관계를 계산합니다. RUN과 기준 유사율을 여기서 직접 입력·저장할 수 있습니다. 현재 RUN을 새로 계산하면 기존 대표선정 MAP/통계를 전체 초기화한 뒤 대표번호 #1부터 다시 계산합니다. 테스트 비교 자료는 실행 전 CSV로 보관합니다.</div>
   <div class="grid" style="margin-top:12px"><div><table><tbody id="ivRepresentativeStatus"><tr><td>조회 전</td></tr></tbody></table></div><div>
     <div style="margin-bottom:10px;padding:10px;border:1px solid #ddd;border-radius:8px">
       <label style="display:inline-block;margin-right:10px"><b>RUN</b> <input id="ivRepRunInput" type="number" min="1" step="1" value="1" style="width:90px"></label>
@@ -52,12 +52,7 @@
       <button class="green" onclick="saveRepresentativeSettings(this)">RUN / 유사율 저장</button>
       <button type="button" onclick="nextRepresentativeRun()">RUN +1</button>
       <span id="ivRepSettingsResult" class="small" style="margin-left:8px"></span>
-      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #eee">
-        <label style="display:inline-block;margin-right:8px"><b>과거 RUN 삭제</b> <input id="ivRepDeleteRunInput" type="number" min="1" step="1" placeholder="RUN 번호" style="width:90px"></label>
-        <button type="button" onclick="deleteRepresentativeRun(this)" style="background:#a51d2d;color:#fff">선택 RUN 삭제</button>
-        <span id="ivRepDeleteResult" class="small" style="margin-left:8px">run_no=0 및 다른 RUN은 보존</span>
-      </div>
-    </div>
+</div>
     <div style="margin-bottom:10px">
       <button class="green" onclick="loadRepresentativeStatus()">상태 새로고침</button>
       <button class="green" onclick="previewRepresentativeCategories(this)">카테고리 사전점검</button>

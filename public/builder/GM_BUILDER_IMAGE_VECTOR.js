@@ -177,9 +177,7 @@ async function loadRepresentativeStatus(){
    <tr><th>카테고리 미확정</th><td id="ivRepPreviewUnresolved">${pv.completed?fmt(pv.category_unresolved):(x.category_unresolved?fmt(x.category_unresolved):'-')}</td></tr>
    <tr><th>비교 그룹</th><td id="ivRepPreviewGroups">${pv.completed?fmt(pv.categories_total):(x.categories_total?fmt(x.categories_total):'-')}</td></tr>
    <tr><th>현재 RUN 완료</th><td>${fmt(j.current_done)}</td></tr>
-   <tr><th>이전 RUN 수</th><td>${fmt(j.previous_run_count)}</td></tr>
-   <tr><th>이전 RUN 자료</th><td>${fmt(j.previous_run_rows)}</td></tr>
-   <tr><th>제외(run 0)</th><td>${fmt(j.excluded_run0)}</td></tr>
+     <tr><th>제외(run 0)</th><td>${fmt(j.excluded_run0)}</td></tr>
    <tr><th>미수행</th><td>${fmt(j.unprocessed)}</td></tr>
    <tr><th>대표 이미지</th><td>${fmt(j.representatives)}</td></tr>
    <tr><th>최종 대표번호</th><td>${fmt(j.max_representative_no||x.last_representative_no||0)}</td></tr>
@@ -228,27 +226,10 @@ async function previewRepresentativeCategories(button){
 }
 
 
-async function deleteRepresentativeRun(button){
- const input=document.getElementById('ivRepDeleteRunInput'),out=document.getElementById('ivRepDeleteResult');
- const runNo=Math.trunc(Number(input&&input.value));
- if(!(runNo>=1)){alert('삭제할 RUN 번호를 입력하세요. run_no=0은 삭제할 수 없습니다.');return;}
- if(!confirm(`RUN ${runNo}의 대표 MAP/통계 자료만 삭제합니다.\n다른 RUN과 run_no=0은 보존됩니다.\n\nRUN ${runNo}을 삭제할까요?`))return;
- if(button)button.disabled=true;
- try{
-   const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/delete-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_no:runNo,confirm_run_no:runNo})});
-   const j=await r.json().catch(()=>({}));
-   if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
-   if(out)out.textContent=`RUN ${runNo} 삭제 완료: MAP ${fmt(j.map_rows)} / 통계 ${fmt(j.stat_rows)} · run 0 보존`;
-   log({action:'image-vector.representative.delete-run',...j});
-   await loadRepresentativeStatus();
- }catch(e){if(out)out.textContent='RUN 삭제 실패: '+String(e&&e.message||e);log('representative run delete error: '+String(e&&e.message||e));}
- finally{if(button)button.disabled=false;}
-}
-
 async function runRepresentativeBuilder(button){
  const runEl=document.getElementById('ivRepRunInput');
  const runNo=Math.max(1,Math.trunc(Number(runEl&&runEl.value||1)));
- if(!confirm(`RUN ${runNo}을 새로 계산합니다.\n\n이 RUN의 기존 대표 MAP/통계만 먼저 삭제하고 대표번호 #1부터 다시 생성합니다.\n다른 RUN과 run_no=0 자료, 원본 Vector/상품/카테고리는 변경하지 않습니다.\n\n실행할까요?`))return;
+ if(!confirm(`RUN ${runNo}을 새로 계산합니다.\n\n기존 대표선정 MAP/통계를 전체 초기화하고 대표번호 #1부터 다시 생성합니다.\n이전 테스트 결과는 DB에 남지 않습니다. 필요한 결과는 CSV로 먼저 보관하세요.\n원본 Vector/상품/카테고리는 변경하지 않습니다.\n\n실행할까요?`))return;
  const timed=startButtonTimer(button,'초기 대표선정 시작');
  try{
    // 화면에 입력한 RUN/유사율을 먼저 중앙설정에 저장한 뒤 그 값으로 실행한다.
