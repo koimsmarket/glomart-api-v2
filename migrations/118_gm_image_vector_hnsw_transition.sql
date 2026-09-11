@@ -1,7 +1,6 @@
--- GM_IMAGE_VECTOR_HNSW_TRANSITION_V002_SAFE_ADD_ONLY
+-- GM_IMAGE_VECTOR_HNSW_TRANSITION_V003_SAFE_EXTENSION_CHECK
 -- 2026-09-11
--- IMPORTANT: additive migration only. No DROP / TRUNCATE / DELETE.
--- The obsolete Tree/Leaf schema remains physically present until HNSW is verified.
+-- Additive only. No DROP / TRUNCATE / DELETE.
 -- Existing 512D REAL[] vector_image and candidate/background pipeline remain untouched.
 
 BEGIN;
@@ -12,16 +11,22 @@ ALTER TABLE gm_product_image_vector
 
 COMMIT;
 
--- pgvector is optional in the current production environment.
--- Attempt extension enablement without breaking DB initialization when unavailable.
+-- pgvector may not be installed by the managed PostgreSQL provider.
+-- IMPORTANT: do not execute CREATE EXTENSION when the provider does not advertise it.
 DO $$
 BEGIN
-  BEGIN
-    EXECUTE 'CREATE EXTENSION IF NOT EXISTS vector';
-  EXCEPTION
-    WHEN insufficient_privilege OR undefined_file THEN
-      RAISE NOTICE 'pgvector extension unavailable; search_vector/HNSW creation deferred';
-  END;
+  IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'vector') THEN
+    BEGIN
+      EXECUTE 'CREATE EXTENSION IF NOT EXISTS vector';
+    EXCEPTION
+      WHEN insufficient_privilege THEN
+        RAISE NOTICE 'pgvector is available but CREATE EXTENSION privilege is unavailable; deferred';
+      WHEN feature_not_supported THEN
+        RAISE NOTICE 'pgvector extension cannot be enabled by this PostgreSQL service; deferred';
+    END;
+  ELSE
+    RAISE NOTICE 'pgvector extension is not installed/available on this PostgreSQL service; HNSW DB index deferred';
+  END IF;
 END $$;
 
 DO $$
@@ -50,7 +55,6 @@ BEGIN
          AND column_name = 'search_vector'
     ) THEN
       BEGIN
-        -- Representative-only HNSW. It is empty until the representative Builder populates search_vector.
         EXECUTE 'CREATE INDEX IF NOT EXISTS idx_gm_product_image_vector_search_hnsw '
              || 'ON gm_product_image_vector USING hnsw (search_vector vector_cosine_ops) '
              || 'WHERE search_vector IS NOT NULL';
