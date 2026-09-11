@@ -1,4 +1,4 @@
-/* GM_IMAGE_VECTOR_ROUTE_V020_HNSW_PRECISE_CLEAN
+/* GM_IMAGE_VECTOR_ROUTE_V021_INCREMENTAL_AFTER_UPSERT
  * Representative-net image search only.
  * FAST: HNSW over current-run representatives -> member vectors -> exact cosine rerank.
  * PRECISE: exact cosine over all current-run representatives -> member vectors -> exact cosine rerank.
@@ -10,7 +10,8 @@ const https=require('https');
 const http=require('http');
 const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V020_HNSW_PRECISE_CLEAN';
+const {assignIncremental}=require('../services/image_representative_assign');
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V021_INCREMENTAL_AFTER_UPSERT';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -287,7 +288,16 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
   }else{
     throw new Error('unsupported vector_image type '+columnType);
   }
-  return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION});
+  // Every successful vector INSERT/UPDATE is followed by representative-net reassignment.
+  // The upstream server already decides when a phone must create/refresh the image vector;
+  // this route does not inspect thumbnail URLs or add duplicate image-url state.
+  const representative=await assignIncremental(pool,uid,v);
+  if(!representative||representative.cache_action!=='keep'){
+    representativeCache={run_no:0,count:0,stamp:'',rows:[],loaded_at:0};
+    representativeHnswCache={run_no:0,count:0,stamp:'',index:null,built_at:0,build_ms:0};
+  }
+  console.log('[GM_IMAGE_VECTOR_REP_ASSIGN]',JSON.stringify({product_uid:uid,assignment:representative,route_version:ROUTE_VERSION}));
+  return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,representative_assignment:representative,route_version:ROUTE_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{
