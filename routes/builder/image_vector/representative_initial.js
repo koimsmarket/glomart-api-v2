@@ -1,5 +1,5 @@
 'use strict';
-// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V005_PREVIEW_RACE_FIX
+// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V004_PREVIEW_SAFE_WORKER
 // Initial/full representative-map builder.
 // V010: reference-backed category resolver, category-at-a-time vector loading,
 //       atomic group commits, resume/skip for completed groups, batched DB writes.
@@ -132,8 +132,8 @@ async function processCategory(db,groupKey,rows,runNo,threshold){
 }
 
 async function runPreview(db){
-  // POST /preview reserves preview.running before this worker is queued.
-  // Do not return just because running=true; that flag prevents a second request.
+  // POST /preview reserves the job by setting preview.running=true before setImmediate().
+  // Do NOT return when running is already true here; that flag means this worker owns the reservation.
   const startedAt=preview.started_at||new Date().toISOString();
   preview={running:true,completed:false,started_at:startedAt,finished_at:null,total_vector:0,candidate_vector:0,category_resolved:0,category_unresolved:0,categories_total:0,reason_counts:{},error:null};
   try{
