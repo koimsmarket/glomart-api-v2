@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V007_REPRESENTATIVE
+// GM_BUILDER_IMAGE_VECTOR_UI_V008_REPRESENTATIVE_INITIAL
 // Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
@@ -106,15 +106,42 @@ setInterval(()=>loadImageVectorBackgroundStatus(),10000);
 
 async function loadRepresentativeStatus(){
  const el=document.getElementById('ivRepresentativeStatus');if(!el)return;
- try{const r=await fetch(`${API}/api/gm/builder/image-vector/representative/status?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);const x=j.job||{};
- el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr><tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr><tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr><tr><th>현재 RUN 완료</th><td>${fmt(j.current_done)}</td></tr><tr><th>이전 RUN</th><td>${fmt(j.previous_run)}</td></tr><tr><th>카테고리 없음(run 0)</th><td>${fmt(j.category_missing)}</td></tr><tr><th>미수행</th><td>${fmt(j.unprocessed)}</td></tr><tr><th>대표 이미지</th><td>${fmt(j.representatives)}</td></tr><tr><th>작업</th><td>${x.running?'실행 중':'대기'} ${x.processed!=null?`(${fmt(x.processed)}/${fmt(x.total)})`:''}</td></tr><tr><th>현재 카테고리</th><td>${x.last_category||'-'}</td></tr><tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
+ try{
+   const [sr,jr]=await Promise.all([
+     fetch(`${API}/api/gm/builder/image-vector/representative/status?t=${Date.now()}`,{cache:'no-store'}),
+     fetch(`${API}/api/gm/builder/image-vector/representative/initial/status?t=${Date.now()}`,{cache:'no-store'})
+   ]);
+   const j=await sr.json(),jj=await jr.json();
+   if(!sr.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${sr.status}`);
+   const x=(jj&&jj.job)||{};
+   el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr>
+   <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
+   <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
+   <tr><th>분류 가능(category_keyword)</th><td>${fmt(j.eligible_vector)}</td></tr>
+   <tr><th>현재 RUN 완료</th><td>${fmt(j.current_done)}</td></tr>
+   <tr><th>이전 RUN</th><td>${fmt(j.previous_run)}</td></tr>
+   <tr><th>제외(run 0)</th><td>${fmt(j.excluded_run0)}</td></tr>
+   <tr><th>미수행</th><td>${fmt(j.unprocessed)}</td></tr>
+   <tr><th>대표 이미지</th><td>${fmt(j.representatives)}</td></tr>
+   <tr><th>최종 대표번호</th><td>${fmt(j.max_representative_no||ij.last_representative_no)}</td></tr>
+   <tr><th>초기 수행</th><td>${x.running?'실행 중':'대기'} ${x.processed!=null?`(${fmt(x.processed)}/${fmt(x.eligible||0)})`:''}</td></tr>
+   <tr><th>카테고리 진행</th><td>${fmt(x.categories_done||0)} / ${fmt(x.categories_total||0)}</td></tr>
+   <tr><th>현재 keyword</th><td>${x.last_category||'-'}</td></tr>
+   <tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 async function runRepresentativeBuilder(button){
- if(!confirm('중앙 설정의 현재 RUN/유사율 기준으로 대표이미지 관계를 계산합니다. 기존 상품/카테고리/원본 Vector는 삭제하지 않습니다. 실행할까요?'))return;
- const timed=startButtonTimer(button,'대표선정 시작');try{const r=await fetch(`${API}/api/gm/builder/image-vector/representative/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);log({action:'image-vector.representative.run',run_no:j.run_no,threshold:j.threshold});await loadRepresentativeStatus();}catch(e){log('representative run error: '+String(e&&e.message||e));}finally{stopButtonTimer(timed);}
+ if(!confirm('초기 전체 수행을 시작합니다. gm_product.category_keyword 단위로 대표이미지 관계를 계산합니다. 원본 Vector/상품/카테고리 테이블은 변경하지 않습니다. 실행할까요?'))return;
+ const timed=startButtonTimer(button,'초기 대표선정 시작');
+ try{
+   const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+   const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+   log({action:'image-vector.representative.initial.run',...j});
+   await loadRepresentativeStatus();
+ }catch(e){log('representative initial run error: '+String(e&&e.message||e));}
+ finally{stopButtonTimer(timed);}
 }
 async function loadRepresentativeStats(){
- const tb=document.getElementById('ivRepresentativeStats');if(!tb)return;try{const r=await fetch(`${API}/api/gm/builder/image-vector/representative/stats?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);tb.innerHTML=(j.items||[]).map(x=>`<tr><td>${x.representative_puid}</td><td>${fmt(x.member_count)}</td><td>${x.avg_similarity==null?'-':Number(x.avg_similarity).toFixed(4)}</td><td>${x.min_similarity==null?'-':Number(x.min_similarity).toFixed(4)}</td><td>${x.max_similarity==null?'-':Number(x.max_similarity).toFixed(4)}</td><td>${fmt(x.run_no)}</td></tr>`).join('')||'<tr><td colspan="6">자료 없음</td></tr>';}catch(e){tb.innerHTML=`<tr><td colspan="6">조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
+ const tb=document.getElementById('ivRepresentativeStats');if(!tb)return;try{const r=await fetch(`${API}/api/gm/builder/image-vector/representative/stats?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);tb.innerHTML=(j.items||[]).map(x=>`<tr><td>#${fmt(x.representative_no)} · ${x.representative_puid}</td><td>${fmt(x.member_count)}</td><td>${x.avg_similarity==null?'-':Number(x.avg_similarity).toFixed(4)}</td><td>${x.min_similarity==null?'-':Number(x.min_similarity).toFixed(4)}</td><td>${x.max_similarity==null?'-':Number(x.max_similarity).toFixed(4)}</td><td>${fmt(x.run_no)}</td></tr>`).join('')||'<tr><td colspan="6">자료 없음</td></tr>';}catch(e){tb.innerHTML=`<tr><td colspan="6">조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 setTimeout(()=>void loadRepresentativeStatus(),300);
