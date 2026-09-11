@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V008_REPRESENTATIVE_INITIAL
+// GM_BUILDER_IMAGE_VECTOR_UI_V009_REPRESENTATIVE_NO_UI_FIX
 // Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
@@ -123,7 +123,7 @@ async function loadRepresentativeStatus(){
    <tr><th>제외(run 0)</th><td>${fmt(j.excluded_run0)}</td></tr>
    <tr><th>미수행</th><td>${fmt(j.unprocessed)}</td></tr>
    <tr><th>대표 이미지</th><td>${fmt(j.representatives)}</td></tr>
-   <tr><th>최종 대표번호</th><td>${fmt(j.max_representative_no||ij.last_representative_no)}</td></tr>
+   <tr><th>최종 대표번호</th><td>${fmt(j.max_representative_no||x.last_representative_no||0)}</td></tr>
    <tr><th>초기 수행</th><td>${x.running?'실행 중':'대기'} ${x.processed!=null?`(${fmt(x.processed)}/${fmt(x.eligible||0)})`:''}</td></tr>
    <tr><th>카테고리 진행</th><td>${fmt(x.categories_done||0)} / ${fmt(x.categories_total||0)}</td></tr>
    <tr><th>현재 keyword</th><td>${x.last_category||'-'}</td></tr>
