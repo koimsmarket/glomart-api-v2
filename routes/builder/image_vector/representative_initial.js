@@ -1,5 +1,5 @@
 'use strict';
-// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V004_PREVIEW_SAFE_WORKER
+// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V014_PREVIEW_TRACE
 // Initial/full representative-map builder.
 // V010: reference-backed category resolver, category-at-a-time vector loading,
 //       atomic group commits, resume/skip for completed groups, batched DB writes.
@@ -12,6 +12,9 @@ const DIM=512;
 let job=freshJob();
 let preview={running:false,completed:false,started_at:null,finished_at:null,total_vector:0,candidate_vector:0,category_resolved:0,category_unresolved:0,categories_total:0,reason_counts:{},error:null};
 function freshJob(){return {running:false,phase:'IDLE',started_at:null,finished_at:null,run_no:null,threshold:null,total_vector:0,candidate_vector:0,category_resolved:0,category_unresolved:0,excluded_run0:0,processed:0,skipped:0,categories_total:0,categories_done:0,categories_skipped:0,representatives:0,last_category:null,last_representative_no:0,error:null};}
+function previewLog(stage,data){
+  try{console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_PREVIEW_V014] ${stage} ${JSON.stringify(data||{})}`);}catch(_){console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_PREVIEW_V014] ${stage}`);}
+}
 const yieldEventLoop=()=>new Promise(resolve=>setImmediate(resolve));
 function S(v){return String(v==null?'':v).trim();}
 function N(v,d=0){const n=Number(v);return Number.isFinite(n)?n:d;}
@@ -136,11 +139,19 @@ async function runPreview(db){
   // Do NOT return when running is already true here; that flag means this worker owns the reservation.
   const startedAt=preview.started_at||new Date().toISOString();
   preview={running:true,completed:false,started_at:startedAt,finished_at:null,total_vector:0,candidate_vector:0,category_resolved:0,category_unresolved:0,categories_total:0,reason_counts:{},error:null};
+  previewLog('PREVIEW_START',{started_at:startedAt});
   try{
-    const ref=await loadCategoryReference(db);await yieldEventLoop();
+    const ref=await loadCategoryReference(db);
+    previewLog('PREVIEW_REFERENCE_READY',{by_code:ref.byCode.size,exact:ref.exact.size,keyword:ref.keyword.size,seed:ref.seed.size,list:ref.list.size,slash:ref.slash.size});
+    await yieldEventLoop();
     const meta=await loadMetadata(db,ref);
+    previewLog('PREVIEW_METADATA_DONE',{total_vector:meta.total,candidate_vector:meta.candidate,category_resolved:meta.resolved,category_unresolved:meta.unresolved.length,categories_total:meta.groups.size});
     preview={running:false,completed:true,started_at:preview.started_at,finished_at:new Date().toISOString(),total_vector:meta.total,candidate_vector:meta.candidate,category_resolved:meta.resolved,category_unresolved:meta.unresolved.length,categories_total:meta.groups.size,reason_counts:meta.reason_counts,error:null};
-  }catch(e){preview.running=false;preview.completed=false;preview.finished_at=new Date().toISOString();preview.error=S(e&&e.message||e);}
+    previewLog('PREVIEW_DONE',{started_at:preview.started_at,finished_at:preview.finished_at,total_vector:preview.total_vector,candidate_vector:preview.candidate_vector,category_resolved:preview.category_resolved,category_unresolved:preview.category_unresolved,categories_total:preview.categories_total});
+  }catch(e){
+    preview.running=false;preview.completed=false;preview.finished_at=new Date().toISOString();preview.error=S(e&&e.message||e);
+    previewLog('PREVIEW_ERROR',{started_at:preview.started_at,finished_at:preview.finished_at,error:preview.error});
+  }
 }
 
 async function runInitial(db,startSettings){

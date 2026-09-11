@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V012_REPRESENTATIVE_PREVIEW_SAFE
+// GM_BUILDER_IMAGE_VECTOR_UI_V014_REPRESENTATIVE_PREVIEW_POLL_SINGLE
 // Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
@@ -119,10 +119,10 @@ async function loadRepresentativeStatus(){
    <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
    <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
    <tr><th>카테고리 후보</th><td>${fmt(j.candidate_vector)}</td></tr>
-   <tr><th>카테고리 사전점검</th><td>${pv.running?'실행 중':(pv.completed?'완료':(pv.error?'오류':'대기'))}</td></tr>
-   <tr><th>카테고리 확정</th><td>${pv.completed?fmt(pv.category_resolved):(x.category_resolved?fmt(x.category_resolved):'-')}</td></tr>
-   <tr><th>카테고리 미확정</th><td>${pv.completed?fmt(pv.category_unresolved):(x.category_unresolved?fmt(x.category_unresolved):'-')}</td></tr>
-   <tr><th>비교 그룹</th><td>${pv.completed?fmt(pv.categories_total):(x.categories_total?fmt(x.categories_total):'-')}</td></tr>
+   <tr><th>카테고리 사전점검</th><td id="ivRepPreviewState">${pv.running?'실행 중':(pv.completed?'완료':(pv.error?'오류':'대기'))}</td></tr>
+   <tr><th>카테고리 확정</th><td id="ivRepPreviewResolved">${pv.completed?fmt(pv.category_resolved):(x.category_resolved?fmt(x.category_resolved):'-')}</td></tr>
+   <tr><th>카테고리 미확정</th><td id="ivRepPreviewUnresolved">${pv.completed?fmt(pv.category_unresolved):(x.category_unresolved?fmt(x.category_unresolved):'-')}</td></tr>
+   <tr><th>비교 그룹</th><td id="ivRepPreviewGroups">${pv.completed?fmt(pv.categories_total):(x.categories_total?fmt(x.categories_total):'-')}</td></tr>
    <tr><th>현재 RUN 완료</th><td>${fmt(j.current_done)}</td></tr>
    <tr><th>이전 RUN</th><td>${fmt(j.previous_run)}</td></tr>
    <tr><th>제외(run 0)</th><td>${fmt(j.excluded_run0)}</td></tr>
@@ -133,20 +133,44 @@ async function loadRepresentativeStatus(){
    <tr><th>수행 단계</th><td>${x.phase||'-'}</td></tr>
    <tr><th>카테고리 진행</th><td>${fmt(x.categories_done||0)} / ${fmt(x.categories_total||0)}</td></tr>
    <tr><th>현재 keyword</th><td>${x.last_category||'-'}</td></tr>
-   <tr><th>사전점검 오류</th><td>${pv.error||'-'}</td></tr>
+   <tr><th>사전점검 오류</th><td id="ivRepPreviewError">${pv.error||'-'}</td></tr>
    <tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 
+function paintRepresentativePreview(pv){
+ pv=pv||{};
+ const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+ set('ivRepPreviewState',pv.running?'실행 중':(pv.completed?'완료':(pv.error?'오류':'대기')));
+ set('ivRepPreviewResolved',pv.completed?fmt(pv.category_resolved):'-');
+ set('ivRepPreviewUnresolved',pv.completed?fmt(pv.category_unresolved):'-');
+ set('ivRepPreviewGroups',pv.completed?fmt(pv.categories_total):'-');
+ set('ivRepPreviewError',pv.error||'-');
+}
+async function fetchRepresentativeInitialStatus(){
+ const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/status?t=${Date.now()}`,{cache:'no-store'});
+ const j=await r.json();
+ if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+ return j;
+}
 async function previewRepresentativeCategories(button){
  const timed=startButtonTimer(button,'카테고리 점검 시작');
  try{
    const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/preview`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
    const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
    log({action:'image-vector.representative.preview',...j});
-   for(let i=0;i<60;i++){await new Promise(resolve=>setTimeout(resolve,1000));await loadRepresentativeStatus();const sr=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/status?t=${Date.now()}`,{cache:'no-store'});const sj=await sr.json();if(sj&&sj.preview&&!sj.preview.running)break;}
- }catch(e){log('representative preview error: '+String(e&&e.message||e));}
- finally{stopButtonTimer(timed);}
+   paintRepresentativePreview({running:true,completed:false,error:null});
+   for(;;){
+     await new Promise(resolve=>setTimeout(resolve,1000));
+     const sj=await fetchRepresentativeInitialStatus();
+     const pv=(sj&&sj.preview)||{};
+     paintRepresentativePreview(pv);
+     if(!pv.running)break;
+   }
+   await loadRepresentativeStatus();
+ }catch(e){
+   const msg=String(e&&e.message||e);log('representative preview error: '+msg);paintRepresentativePreview({running:false,completed:false,error:msg});
+ }finally{stopButtonTimer(timed);}
 }
 
 async function runRepresentativeBuilder(button){
