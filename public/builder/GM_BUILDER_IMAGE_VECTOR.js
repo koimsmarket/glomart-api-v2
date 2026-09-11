@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V009_REPRESENTATIVE_NO_UI_FIX
+// GM_BUILDER_IMAGE_VECTOR_UI_V010_REPRESENTATIVE_ROUTE_FIX
 // Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
@@ -131,7 +131,7 @@ async function loadRepresentativeStatus(){
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 async function runRepresentativeBuilder(button){
- if(!confirm('초기 전체 수행을 시작합니다. gm_product.category_keyword 단위로 대표이미지 관계를 계산합니다. 원본 Vector/상품/카테고리 테이블은 변경하지 않습니다. 실행할까요?'))return;
+ if(!confirm('초기 전체 수행을 시작합니다. 기존 카테고리 기준자료로 비교 그룹을 확정한 뒤 그룹 내부에서 대표이미지 관계를 계산합니다. 원본 Vector/상품/카테고리 테이블은 변경하지 않습니다. 실행할까요?'))return;
  const timed=startButtonTimer(button,'초기 대표선정 시작');
  try{
    const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
