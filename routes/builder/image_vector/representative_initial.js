@@ -203,6 +203,55 @@ async function runInitial(db,startSettings){
     initialLog('INITIAL_ERROR',{started_at:job.started_at,finished_at:job.finished_at,phase:job.phase,keyword:job.current_category_keyword,error:job.error});
   }
 }
+
+function csvCell(v){
+  if(v==null)return '';
+  const x=String(v);
+  return /[",\r\n]/.test(x)?'"'+x.replace(/"/g,'""')+'"':x;
+}
+function compactTs(d){
+  const z=d instanceof Date?d:new Date(d||Date.now());
+  const pad=n=>String(n).padStart(2,'0');
+  return `${z.getFullYear()}${pad(z.getMonth()+1)}${pad(z.getDate())}_${pad(z.getHours())}${pad(z.getMinutes())}${pad(z.getSeconds())}`;
+}
+
+// Download the result produced by the current representative RUN.
+// Includes run_no=0 exclusions so the exported file covers the whole vector set.
+router.get('/api/gm/builder/image-vector/representative/initial/export',async(req,res)=>{
+  const db=dbFrom(req);
+  try{
+    const st=await settings(db);
+    const q=await db.query(`
+      SELECT m.puid,m.representative_no,m.representative_puid,m.similarity,m.run_no,m.updated_at,
+             CASE WHEN m.representative_puid IS NOT NULL AND m.puid=m.representative_puid THEN 'Y' ELSE 'N' END AS is_representative,
+             p.category_keyword,p.cp_fix_code,p.cp_selected_code
+        FROM gm_image_vector_representative_map m
+        LEFT JOIN gm_product p ON p.product_uid=m.puid
+       WHERE m.run_no IN (0,$1)
+       ORDER BY CASE WHEN m.run_no=$1 THEN 0 ELSE 1 END,
+                m.representative_no NULLS LAST,m.puid`,[st.run_no]);
+    const filename=`gm_image_vector_representative_run_${st.run_no}_${compactTs(new Date())}.csv`;
+    res.status(200);
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition',`attachment; filename="${filename}"`);
+    res.write('\uFEFF');
+    res.write(['puid','representative_no','representative_puid','similarity','is_representative','run_no','category_keyword','cp_fix_code','cp_selected_code','updated_at'].join(',')+'\r\n');
+    for(const r of q.rows||[]){
+      res.write([
+        r.puid,r.representative_no,r.representative_puid,
+        r.similarity==null?'':Number(r.similarity).toFixed(6),r.is_representative,r.run_no,
+        r.category_keyword,r.cp_fix_code,r.cp_selected_code,
+        r.updated_at instanceof Date?r.updated_at.toISOString():r.updated_at
+      ].map(csvCell).join(',')+'\r\n');
+    }
+    res.end();
+    initialLog('INITIAL_EXPORT',{run_no:st.run_no,rows:(q.rows||[]).length,filename});
+  }catch(e){
+    if(!res.headersSent)return fail(res,500,'representative export failed',{detail:S(e&&e.message||e)});
+    try{res.end();}catch(_){}
+  }
+});
+
 router.get('/api/gm/builder/image-vector/representative/initial/status',(req,res)=>ok(res,{job,preview}));
 router.post('/api/gm/builder/image-vector/representative/initial/preview',async(req,res)=>{const db=dbFrom(req);if(job.running)return fail(res,409,'representative initial job running');if(preview.running)return fail(res,409,'representative preview already running');preview={...preview,running:true,completed:false,started_at:new Date().toISOString(),finished_at:null,error:null};setImmediate(()=>void runPreview(db));ok(res,{started:true});});
 router.post('/api/gm/builder/image-vector/representative/initial/run',async(req,res)=>{const db=dbFrom(req);if(job.running)return fail(res,409,'representative initial job already running');try{const st=await settings(db);job=Object.assign(freshJob(),{running:true,phase:'QUEUED',started_at:new Date().toISOString(),run_no:st.run_no,threshold:st.threshold});setImmediate(()=>void runInitial(db,st));ok(res,{started:true,...st});}catch(e){job=freshJob();fail(res,500,'representative initial start failed',{detail:S(e&&e.message||e)});}});
