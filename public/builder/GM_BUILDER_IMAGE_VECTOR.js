@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V014_REPRESENTATIVE_PREVIEW_POLL_SINGLE
+// GM_BUILDER_IMAGE_VECTOR_UI_V015_REPRESENTATIVE_RUN_THRESHOLD_INPUT
 // Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
@@ -128,6 +128,33 @@ function paintRepresentativeJob(job){
  set('ivRepJobElapsed',repElapsed(x.started_at,x.finished_at));
 }
 
+function syncRepresentativeSettingInputs(runNo,threshold){
+ const run=document.getElementById('ivRepRunInput'),thr=document.getElementById('ivRepThresholdInput');
+ if(run && document.activeElement!==run)run.value=String(Math.max(1,Math.trunc(Number(runNo||1))));
+ if(thr && document.activeElement!==thr)thr.value=Number(threshold==null?0.95:threshold).toFixed(4);
+}
+function nextRepresentativeRun(){
+ const el=document.getElementById('ivRepRunInput');if(!el)return;
+ el.value=String(Math.max(1,Math.trunc(Number(el.value||1)))+1);
+}
+async function saveRepresentativeSettings(button,opts){
+ opts=opts||{};
+ const runEl=document.getElementById('ivRepRunInput'),thrEl=document.getElementById('ivRepThresholdInput'),out=document.getElementById('ivRepSettingsResult');
+ const runNo=Math.trunc(Number(runEl&&runEl.value)),threshold=Number(thrEl&&thrEl.value);
+ if(!(runNo>=1)){alert('RUN은 1 이상의 정수여야 합니다.');throw new Error('invalid run');}
+ if(!(threshold>0&&threshold<=1)){alert('기준 유사율은 0 초과 1 이하여야 합니다.');throw new Error('invalid threshold');}
+ if(button)button.disabled=true;
+ try{
+   const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/settings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_no:runNo,threshold})});
+   const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+   syncRepresentativeSettingInputs(j.run_no,j.threshold);
+   if(out)out.textContent=`저장 완료: RUN ${j.run_no} / ${Number(j.threshold).toFixed(4)}`;
+   if(!opts.silent){log({action:'image-vector.representative.settings',run_no:j.run_no,threshold:j.threshold});await loadRepresentativeStatus();}
+   return j;
+ }catch(e){if(out)out.textContent='저장 실패: '+String(e&&e.message||e);throw e;}
+ finally{if(button)button.disabled=false;}
+}
+
 async function loadRepresentativeStatus(){
  const el=document.getElementById('ivRepresentativeStatus');if(!el)return;
  try{
@@ -139,6 +166,7 @@ async function loadRepresentativeStatus(){
    if(!sr.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${sr.status}`);
    if(!jr.ok||!jj.ok)throw new Error(jj.detail||jj.error||`HTTP ${jr.status}`);
    const x=(jj&&jj.job)||{},pv=(jj&&jj.preview)||{};
+   syncRepresentativeSettingInputs(j.run_no,j.threshold);
    paintRepresentativeJob(x);
    el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr>
    <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
@@ -202,6 +230,8 @@ async function runRepresentativeBuilder(button){
  if(!confirm('초기 전체 수행을 시작합니다. 카테고리 기준자료를 읽어 비교 그룹을 확정하고, 카테고리별로 Vector를 불러와 처리합니다. 완료된 그룹은 재실행 시 건너뜁니다. 원본 Vector/상품/카테고리 테이블은 변경하지 않습니다. 실행할까요?'))return;
  const timed=startButtonTimer(button,'초기 대표선정 시작');
  try{
+   // 화면에 입력한 RUN/유사율을 먼저 중앙설정에 저장한 뒤 그 값으로 실행한다.
+   await saveRepresentativeSettings(null,{silent:true});
    const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
    const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
    log({action:'image-vector.representative.initial.run',...j});

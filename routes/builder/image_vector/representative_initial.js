@@ -25,6 +25,23 @@ function norm(v){return S(v).replace(/\s+/g,' ').trim();}
 function cosine(a,b){let dot=0,aa=0,bb=0;for(let i=0;i<DIM;i++){const x=Number(a[i])||0,y=Number(b[i])||0;dot+=x*y;aa+=x*x;bb+=y*y;}return aa>0&&bb>0?dot/Math.sqrt(aa*bb):-1;}
 async function config(db,key,def){const r=await db.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[key]);return r.rows.length?r.rows[0].config_value:def;}
 async function settings(db){const runNo=Math.max(1,Math.trunc(N(await config(db,'image_vector_representative_run','1'),1)));const threshold=N(await config(db,'image_vector_representative_similarity','0.95'),0.95);if(!(threshold>0&&threshold<=1))throw new Error('대표이미지 유사율은 0 초과 1 이하여야 합니다.');return {run_no:runNo,threshold};}
+async function saveSettings(db,runNo,threshold){
+  runNo=Math.trunc(Number(runNo));threshold=Number(threshold);
+  if(!(runNo>=1))throw new Error('RUN은 1 이상의 정수여야 합니다.');
+  if(!(threshold>0&&threshold<=1))throw new Error('대표이미지 유사율은 0 초과 1 이하여야 합니다.');
+  const c=await db.connect();
+  try{
+    await c.query('BEGIN');
+    await c.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
+      VALUES('image_vector_representative_run',$1,'NUMBER','IMAGE_VECTOR','FIXED',TRUE,'대표이미지 현재 실행 RUN. 0은 카테고리 없음 예약값',now())
+      ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,value_type='NUMBER',category='IMAGE_VECTOR',enabled=TRUE,updated_at=now()`,[String(runNo)]);
+    await c.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
+      VALUES('image_vector_representative_similarity',$1,'NUMBER','IMAGE_VECTOR','FIXED',TRUE,'대표이미지 기본 유사율 기준(0~1)',now())
+      ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,value_type='NUMBER',category='IMAGE_VECTOR',enabled=TRUE,updated_at=now()`,[threshold.toFixed(4)]);
+    await c.query('COMMIT');
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+  return {run_no:runNo,threshold:Number(threshold.toFixed(4))};
+}
 
 function splitComma(v){return S(v).split(/\s*,\s*/).map(norm).filter(Boolean);}
 function splitSlash(v){return S(v).split(/\s*[\/／]\s*/).map(norm).filter(Boolean);}
@@ -254,5 +271,12 @@ router.get('/api/gm/builder/image-vector/representative/initial/export',async(re
 
 router.get('/api/gm/builder/image-vector/representative/initial/status',(req,res)=>ok(res,{job,preview}));
 router.post('/api/gm/builder/image-vector/representative/initial/preview',async(req,res)=>{const db=dbFrom(req);if(job.running)return fail(res,409,'representative initial job running');if(preview.running)return fail(res,409,'representative preview already running');preview={...preview,running:true,completed:false,started_at:new Date().toISOString(),finished_at:null,error:null};setImmediate(()=>void runPreview(db));ok(res,{started:true});});
+router.post('/api/gm/builder/image-vector/representative/initial/settings',async(req,res)=>{
+  const db=dbFrom(req);
+  if(job.running||preview.running)return fail(res,409,'대표선정/사전점검 실행 중에는 RUN 또는 유사율을 변경할 수 없습니다.');
+  try{const x=await saveSettings(db,req.body&&req.body.run_no,req.body&&req.body.threshold);initialLog('INITIAL_SETTINGS_SAVE',x);ok(res,x);}
+  catch(e){fail(res,400,'representative settings save failed',{detail:S(e&&e.message||e)});}
+});
+
 router.post('/api/gm/builder/image-vector/representative/initial/run',async(req,res)=>{const db=dbFrom(req);if(job.running)return fail(res,409,'representative initial job already running');try{const st=await settings(db);job=Object.assign(freshJob(),{running:true,phase:'QUEUED',started_at:new Date().toISOString(),run_no:st.run_no,threshold:st.threshold});setImmediate(()=>void runInitial(db,st));ok(res,{started:true,...st});}catch(e){job=freshJob();fail(res,500,'representative initial start failed',{detail:S(e&&e.message||e)});}});
 module.exports=router;
