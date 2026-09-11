@@ -1,5 +1,5 @@
 'use strict';
-// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V015_PROGRESS_TRACE
+// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V019_RUN_REBUILD_CLEANUP
 // Initial/full representative-map builder.
 // V010: reference-backed category resolver, category-at-a-time vector loading,
 //       atomic group commits, resume/skip for completed groups, batched DB writes.
@@ -16,7 +16,7 @@ function previewLog(stage,data){
   try{console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_PREVIEW_V014] ${stage} ${JSON.stringify(data||{})}`);}catch(_){console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_PREVIEW_V014] ${stage}`);}
 }
 function initialLog(stage,data){
-  try{console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V015] ${stage} ${JSON.stringify(data||{})}`);}catch(_){console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V015] ${stage}`);}
+  try{console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V019] ${stage} ${JSON.stringify(data||{})}`);}catch(_){console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V019] ${stage}`);}
 }
 const yieldEventLoop=()=>new Promise(resolve=>setImmediate(resolve));
 function S(v){return String(v==null?'':v).trim();}
@@ -41,6 +41,20 @@ async function saveSettings(db,runNo,threshold){
     await c.query('COMMIT');
   }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   return {run_no:runNo,threshold:Number(threshold.toFixed(4))};
+}
+
+
+async function resetRunData(db,runNo){
+  runNo=Math.trunc(Number(runNo));
+  if(!(runNo>=1))throw new Error('삭제/재생성 RUN은 1 이상의 정수여야 합니다.');
+  const c=await db.connect();
+  try{
+    await c.query('BEGIN');
+    const map=await c.query('DELETE FROM gm_image_vector_representative_map_run WHERE run_no=$1',[runNo]);
+    const stat=await c.query('DELETE FROM gm_image_vector_representative_stat WHERE run_no=$1',[runNo]);
+    await c.query('COMMIT');
+    return {run_no:runNo,map_rows:Number(map.rowCount||0),stat_rows:Number(stat.rowCount||0)};
+  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
 
 function splitComma(v){return S(v).split(/\s*,\s*/).map(norm).filter(Boolean);}
@@ -115,16 +129,16 @@ async function loadVectorsForGroup(db,puids){
     WHERE product_uid=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2 ORDER BY product_uid`,[puids,DIM]);
   return r.rows||[];
 }
-async function currentRunSet(db,runNo){const r=await db.query('SELECT puid FROM gm_image_vector_representative_map WHERE run_no=$1',[runNo]);return new Set((r.rows||[]).map(x=>S(x.puid)).filter(Boolean));}
-async function maxRepresentativeNo(db){const r=await db.query('SELECT COALESCE(MAX(representative_no),0)::bigint AS n FROM gm_image_vector_representative_map');return Number(r.rows[0]&&r.rows[0].n||0);}
-async function allocateRepresentativeNos(client,count){if(count<=0)return[];await client.query('SELECT pg_advisory_xact_lock($1)',[20911001]);const q=await client.query('SELECT COALESCE(MAX(representative_no),0)::bigint AS max_no FROM gm_image_vector_representative_map');const start=Number(q.rows[0].max_no||0)+1;return Array.from({length:count},(_,i)=>start+i);}
+async function currentRunSet(db,runNo){const r=await db.query('SELECT puid FROM gm_image_vector_representative_map_run WHERE run_no=$1',[runNo]);return new Set((r.rows||[]).map(x=>S(x.puid)).filter(Boolean));}
+async function maxRepresentativeNo(db,runNo){const r=await db.query('SELECT COALESCE(MAX(representative_no),0)::bigint AS n FROM gm_image_vector_representative_map_run WHERE run_no=$1',[runNo]);return Number(r.rows[0]&&r.rows[0].n||0);}
+async function allocateRepresentativeNos(client,count,runNo){if(count<=0)return[];await client.query('SELECT pg_advisory_xact_lock($1)',[20911001]);const q=await client.query('SELECT COALESCE(MAX(representative_no),0)::bigint AS max_no FROM gm_image_vector_representative_map_run WHERE run_no=$1',[runNo]);const start=Number(q.rows[0].max_no||0)+1;return Array.from({length:count},(_,i)=>start+i);}
 
 async function markRun0(db,puids){
   if(!puids.length)return 0;
   const chunk=1000;let done=0;
-  for(let i=0;i<puids.length;i+=chunk){const a=puids.slice(i,i+chunk);await db.query(`INSERT INTO gm_image_vector_representative_map(puid,representative_no,representative_puid,similarity,run_no,updated_at)
+  for(let i=0;i<puids.length;i+=chunk){const a=puids.slice(i,i+chunk);await db.query(`INSERT INTO gm_image_vector_representative_map_run(puid,representative_no,representative_puid,similarity,run_no,updated_at)
     SELECT x,NULL,NULL,NULL,0,now() FROM unnest($1::text[]) x
-    ON CONFLICT(puid) DO UPDATE SET representative_no=NULL,representative_puid=NULL,similarity=NULL,run_no=0,updated_at=now()`,[a]);done+=a.length;}
+    ON CONFLICT(run_no,puid) DO UPDATE SET representative_no=NULL,representative_puid=NULL,similarity=NULL,updated_at=now()`,[a]);done+=a.length;}
   return done;
 }
 
@@ -134,11 +148,11 @@ async function processCategory(db,groupKey,rows,runNo,threshold,onProgress){
   const client=await db.connect();
   try{
     await client.query('BEGIN');
-    const nos=await allocateRepresentativeNos(client,reps.length);reps.forEach((r,i)=>{r.no=nos[i];});
+    const nos=await allocateRepresentativeNos(client,reps.length,runNo);reps.forEach((r,i)=>{r.no=nos[i];});
     if(mapped.length){
-      await client.query(`INSERT INTO gm_image_vector_representative_map(puid,representative_no,representative_puid,similarity,run_no,updated_at)
+      await client.query(`INSERT INTO gm_image_vector_representative_map_run(puid,representative_no,representative_puid,similarity,run_no,updated_at)
         SELECT * FROM unnest($1::text[],$2::bigint[],$3::text[],$4::real[],$5::int[],$6::timestamptz[])
-        ON CONFLICT(puid) DO UPDATE SET representative_no=EXCLUDED.representative_no,representative_puid=EXCLUDED.representative_puid,similarity=EXCLUDED.similarity,run_no=EXCLUDED.run_no,updated_at=EXCLUDED.updated_at`,
+        ON CONFLICT(run_no,puid) DO UPDATE SET representative_no=EXCLUDED.representative_no,representative_puid=EXCLUDED.representative_puid,similarity=EXCLUDED.similarity,updated_at=EXCLUDED.updated_at`,
         [mapped.map(m=>m.puid),mapped.map(m=>m.rep.no),mapped.map(m=>m.rep.puid),mapped.map(m=>m.similarity),mapped.map(()=>runNo),mapped.map(()=>new Date())]);
     }
     if(reps.length){
@@ -189,7 +203,7 @@ async function runInitial(db,startSettings){
     job.phase='RUN0';
     await markRun0(db,meta.unresolved);
     initialLog('INITIAL_RUN0_DONE',{excluded_run0:meta.unresolved.length});
-    const doneSet=await currentRunSet(db,s.run_no);job.last_representative_no=await maxRepresentativeNo(db);
+    const doneSet=await currentRunSet(db,s.run_no);job.last_representative_no=await maxRepresentativeNo(db,s.run_no);
     job.phase='PROCESS';
     initialLog('INITIAL_PROCESS_START',{categories_total:meta.groups.size,current_run_existing:doneSet.size,last_representative_no:job.last_representative_no});
     let categoryIndex=0;
@@ -242,9 +256,10 @@ router.get('/api/gm/builder/image-vector/representative/initial/export',async(re
       SELECT m.puid,m.representative_no,m.representative_puid,m.similarity,m.run_no,m.updated_at,
              CASE WHEN m.representative_puid IS NOT NULL AND m.puid=m.representative_puid THEN 'Y' ELSE 'N' END AS is_representative,
              p.category_keyword,p.cp_fix_code,p.cp_selected_code
-        FROM gm_image_vector_representative_map m
+        FROM gm_image_vector_representative_map_run m
         LEFT JOIN gm_product p ON p.product_uid=m.puid
-       WHERE m.run_no IN (0,$1)
+       WHERE m.run_no=$1
+          OR (m.run_no=0 AND NOT EXISTS (SELECT 1 FROM gm_image_vector_representative_map_run cur WHERE cur.run_no=$1 AND cur.puid=m.puid))
        ORDER BY CASE WHEN m.run_no=$1 THEN 0 ELSE 1 END,
                 m.representative_no NULLS LAST,m.puid`,[st.run_no]);
     const filename=`gm_image_vector_representative_run_${st.run_no}_${compactTs(new Date())}.csv`;
@@ -278,5 +293,37 @@ router.post('/api/gm/builder/image-vector/representative/initial/settings',async
   catch(e){fail(res,400,'representative settings save failed',{detail:S(e&&e.message||e)});}
 });
 
-router.post('/api/gm/builder/image-vector/representative/initial/run',async(req,res)=>{const db=dbFrom(req);if(job.running)return fail(res,409,'representative initial job already running');try{const st=await settings(db);job=Object.assign(freshJob(),{running:true,phase:'QUEUED',started_at:new Date().toISOString(),run_no:st.run_no,threshold:st.threshold});setImmediate(()=>void runInitial(db,st));ok(res,{started:true,...st});}catch(e){job=freshJob();fail(res,500,'representative initial start failed',{detail:S(e&&e.message||e)});}});
+router.post('/api/gm/builder/image-vector/representative/initial/delete-run',async(req,res)=>{
+  const db=dbFrom(req);
+  if(job.running||preview.running)return fail(res,409,'대표선정/사전점검 실행 중에는 RUN 자료를 삭제할 수 없습니다.');
+  const runNo=Math.trunc(Number(req.body&&req.body.run_no));
+  const confirmRunNo=Math.trunc(Number(req.body&&req.body.confirm_run_no));
+  if(!(runNo>=1))return fail(res,400,'삭제할 RUN은 1 이상의 정수여야 합니다.');
+  if(confirmRunNo!==runNo)return fail(res,400,'삭제 확인 RUN 번호가 일치하지 않습니다.');
+  try{
+    const x=await resetRunData(db,runNo);
+    initialLog('INITIAL_RUN_DELETE',x);
+    if(job.run_no===runNo)job=freshJob();
+    ok(res,{deleted:true,...x,run0_preserved:true});
+  }catch(e){fail(res,500,'representative run delete failed',{detail:S(e&&e.message||e)});}
+});
+
+router.post('/api/gm/builder/image-vector/representative/initial/run',async(req,res)=>{
+  const db=dbFrom(req);
+  if(job.running)return fail(res,409,'representative initial job already running');
+  if(preview.running)return fail(res,409,'representative preview running');
+  try{
+    const st=await settings(db);
+    job=Object.assign(freshJob(),{running:true,phase:'RESET',started_at:new Date().toISOString(),run_no:st.run_no,threshold:st.threshold});
+    const reset=await resetRunData(db,st.run_no);
+    initialLog('INITIAL_RUN_RESET',{...reset,threshold:st.threshold});
+    job.phase='QUEUED';
+    setImmediate(()=>void runInitial(db,st));
+    ok(res,{started:true,reset:true,reset_map_rows:reset.map_rows,reset_stat_rows:reset.stat_rows,...st});
+  }catch(e){
+    job.running=false;job.phase='ERROR';job.finished_at=new Date().toISOString();job.error=S(e&&e.message||e);
+    initialLog('INITIAL_START_ERROR',{run_no:job.run_no,error:job.error});
+    fail(res,500,'representative initial start failed',{detail:job.error});
+  }
+});
 module.exports=router;

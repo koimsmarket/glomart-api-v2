@@ -1,10 +1,10 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V062</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v054"><style>
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V063</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v054"><style>
 #ivBackgroundCard.iv-forced-on{border:3px solid #d71920;box-shadow:0 0 0 3px rgba(215,25,32,.12);}
 #ivForcedWarning{display:none;margin:12px 0;padding:12px 14px;border-radius:8px;background:#fff0f0;border:2px solid #d71920;color:#b00000;font-weight:800;}
 #ivBackgroundCard.iv-forced-on #ivForcedWarning{display:block;animation:ivPulse 1s steps(2,end) infinite;}
 @keyframes ivPulse{50%{opacity:.35}}
 </style></head><body><div class="wrap">
-<div class="head"><div><h1>GM Data Builder V062</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div><div><button onclick="toggleRuntimeConfig()" title="운영 설정">⚙ 설정</button></div></div></div>
+<div class="head"><div><h1>GM Data Builder V063</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div><div><button onclick="toggleRuntimeConfig()" title="운영 설정">⚙ 설정</button></div></div></div>
 <div class="warning"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
 <div class="menu">
 <a href="/builder/download.html"><b>백업 / 다운로드</b><span class="small">테이블 CSV·Excel 다운로드만 담당</span></a>
@@ -44,7 +44,7 @@
 </div>
 
 <div class="card" id="ivRepresentativeCard"><h2>REPRESENTATIVE IMAGE VECTOR</h2>
-  <div class="small">카테고리별 대표이미지 관계를 계산합니다. RUN과 기준 유사율을 여기서 직접 입력·저장할 수 있습니다. 저장값은 중앙 환경설정(gm_runtime_config)에 반영됩니다. 카테고리 없는 상품은 run_no=0으로 기록합니다.</div>
+  <div class="small">카테고리별 대표이미지 관계를 계산합니다. RUN과 기준 유사율을 여기서 직접 입력·저장할 수 있습니다. 현재 RUN을 실행하면 그 RUN의 기존 결과만 삭제한 뒤 대표번호 #1부터 다시 계산합니다. 다른 RUN과 run_no=0 자료는 보존합니다.</div>
   <div class="grid" style="margin-top:12px"><div><table><tbody id="ivRepresentativeStatus"><tr><td>조회 전</td></tr></tbody></table></div><div>
     <div style="margin-bottom:10px;padding:10px;border:1px solid #ddd;border-radius:8px">
       <label style="display:inline-block;margin-right:10px"><b>RUN</b> <input id="ivRepRunInput" type="number" min="1" step="1" value="1" style="width:90px"></label>
@@ -52,11 +52,16 @@
       <button class="green" onclick="saveRepresentativeSettings(this)">RUN / 유사율 저장</button>
       <button type="button" onclick="nextRepresentativeRun()">RUN +1</button>
       <span id="ivRepSettingsResult" class="small" style="margin-left:8px"></span>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #eee">
+        <label style="display:inline-block;margin-right:8px"><b>과거 RUN 삭제</b> <input id="ivRepDeleteRunInput" type="number" min="1" step="1" placeholder="RUN 번호" style="width:90px"></label>
+        <button type="button" onclick="deleteRepresentativeRun(this)" style="background:#a51d2d;color:#fff">선택 RUN 삭제</button>
+        <span id="ivRepDeleteResult" class="small" style="margin-left:8px">run_no=0 및 다른 RUN은 보존</span>
+      </div>
     </div>
     <div style="margin-bottom:10px">
       <button class="green" onclick="loadRepresentativeStatus()">상태 새로고침</button>
       <button class="green" onclick="previewRepresentativeCategories(this)">카테고리 사전점검</button>
-      <button onclick="runRepresentativeBuilder(this)">현재 RUN 대표선정 실행</button>
+      <button onclick="runRepresentativeBuilder(this)">현재 RUN 새로 계산</button>
       <button onclick="loadRepresentativeStats()">대표별 통계 조회</button>
       <a href="/api/gm/builder/image-vector/representative/initial/export" style="display:inline-block;text-decoration:none"><button type="button">결과 CSV 다운로드</button></a>
     </div>
@@ -102,5 +107,5 @@
 <script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v064"></script>
 <script src="/builder/GM_BUILDER_RUNTIME_CONFIG.js?v=gm_builder_v064"></script>
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v064"></script>
-<script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v069"></script>
+<script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v070"></script>
 </body></html>
