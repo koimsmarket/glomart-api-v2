@@ -113,12 +113,13 @@ async function loadRepresentativeStatus(){
    ]);
    const j=await sr.json(),jj=await jr.json();
    if(!sr.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${sr.status}`);
+   if(!jr.ok||!jj.ok)throw new Error(jj.detail||jj.error||`HTTP ${jr.status}`);
    const x=(jj&&jj.job)||{},pv=(jj&&jj.preview)||{};
    el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr>
    <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
    <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
    <tr><th>카테고리 후보</th><td>${fmt(j.candidate_vector)}</td></tr>
-   <tr><th>카테고리 사전점검</th><td>${pv.running?'실행 중':(pv.completed?'완료':'대기')}</td></tr>
+   <tr><th>카테고리 사전점검</th><td>${pv.running?'실행 중':(pv.completed?'완료':(pv.error?'오류':'대기'))}</td></tr>
    <tr><th>카테고리 확정</th><td>${pv.completed?fmt(pv.category_resolved):(x.category_resolved?fmt(x.category_resolved):'-')}</td></tr>
    <tr><th>카테고리 미확정</th><td>${pv.completed?fmt(pv.category_unresolved):(x.category_unresolved?fmt(x.category_unresolved):'-')}</td></tr>
    <tr><th>비교 그룹</th><td>${pv.completed?fmt(pv.categories_total):(x.categories_total?fmt(x.categories_total):'-')}</td></tr>
@@ -132,6 +133,7 @@ async function loadRepresentativeStatus(){
    <tr><th>수행 단계</th><td>${x.phase||'-'}</td></tr>
    <tr><th>카테고리 진행</th><td>${fmt(x.categories_done||0)} / ${fmt(x.categories_total||0)}</td></tr>
    <tr><th>현재 keyword</th><td>${x.last_category||'-'}</td></tr>
+   <tr><th>사전점검 오류</th><td>${pv.error||'-'}</td></tr>
    <tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
