@@ -1,10 +1,10 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V060</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v054"><style>
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM Data Builder V061</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v054"><style>
 #ivBackgroundCard.iv-forced-on{border:3px solid #d71920;box-shadow:0 0 0 3px rgba(215,25,32,.12);}
 #ivForcedWarning{display:none;margin:12px 0;padding:12px 14px;border-radius:8px;background:#fff0f0;border:2px solid #d71920;color:#b00000;font-weight:800;}
 #ivBackgroundCard.iv-forced-on #ivForcedWarning{display:block;animation:ivPulse 1s steps(2,end) infinite;}
 @keyframes ivPulse{50%{opacity:.35}}
 </style></head><body><div class="wrap">
-<div class="head"><div><h1>GM Data Builder V060</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div><div><button onclick="toggleRuntimeConfig()" title="운영 설정">⚙ 설정</button></div></div></div>
+<div class="head"><div><h1>GM Data Builder V061</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div><div><button onclick="toggleRuntimeConfig()" title="운영 설정">⚙ 설정</button></div></div></div>
 <div class="warning"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
 <div class="menu">
 <a href="/builder/download.html"><b>백업 / 다운로드</b><span class="small">테이블 CSV·Excel 다운로드만 담당</span></a>
@@ -47,6 +47,7 @@
   <div class="small">카테고리별 대표이미지 관계를 계산합니다. 기준 유사율과 RUN은 ⚙ 설정의 중앙 환경설정 값을 사용합니다. 카테고리 없는 상품은 run_no=0으로 기록합니다.</div>
   <div class="grid" style="margin-top:12px"><div><table><tbody id="ivRepresentativeStatus"><tr><td>조회 전</td></tr></tbody></table></div><div>
     <button class="green" onclick="loadRepresentativeStatus()">상태 새로고침</button>
+    <button class="green" onclick="previewRepresentativeCategories(this)">카테고리 사전점검</button>
     <button onclick="runRepresentativeBuilder(this)">현재 RUN 대표선정 실행</button>
     <button onclick="loadRepresentativeStats()">대표별 통계 조회</button>
   </div></div>

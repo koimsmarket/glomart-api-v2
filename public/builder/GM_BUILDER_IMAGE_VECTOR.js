@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V011_REPRESENTATIVE_SAFE_INITIAL
+// GM_BUILDER_IMAGE_VECTOR_UI_V012_REPRESENTATIVE_PREVIEW_SAFE
 // Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
@@ -113,13 +113,15 @@ async function loadRepresentativeStatus(){
    ]);
    const j=await sr.json(),jj=await jr.json();
    if(!sr.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${sr.status}`);
-   const x=(jj&&jj.job)||{};
+   const x=(jj&&jj.job)||{},pv=(jj&&jj.preview)||{};
    el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr>
    <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
    <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
    <tr><th>카테고리 후보</th><td>${fmt(j.candidate_vector)}</td></tr>
-   <tr><th>카테고리 확정</th><td>${x.category_resolved?fmt(x.category_resolved):'-'}</td></tr>
-   <tr><th>카테고리 미확정</th><td>${x.category_unresolved?fmt(x.category_unresolved):'-'}</td></tr>
+   <tr><th>카테고리 사전점검</th><td>${pv.running?'실행 중':(pv.completed?'완료':'대기')}</td></tr>
+   <tr><th>카테고리 확정</th><td>${pv.completed?fmt(pv.category_resolved):(x.category_resolved?fmt(x.category_resolved):'-')}</td></tr>
+   <tr><th>카테고리 미확정</th><td>${pv.completed?fmt(pv.category_unresolved):(x.category_unresolved?fmt(x.category_unresolved):'-')}</td></tr>
+   <tr><th>비교 그룹</th><td>${pv.completed?fmt(pv.categories_total):(x.categories_total?fmt(x.categories_total):'-')}</td></tr>
    <tr><th>현재 RUN 완료</th><td>${fmt(j.current_done)}</td></tr>
    <tr><th>이전 RUN</th><td>${fmt(j.previous_run)}</td></tr>
    <tr><th>제외(run 0)</th><td>${fmt(j.excluded_run0)}</td></tr>
@@ -133,6 +135,18 @@ async function loadRepresentativeStatus(){
    <tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
+
+async function previewRepresentativeCategories(button){
+ const timed=startButtonTimer(button,'카테고리 점검 시작');
+ try{
+   const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/preview`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+   const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+   log({action:'image-vector.representative.preview',...j});
+   for(let i=0;i<60;i++){await new Promise(resolve=>setTimeout(resolve,1000));await loadRepresentativeStatus();const sr=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/status?t=${Date.now()}`,{cache:'no-store'});const sj=await sr.json();if(sj&&sj.preview&&!sj.preview.running)break;}
+ }catch(e){log('representative preview error: '+String(e&&e.message||e));}
+ finally{stopButtonTimer(timed);}
+}
+
 async function runRepresentativeBuilder(button){
  if(!confirm('초기 전체 수행을 시작합니다. 카테고리 기준자료를 읽어 비교 그룹을 확정하고, 카테고리별로 Vector를 불러와 처리합니다. 완료된 그룹은 재실행 시 건너뜁니다. 원본 Vector/상품/카테고리 테이블은 변경하지 않습니다. 실행할까요?'))return;
  const timed=startButtonTimer(button,'초기 대표선정 시작');
@@ -141,6 +155,7 @@ async function runRepresentativeBuilder(button){
    const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
    log({action:'image-vector.representative.initial.run',...j});
    await loadRepresentativeStatus();
+   setTimeout(()=>void loadRepresentativeStatus(),1000);setTimeout(()=>void loadRepresentativeStatus(),3000);
  }catch(e){log('representative initial run error: '+String(e&&e.message||e));}
  finally{stopButtonTimer(timed);}
 }
