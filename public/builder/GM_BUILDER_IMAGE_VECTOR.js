@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_VECTOR_UI_V010_REPRESENTATIVE_ROUTE_FIX
+// GM_BUILDER_IMAGE_VECTOR_UI_V011_REPRESENTATIVE_SAFE_INITIAL
 // Image Vector UI only: background worker, product sync, pending queue. Tree/Leaf classification is retired.
 // All /api/gm/builder/image-vector/* calls must originate from this file.
 
@@ -117,21 +117,24 @@ async function loadRepresentativeStatus(){
    el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr>
    <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
    <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
-   <tr><th>분류 가능(category_keyword)</th><td>${fmt(j.eligible_vector)}</td></tr>
+   <tr><th>카테고리 후보</th><td>${fmt(j.candidate_vector)}</td></tr>
+   <tr><th>카테고리 확정</th><td>${x.category_resolved?fmt(x.category_resolved):'-'}</td></tr>
+   <tr><th>카테고리 미확정</th><td>${x.category_unresolved?fmt(x.category_unresolved):'-'}</td></tr>
    <tr><th>현재 RUN 완료</th><td>${fmt(j.current_done)}</td></tr>
    <tr><th>이전 RUN</th><td>${fmt(j.previous_run)}</td></tr>
    <tr><th>제외(run 0)</th><td>${fmt(j.excluded_run0)}</td></tr>
    <tr><th>미수행</th><td>${fmt(j.unprocessed)}</td></tr>
    <tr><th>대표 이미지</th><td>${fmt(j.representatives)}</td></tr>
    <tr><th>최종 대표번호</th><td>${fmt(j.max_representative_no||x.last_representative_no||0)}</td></tr>
-   <tr><th>초기 수행</th><td>${x.running?'실행 중':'대기'} ${x.processed!=null?`(${fmt(x.processed)}/${fmt(x.eligible||0)})`:''}</td></tr>
+   <tr><th>초기 수행</th><td>${x.running?'실행 중':(x.phase==='DONE'?'완료':'대기')} ${x.processed!=null?`(처리 ${fmt(x.processed)} / 건너뜀 ${fmt(x.skipped||0)})`:''}</td></tr>
+   <tr><th>수행 단계</th><td>${x.phase||'-'}</td></tr>
    <tr><th>카테고리 진행</th><td>${fmt(x.categories_done||0)} / ${fmt(x.categories_total||0)}</td></tr>
    <tr><th>현재 keyword</th><td>${x.last_category||'-'}</td></tr>
    <tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 async function runRepresentativeBuilder(button){
- if(!confirm('초기 전체 수행을 시작합니다. 기존 카테고리 기준자료로 비교 그룹을 확정한 뒤 그룹 내부에서 대표이미지 관계를 계산합니다. 원본 Vector/상품/카테고리 테이블은 변경하지 않습니다. 실행할까요?'))return;
+ if(!confirm('초기 전체 수행을 시작합니다. 카테고리 기준자료를 읽어 비교 그룹을 확정하고, 카테고리별로 Vector를 불러와 처리합니다. 완료된 그룹은 재실행 시 건너뜁니다. 원본 Vector/상품/카테고리 테이블은 변경하지 않습니다. 실행할까요?'))return;
  const timed=startButtonTimer(button,'초기 대표선정 시작');
  try{
    const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
