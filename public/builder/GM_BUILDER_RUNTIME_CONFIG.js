@@ -1,11 +1,11 @@
-// GM_BUILDER_RUNTIME_CONFIG_UI_V001
+// GM_BUILDER_RUNTIME_CONFIG_UI_V002_SETTINGS_GEAR
 // Central runtime-config UI only. No image-vector or device-language logic belongs here.
 
 function cfgEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function cfgRowValue(items,key){const x=(items||[]).find(r=>r.config_key===key);return x?x.config_value:'-';}
 function paintRuntimeSummary(items){
   const el=document.getElementById('runtimeVersionSummary');if(!el)return;
-  el.innerHTML=`<tr><th>gm_v1</th><td>${cfgEsc(cfgRowValue(items,'gm_v1'))}</td></tr><tr><th>gm_v2</th><td>${cfgEsc(cfgRowValue(items,'gm_v2'))}</td></tr><tr><th>DEVICE_LANG</th><td>${cfgEsc(cfgRowValue(items,'device_lang_enabled'))}</td></tr><tr><th>생성모드</th><td>${cfgEsc(cfgRowValue(items,'device_lang_background_mode'))}</td></tr>`;
+  el.innerHTML=`<tr><th>gm_v1</th><td>${cfgEsc(cfgRowValue(items,'gm_v1'))}</td></tr><tr><th>gm_v2</th><td>${cfgEsc(cfgRowValue(items,'gm_v2'))}</td></tr><tr><th>gm_v3</th><td>${cfgEsc(cfgRowValue(items,'gm_v3'))}</td></tr><tr><th>상품 마진율</th><td>${cfgEsc(cfgRowValue(items,'product_margin_rate'))}%</td></tr><tr><th>대표벡터 유사율</th><td>${cfgEsc(cfgRowValue(items,'image_vector_representative_similarity'))}</td></tr><tr><th>대표벡터 RUN</th><td>${cfgEsc(cfgRowValue(items,'image_vector_representative_run'))}</td></tr><tr><th>DEVICE_LANG</th><td>${cfgEsc(cfgRowValue(items,'device_lang_enabled'))}</td></tr><tr><th>생성모드</th><td>${cfgEsc(cfgRowValue(items,'device_lang_background_mode'))}</td></tr>`;
 }
 async function loadRuntimeConfig(){
   const tb=document.getElementById('runtimeConfigRows');if(!tb)return;
@@ -27,3 +27,5 @@ async function addRuntimeConfig(){
 async function nextGmV2(){const r=await fetch(`${API}/api/gm/builder/config/gm-v2/next`,{method:'POST'});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'gm_v2.next',value:j.item&&j.item.config_value});await loadRuntimeConfig();}
 
 loadRuntimeConfig();
+
+function toggleRuntimeConfig(){const c=document.getElementById('runtimeConfigCard');if(!c)return;const open=c.style.display==='none';c.style.display=open?'block':'none';if(open)loadRuntimeConfig();}
