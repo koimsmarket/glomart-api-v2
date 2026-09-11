@@ -1,5 +1,5 @@
 'use strict';
-// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V014_PREVIEW_TRACE
+// GM_BUILDER_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V015_PROGRESS_TRACE
 // Initial/full representative-map builder.
 // V010: reference-backed category resolver, category-at-a-time vector loading,
 //       atomic group commits, resume/skip for completed groups, batched DB writes.
@@ -11,9 +11,12 @@ const {dbFrom,ok,fail}=require('../core');
 const DIM=512;
 let job=freshJob();
 let preview={running:false,completed:false,started_at:null,finished_at:null,total_vector:0,candidate_vector:0,category_resolved:0,category_unresolved:0,categories_total:0,reason_counts:{},error:null};
-function freshJob(){return {running:false,phase:'IDLE',started_at:null,finished_at:null,run_no:null,threshold:null,total_vector:0,candidate_vector:0,category_resolved:0,category_unresolved:0,excluded_run0:0,processed:0,skipped:0,categories_total:0,categories_done:0,categories_skipped:0,representatives:0,last_category:null,last_representative_no:0,error:null};}
+function freshJob(){return {running:false,phase:'IDLE',started_at:null,finished_at:null,run_no:null,threshold:null,total_vector:0,candidate_vector:0,category_resolved:0,category_unresolved:0,excluded_run0:0,processed:0,skipped:0,categories_total:0,categories_done:0,categories_skipped:0,representatives:0,last_category:null,current_category_keyword:null,current_category_count:0,current_category_processed:0,current_category_index:0,current_category_representatives:0,last_representative_no:0,error:null};}
 function previewLog(stage,data){
   try{console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_PREVIEW_V014] ${stage} ${JSON.stringify(data||{})}`);}catch(_){console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_PREVIEW_V014] ${stage}`);}
+}
+function initialLog(stage,data){
+  try{console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V015] ${stage} ${JSON.stringify(data||{})}`);}catch(_){console.log(`[GM_IMAGE_VECTOR_REPRESENTATIVE_INITIAL_V015] ${stage}`);}
 }
 const yieldEventLoop=()=>new Promise(resolve=>setImmediate(resolve));
 function S(v){return String(v==null?'':v).trim();}
@@ -84,7 +87,7 @@ async function loadMetadata(db,ref){
     if(S(row.category_keyword)||S(row.keyword))candidate++;
     const x=resolveProductCategory(ref,row);reasonCounts[x.reason||'UNKNOWN']=(reasonCounts[x.reason||'UNKNOWN']||0)+1;
     if(!x.group){unresolved.push(puid);}
-    else{resolved++;if(!groups.has(x.group))groups.set(x.group,{key:x.group,reason:x.reason,puids:[]});groups.get(x.group).puids.push(puid);}
+    else{resolved++;if(!groups.has(x.group))groups.set(x.group,{key:x.group,reason:x.reason,keyword:S(row.category_keyword)||S(row.keyword)||x.code||x.group,puids:[]});groups.get(x.group).puids.push(puid);}
     if((++n%2000)===0)await yieldEventLoop();
   }
   return {total:r.rows.length,candidate,resolved,unresolved,groups,reason_counts:reasonCounts};
@@ -108,9 +111,9 @@ async function markRun0(db,puids){
   return done;
 }
 
-async function processCategory(db,groupKey,rows,runNo,threshold){
+async function processCategory(db,groupKey,rows,runNo,threshold,onProgress){
   const reps=[],mapped=[];
-  let rowNo=0;for(const row of rows){const puid=S(row.puid),v=row.vector_image;if(!puid||!Array.isArray(v)||v.length!==DIM)continue;let best=null,bestScore=-2;for(const rep of reps){const score=cosine(v,rep.vector);if(score>bestScore){bestScore=score;best=rep;}}if(!best||bestScore<threshold){const rep={puid,vector:v,no:null};reps.push(rep);mapped.push({puid,rep,similarity:1});}else mapped.push({puid,rep:best,similarity:bestScore});if((++rowNo%20)===0)await yieldEventLoop();}
+  let rowNo=0;for(const row of rows){const puid=S(row.puid),v=row.vector_image;if(!puid||!Array.isArray(v)||v.length!==DIM)continue;let best=null,bestScore=-2;for(const rep of reps){const score=cosine(v,rep.vector);if(score>bestScore){bestScore=score;best=rep;}}if(!best||bestScore<threshold){const rep={puid,vector:v,no:null};reps.push(rep);mapped.push({puid,rep,similarity:1});}else mapped.push({puid,rep:best,similarity:bestScore});rowNo++;if(onProgress&&(rowNo===1||(rowNo%20)===0||rowNo===rows.length))onProgress({processed:rowNo,representatives:reps.length,total:rows.length});if((rowNo%20)===0)await yieldEventLoop();}
   const client=await db.connect();
   try{
     await client.query('BEGIN');
@@ -155,23 +158,50 @@ async function runPreview(db){
 }
 
 async function runInitial(db,startSettings){
-  const s=startSettings||await settings(db);job=Object.assign(job,{running:true,phase:'REFERENCE',started_at:job.started_at||new Date().toISOString(),run_no:s.run_no,threshold:s.threshold,error:null});
+  const s=startSettings||await settings(db);
+  job=Object.assign(job,{running:true,phase:'REFERENCE',started_at:job.started_at||new Date().toISOString(),run_no:s.run_no,threshold:s.threshold,error:null});
+  initialLog('INITIAL_START',{started_at:job.started_at,run_no:s.run_no,threshold:s.threshold});
   try{
     const ref=await loadCategoryReference(db);
-    job.phase='RESOLVE';const meta=await loadMetadata(db,ref);job.total_vector=meta.total;job.candidate_vector=meta.candidate;job.category_resolved=meta.resolved;job.category_unresolved=meta.unresolved.length;job.excluded_run0=meta.unresolved.length;job.categories_total=meta.groups.size;
+    initialLog('INITIAL_REFERENCE_READY',{by_code:ref.byCode.size,exact:ref.exact.size,keyword:ref.keyword.size,seed:ref.seed.size,list:ref.list.size,slash:ref.slash.size});
+    job.phase='RESOLVE';
+    const meta=await loadMetadata(db,ref);
+    job.total_vector=meta.total;job.candidate_vector=meta.candidate;job.category_resolved=meta.resolved;job.category_unresolved=meta.unresolved.length;job.excluded_run0=meta.unresolved.length;job.categories_total=meta.groups.size;
+    initialLog('INITIAL_METADATA_DONE',{total_vector:meta.total,candidate_vector:meta.candidate,category_resolved:meta.resolved,category_unresolved:meta.unresolved.length,categories_total:meta.groups.size});
     // run_no=0 only for vectors for which no valid category reference can be resolved.
+    job.phase='RUN0';
     await markRun0(db,meta.unresolved);
+    initialLog('INITIAL_RUN0_DONE',{excluded_run0:meta.unresolved.length});
     const doneSet=await currentRunSet(db,s.run_no);job.last_representative_no=await maxRepresentativeNo(db);
     job.phase='PROCESS';
+    initialLog('INITIAL_PROCESS_START',{categories_total:meta.groups.size,current_run_existing:doneSet.size,last_representative_no:job.last_representative_no});
+    let categoryIndex=0;
     for(const g of meta.groups.values()){
+      categoryIndex++;
       job.last_category=g.key;
+      job.current_category_keyword=g.keyword||g.key;
+      job.current_category_count=g.puids.length;
+      job.current_category_processed=0;
+      job.current_category_index=categoryIndex;
+      job.current_category_representatives=0;
       // Each group is committed atomically. If every member is already current, resume skips it.
-      if(g.puids.length&&g.puids.every(x=>doneSet.has(x))){job.skipped+=g.puids.length;job.categories_skipped++;job.categories_done++;continue;}
+      if(g.puids.length&&g.puids.every(x=>doneSet.has(x))){
+        job.skipped+=g.puids.length;job.current_category_processed=g.puids.length;job.categories_skipped++;job.categories_done++;
+        if(categoryIndex===1||(categoryIndex%25)===0||categoryIndex===meta.groups.size)initialLog('INITIAL_PROGRESS',{category_index:categoryIndex,categories_total:meta.groups.size,keyword:job.current_category_keyword,category_count:g.puids.length,processed:job.processed,skipped:job.skipped,representatives:job.representatives,last_representative_no:job.last_representative_no});
+        continue;
+      }
       const rows=await loadVectorsForGroup(db,g.puids);
-      const r=await processCategory(db,g.key,rows,s.run_no,s.threshold);job.processed+=r.members;job.representatives+=r.reps;job.last_representative_no=Math.max(job.last_representative_no,r.last_no||0);job.categories_done++;for(const x of g.puids)doneSet.add(x);await yieldEventLoop();
+      const r=await processCategory(db,g.key,rows,s.run_no,s.threshold,(p)=>{job.current_category_processed=p.processed;job.current_category_representatives=p.representatives;});
+      job.processed+=r.members;job.representatives+=r.reps;job.current_category_processed=r.members;job.current_category_representatives=r.reps;job.last_representative_no=Math.max(job.last_representative_no,r.last_no||0);job.categories_done++;for(const x of g.puids)doneSet.add(x);
+      if(categoryIndex===1||(categoryIndex%25)===0||categoryIndex===meta.groups.size)initialLog('INITIAL_PROGRESS',{category_index:categoryIndex,categories_total:meta.groups.size,keyword:job.current_category_keyword,category_count:g.puids.length,processed:job.processed,skipped:job.skipped,representatives:job.representatives,last_representative_no:job.last_representative_no});
+      await yieldEventLoop();
     }
-    job.running=false;job.phase='DONE';job.finished_at=new Date().toISOString();
-  }catch(e){job.running=false;job.phase='ERROR';job.finished_at=new Date().toISOString();job.error=S(e&&e.message||e);}
+    job.running=false;job.phase='DONE';job.finished_at=new Date().toISOString();job.current_category_processed=job.current_category_count;
+    initialLog('INITIAL_DONE',{started_at:job.started_at,finished_at:job.finished_at,total_vector:job.total_vector,category_resolved:job.category_resolved,excluded_run0:job.excluded_run0,processed:job.processed,skipped:job.skipped,categories_done:job.categories_done,categories_total:job.categories_total,representatives:job.representatives,last_representative_no:job.last_representative_no});
+  }catch(e){
+    job.running=false;job.phase='ERROR';job.finished_at=new Date().toISOString();job.error=S(e&&e.message||e);
+    initialLog('INITIAL_ERROR',{started_at:job.started_at,finished_at:job.finished_at,phase:job.phase,keyword:job.current_category_keyword,error:job.error});
+  }
 }
 router.get('/api/gm/builder/image-vector/representative/initial/status',(req,res)=>ok(res,{job,preview}));
 router.post('/api/gm/builder/image-vector/representative/initial/preview',async(req,res)=>{const db=dbFrom(req);if(job.running)return fail(res,409,'representative initial job running');if(preview.running)return fail(res,409,'representative preview already running');preview={...preview,running:true,completed:false,started_at:new Date().toISOString(),finished_at:null,error:null};setImmediate(()=>void runPreview(db));ok(res,{started:true});});

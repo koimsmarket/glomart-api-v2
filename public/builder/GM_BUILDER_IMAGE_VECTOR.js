@@ -104,6 +104,30 @@ loadImageVectorBackgroundStatus();
 setInterval(()=>loadImageVectorBackgroundStatus(),10000);
 
 
+
+function repElapsed(startedAt,finishedAt){
+ if(!startedAt)return '00:00:00';
+ const a=Date.parse(startedAt),b=finishedAt?Date.parse(finishedAt):Date.now();
+ if(!Number.isFinite(a)||!Number.isFinite(b))return '00:00:00';
+ let sec=Math.max(0,Math.floor((b-a)/1000));const h=Math.floor(sec/3600);sec%=3600;const m=Math.floor(sec/60),ss=sec%60;
+ return [h,m,ss].map(x=>String(x).padStart(2,'0')).join(':');
+}
+function paintRepresentativeJob(job){
+ const x=job||{};const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+ const total=Number(x.total_vector||0),done=Number(x.excluded_run0||0)+Number(x.processed||0)+Number(x.skipped||0);
+ const pct=total>0?Math.min(100,(done/total)*100):0;
+ set('ivRepJobState',`${x.running?'실행 중':(x.phase==='DONE'?'완료':(x.phase==='ERROR'?'오류':'대기'))} / ${x.phase||'IDLE'}`);
+ set('ivRepJobKeyword',x.current_category_keyword||x.last_category||'-');
+ set('ivRepJobCategoryCount',fmt(x.current_category_count||0));
+ set('ivRepJobCategoryProcessed',`${fmt(x.current_category_processed||0)} / ${fmt(x.current_category_count||0)}`);
+ set('ivRepJobCategories',`${fmt(x.categories_done||0)} / ${fmt(x.categories_total||0)}`);
+ set('ivRepJobRepNo',`#${fmt(x.last_representative_no||0)}`);
+ set('ivRepJobRepresentatives',fmt(x.representatives||0));
+ set('ivRepJobTotal',`${fmt(done)} / ${fmt(total)}`);
+ set('ivRepJobPercent',`${pct.toFixed(1)}%`);
+ set('ivRepJobElapsed',repElapsed(x.started_at,x.finished_at));
+}
+
 async function loadRepresentativeStatus(){
  const el=document.getElementById('ivRepresentativeStatus');if(!el)return;
  try{
@@ -115,6 +139,7 @@ async function loadRepresentativeStatus(){
    if(!sr.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${sr.status}`);
    if(!jr.ok||!jj.ok)throw new Error(jj.detail||jj.error||`HTTP ${jr.status}`);
    const x=(jj&&jj.job)||{},pv=(jj&&jj.preview)||{};
+   paintRepresentativeJob(x);
    el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr>
    <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
    <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
@@ -180,8 +205,20 @@ async function runRepresentativeBuilder(button){
    const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
    const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
    log({action:'image-vector.representative.initial.run',...j});
+   // 본 실행 중에는 DB 전체 COUNT 상태 API를 호출하지 않는다.
+   // 메모리에 있는 initial/status만 1초마다 읽어 진행상황을 표시한다.
+   for(;;){
+     const sj=await fetchRepresentativeInitialStatus();
+     const x=(sj&&sj.job)||{};
+     paintRepresentativeJob(x);
+     if(!x.running){
+       if(x.phase==='ERROR')throw new Error(x.error||'대표선정 실행 오류');
+       break;
+     }
+     await new Promise(resolve=>setTimeout(resolve,1000));
+   }
+   // 완료 후에만 무거운 집계 상태를 한 번 갱신한다.
    await loadRepresentativeStatus();
-   setTimeout(()=>void loadRepresentativeStatus(),1000);setTimeout(()=>void loadRepresentativeStatus(),3000);
  }catch(e){log('representative initial run error: '+String(e&&e.message||e));}
  finally{stopButtonTimer(timed);}
 }
@@ -189,3 +226,4 @@ async function loadRepresentativeStats(){
  const tb=document.getElementById('ivRepresentativeStats');if(!tb)return;try{const r=await fetch(`${API}/api/gm/builder/image-vector/representative/stats?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);tb.innerHTML=(j.items||[]).map(x=>`<tr><td>#${fmt(x.representative_no)} · ${x.representative_puid}</td><td>${fmt(x.member_count)}</td><td>${x.avg_similarity==null?'-':Number(x.avg_similarity).toFixed(4)}</td><td>${x.min_similarity==null?'-':Number(x.min_similarity).toFixed(4)}</td><td>${x.max_similarity==null?'-':Number(x.max_similarity).toFixed(4)}</td><td>${fmt(x.run_no)}</td></tr>`).join('')||'<tr><td colspan="6">자료 없음</td></tr>';}catch(e){tb.innerHTML=`<tr><td colspan="6">조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 setTimeout(()=>void loadRepresentativeStatus(),300);
+setInterval(async()=>{try{const sj=await fetchRepresentativeInitialStatus();paintRepresentativeJob((sj&&sj.job)||{});}catch(_){/* lightweight progress poll only */}},1000);
