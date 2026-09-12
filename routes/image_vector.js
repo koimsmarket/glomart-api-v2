@@ -1,4 +1,4 @@
-/* GM_IMAGE_VECTOR_ROUTE_V030_FAST_GENERATION_DIAG
+/* GM_IMAGE_VECTOR_ROUTE_V033_METADATA_BATCH_LOOKUP
  * Representative-net image search only.
  * FAST: HNSW over current-run representatives -> member vectors -> exact cosine rerank.
  * PRECISE: exact cosine over all current-run representatives -> member vectors -> exact cosine rerank.
@@ -11,7 +11,7 @@ const http=require('http');
 const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
 const {upsertImageVector}=require('../services/image_vector_write');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V032_SHARED_REP_SNAPSHOT';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V033_METADATA_BATCH_LOOKUP';
 const FAST_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
 const PRECISE_DB_QUERY_TIMEOUT_MS=Math.max(5000,Math.min(60000,Number(process.env.GM_IMAGE_PRECISE_DB_TIMEOUT_MS||20000)||20000));
 let SEARCH_SEQ=0;
@@ -110,28 +110,55 @@ async function fetchProductMetadata(pool,productUids){
   }
   if(!wanted.length)return {byUid:new Map(),rows:[]};
   const vectorUids=wanted.map(x=>x.vector_uid),pids=wanted.map(x=>x.product_id),malls=wanted.map(x=>x.mall_code),pis=wanted.map(x=>x.pi_ii_vi);
+  // Do not use a per-row LATERAL query with OR predicates here. With up to 30
+  // ranked image identities that plan can rescan a large gm_product relation once
+  // per result and exhaust the FAST 4s DB budget after vector rerank has finished.
+  // Build candidates in three index-friendly branches, then choose one winner per
+  // requested vector identity. The final PID fallback remains batch-only and runs
+  // only for non-option identities, preserving the existing identity policy.
   const q=await pool.query(`
     WITH wanted AS (
       SELECT vector_uid, product_id, mall_code, pi_ii_vi, ord
         FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) WITH ORDINALITY AS x(vector_uid,product_id,mall_code,pi_ii_vi,ord)
+    ), candidates AS (
+      SELECT w.ord,w.vector_uid AS wanted_product_uid,w.product_id AS wanted_product_id,
+             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
+             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,0 AS identity_rank
+        FROM wanted w
+        JOIN gm_product p ON p.product_uid=w.vector_uid
+      UNION ALL
+      SELECT w.ord,w.vector_uid,w.product_id,
+             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
+             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,1 AS identity_rank
+        FROM wanted w
+        JOIN gm_product p
+          ON w.pi_ii_vi<>''
+         AND p.pi_ii_vi=w.pi_ii_vi
+         AND (w.mall_code='' OR p.mall_code=w.mall_code)
+      UNION ALL
+      SELECT w.ord,w.vector_uid,w.product_id,
+             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
+             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,2 AS identity_rank
+        FROM wanted w
+        JOIN gm_product p
+          ON w.pi_ii_vi=''
+         AND p.product_id=w.product_id
+         AND (w.mall_code='' OR p.mall_code=w.mall_code)
+    ), picked AS (
+      SELECT c.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY c.ord
+               ORDER BY c.identity_rank,
+                        CASE WHEN COALESCE(c.sale_status,'active')='active' AND COALESCE(c.soldout_yn,'N')<>'Y' THEN 0 ELSE 1 END,
+                        COALESCE(c.updated_at,c.last_seen_at) DESC NULLS LAST,
+                        c.product_uid ASC
+             ) AS rn
+        FROM candidates c
     )
     SELECT w.ord,w.vector_uid AS wanted_product_uid,w.product_id AS wanted_product_id,
            p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
       FROM wanted w
-      LEFT JOIN LATERAL (
-        SELECT p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
-               p.updated_at,p.last_seen_at
-          FROM gm_product p
-         WHERE p.product_uid=w.vector_uid
-            OR (w.pi_ii_vi<>'' AND p.pi_ii_vi=w.pi_ii_vi AND (w.mall_code='' OR p.mall_code=w.mall_code))
-            OR (w.pi_ii_vi='' AND p.product_id=w.product_id AND (w.mall_code='' OR p.mall_code=w.mall_code))
-         ORDER BY
-           CASE WHEN p.product_uid=w.vector_uid THEN 0 WHEN w.pi_ii_vi<>'' AND p.pi_ii_vi=w.pi_ii_vi THEN 1 ELSE 2 END,
-           CASE WHEN COALESCE(p.sale_status,'active')='active' AND COALESCE(p.soldout_yn,'N')<>'Y' THEN 0 ELSE 1 END,
-           COALESCE(p.updated_at,p.last_seen_at) DESC NULLS LAST,
-           p.product_uid ASC
-         LIMIT 1
-      ) p ON TRUE
+      LEFT JOIN picked p ON p.ord=w.ord AND p.rn=1
      ORDER BY w.ord`,[vectorUids,pids,malls,pis]);
   const byUid=new Map();
   for(const r of q.rows||[]){
