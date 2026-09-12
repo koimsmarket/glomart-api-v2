@@ -11,11 +11,12 @@ const http=require('http');
 const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
 const {upsertImageVector}=require('../services/image_vector_write');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V031_FAST_PRECISE_SPLIT';
-const SEARCH_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V032_SHARED_REP_SNAPSHOT';
+const FAST_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
+const PRECISE_DB_QUERY_TIMEOUT_MS=Math.max(5000,Math.min(60000,Number(process.env.GM_IMAGE_PRECISE_DB_TIMEOUT_MS||20000)||20000));
 let SEARCH_SEQ=0;
 function searchTrace(id,stage,obj){try{console.log('[GM_IMAGE_VECTOR_SEARCH_'+stage+']',JSON.stringify(Object.assign({search_id:id,route_version:ROUTE_VERSION},obj||{})));}catch(_e){}}
-function searchDb(pool,id){return {query:function(text,values){const q=typeof text==='string'?{text:text,values:values||[],query_timeout:SEARCH_DB_QUERY_TIMEOUT_MS}:Object.assign({},text,{query_timeout:SEARCH_DB_QUERY_TIMEOUT_MS});return pool.query(q);}};}
+function searchDb(pool,id,timeoutMs){const ms=Math.max(1000,Number(timeoutMs)||FAST_DB_QUERY_TIMEOUT_MS);return {query:function(text,values){const q=typeof text==='string'?{text:text,values:values||[],query_timeout:ms}:Object.assign({},text,{query_timeout:ms});return pool.query(q);}};}
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -156,7 +157,7 @@ let representativeCache={run_no:0,epoch:0,count:0,stamp:'',rows:[],loaded_at:0};
 let representativeHnswCache={run_no:0,epoch:0,count:0,stamp:'',index:null,built_at:0,build_ms:0};
 let run0Cache={epoch:0,count:0,stamp:'',rows:[],loaded_at:0};
 let run0HnswCache={epoch:0,count:0,stamp:'',index:null,built_at:0,build_ms:0};
-let representativeRefreshPromise=null,run0RefreshPromise=null;
+let representativeRefreshPromise=null,representativeRowsPromise=null,run0RefreshPromise=null;
 let lastIndexError='';
 async function runtimeConfig(pool,key,def){
   const q=await pool.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[key]);
@@ -249,23 +250,53 @@ async function assertRun0Generation(pool,expected){
 }
 function sameRepSnapshot(meta){return representativeCache.run_no===meta.run_no&&representativeCache.epoch===meta.epoch&&representativeCache.count===meta.count&&representativeCache.stamp===meta.stamp&&representativeCache.rows.length===meta.count&&representativeHnswCache.index&&representativeHnswCache.run_no===meta.run_no&&representativeHnswCache.epoch===meta.epoch&&representativeHnswCache.count===meta.count&&representativeHnswCache.stamp===meta.stamp;}
 function sameRun0Snapshot(meta){return run0Cache.epoch===meta.epoch&&run0Cache.count===meta.count&&run0Cache.stamp===meta.stamp&&run0Cache.rows.length===meta.count&&((meta.count===0)||!!run0HnswCache.index)&&run0HnswCache.epoch===meta.epoch&&run0HnswCache.count===meta.count&&run0HnswCache.stamp===meta.stamp;}
-async function rebuildRepresentativeSnapshot(pool,meta){
+function representativeRowsCurrent(generation){
+  return representativeCache.loaded_at>0&&representativeCache.run_no===generation.run_no&&representativeCache.epoch===generation.live_epoch;
+}
+async function fetchRepresentativeRows(pool,generation,stamp){
   const started=Date.now();
   const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
       FROM gm_image_vector_representative_map m
       JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
      WHERE m.run_no=$1 AND m.representative_puid IS NOT NULL AND m.puid=m.representative_puid
        AND v.vector_image IS NOT NULL AND array_length(v.vector_image,1)=$2
-     ORDER BY m.representative_no`,[meta.run_no,DIM]);
+     ORDER BY m.representative_no`,[generation.run_no,DIM]);
   const rows=[];
   for(const r of q.rows||[]){const v=normalizedFloat32(r.vector_image);if(v)rows.push({representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid),vector:v});}
+  const snap={run_no:generation.run_no,epoch:generation.live_epoch,count:rows.length,stamp:C(stamp),rows,loaded_at:Date.now()};
+  console.log('[GM_IMAGE_VECTOR_REP_ROWS_LOADED]',JSON.stringify({run_no:snap.run_no,epoch:snap.epoch,count:snap.count,load_ms:Date.now()-started,route_version:ROUTE_VERSION}));
+  return snap;
+}
+async function ensureRepresentativeRows(pool,generation,{stamp=''}={}){
+  if(representativeRowsCurrent(generation))return representativeCache;
+  if(representativeRowsPromise){
+    const pending=await representativeRowsPromise;
+    if(pending&&pending.run_no===generation.run_no&&pending.epoch===generation.live_epoch)return pending;
+    if(representativeRowsCurrent(generation))return representativeCache;
+  }
+  const pending=(async()=>{
+    const snap=await fetchRepresentativeRows(pool,generation,stamp);
+    const now=await searchGeneration(pool);
+    if(now.run_no!==generation.run_no||now.live_epoch!==generation.live_epoch){
+      const e=warmingError('representative');
+      e.expected_generation=generation;e.current_generation=now;throw e;
+    }
+    representativeCache=snap;
+    return snap;
+  })();
+  representativeRowsPromise=pending;
+  try{return await pending;}finally{if(representativeRowsPromise===pending)representativeRowsPromise=null;}
+}
+async function rebuildRepresentativeSnapshot(pool,meta){
+  const started=Date.now();
+  const generation={run_no:meta.run_no,live_epoch:meta.epoch,run0_epoch:0};
+  const snap=await ensureRepresentativeRows(pool,generation,{stamp:meta.stamp});
+  const rows=snap.rows;
   const index=new RepresentativeHnsw();if(rows.length)await index.buildAsync(rows,Math.max(1,Number(process.env.GM_IMAGE_HNSW_BUILD_YIELD_EVERY||20)||20));
-  // Recheck metadata. Never publish a snapshot that became stale while it was being built.
+  // Recheck metadata. Never publish an HNSW index that became stale while it was being built.
   const after=await representativeMeta(pool);
   if(after.run_no!==meta.run_no||after.epoch!==meta.epoch){console.log('[GM_IMAGE_VECTOR_REP_HNSW_DISCARD_RUN_SWITCH]',JSON.stringify({requested:meta,after,route_version:ROUTE_VERSION}));return false;}
-  // Count/stamp may advance continuously while vectors arrive. Publish this coherent snapshot
-  // instead of starving FAST search; the next metadata check immediately schedules the next snapshot.
-  representativeCache={run_no:meta.run_no,epoch:meta.epoch,count:rows.length,stamp:meta.stamp,rows,loaded_at:Date.now()};
+  // The 512D row snapshot is shared by PRECISE and FAST. Only the HNSW object is published here.
   representativeHnswCache={run_no:meta.run_no,epoch:meta.epoch,count:rows.length,stamp:meta.stamp,index:rows.length?index:null,built_at:Date.now(),build_ms:Date.now()-started};
   console.log('[GM_IMAGE_VECTOR_REP_HNSW_BACKGROUND_BUILD]',JSON.stringify({run_no:meta.run_no,count:rows.length,build_ms:representativeHnswCache.build_ms,status:index.status(),route_version:ROUTE_VERSION}));
   return true;
@@ -343,15 +374,9 @@ function topRepresentativeMatches(queryNorm,rows,limit){
 function warmingError(kind){const e=new Error(kind+' index warming');e.code='INDEX_WARMING';e.index_kind=kind;return e;}
 
 async function loadPreciseRepresentativeRows(pool,generation){
-  const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
-      FROM gm_image_vector_representative_map m
-      JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
-     WHERE m.run_no=$1 AND m.representative_puid IS NOT NULL AND m.puid=m.representative_puid
-       AND v.vector_image IS NOT NULL AND array_length(v.vector_image,1)=$2
-     ORDER BY m.representative_no`,[generation.run_no,DIM]);
-  const rows=[];
-  for(const r of q.rows||[]){const v=normalizedFloat32(r.vector_image);if(v)rows.push({representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid),vector:v});}
-  return {run_no:generation.run_no,epoch:generation.live_epoch,count:rows.length,rows,loaded_at:Date.now()};
+  // PRECISE uses the same generation-bound 512D representative snapshot as FAST.
+  // If FAST already loaded the rows (even while HNSW is still building), no full DB read is repeated.
+  return ensureRepresentativeRows(pool,generation);
 }
 
 async function representativeNetSearch(pool,queryVector,limit,searchMode,{backgroundPool=null,trace=null}={}){
@@ -369,8 +394,10 @@ async function representativeNetSearch(pool,queryVector,limit,searchMode,{backgr
   if(searchMode==='precise'){
     if(trace)trace('PRECISE_ENTER');
     t=Date.now();
+    const hadRepSnapshot=representativeRowsCurrent(generation);
     snap=await loadPreciseRepresentativeRows(pool,generation);
     timings.representative_cache_ms+=Date.now()-t;
+    if(trace)trace('REP_ROWS_READY',{source:hadRepSnapshot?'memory':'db_or_shared_pending',representative_count:snap.rows.length,ms:timings.representative_cache_ms});
     t=Date.now();
     repTop=topRepresentativeMatches(qn,snap.rows,REP_GROUP_LIMIT);
     timings.representative_scan_ms=Date.now()-t;
@@ -503,9 +530,9 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
  const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(30,Number(req.body&&req.body.limit||30)||30)),searchMode=C(req.body&&req.body.search_mode).toLowerCase()==='precise'?'precise':'fast';
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!v)return res.status(400).json({ok:false,error:'vector_base64(1024-byte Float16) required'});
- const started=Date.now(),searchId=Date.now().toString(36)+'_'+(++SEARCH_SEQ),db=searchDb(pool,searchId);
+ const started=Date.now(),searchId=Date.now().toString(36)+'_'+(++SEARCH_SEQ),dbTimeoutMs=searchMode==='precise'?PRECISE_DB_QUERY_TIMEOUT_MS:FAST_DB_QUERY_TIMEOUT_MS,db=searchDb(pool,searchId,dbTimeoutMs);
  const trace=(stage,obj)=>searchTrace(searchId,stage,Object.assign({mode:searchMode,elapsed_ms:Date.now()-started},obj||{}));
- trace('ENTER',{limit:limit,db_timeout_ms:SEARCH_DB_QUERY_TIMEOUT_MS});
+ trace('ENTER',{limit:limit,db_timeout_ms:dbTimeoutMs});
  try{
   trace('COLUMN_START');
   const columnType=await vectorColumnType(db);
