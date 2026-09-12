@@ -11,7 +11,7 @@ const http=require('http');
 const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
 const {upsertImageVector}=require('../services/image_vector_write');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V030_FAST_GENERATION_DIAG';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V031_FAST_PRECISE_SPLIT';
 const SEARCH_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
 let SEARCH_SEQ=0;
 function searchTrace(id,stage,obj){try{console.log('[GM_IMAGE_VECTOR_SEARCH_'+stage+']',JSON.stringify(Object.assign({search_id:id,route_version:ROUTE_VERSION},obj||{})));}catch(_e){}}
@@ -342,33 +342,72 @@ function topRepresentativeMatches(queryNorm,rows,limit){
 }
 function warmingError(kind){const e=new Error(kind+' index warming');e.code='INDEX_WARMING';e.index_kind=kind;return e;}
 
+async function loadPreciseRepresentativeRows(pool,generation){
+  const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
+      FROM gm_image_vector_representative_map m
+      JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
+     WHERE m.run_no=$1 AND m.representative_puid IS NOT NULL AND m.puid=m.representative_puid
+       AND v.vector_image IS NOT NULL AND array_length(v.vector_image,1)=$2
+     ORDER BY m.representative_no`,[generation.run_no,DIM]);
+  const rows=[];
+  for(const r of q.rows||[]){const v=normalizedFloat32(r.vector_image);if(v)rows.push({representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid),vector:v});}
+  return {run_no:generation.run_no,epoch:generation.live_epoch,count:rows.length,rows,loaded_at:Date.now()};
+}
+
 async function representativeNetSearch(pool,queryVector,limit,searchMode,{backgroundPool=null,trace=null}={}){
   searchMode=searchMode==='precise'?'precise':'fast';
   const timings={representative_cache_ms:0,hnsw_build_ms:0,representative_scan_ms:0,representative_search_ms:0,run0_cache_ms:0,run0_hnsw_ms:0,run0_search_ms:0,map_fetch_ms:0,vector_fetch_ms:0,exact_rerank_ms:0,product_fetch_ms:0};
   const qn=normalizedFloat32(queryVector);if(!qn)throw new Error('invalid query vector');
-  let t=Date.now();if(trace)trace('GENERATION_START');const metas=await ensureSearchSnapshots(pool,{precise:searchMode==='precise',backgroundPool:backgroundPool||pool});timings.representative_cache_ms=Date.now()-t;if(trace)trace('GENERATION_DONE',{generation:metas.generation,ms:timings.representative_cache_ms});
-  const snap=representativeCache;
-  // Full Builder publish may replace the whole map while reusing the same RUN.
-  // An old-generation HNSW must never select representative IDs against the new map.
-  if(snap.run_no!==metas.generation.run_no||snap.epoch!==metas.generation.live_epoch||representativeHnswCache.run_no!==metas.generation.run_no||representativeHnswCache.epoch!==metas.generation.live_epoch)throw warmingError('representative');
-  if(!snap.rows.length||snap.run_no!==metas.generation.run_no)throw warmingError('representative');
-  let repTop=[];
-  if(searchMode==='precise'){
-    t=Date.now();repTop=topRepresentativeMatches(qn,snap.rows,REP_GROUP_LIMIT);timings.representative_scan_ms=Date.now()-t;timings.representative_search_ms=timings.representative_scan_ms;if(trace)trace('REP_SCAN_DONE',{candidates:repTop.length,ms:timings.representative_scan_ms});
-  }else{
-    const hc=representativeHnswCache;if(!hc.index||hc.run_no!==snap.run_no)throw warmingError('representative');
-    t=Date.now();repTop=hc.index.search(qn,REP_GROUP_LIMIT);timings.representative_search_ms=Date.now()-t;if(trace)trace('REP_HNSW_DONE',{candidates:repTop.length,ms:timings.representative_search_ms});
-  }
-  const repIds=repTop.map(x=>x.representative_puid);
-  const r0snap=run0Cache;let run0Top=[];
-  if(run0Cache.loaded_at===0||run0Cache.epoch!==metas.generation.run0_epoch||run0HnswCache.epoch!==metas.generation.run0_epoch)throw warmingError('run0');
-  if(run0Cache.count>0){
-    // RUN0 freshness is governed by the explicit RUN0 epoch. COUNT/MAX validation happens only
-    // in the background builder; a FAST user request never scans the whole RUN0 membership.
 
-    if(!run0HnswCache.index){if(!r0snap.rows.length)throw warmingError('run0');}
-    else{t=Date.now();run0Top=run0HnswCache.index.search(qn,RUN0_LIMIT);timings.run0_search_ms=Date.now()-t;if(trace)trace('RUN0_HNSW_DONE',{candidates:run0Top.length,ms:timings.run0_search_ms});}
+  let t=Date.now();
+  if(trace)trace('GENERATION_START');
+  const generation=await searchGeneration(pool);
+  timings.representative_cache_ms=Date.now()-t;
+  if(trace)trace('GENERATION_DONE',{generation,ms:timings.representative_cache_ms});
+
+  let snap,repTop=[];
+  if(searchMode==='precise'){
+    if(trace)trace('PRECISE_ENTER');
+    t=Date.now();
+    snap=await loadPreciseRepresentativeRows(pool,generation);
+    timings.representative_cache_ms+=Date.now()-t;
+    t=Date.now();
+    repTop=topRepresentativeMatches(qn,snap.rows,REP_GROUP_LIMIT);
+    timings.representative_scan_ms=Date.now()-t;
+    timings.representative_search_ms=timings.representative_scan_ms;
+    if(trace)trace('REP_SCAN_DONE',{representative_count:snap.rows.length,candidates:repTop.length,ms:timings.representative_scan_ms});
+    // PRECISE never waits for representative HNSW. Warm FAST snapshots independently.
+    ensureSearchSnapshots(backgroundPool||pool,{precise:false,backgroundPool:backgroundPool||pool}).catch(()=>{});
+  }else{
+    if(trace)trace('FAST_ENTER');
+    const metas=await ensureSearchSnapshots(pool,{precise:false,backgroundPool:backgroundPool||pool});
+    snap=representativeCache;
+    if(snap.run_no!==metas.generation.run_no||snap.epoch!==metas.generation.live_epoch||
+       !representativeHnswCache.index||representativeHnswCache.run_no!==metas.generation.run_no||
+       representativeHnswCache.epoch!==metas.generation.live_epoch)throw warmingError('representative');
+    if(!snap.rows.length||snap.run_no!==metas.generation.run_no)throw warmingError('representative');
+    const hc=representativeHnswCache;
+    t=Date.now();
+    repTop=hc.index.search(qn,REP_GROUP_LIMIT);
+    timings.representative_search_ms=Date.now()-t;
+    if(trace)trace('REP_HNSW_DONE',{candidates:repTop.length,ms:timings.representative_search_ms});
   }
+
+  const metas={generation};
+  const repIds=repTop.map(x=>x.representative_puid);
+  let run0Top=[];
+  const run0Ready=run0Cache.loaded_at>0&&run0Cache.epoch===generation.run0_epoch&&run0HnswCache.epoch===generation.run0_epoch&&((run0Cache.count===0)||!!run0HnswCache.index);
+  if(searchMode==='fast'&&!run0Ready)throw warmingError('run0');
+  if(searchMode==='precise'&&!run0Ready){
+    if(trace)trace('RUN0_SKIP_WARMING',{epoch:generation.run0_epoch});
+    scheduleRun0RefreshForGeneration(backgroundPool||pool,generation).catch(()=>{});
+  }else if(run0Ready&&run0Cache.count>0&&run0HnswCache.index){
+    t=Date.now();
+    run0Top=run0HnswCache.index.search(qn,RUN0_LIMIT);
+    timings.run0_search_ms=Date.now()-t;
+    if(trace)trace('RUN0_HNSW_DONE',{candidates:run0Top.length,ms:timings.run0_search_ms});
+  }
+
   const run0Ids=run0Top.map(x=>x.representative_puid);
   t=Date.now();
   const mq=await pool.query(`SELECT puid,representative_no,representative_puid,run_no
@@ -386,13 +425,10 @@ async function representativeNetSearch(pool,queryVector,limit,searchMode,{backgr
   for(const r of vq.rows||[]){const score=exactCosine(qn,r.vector_image);if(Number.isFinite(score))exact.push({product_uid:C(r.product_uid),score});}
   exact.sort((a,b)=>b.score-a.score);const ranked=exact.slice(0,Math.max(1,limit));timings.exact_rerank_ms=Date.now()-t;if(trace)trace('EXACT_DONE',{ranked:ranked.length,ms:timings.exact_rerank_ms});
   t=Date.now();const productLookup=await fetchProductMetadata(pool,ranked.map(x=>x.product_uid));timings.product_fetch_ms=Date.now()-t;if(trace)trace('PRODUCT_DONE',{matches:ranked.length,ms:timings.product_fetch_ms});
-  // A representative mutation/full publish can commit after the initial epoch check while this
-  // request is fetching members/vectors. Recheck after all DB reads so an old HNSW generation
-  // is never returned together with a newer representative map.
-  await assertSearchGenerationLite(pool,metas.generation);
-  if(trace)trace('GENERATION_RECHECK_DONE',{generation:metas.generation});
+  await assertSearchGenerationLite(pool,generation);
+  if(trace)trace('GENERATION_RECHECK_DONE',{generation});
   const matches=ranked.map((x,idx)=>{const m=Object.assign({},productLookup.byUid.get(x.product_uid)||{product_uid:x.product_uid,product_name:'',product_url:'',image_url:'',mall_code:'',keyword:'',category_keyword:''},{product_uid:x.product_uid,score:x.score});const aliases=C(m.keyword).split('|').map(C).filter(Boolean);m.search_keyword=C(aliases[0]||m.category_keyword||m.product_name);m.level_best=idx===0;return m;});
-  return {search_mode:searchMode,run_no:snap.run_no,representative_count:snap.rows.length,representative_candidates:repTop,run0_total:run0Cache.epoch===metas.generation.run0_epoch?run0Cache.count:0,run0_candidates:run0Top,member_candidate_count:candidateIds.length,run0_candidate_count:run0Count,matches,timings,hnsw_status:searchMode==='fast'&&representativeHnswCache.index?representativeHnswCache.index.status():null,run0_hnsw_status:run0HnswCache.index?run0HnswCache.index.status():null};
+  return {search_mode:searchMode,run_no:snap.run_no,representative_count:snap.rows.length,representative_candidates:repTop,run0_total:run0Ready?run0Cache.count:0,run0_candidates:run0Top,member_candidate_count:candidateIds.length,run0_candidate_count:run0Count,matches,timings,hnsw_status:searchMode==='fast'&&representativeHnswCache.index?representativeHnswCache.index.status():null,run0_hnsw_status:run0Ready&&run0HnswCache.index?run0HnswCache.index.status():null};
 }
 
 function allowedImageUrl(raw){
@@ -482,7 +518,7 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
   return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:out.search_mode,search_mode_label:out.search_mode==='fast'?'신속검색':'정밀검색',run_no:out.run_no,representative_count:out.representative_count,representative_group_limit:REP_GROUP_LIMIT,representative_candidates:out.representative_candidates,representative_scanned:out.search_mode==='precise'?out.representative_count:null,candidate_count:out.member_candidate_count,run0_candidate_count:out.run0_candidate_count,run0_total:out.run0_total,run0_candidate_limit:RUN0_LIMIT,run0_candidates:out.run0_candidates,hnsw_status:out.hnsw_status,run0_hnsw_status:out.run0_hnsw_status,search_ms:searchMs,timings:out.timings});
  }catch(e){
   trace('FAIL',{code:C(e&&e.code),error:C(e&&e.message||e)});
-  if(e&&e.code==='INDEX_WARMING')return res.status(503).json({ok:false,error:'INDEX_WARMING',index_kind:e.index_kind||'',retryable:true,route_version:ROUTE_VERSION,search_id:searchId,search_ms:Date.now()-started});
+  if(e&&e.code==='INDEX_WARMING')return res.json({ok:false,error:'INDEX_WARMING',http_status:503,index_kind:e.index_kind||'',retryable:true,route_version:ROUTE_VERSION,search_id:searchId,search_ms:Date.now()-started});
   const timedOut=/timeout/i.test(C(e&&e.message||e))||C(e&&e.code)==='57014';
   return res.status(timedOut?504:500).json({ok:false,error:timedOut?'SEARCH_DB_TIMEOUT':C(e&&e.message||e),detail:C(e&&e.message||e),route_version:ROUTE_VERSION,search_id:searchId,search_ms:Date.now()-started});
  }
