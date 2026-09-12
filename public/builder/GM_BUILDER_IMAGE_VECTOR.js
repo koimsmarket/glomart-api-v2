@@ -128,6 +128,7 @@ function paintRepresentativeJob(job){
  set('ivRepJobElapsed',repElapsed(x.started_at,x.finished_at));
 }
 
+// V021: distinguish TARGET Builder settings from currently LIVE representative net.
 function syncRepresentativeSettingInputs(runNo,threshold){
  const run=document.getElementById('ivRepRunInput'),thr=document.getElementById('ivRepThresholdInput');
  if(run && document.activeElement!==run)run.value=String(Math.max(1,Math.trunc(Number(runNo||1))));
@@ -147,7 +148,8 @@ async function saveRepresentativeSettings(button,opts){
  try{
    const r=await fetch(`${API}/api/gm/builder/image-vector/representative/initial/settings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_no:runNo,threshold})});
    const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
-   syncRepresentativeSettingInputs(j.run_no,j.threshold);
+   syncRepresentativeSettingInputs(j.target_run_no==null?j.run_no:j.target_run_no,j.target_threshold==null?j.threshold:j.target_threshold);
+   const liveRun=j.live_run_no==null?j.run_no:j.live_run_no,liveThr=j.live_threshold==null?j.threshold:j.live_threshold;
    if(out)out.textContent=`저장 완료: RUN ${j.run_no} / ${Number(j.threshold).toFixed(4)}`;
    if(!opts.silent){log({action:'image-vector.representative.settings',run_no:j.run_no,threshold:j.threshold});await loadRepresentativeStatus();}
    return j;
@@ -166,10 +168,13 @@ async function loadRepresentativeStatus(){
    if(!sr.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${sr.status}`);
    if(!jr.ok||!jj.ok)throw new Error(jj.detail||jj.error||`HTTP ${jr.status}`);
    const x=(jj&&jj.job)||{},pv=(jj&&jj.preview)||{};
-   syncRepresentativeSettingInputs(j.run_no,j.threshold);
+   syncRepresentativeSettingInputs(j.target_run_no==null?j.run_no:j.target_run_no,j.target_threshold==null?j.threshold:j.target_threshold);
+   const liveRun=j.live_run_no==null?j.run_no:j.live_run_no,liveThr=j.live_threshold==null?j.threshold:j.live_threshold;
    paintRepresentativeJob(x);
-   el.innerHTML=`<tr><th>현재 RUN</th><td>${fmt(j.run_no)}</td></tr>
-   <tr><th>기준 유사율</th><td>${Number(j.threshold).toFixed(4)}</td></tr>
+   el.innerHTML=`<tr><th>현재 LIVE RUN</th><td>${fmt(liveRun)}</td></tr>
+   <tr><th>현재 LIVE 유사율</th><td>${Number(liveThr).toFixed(4)}</td></tr>
+   <tr><th>다음 Builder TARGET RUN</th><td>${fmt(j.target_run_no==null?j.run_no:j.target_run_no)}</td></tr>
+   <tr><th>다음 Builder TARGET 유사율</th><td>${Number(j.target_threshold==null?j.threshold:j.target_threshold).toFixed(4)}</td></tr>
    <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
    <tr><th>카테고리 후보</th><td>${fmt(j.candidate_vector)}</td></tr>
    <tr><th>카테고리 사전점검</th><td id="ivRepPreviewState">${pv.running?'실행 중':(pv.completed?'완료':(pv.error?'오류':'대기'))}</td></tr>

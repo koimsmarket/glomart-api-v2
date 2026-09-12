@@ -1,5 +1,5 @@
 'use strict';
-// GM_RUNTIME_CONFIG_V003
+// GM_RUNTIME_CONFIG_V005_PROTECT_RUN0_EPOCH
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -7,6 +7,18 @@ const {dbFrom,ok,fail}=require('./core');
 const KEY_RE=/^[a-zA-Z0-9_.-]{1,120}$/;
 const MODE_RE=/^[A-Z0-9_.-]{1,20}$/;
 const TYPES=new Set(['STRING','NUMBER','BOOLEAN','VERSION','JSON']);
+// These keys participate in representative-map locking / atomic publish invariants.
+// They may be read through the generic config UI, but writes must go through the
+// dedicated image-vector Builder endpoints (or internal services for LIVE/build state).
+const IMAGE_VECTOR_PROTECTED_KEYS=new Set([
+  'image_vector_representative_run',
+  'image_vector_representative_similarity',
+  'image_vector_representative_live_run',
+  'image_vector_representative_live_similarity',
+  'image_vector_representative_live_epoch',
+  'image_vector_representative_run0_epoch',
+  'image_vector_representative_building'
+]);
 function typedValue(row){
   const raw=String(row.config_value==null?'':row.config_value);
   switch(String(row.value_type||'').toUpperCase()){
@@ -44,6 +56,7 @@ router.post('/api/gm/builder/config',async(req,res)=>{
   if(!MODE_RE.test(mode))return fail(res,400,'invalid mode');
   if(key==='gm_v1')return fail(res,400,'gm_v1 is protected: AUTO_1MIN');
   if(key==='gm_v2')return fail(res,400,'gm_v2 is protected: use gm-v2/next');
+  if(IMAGE_VECTOR_PROTECTED_KEYS.has(key))return fail(res,409,'IMAGE_VECTOR_CONFIG_PROTECTED',{detail:'Use the dedicated image-vector representative settings/build flow. LIVE/build/epoch keys are internal state.'});
   try{
     const r=await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
       VALUES($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT(config_key) DO UPDATE SET

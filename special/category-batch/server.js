@@ -1,5 +1,5 @@
 'use strict';
-/* GM_CATEGORY_BATCH_SPECIAL_SERVER_V003
+/* GM_CATEGORY_BATCH_SPECIAL_SERVER_V005_CENTRAL_UPSERT_ENV_REQUIRED
  * Standalone one-off preload service. It intentionally does NOT require or modify
  * glomart-api-v2/server.js, routes/image_vector.js, or public/image_worker.js.
  * Run as a separate Cloudtype service with the same DATABASE_URL.
@@ -9,10 +9,12 @@ const cors=require('cors');
 const {Pool}=require('pg');
 const path=require('path');
 
-const VERSION='GM_CATEGORY_BATCH_SPECIAL_SERVER_V003';
+const VERSION='GM_CATEGORY_BATCH_SPECIAL_SERVER_V005_CENTRAL_UPSERT_ENV_REQUIRED';
 const PORT=Number(process.env.PORT||3000);
 const ADMIN_IDS=new Set(['derzon','derzon1287','msoon']);
 const DIM=512;
+const MAIN_API_BASE=S(process.env.GM_MAIN_API_BASE||process.env.GM_API_BASE||'').replace(/\/+$/,'');
+const MAIN_API_TIMEOUT_MS=Math.max(5000,Math.min(120000,Number(process.env.GM_MAIN_API_TIMEOUT_MS||30000)||30000));
 const app=express();
 const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.PGSSL==='1'?{rejectUnauthorized:false}:false});
 app.use(cors({origin:(origin,cb)=>cb(null,!origin||/^https:\/\/(m\.)?glomart\.kr$/i.test(origin)||/^https:\/\/koims1287\.cafe24\.com$/i.test(origin)),credentials:false}));
@@ -40,6 +42,30 @@ function auth(req,res){
 function log(tag,obj){console.log('[GM_CATEGORY_BATCH '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},obj||{})));}
 function splitKeywords(v){return [...new Set(S(v).split('/').map(x=>x.trim()).filter(Boolean))];}
 function vectorValidSql(alias='v'){return `${alias}.vector_image IS NOT NULL AND array_length(${alias}.vector_image,1)=${DIM}`;}
+
+function f32ToF16Bits(val){
+  if(!Number.isFinite(val))return val<0?0xfc00:0x7c00;
+  const f=new Float32Array(1),u=new Uint32Array(f.buffer);f[0]=val;const x=u[0],sign=(x>>>16)&0x8000,exp=((x>>>23)&0xff)-127+15;let mant=x&0x7fffff;
+  if(exp<=0){if(exp<-10)return sign;mant=(mant|0x800000)>>(1-exp);return sign+((mant+0x1000)>>13);}
+  if(exp>=31)return sign|0x7c00;
+  return sign|(exp<<10)|((mant+0x1000)>>13);
+}
+function vectorBase64(values){
+  if(!Array.isArray(values)||values.length!==DIM)throw new Error('embedding dimension '+(values&&values.length||0));
+  const b=Buffer.allocUnsafe(DIM*2);
+  for(let i=0;i<DIM;i++)b.writeUInt16LE(f32ToF16Bits(Number(values[i])||0),i*2);
+  return b.toString('base64');
+}
+async function centralVectorUpsert(productUid,vector){
+  if(!MAIN_API_BASE)throw new Error('GM_MAIN_API_BASE (or GM_API_BASE) is required for central vector upsert');
+  const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),MAIN_API_TIMEOUT_MS);
+  try{
+    const r=await fetch(MAIN_API_BASE+'/api/gm/image-vector/upsert?v=gm_v1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_uid:productUid,vector_base64:vectorBase64(vector)}),signal:ctrl.signal});
+    const text=await r.text();let j={};try{j=text?JSON.parse(text):{};}catch(_e){}
+    if(!r.ok||!j.ok)throw new Error('central upsert HTTP '+r.status+' '+S(j.error||text).slice(0,240));
+    return j;
+  }finally{clearTimeout(timer);}
+}
 
 app.get('/health',async(_req,res)=>{
   try{await pool.query('SELECT 1');res.json({ok:true,version:VERSION,control,cycles:cycles.size,server_queue:serverQueue.length});}
@@ -207,9 +233,9 @@ async function runServerQueue(){
         const exists=await pool.query(`SELECT 1 FROM gm_product_image_vector WHERE product_uid=$1 AND ${vectorValidSql('gm_product_image_vector')} LIMIT 1`,[job.item.product_uid]);
         if(!exists.rowCount){
           const vector=await inferUrl(job.item.image_url);
-          await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[job.item.product_uid,vector]);
+          await centralVectorUpsert(job.item.product_uid,vector);
         }
-        log('SERVER_VECTOR_OK',{cycle_id:job.cycle_id,product_uid:job.item.product_uid,mall_code:job.item.mall_code,elapsed_ms:Date.now()-started,queue_left:serverQueue.length});
+        log('SERVER_VECTOR_OK',{cycle_id:job.cycle_id,product_uid:job.item.product_uid,mall_code:job.item.mall_code,writer:'MAIN_API_UPSERT',elapsed_ms:Date.now()-started,queue_left:serverQueue.length});
         serverQueued.delete(job.item.product_uid);
       }catch(e){
         if(job.retry<2){job.retry++;serverQueue.push(job);}else serverQueued.delete(job.item.product_uid);

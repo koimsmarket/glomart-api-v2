@@ -216,6 +216,7 @@ router.post('/api/gm/builder/record/update', express.json({limit:'2mb'}), async 
   const tableKey = req.body && req.body.table;
   const spec = tableSpec(tableKey);
   if(!spec) return fail(res,400,'invalid table');
+  if(spec.table==='gm_product_image_vector') return fail(res,409,'IMAGE_VECTOR_DOMAIN_WRITE_ONLY',{detail:'Direct record editing is disabled for image vectors; use the image-vector domain service.'});
   const changes = req.body && req.body.changes;
   if(!changes || typeof changes !== 'object' || Array.isArray(changes)) return fail(res,400,'changes required');
   const originals = req.body && req.body.original;
@@ -281,6 +282,7 @@ router.post('/api/gm/builder/record/delete-selected', express.json({limit:'2mb'}
   const tableKey = req.body && req.body.table;
   const spec = tableSpec(tableKey);
   if(!spec) return fail(res,400,'invalid table');
+  if(spec.table==='gm_product_image_vector') return fail(res,409,'IMAGE_VECTOR_DOMAIN_WRITE_ONLY',{detail:'Direct record deletion is disabled for image vectors; use image-vector sync/delete domain operations.'});
   const confirmText=String((req.body&&req.body.confirm)||req.query.confirm||'');
   if(confirmText !== 'DELETE SELECTED') return fail(res,400,'confirmation required');
   const items=req.body && req.body.items;

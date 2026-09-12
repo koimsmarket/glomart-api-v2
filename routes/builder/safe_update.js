@@ -49,6 +49,9 @@ function safeKeyWhere(key,startIndex=1){
 router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','application/csv'], limit:'100mb' }), async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
+  // gm_product_image_vector is managed only by the image-vector domain service.
+  // Generic CSV writes would bypass representative assignment / mutation locking.
+  if (spec.table === 'gm_product_image_vector') return fail(res,409,'IMAGE_VECTOR_DOMAIN_WRITE_ONLY',{detail:'Use /api/gm/image-vector/upsert or image-vector Builder domain operations.'});
 
   const apply = String(req.query.apply || '').toUpperCase() === 'YES';
   const exactFileMode = String(req.query.file_mode || '').toUpperCase() === 'EXACT';

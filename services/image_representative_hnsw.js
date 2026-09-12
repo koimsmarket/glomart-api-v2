@@ -1,6 +1,6 @@
 'use strict';
 
-// GM_IMAGE_REPRESENTATIVE_HNSW_V001
+// GM_IMAGE_REPRESENTATIVE_HNSW_V002_COOPERATIVE_BACKGROUND_BUILD
 // Dependency-free in-memory HNSW for normalized 512D representative vectors.
 // The DB REAL[] vectors remain authoritative. This index only selects representative groups.
 
@@ -103,6 +103,15 @@ class RepresentativeHnsw{
   build(rows){
     const started=Date.now();this.nodes=[];this.entry=-1;this.maxLevel=-1;
     for(const row of rows||[])this.add(row);
+    this.builtAt=Date.now();this.buildMs=this.builtAt-started;return this;
+  }
+  async buildAsync(rows,yieldEvery=20){
+    const started=Date.now();this.nodes=[];this.entry=-1;this.maxLevel=-1;
+    const list=rows||[];yieldEvery=Math.max(1,Number(yieldEvery)||20);
+    for(let i=0;i<list.length;i++){
+      this.add(list[i]);
+      if((i+1)%yieldEvery===0)await new Promise(resolve=>setImmediate(resolve));
+    }
     this.builtAt=Date.now();this.buildMs=this.builtAt-started;return this;
   }
   search(query,k,efSearch){
