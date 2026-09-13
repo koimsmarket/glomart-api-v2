@@ -1,8 +1,9 @@
-/* GM_IMAGE_VECTOR_ROUTE_V034_PRODUCT_DISPLAY_METADATA
+/* GM_IMAGE_VECTOR_ROUTE_V036_FAST_DB_INDEXED_LOOKUP
  * Representative-net image search only.
- * FAST: HNSW over current-run representatives -> member vectors -> exact cosine rerank.
+ * FAST: compact persistent candidate_vector cache over current-run representatives -> member vectors -> exact cosine rerank.
  * PRECISE: exact cosine over all current-run representatives -> member vectors -> exact cosine rerank.
- * Legacy candidate ANN / classification Tree-Leaf / upper-level search paths are removed.
+ * No process-local HNSW warm-up is required for FAST; candidate_vector is persisted in PostgreSQL.
+ * Legacy classification Tree-Leaf / upper-level search paths remain removed.
  * gm_product_image_vector.vector_image remains the authoritative 512D source.
  */
 const express=require('express');
@@ -10,8 +11,9 @@ const https=require('https');
 const http=require('http');
 const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
+const {encodeCandidateVector,BYTE_LEN:CANDIDATE_BYTE_LEN}=require('../services/image_candidate_vector');
 const {upsertImageVector}=require('../services/image_vector_write');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V034_PRODUCT_DISPLAY_METADATA';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V036_FAST_DB_INDEXED_LOOKUP';
 const FAST_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
 const PRECISE_DB_QUERY_TIMEOUT_MS=Math.max(5000,Math.min(60000,Number(process.env.GM_IMAGE_PRECISE_DB_TIMEOUT_MS||20000)||20000));
 let SEARCH_SEQ=0;
@@ -100,112 +102,72 @@ function preciseOptionIdentity(raw){
   return '';
 }
 async function fetchProductMetadata(pool,productUids){
-  // Final 512-d image matches are vector-table identities. Resolve CURRENT product text
-  // from gm_product by PID(product_id), not by gm_product.product_uid.
-  // Example: 9591328187_28631524894_95574594581 -> PID 9591328187 -> CPKR_9591328187.
+  // FAST metadata lookup must stay on indexed identities only. Never scan gm_product by
+  // product_id inside the image-search request path: gm_product has no product_id index
+  // in the preserved schema and queue/upsert traffic can push that fallback past 4s.
   const wanted=[];const seen=new Set();
   for(const raw of productUids||[]){
     const vectorUid=C(raw);if(!vectorUid||seen.has(vectorUid))continue;seen.add(vectorUid);
     wanted.push({vector_uid:vectorUid,product_id:pidFromVectorUid(vectorUid),mall_code:mallHintFromVectorUid(vectorUid),pi_ii_vi:preciseOptionIdentity(vectorUid)});
   }
   if(!wanted.length)return {byUid:new Map(),rows:[]};
-  const vectorUids=wanted.map(x=>x.vector_uid),pids=wanted.map(x=>x.product_id),malls=wanted.map(x=>x.mall_code),pis=wanted.map(x=>x.pi_ii_vi);
-  // Do not use a per-row LATERAL query with OR predicates here. With up to 30
-  // ranked image identities that plan can rescan a large gm_product relation once
-  // per result and exhaust the FAST 4s DB budget after vector rerank has finished.
-  // Build candidates in three index-friendly branches, then choose one winner per
-  // requested vector identity. The final PID fallback remains batch-only and runs
-  // only for non-option identities, preserving the existing identity policy.
-  const q=await pool.query(`
-    WITH wanted AS (
-      SELECT vector_uid, product_id, mall_code, pi_ii_vi, ord
-        FROM unnest($1::text[],$2::text[],$3::text[],$4::text[]) WITH ORDINALITY AS x(vector_uid,product_id,mall_code,pi_ii_vi,ord)
-    ), candidates AS (
-      SELECT w.ord,w.vector_uid AS wanted_product_uid,w.product_id AS wanted_product_id,
-             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
-             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,0 AS identity_rank
-        FROM wanted w
-        JOIN gm_product p ON p.product_uid=w.vector_uid
-      UNION ALL
-      SELECT w.ord,w.vector_uid,w.product_id,
-             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
-             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,1 AS identity_rank
-        FROM wanted w
-        JOIN gm_product p
-          ON w.pi_ii_vi<>''
-         AND p.pi_ii_vi=w.pi_ii_vi
-         AND (w.mall_code='' OR p.mall_code=w.mall_code)
-      UNION ALL
-      SELECT w.ord,w.vector_uid,w.product_id,
-             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
-             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,2 AS identity_rank
-        FROM wanted w
-        JOIN gm_product p
-          ON w.pi_ii_vi=''
-         AND p.product_id=w.product_id
-         AND (w.mall_code='' OR p.mall_code=w.mall_code)
-    ), picked AS (
-      SELECT c.*,
-             ROW_NUMBER() OVER (
-               PARTITION BY c.ord
-               ORDER BY c.identity_rank,
-                        CASE WHEN COALESCE(c.sale_status,'active')='active' AND COALESCE(c.soldout_yn,'N')<>'Y' THEN 0 ELSE 1 END,
-                        COALESCE(c.updated_at,c.last_seen_at) DESC NULLS LAST,
-                        c.product_uid ASC
-             ) AS rn
-        FROM candidates c
-    )
-    SELECT w.ord,w.vector_uid AS wanted_product_uid,w.product_id AS wanted_product_id,
-           p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
-      FROM wanted w
-      LEFT JOIN picked p ON p.ord=w.ord AND p.rn=1
-     ORDER BY w.ord`,[vectorUids,pids,malls,pis]);
-  const byUid=new Map();
-  for(const r of q.rows||[]){
-    if(C(r.product_uid)){
-      const m=metaFromRow(r);
-      m.lookup_pid=C(r.wanted_product_id);
-      byUid.set(C(r.wanted_product_uid),m);
+  const byUid=new Map(),rows=[];
+
+  // 1) Exact product_uid uses the gm_product PRIMARY KEY.
+  const exactQ=await pool.query(`SELECT product_uid,product_id,product_name,product_url,thumb_origin_url,mall_code,keyword,category_keyword,sale_status,soldout_yn,updated_at,last_seen_at
+      FROM gm_product WHERE product_uid=ANY($1::text[])`,[wanted.map(x=>x.vector_uid)]);
+  for(const r of exactQ.rows||[]){
+    const uid=C(r.product_uid);if(!uid)continue;
+    const m=metaFromRow(r);m.lookup_pid=C(r.product_id);byUid.set(uid,m);rows.push(r);
+  }
+
+  // 2) Unresolved option identities use the existing pi_ii_vi index. Fetch a small batch,
+  // then choose the exact pi_ii_vi + mall winner in Node instead of UNION/WINDOW sorting.
+  const optionWanted=wanted.filter(x=>x.pi_ii_vi&&!byUid.has(x.vector_uid));
+  if(optionWanted.length){
+    const pis=[...new Set(optionWanted.map(x=>x.pi_ii_vi).filter(Boolean))];
+    const malls=[...new Set(optionWanted.map(x=>x.mall_code).filter(Boolean))];
+    const optionQ=await pool.query(`SELECT product_uid,product_id,product_name,product_url,thumb_origin_url,mall_code,keyword,category_keyword,pi_ii_vi,sale_status,soldout_yn,updated_at,last_seen_at
+        FROM gm_product
+       WHERE pi_ii_vi=ANY($1::text[])
+         AND (cardinality($2::text[])=0 OR mall_code=ANY($2::text[]))`,[pis,malls]);
+    const bucket=new Map();
+    function metaPreference(r){
+      const active=(C(r.sale_status||'active')==='active'&&C(r.soldout_yn||'N')!=='Y')?0:1;
+      const ts=new Date(r.updated_at||r.last_seen_at||0).getTime()||0;
+      return [active,-ts,C(r.product_uid)];
+    }
+    function better(a,b){
+      if(!a)return b;if(!b)return a;
+      const A=metaPreference(a),B=metaPreference(b);
+      for(let i=0;i<A.length;i++){if(A[i]<B[i])return a;if(A[i]>B[i])return b;}return a;
+    }
+    for(const r of optionQ.rows||[]){
+      const key=C(r.pi_ii_vi)+'|'+C(r.mall_code).toUpperCase();
+      bucket.set(key,better(bucket.get(key),r));
+      rows.push(r);
+    }
+    for(const w of optionWanted){
+      const r=bucket.get(w.pi_ii_vi+'|'+C(w.mall_code).toUpperCase());
+      if(!r)continue;
+      const m=metaFromRow(r);m.lookup_pid=w.product_id;byUid.set(w.vector_uid,m);
     }
   }
 
-  // Display-only fallback is intentionally separated from the main metadata query.
-  // Only unresolved option identities are retried, so FAST search never explodes the
-  // candidate set by joining every requested option PID to every gm_product option row.
-  const unresolved=wanted.filter(x=>x.pi_ii_vi!==''&&!byUid.has(x.vector_uid)&&x.product_id);
+  // 3) Display-only fallback: canonical product rows are addressed by PRIMARY KEY
+  // (CPKR_<PID>/ALKR_<PID>). This replaces the former unindexed product_id scan.
+  const unresolved=wanted.filter(x=>!byUid.has(x.vector_uid)&&x.product_id&&/^(CPKR|ALKR)$/i.test(x.mall_code));
   if(unresolved.length){
-    const strict=unresolved.filter(x=>x.mall_code);
-    if(strict.length){
-      const uq=await pool.query(`
-        WITH wanted AS (
-          SELECT vector_uid,product_id,mall_code,ord
-            FROM unnest($1::text[],$2::text[],$3::text[]) WITH ORDINALITY AS x(vector_uid,product_id,mall_code,ord)
-        ), picked AS (
-          SELECT DISTINCT ON (w.ord)
-                 w.ord,w.vector_uid AS wanted_product_uid,w.product_id AS wanted_product_id,
-                 p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
-            FROM wanted w
-            JOIN gm_product p
-              ON p.product_id=w.product_id
-             AND p.mall_code=w.mall_code
-           ORDER BY w.ord,
-                    CASE WHEN COALESCE(p.sale_status,'active')='active' AND COALESCE(p.soldout_yn,'N')<>'Y' THEN 0 ELSE 1 END,
-                    COALESCE(p.updated_at,p.last_seen_at) DESC NULLS LAST,
-                    p.product_uid ASC
-        )
-        SELECT * FROM picked ORDER BY ord`,[
-          strict.map(x=>x.vector_uid),strict.map(x=>x.product_id),strict.map(x=>x.mall_code)
-      ]);
-      for(const r of uq.rows||[]){
-        if(!C(r.product_uid))continue;
-        const m=metaFromRow(r);
-        m.lookup_pid=C(r.wanted_product_id);
-        m.display_fallback='pid_mall';
-        byUid.set(C(r.wanted_product_uid),m);
-      }
+    const canonicalByUid=new Map();
+    for(const w of unresolved)canonicalByUid.set(C(w.mall_code).toUpperCase()+'_'+w.product_id,w);
+    const canonicalQ=await pool.query(`SELECT product_uid,product_id,product_name,product_url,thumb_origin_url,mall_code,keyword,category_keyword
+        FROM gm_product WHERE product_uid=ANY($1::text[])`,[[...canonicalByUid.keys()]]);
+    for(const r of canonicalQ.rows||[]){
+      const w=canonicalByUid.get(C(r.product_uid));if(!w)continue;
+      const m=metaFromRow(r);m.lookup_pid=w.product_id;m.display_fallback='canonical_product_uid';byUid.set(w.vector_uid,m);rows.push(r);
     }
   }
-  return {byUid,rows:q.rows||[]};
+  return {byUid,rows};
 }
 // Legacy candidate ANN and classification Tree/Leaf search removed.
 
@@ -222,7 +184,94 @@ let representativeHnswCache={run_no:0,epoch:0,count:0,stamp:'',index:null,built_
 let run0Cache={epoch:0,count:0,stamp:'',rows:[],loaded_at:0};
 let run0HnswCache={epoch:0,count:0,stamp:'',index:null,built_at:0,build_ms:0};
 let representativeRefreshPromise=null,representativeRowsPromise=null,run0RefreshPromise=null;
+// FAST uses the persistent compact candidate_vector representation instead of rebuilding
+// a process-local HNSW graph after every deploy/restart. The candidate cache is only a few MB
+// and is atomically replaced per published generation. Exact REAL[] rerank below remains authoritative.
+let representativeFastCache={run_no:0,epoch:0,count:0,rows:[],loaded_at:0,load_ms:0,missing_fallback:0};
+let run0FastCache={epoch:0,count:0,rows:[],loaded_at:0,load_ms:0,missing_fallback:0};
+let representativeFastPromise=null,run0FastPromise=null;
 let lastIndexError='';
+
+function validCandidateBuffer(raw){
+  const b=Buffer.isBuffer(raw)?raw:Buffer.from(raw||[]);
+  return b.length===CANDIDATE_BYTE_LEN&&b.readUInt8(0)===1&&b.readUInt16LE(1)===DIM?b:null;
+}
+function candidateCosine(queryNorm,raw){
+  const b=validCandidateBuffer(raw);if(!b)return -Infinity;
+  const scale=b.readFloatLE(3);if(!Number.isFinite(scale)||!(scale>0))return -Infinity;
+  let dot=0;for(let i=0;i<DIM;i++)dot+=queryNorm[i]*(b.readInt8(7+i)*scale);
+  return dot;
+}
+function topFastCandidateMatches(queryNorm,rows,limit){
+  const out=[];
+  for(const r of rows||[]){
+    const score=candidateCosine(queryNorm,r.candidate_vector);if(!Number.isFinite(score))continue;
+    const x={representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid),score};
+    if(out.length<limit){out.push(x);out.sort((a,b)=>b.score-a.score);continue;}
+    if(score<=out[out.length-1].score)continue;out[out.length-1]=x;out.sort((a,b)=>b.score-a.score);
+  }
+  return out;
+}
+function fastCacheStatus(cache){return {backend:'candidate_vector_cache',count:Number(cache&&cache.count||0),loaded_at:Number(cache&&cache.loaded_at||0),load_ms:Number(cache&&cache.load_ms||0),missing_fallback:Number(cache&&cache.missing_fallback||0)};}
+async function buildRepresentativeFastCache(pool,generation){
+  const started=Date.now();
+  const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.candidate_vector
+      FROM gm_image_vector_representative_map m
+      JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
+     WHERE m.run_no=$1 AND m.representative_puid IS NOT NULL AND m.puid=m.representative_puid
+     ORDER BY m.representative_no`,[generation.run_no]);
+  const rows=[],missing=[];
+  for(const r of q.rows||[]){const b=validCandidateBuffer(r.candidate_vector);if(b)rows.push({representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid),candidate_vector:b});else missing.push({representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid)});}
+  // candidate_vector backfill should normally make this empty. Preserve correctness on older rows
+  // by reading REAL[] only for the small missing subset, never for the whole representative network.
+  if(missing.length){
+    const ids=missing.map(x=>x.representative_puid);
+    const vq=await pool.query(`SELECT product_uid,vector_image FROM gm_product_image_vector
+       WHERE product_uid=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2`,[ids,DIM]);
+    const by=new Map((vq.rows||[]).map(r=>[C(r.product_uid),r.vector_image]));
+    for(const m of missing){const cv=encodeCandidateVector(by.get(m.representative_puid));if(cv)rows.push({representative_no:m.representative_no,representative_puid:m.representative_puid,candidate_vector:cv});}
+  }
+  const now=await searchGeneration(pool);
+  if(now.run_no!==generation.run_no||now.live_epoch!==generation.live_epoch){const e=warmingError('representative');e.expected_generation=generation;e.current_generation=now;throw e;}
+  const snap={run_no:generation.run_no,epoch:generation.live_epoch,count:rows.length,rows,loaded_at:Date.now(),load_ms:Date.now()-started,missing_fallback:missing.length};
+  console.log('[GM_IMAGE_VECTOR_REP_FAST_CACHE_READY]',JSON.stringify({run_no:snap.run_no,epoch:snap.epoch,count:snap.count,load_ms:snap.load_ms,missing_fallback:snap.missing_fallback,route_version:ROUTE_VERSION}));
+  representativeFastCache=snap;return snap;
+}
+async function ensureRepresentativeFastCache(pool,generation){
+  if(representativeFastCache.loaded_at>0&&representativeFastCache.run_no===generation.run_no&&representativeFastCache.epoch===generation.live_epoch)return representativeFastCache;
+  if(representativeFastPromise){const x=await representativeFastPromise;if(x&&x.run_no===generation.run_no&&x.epoch===generation.live_epoch)return x;}
+  const p=buildRepresentativeFastCache(pool,generation);representativeFastPromise=p;
+  try{return await p;}finally{if(representativeFastPromise===p)representativeFastPromise=null;}
+}
+async function buildRun0FastCache(pool,generation){
+  const started=Date.now();
+  const q=await pool.query(`SELECT m.puid,v.candidate_vector
+      FROM gm_image_vector_representative_map m
+      JOIN gm_product_image_vector v ON v.product_uid=m.puid
+     WHERE m.run_no=0 ORDER BY m.puid`);
+  const rows=[],missing=[];let no=0;
+  for(const r of q.rows||[]){const puid=C(r.puid),b=validCandidateBuffer(r.candidate_vector);if(b)rows.push({representative_no:--no,representative_puid:puid,candidate_vector:b});else if(puid)missing.push(puid);}
+  if(missing.length){
+    const vq=await pool.query(`SELECT product_uid,vector_image FROM gm_product_image_vector WHERE product_uid=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2`,[missing,DIM]);
+    for(const r of vq.rows||[]){const cv=encodeCandidateVector(r.vector_image);if(cv)rows.push({representative_no:--no,representative_puid:C(r.product_uid),candidate_vector:cv});}
+  }
+  const now=await searchGeneration(pool);if(now.run0_epoch!==generation.run0_epoch){const e=warmingError('run0');e.expected_generation=generation;e.current_generation=now;throw e;}
+  const snap={epoch:generation.run0_epoch,count:rows.length,rows,loaded_at:Date.now(),load_ms:Date.now()-started,missing_fallback:missing.length};
+  console.log('[GM_IMAGE_VECTOR_RUN0_FAST_CACHE_READY]',JSON.stringify({epoch:snap.epoch,count:snap.count,load_ms:snap.load_ms,missing_fallback:snap.missing_fallback,route_version:ROUTE_VERSION}));
+  run0FastCache=snap;return snap;
+}
+async function ensureRun0FastCache(pool,generation){
+  if(run0FastCache.loaded_at>0&&run0FastCache.epoch===generation.run0_epoch)return run0FastCache;
+  if(run0FastPromise){const x=await run0FastPromise;if(x&&x.epoch===generation.run0_epoch)return x;}
+  const p=buildRun0FastCache(pool,generation);run0FastPromise=p;
+  try{return await p;}finally{if(run0FastPromise===p)run0FastPromise=null;}
+}
+async function ensureFastCandidateSnapshots(pool,generation){
+  const rep=await ensureRepresentativeFastCache(pool,generation);
+  const run0=await ensureRun0FastCache(pool,generation);
+  return {rep,run0};
+}
+
 async function runtimeConfig(pool,key,def){
   const q=await pool.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[key]);
   return q.rows&&q.rows.length?C(q.rows[0].config_value):C(def);
@@ -467,47 +516,51 @@ async function representativeNetSearch(pool,queryVector,limit,searchMode,{backgr
     timings.representative_scan_ms=Date.now()-t;
     timings.representative_search_ms=timings.representative_scan_ms;
     if(trace)trace('REP_SCAN_DONE',{representative_count:snap.rows.length,candidates:repTop.length,ms:timings.representative_scan_ms});
-    // PRECISE never waits for representative HNSW. Warm FAST snapshots independently.
-    ensureSearchSnapshots(backgroundPool||pool,{precise:false,backgroundPool:backgroundPool||pool}).catch(()=>{});
+    // Warm the compact persistent-candidate FAST cache independently. No HNSW rebuild is required.
+    ensureFastCandidateSnapshots(backgroundPool||pool,generation).catch(()=>{});
   }else{
     if(trace)trace('FAST_ENTER');
-    const metas=await ensureSearchSnapshots(pool,{precise:false,backgroundPool:backgroundPool||pool});
-    snap=representativeCache;
-    if(snap.run_no!==metas.generation.run_no||snap.epoch!==metas.generation.live_epoch||
-       !representativeHnswCache.index||representativeHnswCache.run_no!==metas.generation.run_no||
-       representativeHnswCache.epoch!==metas.generation.live_epoch)throw warmingError('representative');
-    if(!snap.rows.length||snap.run_no!==metas.generation.run_no)throw warmingError('representative');
-    const hc=representativeHnswCache;
     t=Date.now();
-    repTop=hc.index.search(qn,REP_GROUP_LIMIT);
+    const fast=await ensureFastCandidateSnapshots(backgroundPool||pool,generation);
+    timings.representative_cache_ms+=Date.now()-t;
+    snap={run_no:generation.run_no,epoch:generation.live_epoch,rows:fast.rep.rows};
+    t=Date.now();
+    repTop=topFastCandidateMatches(qn,fast.rep.rows,REP_GROUP_LIMIT);
     timings.representative_search_ms=Date.now()-t;
-    if(trace)trace('REP_HNSW_DONE',{candidates:repTop.length,ms:timings.representative_search_ms});
+    if(trace)trace('REP_FAST_CANDIDATE_DONE',{representative_count:fast.rep.count,candidates:repTop.length,cache_load_ms:fast.rep.load_ms,missing_fallback:fast.rep.missing_fallback,ms:timings.representative_search_ms});
   }
 
   const metas={generation};
   const repIds=repTop.map(x=>x.representative_puid);
   let run0Top=[];
-  const run0Ready=run0Cache.loaded_at>0&&run0Cache.epoch===generation.run0_epoch&&run0HnswCache.epoch===generation.run0_epoch&&((run0Cache.count===0)||!!run0HnswCache.index);
-  if(searchMode==='fast'&&!run0Ready)throw warmingError('run0');
-  if(searchMode==='precise'&&!run0Ready){
-    if(trace)trace('RUN0_SKIP_WARMING',{epoch:generation.run0_epoch});
-    scheduleRun0RefreshForGeneration(backgroundPool||pool,generation).catch(()=>{});
-  }else if(run0Ready&&run0Cache.count>0&&run0HnswCache.index){
-    t=Date.now();
-    run0Top=run0HnswCache.index.search(qn,RUN0_LIMIT);
-    timings.run0_search_ms=Date.now()-t;
-    if(trace)trace('RUN0_HNSW_DONE',{candidates:run0Top.length,ms:timings.run0_search_ms});
+  let run0Fast=run0FastCache;
+  if(!(run0Fast.loaded_at>0&&run0Fast.epoch===generation.run0_epoch)){
+    try{run0Fast=await ensureRun0FastCache(backgroundPool||pool,generation);}catch(e){if(trace)trace('RUN0_FAST_CACHE_FAIL',{error:C(e&&e.message||e)});run0Fast={epoch:generation.run0_epoch,count:0,rows:[],loaded_at:0,load_ms:0,missing_fallback:0};}
+  }
+  const run0Ready=run0Fast.epoch===generation.run0_epoch;
+  if(run0Ready&&run0Fast.count>0){
+    t=Date.now();run0Top=topFastCandidateMatches(qn,run0Fast.rows,RUN0_LIMIT);timings.run0_search_ms=Date.now()-t;
+    if(trace)trace('RUN0_FAST_CANDIDATE_DONE',{candidates:run0Top.length,count:run0Fast.count,ms:timings.run0_search_ms});
   }
 
   const run0Ids=run0Top.map(x=>x.representative_puid);
   t=Date.now();
-  const mq=await pool.query(`SELECT puid,representative_no,representative_puid,run_no
-      FROM gm_image_vector_representative_map
-     WHERE (run_no=$1 AND representative_puid=ANY($2::text[]))
-        OR (run_no=0 AND puid=ANY($3::text[]))`,[snap.run_no,repIds,run0Ids]);
-  timings.map_fetch_ms=Date.now()-t;if(trace)trace('MAP_DONE',{rows:(mq.rows||[]).length,ms:timings.map_fetch_ms});
+  const mapRows=[];
+  if(repIds.length){
+    const q=await pool.query(`SELECT puid,representative_no,representative_puid,run_no
+        FROM gm_image_vector_representative_map
+       WHERE run_no=$1 AND representative_puid=ANY($2::text[])`,[snap.run_no,repIds]);
+    mapRows.push(...(q.rows||[]));
+  }
+  if(run0Ids.length){
+    const q=await pool.query(`SELECT puid,representative_no,representative_puid,run_no
+        FROM gm_image_vector_representative_map
+       WHERE run_no=0 AND puid=ANY($1::text[])`,[run0Ids]);
+    mapRows.push(...(q.rows||[]));
+  }
+  timings.map_fetch_ms=Date.now()-t;if(trace)trace('MAP_DONE',{rows:mapRows.length,ms:timings.map_fetch_ms});
   const candidateIds=[],seen=new Set();let run0Count=0;
-  for(const r of mq.rows||[]){const id=C(r.puid);if(!id||seen.has(id))continue;seen.add(id);candidateIds.push(id);if(Number(r.run_no||0)===0)run0Count++;}
+  for(const r of mapRows){const id=C(r.puid);if(!id||seen.has(id))continue;seen.add(id);candidateIds.push(id);if(Number(r.run_no||0)===0)run0Count++;}
   t=Date.now();
   const vq=candidateIds.length?await pool.query(`SELECT product_uid,vector_image FROM gm_product_image_vector
       WHERE product_uid=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2`,[candidateIds,DIM]):{rows:[]};
@@ -519,7 +572,7 @@ async function representativeNetSearch(pool,queryVector,limit,searchMode,{backgr
   await assertSearchGenerationLite(pool,generation);
   if(trace)trace('GENERATION_RECHECK_DONE',{generation});
   const matches=ranked.map((x,idx)=>{const m=Object.assign({},productLookup.byUid.get(x.product_uid)||{product_uid:x.product_uid,product_name:'',product_url:'',image_url:'',mall_code:'',keyword:'',category_keyword:''},{product_uid:x.product_uid,score:x.score});const aliases=C(m.keyword).split('|').map(C).filter(Boolean);m.search_keyword=C(aliases[0]||m.category_keyword||m.product_name);m.level_best=idx===0;return m;});
-  return {search_mode:searchMode,run_no:snap.run_no,representative_count:snap.rows.length,representative_candidates:repTop,run0_total:run0Ready?run0Cache.count:0,run0_candidates:run0Top,member_candidate_count:candidateIds.length,run0_candidate_count:run0Count,matches,timings,hnsw_status:searchMode==='fast'&&representativeHnswCache.index?representativeHnswCache.index.status():null,run0_hnsw_status:run0Ready&&run0HnswCache.index?run0HnswCache.index.status():null};
+  return {search_mode:searchMode,run_no:snap.run_no,representative_count:snap.rows.length,representative_candidates:repTop,run0_total:run0Ready?run0Fast.count:0,run0_candidates:run0Top,member_candidate_count:candidateIds.length,run0_candidate_count:run0Count,matches,timings,hnsw_status:searchMode==='fast'?fastCacheStatus(representativeFastCache):null,run0_hnsw_status:run0Ready?fastCacheStatus(run0Fast):null};
 }
 
 function allowedImageUrl(raw){
@@ -554,8 +607,8 @@ router.get('/api/gm/image-vector/proxy',(req,res)=>{
  if(!u)return res.status(400).json({ok:false,error:'unsupported image url'});
  fetchImage(u,res,0);
 });
-router.get('/api/gm/image-vector/version',async(req,res)=>{const pool=req.app.locals.pool;if(pool)ensureSearchSnapshots(pool).catch(()=>{});res.json({ok:true,route_version:ROUTE_VERSION,dimensions:DIM,vector_version:VECTOR_VERSION,representative_hnsw:representativeHnswCache.index?representativeHnswCache.index.status():{count:0},run0_hnsw:run0HnswCache.index?run0HnswCache.index.status():{count:0},refreshing:{representative:!!representativeRefreshPromise,run0:!!run0RefreshPromise},last_index_error:lastIndexError});});
-router.get('/api/gm/image-vector/index-status',async(req,res)=>{const pool=req.app.locals.pool;if(pool)ensureSearchSnapshots(pool).catch(()=>{});res.json({ok:true,route_version:ROUTE_VERSION,representative_hnsw:representativeHnswCache.index?representativeHnswCache.index.status():{count:0},run0_hnsw:run0HnswCache.index?run0HnswCache.index.status():{count:0},refreshing:{representative:!!representativeRefreshPromise,run0:!!run0RefreshPromise},last_index_error:lastIndexError});});
+router.get('/api/gm/image-vector/version',async(req,res)=>{const pool=req.app.locals.pool;if(pool)searchGeneration(pool).then(g=>ensureFastCandidateSnapshots(pool,g)).catch(e=>{lastIndexError=C(e&&e.message||e);});res.json({ok:true,route_version:ROUTE_VERSION,dimensions:DIM,vector_version:VECTOR_VERSION,representative_hnsw:fastCacheStatus(representativeFastCache),run0_hnsw:fastCacheStatus(run0FastCache),refreshing:{representative:!!representativeFastPromise,run0:!!run0FastPromise},last_index_error:lastIndexError});});
+router.get('/api/gm/image-vector/index-status',async(req,res)=>{const pool=req.app.locals.pool;if(pool)searchGeneration(pool).then(g=>ensureFastCandidateSnapshots(pool,g)).catch(e=>{lastIndexError=C(e&&e.message||e);});res.json({ok:true,route_version:ROUTE_VERSION,representative_hnsw:fastCacheStatus(representativeFastCache),run0_hnsw:fastCacheStatus(run0FastCache),refreshing:{representative:!!representativeFastPromise,run0:!!run0FastPromise},last_index_error:lastIndexError});});
 router.post('/api/gm/image-vector/missing',async(req,res)=>{
  const pool=req.app.locals.pool;
  const raw=Array.isArray(req.body&&req.body.product_uids)?req.body.product_uids:[];
@@ -585,7 +638,9 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
   // One DB transaction owns vector persistence + representative-map follow-up.
   const write=await upsertImageVector(pool,{product_uid:uid,vector_image:v});
   const columnType=write.column_type,representative=write.representative_assignment;
-  if(!representative||representative.cache_action!=='keep')ensureSearchSnapshots(pool).catch(e=>{lastIndexError=C(e&&e.message||e);});
+  // Any vector write may affect candidate retrieval. Invalidate compact FAST caches; next search/version call atomically reloads them.
+  representativeFastCache={run_no:0,epoch:0,count:0,rows:[],loaded_at:0,load_ms:0,missing_fallback:0};
+  run0FastCache={epoch:0,count:0,rows:[],loaded_at:0,load_ms:0,missing_fallback:0};
   console.log('[GM_IMAGE_VECTOR_REP_ASSIGN]',JSON.stringify({product_uid:uid,assignment:representative,route_version:ROUTE_VERSION}));
   return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,representative_assignment:representative,route_version:ROUTE_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
