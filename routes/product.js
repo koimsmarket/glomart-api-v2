@@ -2075,12 +2075,74 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       cp_selected_code:queueCpSelectedCode
     });
 
-    // GM_PRODUCT_QUEUE_ASYNC_V018
-    // Search collection must never synchronously upsert products in the HTTP request.
-    // The dedicated low-priority worker owns product/option/detail writes.  The request
-    // only persists one queue row and returns immediately, keeping image-search DB
-    // resources independent from collector bursts.
-    return ok(res,{
+    // GM_QUEUE_INLINE_UPSERT_V016
+    // Cloudtype에서 queue row는 정상 생성되는데 worker가 실행되지 않거나
+    // 스키마 변경 후 worker가 조용히 실패하면 gm_product가 계속 비는 문제가 있었다.
+    // 검색 chunk는 보통 10개 단위이므로 queue 수신 즉시 같은 프로세스에서 upsert까지 수행한다.
+    // 기존 queue 테이블은 진단/재처리용으로 유지한다.
+    const uidSeen = new Set();
+    const duplicateUidSamples = [];
+    const inlineResults = [];
+    for(const item of queueItems){
+      try{
+        const probe = normalizeProductPayload(item, queueParent);
+        if(probe && probe.id && probe.id.uid){
+          if(uidSeen.has(probe.id.uid)) duplicateUidSamples.push(probe.id.uid);
+          else uidSeen.add(probe.id.uid);
+        }
+      }catch(_dupProbe){}
+      try{
+        inlineResults.push(await upsertProduct(pool, item, queueParent));
+      }catch(e){
+        inlineResults.push({ ok:false, error:String(e && e.message || e), error_detail:compactError(e), uid:cleanText(item && (item.product_uid || item.productUid || item.pi_ii_vi || item.piIiVi || '')), title_sample:cleanText(item && (item.title || item.name || item.productName || item.product_name || '')).slice(0,120) });
+      }
+    }
+    const inlineSaved = inlineResults.filter(x=>x && x.ok).length;
+    const inlineSkipped = inlineResults.length - inlineSaved;
+    const inlineInserted = inlineResults.filter(x=>x && x.ok && x.action === 'inserted').length;
+    const inlineUpdated = inlineResults.filter(x=>x && x.ok && x.action !== 'inserted').length;
+    const optionAudit = inlineResults.reduce((a,x)=>{
+      const o = x && x.item && x.item.option_result || {};
+      a.received += Number(o.received || 0);
+      a.inserted += Number(o.inserted || 0);
+      a.updated += Number(o.updated || 0);
+      a.skipped += Number(o.skipped || 0);
+      a.nonactive += Number(o.nonactive || 0);
+      if(o.balance_ok === false) a.balance_ok = false;
+      return a;
+    }, { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true });
+    optionAudit.balance_ok = optionAudit.balance_ok && optionAudit.received === (optionAudit.inserted + optionAudit.updated + optionAudit.skipped);
+    const saveAudit = {
+      search_result_count:items.length,
+      product_inserted:inlineInserted,
+      product_updated:inlineUpdated,
+      product_skipped:inlineSkipped,
+      product_balance_ok:items.length === (inlineInserted + inlineUpdated + inlineSkipped),
+      option_received:optionAudit.received,
+      option_inserted:optionAudit.inserted,
+      option_updated:optionAudit.updated,
+      option_skipped:optionAudit.skipped,
+      option_nonactive:optionAudit.nonactive,
+      option_balance_ok:optionAudit.balance_ok
+    };
+    const inlineStatus = inlineSaved > 0 ? 'done' : 'failed';
+    const inlineError = inlineSaved > 0 ? null : (inlineResults.find(x=>x && (x.error || x.reason)) || {}).error || (inlineResults.find(x=>x && x.reason) || {}).reason || 'inline upsert saved 0 rows';
+    try{
+      await pool.query(`
+        UPDATE gm_product_upsert_queue
+        SET status=$2,
+            processed_at=now(),
+            error_message=$3,
+            result_json=$4::jsonb
+        WHERE queue_id=$1
+      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, audit:saveAudit, option_audit:optionAudit, sample:inlineResults.slice(0,10), errors:inlineResults.filter(x=>x && !x.ok).slice(0,30) })]);
+    }catch(_qe){
+      console.warn('[GM_PRODUCT_QUEUE] inline result update failed', String(_qe && _qe.message || _qe));
+    }
+    console.log('[GM_PRODUCT_QUEUE_SAVE_AUDIT]', Object.assign({ queue_id:r.rows[0] && r.rows[0].queue_id, request_id:r.rows[0] && r.rows[0].request_id, mall_code:mallCode, keyword }, saveAudit));
+    console.log('[GM_PRODUCT_QUEUE] inline upsert done', { saved:inlineSaved, skipped:inlineSkipped, status:inlineStatus, queue_id:r.rows[0] && r.rows[0].queue_id, audit:saveAudit, sample:inlineResults.slice(0,3) });
+
+    ok(res,{
       action:'product.queue',
       queued:true,
       queue:r.rows[0],
@@ -2088,11 +2150,17 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       request_id:r.rows[0] && r.rows[0].request_id,
       item_count:r.rows[0] && r.rows[0].item_count,
       received:items.length,
-      saved:0,
-      skipped:0,
-      inline_upsert:false,
-      async_worker:true,
-      status:r.rows[0] && r.rows[0].status,
+      saved:inlineSaved,
+      skipped:inlineSkipped,
+      inline_upsert:true,
+      inline_status:inlineStatus,
+      audit:saveAudit,
+      option_audit:optionAudit,
+      inline_sample:inlineResults.slice(0,10),
+      inline_errors:inlineResults.filter(x=>x && !x.ok).slice(0,30),
+      unique_uid_count:uidSeen.size,
+      duplicate_uid_count:duplicateUidSamples.length,
+      duplicate_uid_sample:duplicateUidSamples.slice(0,30),
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });

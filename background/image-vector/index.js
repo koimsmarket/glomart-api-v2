@@ -1,5 +1,5 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_V015_NO_MIGRATION_QUEUE
+/* GM_IMAGE_VECTOR_BACKGROUND_V016_PENDING_FIRST
  * Image-vector processing is completely detached from SPECIAL/category search.
  *
  * Persistent work source: gm_image_vector_pending
@@ -57,7 +57,7 @@ let candidateBackfillComplete=false;
 let candidateConverted=0;
 let representativeRefreshCompleted=0,representativeRefreshFailed=0;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V015_NO_MIGRATION_QUEUE '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V016_PENDING_FIRST '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -289,9 +289,6 @@ async function pump(){
   if(pumping||!poolRef||!schemaReady)return;
   pumping=true;
   try{
-    // Representative metadata maintenance is lightweight DB work and is independent of
-    // MobileCLIP OFF/AUTO/ON mode. It keeps category changes consistent with the live net.
-    await processRepresentativeMetadataRefresh();
     const mem=memorySnapshot();lastMemory=mem;
     const decision=operatingDecision(mem);
     if(!decision.run){
@@ -305,22 +302,30 @@ async function pump(){
       log('YIELD_FOREGROUND',{mode,state:decision.state,quiet_remaining_ms:quietMs,active:inflight.size,memory_percent:mem.percent});
       return;
     }
-    // Candidate backfill obeys the exact same OFF/AUTO/ON decision as image-vector work.
-    // Existing 512-d vectors never run MobileCLIP again; they are converted directly in small DB batches.
-    await backfillCandidateBatch();
+    // Preserve the original V008 execution contract: pending MobileCLIP work always gets
+    // the free worker slots first. HNSW/candidate maintenance must never stand in front of it.
     const free=Math.max(0,MAX_SLOTS-inflight.size);
     if(free<=0)return;
     const jobs=await pickJobs(free);
-    if(!jobs.length){releaseIdleWorker('NO_PENDING');return;}
-    const w=ensureWorker();
-    for(const row of jobs){
-      const taskId=++seq;
-      const rec={task_id:taskId,product_uid:S(row.product_uid),image_url:S(row.image_url),updated_at:new Date(row.updated_at).toISOString()};
-      inflight.set(taskId,rec);
-      if(!w.connected)throw new Error('VECTOR_CHILD_NOT_CONNECTED');
-      w.send({type:'task',...rec});
+    if(jobs.length){
+      const w=ensureWorker();
+      for(const row of jobs){
+        const taskId=++seq;
+        const rec={task_id:taskId,product_uid:S(row.product_uid),image_url:S(row.image_url),updated_at:new Date(row.updated_at).toISOString()};
+        inflight.set(taskId,rec);
+        if(!w.connected)throw new Error('VECTOR_CHILD_NOT_CONNECTED');
+        w.send({type:'task',...rec});
+      }
+      log('DISPATCH',{mode,state:decision.state,memory_percent:mem.percent,max_slots:MAX_SLOTS,dispatched:jobs.length,active:inflight.size});
+      return;
     }
-    log('DISPATCH',{mode,state:decision.state,memory_percent:mem.percent,max_slots:MAX_SLOTS,dispatched:jobs.length,active:inflight.size});
+    // HNSW support maintenance is idle-only. It runs only when there is no pending
+    // MobileCLIP job available, so it cannot block the server vector conversion queue.
+    if(inflight.size===0){
+      await processRepresentativeMetadataRefresh();
+      await backfillCandidateBatch();
+    }
+    releaseIdleWorker('NO_PENDING');
   }catch(e){lastError=S(e&&e.message||e);log('PUMP_FAIL',{error:lastError});}
   finally{pumping=false;}
 }
@@ -340,7 +345,7 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V015',mode,state:decision.state,running:decision.run,pending,representative_refresh_pending:null,representative_refresh_completed:representativeRefreshCompleted,representative_refresh_failed:representativeRefreshFailed,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',candidate_format:'INT8_V1',candidate_bytes:CANDIDATE_BYTES,candidate_backfill_complete:candidateBackfillComplete,candidate_converted:candidateConverted,completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V016',mode,state:decision.state,running:decision.run,pending,representative_refresh_pending:null,representative_refresh_completed:representativeRefreshCompleted,representative_refresh_failed:representativeRefreshFailed,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',candidate_format:'INT8_V1',candidate_bytes:CANDIDATE_BYTES,candidate_backfill_complete:candidateBackfillComplete,candidate_converted:candidateConverted,completed,failed,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
