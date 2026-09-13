@@ -1,4 +1,4 @@
-/* GM_IMAGE_VECTOR_ROUTE_V033_METADATA_BATCH_LOOKUP
+/* GM_IMAGE_VECTOR_ROUTE_V034_PRODUCT_DISPLAY_METADATA
  * Representative-net image search only.
  * FAST: HNSW over current-run representatives -> member vectors -> exact cosine rerank.
  * PRECISE: exact cosine over all current-run representatives -> member vectors -> exact cosine rerank.
@@ -11,7 +11,7 @@ const http=require('http');
 const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
 const {upsertImageVector}=require('../services/image_vector_write');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V033_METADATA_BATCH_LOOKUP';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V034_PRODUCT_DISPLAY_METADATA';
 const FAST_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
 const PRECISE_DB_QUERY_TIMEOUT_MS=Math.max(5000,Math.min(60000,Number(process.env.GM_IMAGE_PRECISE_DB_TIMEOUT_MS||20000)||20000));
 let SEARCH_SEQ=0;
@@ -142,6 +142,19 @@ async function fetchProductMetadata(pool,productUids){
         FROM wanted w
         JOIN gm_product p
           ON w.pi_ii_vi=''
+         AND p.product_id=w.product_id
+         AND (w.mall_code='' OR p.mall_code=w.mall_code)
+      UNION ALL
+      /* Display metadata fallback only: keep the matched vector_uid as the result identity.
+         If an option-vector row has no exact gm_product option row, borrow current product
+         title/keyword from the same PID+mall so the client never has to display a raw PUID.
+         This fallback is NOT used for vector identity, ordering, cart, or order routing. */
+      SELECT w.ord,w.vector_uid,w.product_id,
+             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
+             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,3 AS identity_rank
+        FROM wanted w
+        JOIN gm_product p
+          ON w.pi_ii_vi<>''
          AND p.product_id=w.product_id
          AND (w.mall_code='' OR p.mall_code=w.mall_code)
     ), picked AS (
