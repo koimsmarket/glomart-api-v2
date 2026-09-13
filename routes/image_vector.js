@@ -144,19 +144,6 @@ async function fetchProductMetadata(pool,productUids){
           ON w.pi_ii_vi=''
          AND p.product_id=w.product_id
          AND (w.mall_code='' OR p.mall_code=w.mall_code)
-      UNION ALL
-      /* Display metadata fallback only: keep the matched vector_uid as the result identity.
-         If an option-vector row has no exact gm_product option row, borrow current product
-         title/keyword from the same PID+mall so the client never has to display a raw PUID.
-         This fallback is NOT used for vector identity, ordering, cart, or order routing. */
-      SELECT w.ord,w.vector_uid,w.product_id,
-             p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword,
-             p.updated_at,p.last_seen_at,p.sale_status,p.soldout_yn,3 AS identity_rank
-        FROM wanted w
-        JOIN gm_product p
-          ON w.pi_ii_vi<>''
-         AND p.product_id=w.product_id
-         AND (w.mall_code='' OR p.mall_code=w.mall_code)
     ), picked AS (
       SELECT c.*,
              ROW_NUMBER() OVER (
@@ -179,6 +166,43 @@ async function fetchProductMetadata(pool,productUids){
       const m=metaFromRow(r);
       m.lookup_pid=C(r.wanted_product_id);
       byUid.set(C(r.wanted_product_uid),m);
+    }
+  }
+
+  // Display-only fallback is intentionally separated from the main metadata query.
+  // Only unresolved option identities are retried, so FAST search never explodes the
+  // candidate set by joining every requested option PID to every gm_product option row.
+  const unresolved=wanted.filter(x=>x.pi_ii_vi!==''&&!byUid.has(x.vector_uid)&&x.product_id);
+  if(unresolved.length){
+    const strict=unresolved.filter(x=>x.mall_code);
+    if(strict.length){
+      const uq=await pool.query(`
+        WITH wanted AS (
+          SELECT vector_uid,product_id,mall_code,ord
+            FROM unnest($1::text[],$2::text[],$3::text[]) WITH ORDINALITY AS x(vector_uid,product_id,mall_code,ord)
+        ), picked AS (
+          SELECT DISTINCT ON (w.ord)
+                 w.ord,w.vector_uid AS wanted_product_uid,w.product_id AS wanted_product_id,
+                 p.product_uid,p.product_id,p.product_name,p.product_url,p.thumb_origin_url,p.mall_code,p.keyword,p.category_keyword
+            FROM wanted w
+            JOIN gm_product p
+              ON p.product_id=w.product_id
+             AND p.mall_code=w.mall_code
+           ORDER BY w.ord,
+                    CASE WHEN COALESCE(p.sale_status,'active')='active' AND COALESCE(p.soldout_yn,'N')<>'Y' THEN 0 ELSE 1 END,
+                    COALESCE(p.updated_at,p.last_seen_at) DESC NULLS LAST,
+                    p.product_uid ASC
+        )
+        SELECT * FROM picked ORDER BY ord`,[
+          strict.map(x=>x.vector_uid),strict.map(x=>x.product_id),strict.map(x=>x.mall_code)
+      ]);
+      for(const r of uq.rows||[]){
+        if(!C(r.product_uid))continue;
+        const m=metaFromRow(r);
+        m.lookup_pid=C(r.wanted_product_id);
+        m.display_fallback='pid_mall';
+        byUid.set(C(r.wanted_product_uid),m);
+      }
     }
   }
   return {byUid,rows:q.rows||[]};
