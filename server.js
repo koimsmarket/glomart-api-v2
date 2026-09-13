@@ -344,22 +344,51 @@ function searchCache(keyword, page=1, pageSize=40){
   return { total, page, pageSize, nextPage:start + pageSize < total ? page + 1 : null, prevPage:page > 1 ? page - 1 : null, items };
 }
 
-function makePool(){
+/* GM_DB_POOL_PRIORITY_SPLIT_V001
+ * Keep latency-sensitive image search isolated from background product/vector writes.
+ * - pool: normal API traffic (legacy behavior)
+ * - imageSearchPool: reserved read connections for /api/gm/image-vector/search
+ * - backgroundPool: strictly limited queue worker connections
+ * Separate pools do not make PostgreSQL infinite; background concurrency is also capped
+ * so queue ingestion cannot consume every connection while a user is searching.
+ */
+function makePool(overrides={}){
   const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.PG_URL || '';
+  const ssl = process.env.PGSSL === '1' ? { rejectUnauthorized:false } : false;
   if(connectionString){
-    return new Pool({ connectionString, ssl: process.env.PGSSL === '1' ? { rejectUnauthorized:false } : false });
+    return new Pool(Object.assign({ connectionString, ssl }, overrides || {}));
   }
-  return new Pool({
+  return new Pool(Object.assign({
     host: process.env.PGHOST || process.env.POSTGRES_HOST || 'postgresql',
     port: Number(process.env.PGPORT || process.env.POSTGRES_PORT || 5432),
     user: process.env.PGUSER || process.env.POSTGRES_USER || 'root',
     password: process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD || process.env.POSTGRESQL_PASSWORD || '',
     database: process.env.PGDATABASE || process.env.POSTGRES_DB || 'postgres'
-  });
+  }, overrides || {}));
+}
+function gmPoolInt(name,def,min,max){
+  const n=Number(process.env[name]);
+  const v=Number.isFinite(n)?Math.trunc(n):def;
+  return Math.max(min,Math.min(max,v));
 }
 
 const pool = makePool();
+const imageSearchPool = makePool({
+  max: gmPoolInt('GM_IMAGE_SEARCH_POOL_MAX',3,1,8),
+  connectionTimeoutMillis: gmPoolInt('GM_IMAGE_SEARCH_POOL_CONNECT_TIMEOUT_MS',2500,500,10000)
+});
+const backgroundPool = makePool({
+  max: gmPoolInt('GM_BACKGROUND_POOL_MAX',1,1,4),
+  connectionTimeoutMillis: gmPoolInt('GM_BACKGROUND_POOL_CONNECT_TIMEOUT_MS',5000,1000,15000)
+});
 app.locals.pool = pool;
+app.locals.imageSearchPool = imageSearchPool;
+app.locals.backgroundPool = backgroundPool;
+console.log('[GM_DB_POOL_PRIORITY_SPLIT_V001]', JSON.stringify({
+  normal_max: pool.options && pool.options.max,
+  image_search_max: imageSearchPool.options && imageSearchPool.options.max,
+  background_max: backgroundPool.options && backgroundPool.options.max
+}));
 
 /* GM_AUTO_ORDER_DASHBOARD_API_V012
  * Auto-order dashboard API only.
@@ -1866,7 +1895,7 @@ app.locals.pool = pool;
 
 // Start queue worker from server.js as package entry may not load index.js.
 try{
-  require('./workers/product_queue_worker').startProductQueueWorker(pool);
+  require('./workers/product_queue_worker').startProductQueueWorker(backgroundPool);
 }catch(e){
   console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
 }

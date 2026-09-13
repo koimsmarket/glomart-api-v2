@@ -1,4 +1,4 @@
-/* GM_IMAGE_VECTOR_ROUTE_V036_FAST_DB_INDEXED_LOOKUP
+/* GM_IMAGE_VECTOR_ROUTE_V038_SEARCH_POOL_ISOLATION
  * Representative-net image search only.
  * FAST: compact persistent candidate_vector cache over current-run representatives -> member vectors -> exact cosine rerank.
  * PRECISE: exact cosine over all current-run representatives -> member vectors -> exact cosine rerank.
@@ -13,7 +13,7 @@ const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
 const {encodeCandidateVector,BYTE_LEN:CANDIDATE_BYTE_LEN}=require('../services/image_candidate_vector');
 const {upsertImageVector}=require('../services/image_vector_write');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V036_FAST_DB_INDEXED_LOOKUP';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V038_SEARCH_POOL_ISOLATION';
 const FAST_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
 const PRECISE_DB_QUERY_TIMEOUT_MS=Math.max(5000,Math.min(60000,Number(process.env.GM_IMAGE_PRECISE_DB_TIMEOUT_MS||20000)||20000));
 let SEARCH_SEQ=0;
@@ -646,7 +646,7 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{
- const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(30,Number(req.body&&req.body.limit||30)||30)),searchMode=C(req.body&&req.body.search_mode).toLowerCase()==='precise'?'precise':'fast';
+ const pool=(req.app.locals.imageSearchPool||req.app.locals.pool),v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(30,Number(req.body&&req.body.limit||30)||30)),searchMode=C(req.body&&req.body.search_mode).toLowerCase()==='precise'?'precise':'fast';
  if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
  if(!v)return res.status(400).json({ok:false,error:'vector_base64(1024-byte Float16) required'});
  const started=Date.now(),searchId=Date.now().toString(36)+'_'+(++SEARCH_SEQ),dbTimeoutMs=searchMode==='precise'?PRECISE_DB_QUERY_TIMEOUT_MS:FAST_DB_QUERY_TIMEOUT_MS,db=searchDb(pool,searchId,dbTimeoutMs);

@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_QUEUE_WORKER_V017_DIAG_NO_HARD_ZERO_SAVE_THROW
+// GM_PRODUCT_QUEUE_WORKER_V018_LOW_PRIORITY_SINGLE_ROW
 
 const productRouter = require('../routes/product');
 
@@ -162,7 +162,7 @@ function startProductQueueWorker(pool, options){
   if(!pool || typeof pool.query !== 'function') return { started:false, reason:'invalid_pool' };
   const opts = Object.assign({
     intervalMs: toInt(process.env.GM_PRODUCT_QUEUE_INTERVAL_MS, 5000),
-    batchRows: toInt(process.env.GM_PRODUCT_QUEUE_BATCH_ROWS, 10),
+    batchRows: toInt(process.env.GM_PRODUCT_QUEUE_BATCH_ROWS, 1),
     maxRetry: toInt(process.env.GM_PRODUCT_QUEUE_MAX_RETRY, 3)
   }, options || {});
   started = true;
