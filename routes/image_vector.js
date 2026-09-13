@@ -1,4 +1,4 @@
-/* GM_IMAGE_VECTOR_ROUTE_V038_SEARCH_POOL_ISOLATION
+/* GM_IMAGE_VECTOR_ROUTE_V039_FAST_PK_METADATA_ONLY
  * Representative-net image search only.
  * FAST: compact persistent candidate_vector cache over current-run representatives -> member vectors -> exact cosine rerank.
  * PRECISE: exact cosine over all current-run representatives -> member vectors -> exact cosine rerank.
@@ -13,7 +13,7 @@ const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
 const {encodeCandidateVector,BYTE_LEN:CANDIDATE_BYTE_LEN}=require('../services/image_candidate_vector');
 const {upsertImageVector}=require('../services/image_vector_write');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V038_SEARCH_POOL_ISOLATION';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V039_FAST_PK_METADATA_ONLY';
 const FAST_DB_QUERY_TIMEOUT_MS=Math.max(1000,Math.min(10000,Number(process.env.GM_IMAGE_SEARCH_DB_TIMEOUT_MS||4000)||4000));
 const PRECISE_DB_QUERY_TIMEOUT_MS=Math.max(5000,Math.min(60000,Number(process.env.GM_IMAGE_PRECISE_DB_TIMEOUT_MS||20000)||20000));
 let SEARCH_SEQ=0;
@@ -121,38 +121,9 @@ async function fetchProductMetadata(pool,productUids){
     const m=metaFromRow(r);m.lookup_pid=C(r.product_id);byUid.set(uid,m);rows.push(r);
   }
 
-  // 2) Unresolved option identities use the existing pi_ii_vi index. Fetch a small batch,
-  // then choose the exact pi_ii_vi + mall winner in Node instead of UNION/WINDOW sorting.
-  const optionWanted=wanted.filter(x=>x.pi_ii_vi&&!byUid.has(x.vector_uid));
-  if(optionWanted.length){
-    const pis=[...new Set(optionWanted.map(x=>x.pi_ii_vi).filter(Boolean))];
-    const malls=[...new Set(optionWanted.map(x=>x.mall_code).filter(Boolean))];
-    const optionQ=await pool.query(`SELECT product_uid,product_id,product_name,product_url,thumb_origin_url,mall_code,keyword,category_keyword,pi_ii_vi,sale_status,soldout_yn,updated_at,last_seen_at
-        FROM gm_product
-       WHERE pi_ii_vi=ANY($1::text[])
-         AND (cardinality($2::text[])=0 OR mall_code=ANY($2::text[]))`,[pis,malls]);
-    const bucket=new Map();
-    function metaPreference(r){
-      const active=(C(r.sale_status||'active')==='active'&&C(r.soldout_yn||'N')!=='Y')?0:1;
-      const ts=new Date(r.updated_at||r.last_seen_at||0).getTime()||0;
-      return [active,-ts,C(r.product_uid)];
-    }
-    function better(a,b){
-      if(!a)return b;if(!b)return a;
-      const A=metaPreference(a),B=metaPreference(b);
-      for(let i=0;i<A.length;i++){if(A[i]<B[i])return a;if(A[i]>B[i])return b;}return a;
-    }
-    for(const r of optionQ.rows||[]){
-      const key=C(r.pi_ii_vi)+'|'+C(r.mall_code).toUpperCase();
-      bucket.set(key,better(bucket.get(key),r));
-      rows.push(r);
-    }
-    for(const w of optionWanted){
-      const r=bucket.get(w.pi_ii_vi+'|'+C(w.mall_code).toUpperCase());
-      if(!r)continue;
-      const m=metaFromRow(r);m.lookup_pid=w.product_id;byUid.set(w.vector_uid,m);
-    }
-  }
+  // 2) FAST critical path intentionally skips pi_ii_vi fallback.
+  // Exact/canonical PRIMARY KEY metadata is enough to render a search result;
+  // unresolved display metadata must never make the whole image search time out.
 
   // 3) Display-only fallback: canonical product rows are addressed by PRIMARY KEY
   // (CPKR_<PID>/ALKR_<PID>). This replaces the former unindexed product_id scan.
