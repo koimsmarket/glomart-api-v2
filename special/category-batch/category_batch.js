@@ -70,7 +70,36 @@ router.post('/api/special/category-batch/next',async(req,res)=>{const m=auth(req
 router.post('/api/special/category-batch/complete',async(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const d=S(req.body&&req.body.device_id),id=Number(req.body&&req.body.category_id||0),l=leases.get(d);if(!l||Number(l.category_id)!==id)return res.status(409).json({ok:false,error:'LEASE_MISMATCH'});let keywordSync=null;try{keywordSync=await syncLearnedCategoryKeywords(l);}catch(e){keywordSync={applied:false,error:S(e&&e.message||e)};log('KEYWORD_SYNC_ERROR',{device_id:d,category_id:id,error:keywordSync.error});}await release(d,true);log('CATEGORY_DONE',{device_id:d,category_id:id,keyword_sync:keywordSync});res.json({ok:true,category_id:id,keyword_sync:keywordSync});});
 router.post('/api/special/category-batch/release',async(req,res)=>{const m=auth(req,res);if(!m)return;pool(req);const d=S(req.body&&req.body.device_id),id=await release(d,false);res.json({ok:true,category_id:id});});
 
-router.get('/api/special/category-batch/search-state',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req),kw=S(req.query.keyword),st=S(req.query.started_at),rid=S(req.query.request_id);if(!st||(!kw&&!rid))return res.status(400).json({ok:false,error:'started_at and keyword/request_id required'});let q;if(rid){q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE request_id LIKE $1 AND created_at >= $2::timestamptz`,[rid+'%',st]);}else{q=await p.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='pending')::int pending,COUNT(*) FILTER(WHERE status='processing')::int processing,COUNT(*) FILTER(WHERE status='done')::int done,COUNT(*) FILTER(WHERE status='failed')::int failed,COUNT(DISTINCT mall_code)::int mall_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT keyword),NULL) keywords,MAX(created_at) last_created_at FROM gm_product_upsert_queue WHERE keyword=$1 AND created_at >= $2::timestamptz`,[kw,st]);}const x=q.rows[0]||{},last=x.last_created_at?new Date(x.last_created_at).getTime():0,quiet=last?Math.max(0,(Date.now()-last)/1000):0,settled=Number(x.total||0)>0&&Number(x.pending||0)===0&&Number(x.processing||0)===0&&quiet>=5;res.json({ok:true,total:+x.total||0,pending:+x.pending||0,processing:+x.processing||0,done:+x.done||0,failed:+x.failed||0,mall_count:+x.mall_count||0,keywords:x.keywords||[],quiet_sec:Math.round(quiet*10)/10,settled});});
+router.get('/api/special/category-batch/search-state',async(req,res)=>{
+ const m=auth(req,res);if(!m)return;
+ const p=pool(req),kw=S(req.query.keyword),st=S(req.query.started_at),rid=S(req.query.request_id);
+ if(!st||(!kw&&!rid))return res.status(400).json({ok:false,error:'started_at and keyword/request_id required'});
+ const where=rid?'request_id LIKE $1 AND created_at >= $2::timestamptz':'keyword=$1 AND created_at >= $2::timestamptz';
+ const args=rid?[rid+'%',st]:[kw,st];
+ const q=await p.query(`SELECT queue_id,request_id,mall_code,keyword,status,result_json,created_at FROM gm_product_upsert_queue WHERE ${where} ORDER BY created_at ASC`,args);
+ const rows=q.rows||[];
+ let pending=0,processing=0,done=0,failed=0,last=0;
+ const keywords=new Set(),chunkProgress={};
+ for(const row of rows){
+   const status=S(row.status).toLowerCase();
+   if(status==='pending')pending++;else if(status==='processing')processing++;else if(status==='done')done++;else if(status==='failed')failed++;
+   if(row.keyword)keywords.add(row.keyword);
+   const t=row.created_at?new Date(row.created_at).getTime():0;if(t>last)last=t;
+   const mall=S(row.mall_code).toUpperCase()||'UNKNOWN';
+   if(!chunkProgress[mall])chunkProgress[mall]={expected_total:0,max_index:0,received_chunks:0,complete:false};
+   const cp=chunkProgress[mall],rj=row.result_json&&typeof row.result_json==='object'?row.result_json:{};
+   const idx=Number(rj.chunk_index||0),tot=Number(rj.chunk_total||0);
+   if(idx>0){cp.received_chunks++;if(idx>cp.max_index)cp.max_index=idx;}
+   if(tot>cp.expected_total)cp.expected_total=tot;
+ }
+ const malls=Object.keys(chunkProgress);
+ for(const mall of malls){const cp=chunkProgress[mall];cp.complete=cp.expected_total>0&&cp.max_index>=cp.expected_total;}
+ const chunksComplete=malls.length>0&&malls.every(mall=>chunkProgress[mall].complete===true);
+ const quiet=last?Math.max(0,(Date.now()-last)/1000):0;
+ const total=rows.length;
+ const settled=total>0&&pending===0&&processing===0&&chunksComplete&&quiet>=5;
+ res.json({ok:true,total,pending,processing,done,failed,mall_count:malls.length,keywords:[...keywords],quiet_sec:Math.round(quiet*10)/10,chunks_complete:chunksComplete,chunk_progress:chunkProgress,settled});
+});
 
 // V019: category SPECIAL no longer owns image-vector queues or workers.
 // Keep the old status URL as a harmless compatibility response for older controllers.
