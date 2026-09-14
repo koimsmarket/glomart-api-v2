@@ -23,6 +23,7 @@ router.use(require('./runtime_config'));// central runtime configuration
 router.use(require('./device_lang'));   // language-pack administration
 
 // ---- Domain Builder modules --------------------------------------------------
-router.use(require('./image_vector'));  // ALL /builder/image-vector/* routes
+router.use(require('./image_vector'));  // vector production / sync only
+router.use(require('./image_hnsw'));    // HNSW / representative Builder only
 
 module.exports = router;

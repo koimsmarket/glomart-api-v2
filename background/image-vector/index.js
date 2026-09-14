@@ -1,5 +1,5 @@
 'use strict';
-/* GM_IMAGE_VECTOR_BACKGROUND_V016_PENDING_FIRST
+/* GM_IMAGE_VECTOR_BACKGROUND_V008
  * Image-vector processing is completely detached from SPECIAL/category search.
  *
  * Persistent work source: gm_image_vector_pending
@@ -22,20 +22,11 @@ const path=require('path');
 const {fork}=require('child_process');
 const router=express.Router();
 const {parseCsv}=require('../../routes/builder/core');
-const {encodeCandidateVector,BYTE_LEN:CANDIDATE_BYTES}=require('../../services/image_candidate_vector');
-const imageAnn=require('../../services/image_ann_index');
-const {upsertImageVector,refreshRepresentativeFromMetadata}=require('../../services/image_vector_write');
 const DIM=512;
 const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
 const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLOTS||4)));
 const FETCH_WINDOW=Math.max(8,Math.min(100,Number(process.env.GM_IMAGE_VECTOR_FETCH_WINDOW||30)));
-const CANDIDATE_BATCH=Math.max(100,Math.min(2000,Number(process.env.GM_IMAGE_VECTOR_CANDIDATE_BATCH||1000)));
 const FAIL_COOLDOWN_MS=Math.max(60000,Number(process.env.GM_IMAGE_VECTOR_FAIL_COOLDOWN_MS||600000));
-const REP_REFRESH_BATCH=Math.max(1,Math.min(50,Number(process.env.GM_IMAGE_REP_REFRESH_BATCH||10)||10));
-let representativeReconcileCursor='';
-let representativeReconcileCycles=0;
-const BUILDER_LOCK_KEY=20911002;
-const MUTATION_LOCK_KEY=20911001;
 // Vector is always lowest priority, even in ON mode. Product/search saves get a quiet window first.
 const FOREGROUND_QUIET_MS=Math.max(3000,Number(process.env.GM_IMAGE_VECTOR_FOREGROUND_QUIET_MS||10000));
 const AUTO_START_HOUR=0;
@@ -52,12 +43,8 @@ let autoRunning=false;
 let schemaReady=false;
 let foregroundQuietUntil=0;
 let foregroundEventCount=0;
-let candidateCursor='';
-let candidateBackfillComplete=false;
-let candidateConverted=0;
-let representativeRefreshCompleted=0,representativeRefreshFailed=0;
 const S=v=>String(v==null?'':v).trim();
-function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V016_PENDING_FIRST '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V008 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
 function containerLimit(){
   let limit=readNumber('/sys/fs/cgroup/memory.max');
@@ -102,21 +89,11 @@ async function ensureSchema(){
   if(!(pending.rows[0]&&pending.rows[0].t) || !(config.rows[0]&&config.rows[0].t)){
     throw new Error('BACKGROUND_SCHEMA_NOT_READY');
   }
-  const col=await poolRef.query(`SELECT EXISTS(
-    SELECT 1 FROM pg_attribute a
-    JOIN pg_class c ON c.oid=a.attrelid
-    JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE c.relname='gm_product_image_vector'
-      AND a.attname='candidate_vector'
-      AND a.attnum>0 AND NOT a.attisdropped
-      AND n.nspname=current_schema()
-  ) AS ok`);
-  if(!(col.rows[0]&&col.rows[0].ok))throw new Error('CANDIDATE_COLUMN_NOT_READY_MIGRATION_116');
   const cfg=await poolRef.query('SELECT mode FROM gm_image_vector_background_config WHERE config_id=1');
   const saved=S(cfg.rows[0]&&cfg.rows[0].mode).toUpperCase();
   if(VALID_MODES.has(saved))mode=saved;
   schemaReady=true;
-  log('SCHEMA_READY',{pending_migration:'110_gm_image_vector_pending.sql',config_migration:'111_gm_image_vector_background_config.sql',candidate_migration:'116_gm_product_image_candidate_vector.sql',mode});
+  log('SCHEMA_READY',{pending_migration:'110_gm_image_vector_pending.sql',config_migration:'111_gm_image_vector_background_config.sql',mode});
 }
 
 
@@ -166,120 +143,16 @@ async function finish(msg){
     if(!msg.ok)throw new Error(S(msg.error)||'VECTOR_WORKER_FAIL');
     const v=Array.isArray(msg.vector)?msg.vector:null;
     if(!v||v.length!==DIM)throw new Error('embedding dimension '+(v&&v.length||0));
-    const candidate=encodeCandidateVector(v);
-    if(!candidate)throw new Error('candidate vector encode failed');
-    const write=await upsertImageVector(poolRef,{product_uid:rec.product_uid,vector_image:v,candidate_vector:candidate});
-    imageAnn.markDirty();
+    await poolRef.query('INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image',[rec.product_uid,v]);
     const del=await poolRef.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2',[rec.product_uid,rec.image_url]);
     completed++;failUntil.delete(rec.product_uid);
-    log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),candidate_bytes:candidate.length,pending_deleted:del.rowCount,representative_action:write&&write.representative_assignment&&write.representative_assignment.action||'',active:inflight.size});
+    log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),pending_deleted:del.rowCount,active:inflight.size});
   }catch(e){
     failed++;lastError=S(e&&e.message||e);failUntil.set(rec.product_uid,Date.now()+FAIL_COOLDOWN_MS);
     log('VECTOR_FAIL',{product_uid:rec.product_uid,error:lastError,cooldown_ms:FAIL_COOLDOWN_MS,active:inflight.size});
   }
   setImmediate(()=>void pump());
 }
-async function backfillCandidateBatch(){
-  if(candidateBackfillComplete||!poolRef)return 0;
-  const started=Date.now();
-  const readStarted=Date.now();
-  const q=await poolRef.query(`
-    SELECT product_uid,vector_image
-      FROM gm_product_image_vector
-     WHERE product_uid > $1
-       AND candidate_vector IS NULL
-       AND vector_image IS NOT NULL
-       AND array_length(vector_image,1)=$2
-     ORDER BY product_uid ASC
-     LIMIT $3`,[candidateCursor,DIM,CANDIDATE_BATCH]);
-  const readMs=Date.now()-readStarted;
-  const rows=q.rows||[];
-  if(!rows.length){
-    candidateBackfillComplete=true;
-    log('CANDIDATE_BACKFILL_COMPLETE',{converted:candidateConverted,candidate_bytes:CANDIDATE_BYTES,elapsed_ms:Date.now()-started});
-    return 0;
-  }
-  candidateCursor=S(rows[rows.length-1].product_uid);
-  const encodeStarted=Date.now();
-  const uids=[];const candidates=[];
-  for(const row of rows){
-    const uid=S(row.product_uid),candidate=encodeCandidateVector(row.vector_image);
-    if(uid&&candidate){uids.push(uid);candidates.push(candidate);}
-  }
-  const encodeMs=Date.now()-encodeStarted;
-  if(!uids.length)return 0;
-  const writeStarted=Date.now();
-  // One DB round trip per batch. UNNEST avoids one UPDATE/parameter pair per row.
-  const u=await poolRef.query(`
-    UPDATE gm_product_image_vector v
-       SET candidate_vector=x.candidate_vector
-      FROM UNNEST($1::text[],$2::bytea[]) AS x(product_uid,candidate_vector)
-     WHERE v.product_uid=x.product_uid
-       AND v.candidate_vector IS NULL`,[uids,candidates]);
-  const writeMs=Date.now()-writeStarted;
-  candidateConverted+=u.rowCount;
-  if(u.rowCount>0)imageAnn.markDirty();
-  log('CANDIDATE_BACKFILL',{read:rows.length,converted:u.rowCount,total_converted:candidateConverted,cursor:candidateCursor,candidate_bytes:CANDIDATE_BYTES,batch:CANDIDATE_BATCH,read_ms:readMs,encode_ms:encodeMs,write_ms:writeMs,elapsed_ms:Date.now()-started});
-  return u.rowCount;
-}
-async function recoverStaleBuilderMarker(buildId){
-  if(!poolRef||!buildId)return false;
-  const c=await poolRef.connect();let gotBuilder=false,inTx=false;
-  try{
-    const lk=await c.query('SELECT pg_try_advisory_lock($1) AS locked',[BUILDER_LOCK_KEY]);
-    gotBuilder=!!(lk.rows&&lk.rows[0]&&lk.rows[0].locked);
-    if(!gotBuilder)return false; // a real Builder session still owns the long-lived lock
-    await c.query('BEGIN');inTx=true;
-    await c.query('SELECT pg_advisory_xact_lock($1)',[MUTATION_LOCK_KEY]);
-    const now=await c.query(`SELECT config_value FROM gm_runtime_config WHERE config_key='image_vector_representative_building'`);
-    const current=S(now.rows&&now.rows[0]&&now.rows[0].config_value);
-    if(current&&current===buildId){
-      await c.query(`UPDATE gm_runtime_config SET config_value='',updated_at=now() WHERE config_key='image_vector_representative_building' AND config_value=$1`,[buildId]);
-      log('STALE_BUILD_MARKER_RECOVERED',{build_id:buildId,live_net_preserved:true});
-    }
-    await c.query('COMMIT');inTx=false;
-    return true;
-  }catch(e){if(inTx){try{await c.query('ROLLBACK');}catch(_e){}}log('STALE_BUILD_MARKER_RECOVERY_FAIL',{build_id:buildId,error:S(e&&e.message||e)});return false;}
-  finally{if(gotBuilder){try{await c.query('SELECT pg_advisory_unlock($1)',[BUILDER_LOCK_KEY]);}catch(_e){}}c.release();}
-}
-
-async function processRepresentativeMetadataRefresh(){
-  if(!poolRef)return 0;
-  const b=await poolRef.query(`SELECT config_value FROM gm_runtime_config WHERE config_key='image_vector_representative_building'`);
-  const buildId=S(b.rows&&b.rows[0]&&b.rows[0].config_value);
-  if(buildId){
-    const recovered=await recoverStaleBuilderMarker(buildId);
-    if(!recovered)return 0;
-  }
-  // No migration/trigger/timestamp dependency. Reconcile a bounded slice of the actual vector
-  // table every tick. This avoids PostgreSQL transaction-start timestamp races: a metadata
-  // transaction may COMMIT after a representative write while carrying an older now()/updated_at.
-  // The cursor makes this a rolling audit, never a request-time/full-table search.
-  let q=await poolRef.query(`SELECT product_uid AS puid
-      FROM gm_product_image_vector
-     WHERE vector_image IS NOT NULL AND array_length(vector_image,1)=$1
-       AND product_uid>$2
-     ORDER BY product_uid
-     LIMIT $3`,[DIM,representativeReconcileCursor,REP_REFRESH_BATCH]);
-  if(!(q.rows||[]).length && representativeReconcileCursor){
-    representativeReconcileCursor='';representativeReconcileCycles++;
-    log('REP_RECONCILE_CYCLE_DONE',{cycles:representativeReconcileCycles,completed:representativeRefreshCompleted,failed:representativeRefreshFailed});
-    return 0;
-  }
-  let done=0;
-  for(const row of q.rows||[]){
-    const uid=S(row.puid);if(!uid)continue;
-    representativeReconcileCursor=uid;
-    try{
-      const r=await refreshRepresentativeFromMetadata(poolRef,uid,{reconcile:true});
-      if(r&&r.action==='defer_builder')break;
-      representativeRefreshCompleted++;done++;
-      if(r&&r.changed)log('REP_RECONCILE_CHANGED',{product_uid:uid,action:r.action||'',representative_action:r&&r.representative_assignment&&r.representative_assignment.action||''});
-    }catch(e){representativeRefreshFailed++;lastError=S(e&&e.message||e);log('REP_RECONCILE_FAIL',{product_uid:uid,error:lastError});break;}
-  }
-  return done;
-}
-
 async function pickJobs(limit){
   const q=await poolRef.query(`SELECT product_uid,image_url,updated_at FROM gm_image_vector_pending ORDER BY updated_at ASC,product_uid ASC LIMIT $1`,[Math.max(limit,FETCH_WINDOW)]);
   const now=Date.now(),busy=new Set([...inflight.values()].map(x=>x.product_uid));
@@ -302,30 +175,19 @@ async function pump(){
       log('YIELD_FOREGROUND',{mode,state:decision.state,quiet_remaining_ms:quietMs,active:inflight.size,memory_percent:mem.percent});
       return;
     }
-    // Preserve the original V008 execution contract: pending MobileCLIP work always gets
-    // the free worker slots first. HNSW/candidate maintenance must never stand in front of it.
     const free=Math.max(0,MAX_SLOTS-inflight.size);
     if(free<=0)return;
     const jobs=await pickJobs(free);
-    if(jobs.length){
-      const w=ensureWorker();
-      for(const row of jobs){
-        const taskId=++seq;
-        const rec={task_id:taskId,product_uid:S(row.product_uid),image_url:S(row.image_url),updated_at:new Date(row.updated_at).toISOString()};
-        inflight.set(taskId,rec);
-        if(!w.connected)throw new Error('VECTOR_CHILD_NOT_CONNECTED');
-        w.send({type:'task',...rec});
-      }
-      log('DISPATCH',{mode,state:decision.state,memory_percent:mem.percent,max_slots:MAX_SLOTS,dispatched:jobs.length,active:inflight.size});
-      return;
+    if(!jobs.length){releaseIdleWorker('NO_PENDING');return;}
+    const w=ensureWorker();
+    for(const row of jobs){
+      const taskId=++seq;
+      const rec={task_id:taskId,product_uid:S(row.product_uid),image_url:S(row.image_url),updated_at:new Date(row.updated_at).toISOString()};
+      inflight.set(taskId,rec);
+      if(!w.connected)throw new Error('VECTOR_CHILD_NOT_CONNECTED');
+      w.send({type:'task',...rec});
     }
-    // HNSW support maintenance is idle-only. It runs only when there is no pending
-    // MobileCLIP job available, so it cannot block the server vector conversion queue.
-    if(inflight.size===0){
-      await processRepresentativeMetadataRefresh();
-      await backfillCandidateBatch();
-    }
-    releaseIdleWorker('NO_PENDING');
+    log('DISPATCH',{mode,state:decision.state,memory_percent:mem.percent,max_slots:MAX_SLOTS,dispatched:jobs.length,active:inflight.size});
   }catch(e){lastError=S(e&&e.message||e);log('PUMP_FAIL',{error:lastError});}
   finally{pumping=false;}
 }
@@ -345,7 +207,7 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V016',mode,state:decision.state,running:decision.run,pending,representative_refresh_pending:null,representative_refresh_completed:representativeRefreshCompleted,representative_refresh_failed:representativeRefreshFailed,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',candidate_format:'INT8_V1',candidate_bytes:CANDIDATE_BYTES,candidate_backfill_complete:candidateBackfillComplete,candidate_converted:candidateConverted,completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',completed,failed,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
@@ -411,7 +273,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
     const count=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');
     const pending=Number(count.rows[0]&&count.rows[0].n||0);
     log('PENDING_IMPORT',{received:rows.length,valid:list.length,invalid,upserted,pending});
-    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V013',received:rows.length,valid:list.length,invalid,upserted,pending});
+    res.json({ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',received:rows.length,valid:list.length,invalid,upserted,pending});
     setImmediate(()=>void pump());
   }catch(e){
     lastError=S(e&&e.message||e);log('PENDING_IMPORT_FAIL',{error:lastError});

@@ -1,0 +1,35 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GM HNSW Builder V001</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v054"></head><body><div class="wrap">
+<div class="head"><div><h1>GM HNSW / 대표이미지 Builder</h1><div class="small">기존 Image Vector 생산과 분리된 후처리 전용 페이지</div></div></div>
+<div class="warning"><b>분리 원칙</b><br>이 페이지는 이미 저장된 512D Vector를 읽어 대표이미지/HNSW RUN을 생성합니다. 기존 background Auto/ON, product queue, SPECIAL, 일반 검색 수집은 변경하지 않습니다.</div>
+<div class="menu"><a href="/gm_data_builder.html"><b>← GM Data Builder</b><span class="small">기존 Builder로 돌아가기</span></a></div>
+<div class="card" id="ivRepresentativeCard"><h2>HNSW / REPRESENTATIVE IMAGE VECTOR</h2>
+  <div class="small">카테고리별 대표이미지 관계를 별도 RUN으로 계산합니다. 새 RUN이 완성되기 전까지 기존 LIVE RUN은 유지합니다.</div>
+  <div class="grid" style="margin-top:12px"><div><table><tbody id="ivRepresentativeStatus"><tr><td>조회 전</td></tr></tbody></table></div><div>
+    <div style="margin-bottom:10px;padding:10px;border:1px solid #ddd;border-radius:8px">
+      <label style="display:inline-block;margin-right:10px"><b>RUN</b> <input id="ivRepRunInput" type="number" min="1" step="1" value="1" style="width:90px"></label>
+      <label style="display:inline-block;margin-right:10px"><b>기준 유사율</b> <input id="ivRepThresholdInput" type="number" min="0.0001" max="1" step="0.0001" value="0.9500" style="width:110px"></label>
+      <button class="green" onclick="saveRepresentativeSettings(this)">RUN / 유사율 저장</button>
+      <button type="button" onclick="nextRepresentativeRun()">RUN +1</button>
+      <span id="ivRepSettingsResult" class="small" style="margin-left:8px"></span>
+    </div>
+    <div style="margin-bottom:10px">
+      <button class="green" onclick="loadRepresentativeStatus()">상태 새로고침</button>
+      <button class="green" onclick="previewRepresentativeCategories(this)">카테고리 사전점검</button>
+      <button onclick="runRepresentativeBuilder(this)">현재 RUN 새로 계산</button>
+      <button onclick="loadRepresentativeStats()">대표별 통계 조회</button>
+      <a href="/api/gm/builder/image-hnsw/representative/initial/export" style="display:inline-block;text-decoration:none"><button type="button">결과 CSV 다운로드</button></a>
+    </div>
+    <div id="ivRepresentativeProgress" style="border:1px solid #ddd;border-radius:10px;padding:12px;min-height:250px">
+      <h3 style="margin:0 0 10px">대표선정 진행상황</h3><table><tbody>
+        <tr><th>상태 / 단계</th><td id="ivRepJobState">대기 / IDLE</td></tr><tr><th>현재 카테고리 키워드</th><td id="ivRepJobKeyword">-</td></tr>
+        <tr><th>현재 카테고리 수량</th><td id="ivRepJobCategoryCount">0</td></tr><tr><th>현재 카테고리 처리</th><td id="ivRepJobCategoryProcessed">0 / 0</td></tr>
+        <tr><th>카테고리 진행</th><td id="ivRepJobCategories">0 / 0</td></tr><tr><th>대표번호 진행</th><td id="ivRepJobRepNo">#0</td></tr>
+        <tr><th>대표 생성 수</th><td id="ivRepJobRepresentatives">0</td></tr><tr><th>총 진행 수량</th><td id="ivRepJobTotal">0 / 0</td></tr>
+        <tr><th>진행률</th><td id="ivRepJobPercent">0.0%</td></tr><tr><th>경과시간</th><td id="ivRepJobElapsed">00:00:00</td></tr>
+      </tbody></table>
+    </div>
+  </div></div>
+  <div style="overflow:auto;max-height:420px;margin-top:12px"><table><thead><tr><th>대표 PUID</th><th>소속수</th><th>평균</th><th>최저</th><th>최고</th><th>RUN</th></tr></thead><tbody id="ivRepresentativeStats"><tr><td colspan="6">조회 전</td></tr></tbody></table></div>
+</div>
+<div class="card"><h2>로그</h2><pre id="log">준비됨</pre></div>
+</div><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v064"></script><script src="/builder/GM_BUILDER_IMAGE_HNSW.js?v=gm_builder_v001"></script></body></html>
