@@ -106,14 +106,19 @@ async function markRun0(client,puid){await client.query(`INSERT INTO gm_image_ve
   VALUES($1,NULL,NULL,NULL,0,now()) ON CONFLICT(puid) DO UPDATE SET representative_no=NULL,representative_puid=NULL,similarity=NULL,run_no=0,updated_at=now()`,[puid]);}
 
 async function assignIncremental(db,puid,newVector){
+  const diagStarted=Date.now();
   const vn=normalizedFloat32(newVector);if(!vn)throw new Error('invalid 512D vector for representative assignment');
+  const connectStarted=Date.now();
   const client=await db.connect();
+  console.log('[GM_HNSW_DIAG ASSIGN_CONNECT]',JSON.stringify({puid:S(puid),wait_ms:Date.now()-connectStarted}));
   let st=null,c=null,cat=null,old=null,wasRepresentative=false,reps=[],first=null;
   const touched=new Set();
   try{
     await client.query('BEGIN');
     // Serialize incremental assignments so simultaneous Special/search workers do not create duplicate representatives.
+    const lockStarted=Date.now();
     await client.query('SELECT pg_advisory_xact_lock($1)',[LOCK_KEY]);
+    console.log('[GM_HNSW_DIAG ASSIGN_LOCK]',JSON.stringify({puid:S(puid),wait_ms:Date.now()-lockStarted}));
     st=await settings(client);
     c=await representativeCache(client,st);const meta=await productMeta(client,puid);
     cat=resolveProductCategory(c.ref,meta||{});
@@ -158,7 +163,7 @@ async function assignIncremental(db,puid,newVector){
     for(const r of touched)await refreshStat(client,st.run_no,r);
     await client.query('COMMIT');cache={run_no:0,threshold:0,stamp:'',count:0,ref:null,groups:new Map()};
     return {action:remainsRepresentative?'representative_kept':'representative_relinked',run_no:st.run_no,threshold:st.threshold,representative_no:remainsRepresentative?selfRepNo:first.rep.representative_no,representative_puid:remainsRepresentative?puid:first.rep.representative_puid,similarity:remainsRepresentative?1:first.score,rechecked_members:(oldChildren.rows||[]).length,category_group:cat.group,category_reason:cat.reason,cache_action:'invalidate'};
-  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+  }catch(e){await client.query('ROLLBACK');throw e;}finally{console.log('[GM_HNSW_DIAG ASSIGN_EXIT]',JSON.stringify({puid:S(puid),elapsed_ms:Date.now()-diagStarted}));client.release();}
 }
 
 function invalidate(){cache={run_no:0,threshold:0,stamp:'',count:0,ref:null,groups:new Map()};}

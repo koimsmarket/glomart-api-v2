@@ -127,6 +127,7 @@ function publicStatus(){
 function scheduleRebuild(pool,reason){
   lastPool=pool||lastPool;
   if(reason){dirtyReasons.add(C(reason));dirtySerial++;}
+  console.log('[GM_HNSW_DIAG REBUILD_REQUEST]',JSON.stringify({reason:C(reason),active_ready:!!active.index,active_run_no:active.run_no,next_building:!!nextBuildPromise,rebuild_timer:!!rebuildTimer,dirty_count:dirtyReasons.size}));
   if(rebuildTimer||nextBuildPromise||!lastPool)return;
   rebuildTimer=setTimeout(()=>{
     rebuildTimer=null;
@@ -143,12 +144,15 @@ function startBuild(pool,reason,force){
     const started=Date.now(),generation=Number(lifecycle.generation||0)+1,buildDirtySerial=dirtySerial;
     try{
       lifecycle={state:'LOADING',phase:'META',reason:C(reason||'preload'),run_no:0,total:0,loaded:0,built:0,percent:0,started_at:started,finished_at:0,load_ms:0,build_ms:0,error:'',generation};
+      console.log('[GM_HNSW_DIAG NEXT_BUILD_START]',JSON.stringify({reason:C(reason),force:!!force,generation,active_ready:!!active.index,active_run_no:active.run_no,dirty_count:dirtyReasons.size}));
       const meta=await representativeMeta(pool);
+      console.log('[GM_HNSW_DIAG NEXT_META_DONE]',JSON.stringify({run_no:meta.run_no,count:meta.count,meta_ms:Date.now()-started,generation}));
       lifecycle.run_no=meta.run_no;lifecycle.total=meta.count;
       if(meta.count<1)throw new Error('representative map is empty; build representative data first');
       const loadStarted=Date.now();lifecycle.phase='CACHE_QUERY';
       const rows=await loadRepresentativeRows(pool,meta,(loaded,total)=>{lifecycle.phase='CACHE_NORMALIZE';lifecycle.loaded=loaded;lifecycle.total=total;lifecycle.percent=total?Math.min(49.9,loaded/total*50):0;});
-      lifecycle.load_ms=Date.now()-loadStarted;lifecycle.loaded=rows.length;lifecycle.total=rows.length;
+      lifecycle.load_ms=Date.now()-loadStarted;
+      console.log('[GM_HNSW_DIAG NEXT_LOAD_DONE]',JSON.stringify({run_no:meta.run_no,rows:rows.length,load_ms:lifecycle.load_ms,generation}));lifecycle.loaded=rows.length;lifecycle.total=rows.length;
       lifecycle.state='BUILDING';lifecycle.phase='HNSW_BUILD';lifecycle.percent=50;
       const buildStarted=Date.now(),index=new RepresentativeHnsw();
       await index.buildAsync(rows,{yieldEvery:25,progressEvery:100,onProgress:p=>{lifecycle.built=p.built;lifecycle.percent=50+(Number(p.percent||0)*0.5);}});
@@ -179,6 +183,7 @@ function onAssignment(pool,assignment,vector){
   if(!assignment)return;
   lastPool=pool||lastPool;
   const action=C(assignment.action);
+  console.log('[GM_HNSW_DIAG ASSIGN_EVENT]',JSON.stringify({action,run_no:N(assignment.run_no),representative_puid:C(assignment.representative_puid),active_ready:!!active.index,active_run_no:active.run_no,next_building:!!nextBuildPromise}));
   if(action==='linked')return;
   if(action==='new_representative'){
     const runNo=N(assignment.run_no),uid=C(assignment.representative_puid),repNo=N(assignment.representative_no),vn=normalizedFloat32(vector);
