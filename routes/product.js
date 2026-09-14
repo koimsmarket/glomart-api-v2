@@ -2055,7 +2055,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
         request_id, mall_code, keyword, items_json, item_count, status, retry_count, created_at
-      ) VALUES ($1,$2,$3,$4::jsonb,$5,'pending',0,now())
+      ) VALUES ($1,$2,$3,$4::jsonb,$5,'processing',0,now())
       ON CONFLICT (request_id) DO UPDATE SET
         mall_code=EXCLUDED.mall_code,
         keyword=EXCLUDED.keyword,
@@ -2126,16 +2126,21 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       option_balance_ok:optionAudit.balance_ok
     };
     const inlineStatus = inlineSaved > 0 ? 'done' : 'failed';
+    // Inline 저장 중에는 queue row를 processing으로 유지해 worker가 같은 row를 동시에 잡지 못하게 한다.
+    // Inline이 전부 실패한 경우에만 pending으로 되돌려 기존 worker가 재시도한다.
+    const queueStatusAfterInline = inlineSaved > 0 ? 'done' : 'pending';
     const inlineError = inlineSaved > 0 ? null : (inlineResults.find(x=>x && (x.error || x.reason)) || {}).error || (inlineResults.find(x=>x && x.reason) || {}).reason || 'inline upsert saved 0 rows';
     try{
       await pool.query(`
         UPDATE gm_product_upsert_queue
         SET status=$2,
-            processed_at=now(),
+            processed_at=CASE WHEN $2='done' THEN now() ELSE processed_at END,
+            locked_at=NULL,
             error_message=$3,
             result_json=$4::jsonb
         WHERE queue_id=$1
-      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, audit:saveAudit, option_audit:optionAudit, sample:inlineResults.slice(0,10), errors:inlineResults.filter(x=>x && !x.ok).slice(0,30) })]);
+      `, [r.rows[0] && r.rows[0].queue_id, queueStatusAfterInline, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, audit:saveAudit, option_audit:optionAudit, sample:inlineResults.slice(0,10), errors:inlineResults.filter(x=>x && !x.ok).slice(0,30) })]);
+      if(r.rows[0]) r.rows[0].status = queueStatusAfterInline;
     }catch(_qe){
       console.warn('[GM_PRODUCT_QUEUE] inline result update failed', String(_qe && _qe.message || _qe));
     }
