@@ -9,7 +9,7 @@ const http=require('http');
 const router=express.Router();
 const {assignIncremental}=require('../services/image_representative_assign');
 const representativeSearch=require('../services/image_representative_search');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V023_HNSW_MANAGER_SPLIT';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V025_MEMORY_MODE_NO_MIGRATION';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -72,13 +72,33 @@ function fetchImage(u,res,depth){
 
 router.get('/api/gm/image-vector/proxy',(req,res)=>{const u=allowedImageUrl(req.query&&req.query.url);if(!u)return res.status(400).json({ok:false,error:'unsupported image url'});fetchImage(u,res,0);});
 router.get('/api/gm/image-vector/version',(req,res)=>res.json({ok:true,route_version:ROUTE_VERSION,dimensions:DIM,vector_version:VECTOR_VERSION,representative_hnsw:representativeSearch.status()}));
-// Status is read-only. Merely opening/refreshing Builder must never start a 46k-vector preload.
-router.get('/api/gm/image-vector/index-status',(req,res)=>res.json({ok:true,route_version:ROUTE_VERSION,representative_hnsw:representativeSearch.status()}));
-// Explicit/manual preload builds NEXT while any existing ACTIVE index keeps serving searches.
-router.post('/api/gm/image-vector/index-preload',(req,res)=>{
+// Deep-switch records share gm_image_vector_background_config.
+// config_id=1: background vector OFF/AUTO/ON; config_id=2: representative HNSW LOADING/UNLOADING.
+router.get('/api/gm/image-vector/memory-mode',async(req,res)=>{
   const pool=req.app.locals.pool;if(!pool)return res.status(503).json({ok:false,error:'db unavailable',route_version:ROUTE_VERSION});
-  const started=representativeSearch.startBuild(pool,'manual_preload',true);
-  return res.json({ok:true,started,route_version:ROUTE_VERSION,representative_hnsw:representativeSearch.status()});
+  try{const memory_mode=await representativeSearch.getMemoryMode(pool,true);return res.json({ok:true,memory_mode,route_version:ROUTE_VERSION,representative_hnsw:representativeSearch.status()});}
+  catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
+});
+router.post('/api/gm/image-vector/memory-mode',async(req,res)=>{
+  const pool=req.app.locals.pool;if(!pool)return res.status(503).json({ok:false,error:'db unavailable',route_version:ROUTE_VERSION});
+  try{const memory_mode=await representativeSearch.setMemoryMode(pool,req.body&&req.body.mode);return res.json({ok:true,memory_mode,route_version:ROUTE_VERSION,representative_hnsw:representativeSearch.status()});}
+  catch(e){return res.status(e&&e.message==='INVALID_MEMORY_MODE'?400:500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
+});
+// Status is read-only. Merely opening/refreshing Builder must never start a representative preload.
+router.get('/api/gm/image-vector/index-status',async(req,res)=>{
+  const pool=req.app.locals.pool;if(!pool)return res.status(503).json({ok:false,error:'db unavailable',route_version:ROUTE_VERSION});
+  try{await representativeSearch.getMemoryMode(pool,false);return res.json({ok:true,route_version:ROUTE_VERSION,representative_hnsw:representativeSearch.status()});}
+  catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
+});
+// Full preload is Builder-only and is ignored while memory mode is UNLOADING.
+router.post('/api/gm/image-vector/index-preload',async(req,res)=>{
+  const pool=req.app.locals.pool;if(!pool)return res.status(503).json({ok:false,error:'db unavailable',route_version:ROUTE_VERSION});
+  try{
+    const memory_mode=await representativeSearch.getMemoryMode(pool,true);
+    if(memory_mode!=='LOADING')return res.json({ok:true,started:false,skipped:'MEMORY_UNLOADING',memory_mode,route_version:ROUTE_VERSION,representative_hnsw:representativeSearch.status()});
+    const started=representativeSearch.startBuild(pool,'builder_representative_complete',true);
+    return res.json({ok:true,started,memory_mode,route_version:ROUTE_VERSION,representative_hnsw:representativeSearch.status()});
+  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/missing',async(req,res)=>{
   const pool=req.app.locals.pool,raw=Array.isArray(req.body&&req.body.product_uids)?req.body.product_uids:[],ids=[...new Set(raw.map(C).filter(Boolean))].slice(0,200);
@@ -120,10 +140,9 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
     if(!isArrayVectorType(columnType))return res.status(409).json({ok:false,error:'representative search requires REAL[] production vectors',column_type:columnType,route_version:ROUTE_VERSION,search_ms:Date.now()-started});
     const out=await representativeSearch.search(pool,v,limit,searchMode),searchMs=Date.now()-started;
     const metaReady=out.matches.filter(m=>C(m.keyword||m.category_keyword||m.product_name)).length;
-    console.log('[GM_IMAGE_VECTOR_REP_SEARCH]',JSON.stringify({mode:out.search_mode,run_no:out.run_no,representative_count:out.representative_count,rep_groups:out.representative_candidates.length,member_candidates:out.member_candidate_count,run0_candidates:out.run0_candidate_count,count:out.matches.length,best_score:out.matches[0]?Number(Number(out.matches[0].score||0).toFixed(6)):null,search_ms:searchMs,timings:out.timings,hnsw:out.hnsw_status,route_version:ROUTE_VERSION}));
-    return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:out.search_mode,search_mode_label:out.search_mode==='fast'?'신속검색':'정밀검색',run_no:out.run_no,representative_count:out.representative_count,representative_group_limit:representativeSearch.REP_GROUP_LIMIT,representative_candidates:out.representative_candidates,representative_scanned:out.search_mode==='precise'?out.representative_count:null,candidate_count:out.member_candidate_count,run0_candidate_count:out.run0_candidate_count,hnsw_status:out.hnsw_status,search_ms:searchMs,timings:out.timings});
+    console.log('[GM_IMAGE_VECTOR_REP_SEARCH]',JSON.stringify({mode:out.search_mode,engine:out.search_engine,memory_mode:out.memory_mode,run_no:out.run_no,representative_count:out.representative_count,rep_groups:out.representative_candidates.length,member_candidates:out.member_candidate_count,run0_candidates:out.run0_candidate_count,count:out.matches.length,best_score:out.matches[0]?Number(Number(out.matches[0].score||0).toFixed(6)):null,search_ms:searchMs,timings:out.timings,hnsw:out.hnsw_status,route_version:ROUTE_VERSION}));
+    return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:out.search_mode,search_mode_label:out.search_mode==='fast'?'신속검색':'정밀검색',search_engine:out.search_engine,memory_mode:out.memory_mode,run_no:out.run_no,representative_count:out.representative_count,representative_group_limit:representativeSearch.REP_GROUP_LIMIT,representative_candidates:out.representative_candidates,representative_scanned:out.search_mode==='precise'?out.representative_count:null,candidate_count:out.member_candidate_count,run0_candidate_count:out.run0_candidate_count,hnsw_status:out.hnsw_status,search_ms:searchMs,timings:out.timings});
   }catch(e){
-    if(e&&e.code==='INDEX_NOT_READY')return res.status(503).json({ok:false,error:'INDEX_NOT_READY',message:'대표이미지/HNSW 최초 인덱스 준비 중입니다.',retry_after_ms:2000,route_version:ROUTE_VERSION,search_ms:Date.now()-started,representative_hnsw:e.status||representativeSearch.status()});
     return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION,search_ms:Date.now()-started});
   }
 });

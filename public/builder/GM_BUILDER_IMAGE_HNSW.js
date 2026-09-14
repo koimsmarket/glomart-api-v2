@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_HNSW_UI_V003_INDEX_PRELOAD_STATUS
+// GM_BUILDER_IMAGE_HNSW_UI_V004_MEMORY_MODE
 // Dedicated HNSW / representative-image Builder UI.
 
 // V002: this page is standalone and must not depend on GM_BUILDER_DASHBOARD.js.
@@ -61,6 +61,31 @@ async function saveRepresentativeSettings(button,opts){
  finally{if(button)button.disabled=false;}
 }
 
+function syncHnswMemoryMode(mode){
+ mode=String(mode||'UNLOADING').toUpperCase();
+ document.querySelectorAll('input[name="ivHnswMemoryMode"]').forEach(el=>{el.checked=el.value===mode;});
+ const out=document.getElementById('ivHnswMemoryModeResult');if(out)out.textContent=`현재: ${mode}`;
+}
+async function loadHnswMemoryMode(){
+ try{
+   const r=await fetch(`${API}/api/gm/image-vector/memory-mode?t=${Date.now()}`,{cache:'no-store'});
+   const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+   syncHnswMemoryMode(j.memory_mode);return j.memory_mode;
+ }catch(e){const out=document.getElementById('ivHnswMemoryModeResult');if(out)out.textContent='조회 실패: '+String(e&&e.message||e);return null;}
+}
+async function saveHnswMemoryMode(button){
+ const picked=document.querySelector('input[name="ivHnswMemoryMode"]:checked');
+ if(!picked){alert('Loading 또는 UnLoading을 선택하세요.');return;}
+ const mode=picked.value;if(button)button.disabled=true;
+ try{
+   const r=await fetch(`${API}/api/gm/image-vector/memory-mode`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+   const j=await r.json().catch(()=>({}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+   syncHnswMemoryMode(j.memory_mode);paintHnswIndexStatus(j.representative_hnsw||{});
+   log({action:'image-hnsw.memory-mode',memory_mode:j.memory_mode});
+ }catch(e){const out=document.getElementById('ivHnswMemoryModeResult');if(out)out.textContent='저장 실패: '+String(e&&e.message||e);}
+ finally{if(button)button.disabled=false;}
+}
+
 function hnswStateLabel(x){
  x=x||{};
  if(x.ready||x.state==='READY')return 'READY';
@@ -72,6 +97,7 @@ function hnswStateLabel(x){
 function paintHnswIndexStatus(x){
  x=x||{};const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
  const total=Number(x.total||0),loaded=Number(x.loaded||x.cached_representatives||0),built=Number(x.built||x.index_count||0),pct=Number(x.percent||0);
+ set('ivHnswMemoryModeStatus',x.memory_mode||'-');
  set('ivHnswState',`${hnswStateLabel(x)} / ${x.phase||'-'}`);
  set('ivHnswRun',fmt(x.run_no||0));
  set('ivHnswCache',`${fmt(loaded)} / ${fmt(total)}`);
@@ -112,6 +138,7 @@ async function loadRepresentativeStatus(){
    paintRepresentativeJob(x);
    el.innerHTML=`<tr><th>현재 LIVE RUN</th><td>${fmt(liveRun)}</td></tr>
    <tr><th>현재 LIVE 유사율</th><td>${Number(liveThr).toFixed(4)}</td></tr>
+   <tr><th>메모리 모드</th><td id="ivHnswMemoryModeStatus">-</td></tr>
    <tr><th>HNSW 상태</th><td id="ivHnswState">조회 전</td></tr>
    <tr><th>HNSW RUN</th><td id="ivHnswRun">-</td></tr>
    <tr><th>대표 Vector preload</th><td id="ivHnswCache">0 / 0</td></tr>
@@ -137,6 +164,7 @@ async function loadRepresentativeStatus(){
    <tr><th>현재 keyword</th><td>${x.last_category||'-'}</td></tr>
    <tr><th>사전점검 오류</th><td id="ivRepPreviewError">${pv.error||'-'}</td></tr>
    <tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
+   void loadHnswMemoryMode();
    void loadHnswIndexStatus();
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
@@ -211,6 +239,7 @@ async function loadRepresentativeStats(){
  const tb=document.getElementById('ivRepresentativeStats');if(!tb)return;try{const r=await fetch(`${API}/api/gm/builder/image-hnsw/representative/stats?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);tb.innerHTML=(j.items||[]).map(x=>`<tr><td>#${fmt(x.representative_no)} · ${x.representative_puid}</td><td>${fmt(x.member_count)}</td><td>${x.avg_similarity==null?'-':Number(x.avg_similarity).toFixed(4)}</td><td>${x.min_similarity==null?'-':Number(x.min_similarity).toFixed(4)}</td><td>${x.max_similarity==null?'-':Number(x.max_similarity).toFixed(4)}</td><td>${fmt(x.run_no)}</td></tr>`).join('')||'<tr><td colspan="6">자료 없음</td></tr>';}catch(e){tb.innerHTML=`<tr><td colspan="6">조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 setTimeout(()=>void loadRepresentativeStatus(),300);
+setTimeout(()=>void loadHnswMemoryMode(),400);
 setTimeout(()=>void loadHnswIndexStatus(),500);
 setInterval(async()=>{try{const sj=await fetchRepresentativeInitialStatus();paintRepresentativeJob((sj&&sj.job)||{});}catch(_){/* lightweight progress poll only */}},1000);
 setInterval(()=>void loadHnswIndexStatus(),1000);
