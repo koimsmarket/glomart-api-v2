@@ -1,4 +1,4 @@
-// GM_BUILDER_IMAGE_HNSW_UI_V001
+// GM_BUILDER_IMAGE_HNSW_UI_V003_INDEX_PRELOAD_STATUS
 // Dedicated HNSW / representative-image Builder UI.
 
 // V002: this page is standalone and must not depend on GM_BUILDER_DASHBOARD.js.
@@ -61,6 +61,41 @@ async function saveRepresentativeSettings(button,opts){
  finally{if(button)button.disabled=false;}
 }
 
+function hnswStateLabel(x){
+ x=x||{};
+ if(x.ready||x.state==='READY')return 'READY';
+ if(x.state==='BUILDING')return 'BUILDING';
+ if(x.state==='LOADING')return 'LOADING';
+ if(x.state==='ERROR')return 'ERROR';
+ return x.state||'IDLE';
+}
+function paintHnswIndexStatus(x){
+ x=x||{};const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+ const total=Number(x.total||0),loaded=Number(x.loaded||x.cached_representatives||0),built=Number(x.built||x.index_count||0),pct=Number(x.percent||0);
+ set('ivHnswState',`${hnswStateLabel(x)} / ${x.phase||'-'}`);
+ set('ivHnswRun',fmt(x.run_no||0));
+ set('ivHnswCache',`${fmt(loaded)} / ${fmt(total)}`);
+ set('ivHnswBuild',`${fmt(built)} / ${fmt(total)}${Number.isFinite(pct)?` (${pct.toFixed(1)}%)`:''}`);
+ set('ivHnswTimes',`LOAD ${fmt(x.load_ms||0)}ms / BUILD ${fmt(x.build_ms||0)}ms`);
+ set('ivHnswError',x.error||'-');
+}
+async function loadHnswIndexStatus(){
+ try{
+   const r=await fetch(`${API}/api/gm/image-vector/index-status?t=${Date.now()}`,{cache:'no-store'});
+   const j=await r.json().catch(()=>({}));
+   if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+   paintHnswIndexStatus(j.representative_hnsw||{});
+   return j.representative_hnsw||{};
+ }catch(e){paintHnswIndexStatus({state:'ERROR',phase:'STATUS',error:String(e&&e.message||e)});return null;}
+}
+async function requestHnswPreload(){
+ try{
+   const r=await fetch(`${API}/api/gm/image-vector/index-preload`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+   const j=await r.json().catch(()=>({}));
+   if(r.ok&&j.ok)paintHnswIndexStatus(j.representative_hnsw||{});
+ }catch(_){/* status poll will show the error */}
+}
+
 async function loadRepresentativeStatus(){
  const el=document.getElementById('ivRepresentativeStatus');if(!el)return;
  try{
@@ -77,6 +112,12 @@ async function loadRepresentativeStatus(){
    paintRepresentativeJob(x);
    el.innerHTML=`<tr><th>현재 LIVE RUN</th><td>${fmt(liveRun)}</td></tr>
    <tr><th>현재 LIVE 유사율</th><td>${Number(liveThr).toFixed(4)}</td></tr>
+   <tr><th>HNSW 상태</th><td id="ivHnswState">조회 전</td></tr>
+   <tr><th>HNSW RUN</th><td id="ivHnswRun">-</td></tr>
+   <tr><th>대표 Vector preload</th><td id="ivHnswCache">0 / 0</td></tr>
+   <tr><th>HNSW Build</th><td id="ivHnswBuild">0 / 0</td></tr>
+   <tr><th>HNSW 시간</th><td id="ivHnswTimes">-</td></tr>
+   <tr><th>HNSW 오류</th><td id="ivHnswError">-</td></tr>
    <tr><th>다음 Builder TARGET RUN</th><td>${fmt(j.target_run_no==null?j.run_no:j.target_run_no)}</td></tr>
    <tr><th>다음 Builder TARGET 유사율</th><td>${Number(j.target_threshold==null?j.threshold:j.target_threshold).toFixed(4)}</td></tr>
    <tr><th>전체 Vector</th><td>${fmt(j.total_vector)}</td></tr>
@@ -96,6 +137,7 @@ async function loadRepresentativeStatus(){
    <tr><th>현재 keyword</th><td>${x.last_category||'-'}</td></tr>
    <tr><th>사전점검 오류</th><td id="ivRepPreviewError">${pv.error||'-'}</td></tr>
    <tr><th>오류</th><td>${x.error||'-'}</td></tr>`;
+   void loadHnswIndexStatus();
  }catch(e){el.innerHTML=`<tr><td>대표이미지 상태 조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 
@@ -158,6 +200,8 @@ async function runRepresentativeBuilder(button){
      }
      await new Promise(resolve=>setTimeout(resolve,1000));
    }
+   // 새 대표망이 완성되면 HNSW preload를 별도 비동기 작업으로 시작한다.
+   await requestHnswPreload();
    // 완료 후에만 무거운 집계 상태를 한 번 갱신한다.
    await loadRepresentativeStatus();
  }catch(e){log('representative initial run error: '+String(e&&e.message||e));}
@@ -167,4 +211,6 @@ async function loadRepresentativeStats(){
  const tb=document.getElementById('ivRepresentativeStats');if(!tb)return;try{const r=await fetch(`${API}/api/gm/builder/image-hnsw/representative/stats?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);tb.innerHTML=(j.items||[]).map(x=>`<tr><td>#${fmt(x.representative_no)} · ${x.representative_puid}</td><td>${fmt(x.member_count)}</td><td>${x.avg_similarity==null?'-':Number(x.avg_similarity).toFixed(4)}</td><td>${x.min_similarity==null?'-':Number(x.min_similarity).toFixed(4)}</td><td>${x.max_similarity==null?'-':Number(x.max_similarity).toFixed(4)}</td><td>${fmt(x.run_no)}</td></tr>`).join('')||'<tr><td colspan="6">자료 없음</td></tr>';}catch(e){tb.innerHTML=`<tr><td colspan="6">조회 실패: ${String(e&&e.message||e)}</td></tr>`;}
 }
 setTimeout(()=>void loadRepresentativeStatus(),300);
+setTimeout(()=>void loadHnswIndexStatus(),500);
 setInterval(async()=>{try{const sj=await fetchRepresentativeInitialStatus();paintRepresentativeJob((sj&&sj.job)||{});}catch(_){/* lightweight progress poll only */}},1000);
+setInterval(()=>void loadHnswIndexStatus(),1000);

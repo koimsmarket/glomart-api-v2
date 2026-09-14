@@ -1,6 +1,6 @@
 'use strict';
 
-// GM_IMAGE_REPRESENTATIVE_HNSW_V001
+// GM_IMAGE_REPRESENTATIVE_HNSW_V002_ASYNC_PRELOAD
 // Dependency-free in-memory HNSW for normalized 512D representative vectors.
 // The DB REAL[] vectors remain authoritative. This index only selects representative groups.
 
@@ -104,6 +104,23 @@ class RepresentativeHnsw{
     const started=Date.now();this.nodes=[];this.entry=-1;this.maxLevel=-1;
     for(const row of rows||[])this.add(row);
     this.builtAt=Date.now();this.buildMs=this.builtAt-started;return this;
+  }
+  async buildAsync(rows,opts){
+    opts=opts||{};
+    const list=rows||[],started=Date.now();
+    const yieldEvery=Math.max(1,Math.min(500,Number(opts.yieldEvery||25)||25));
+    const progressEvery=Math.max(1,Math.min(2000,Number(opts.progressEvery||100)||100));
+    const onProgress=typeof opts.onProgress==='function'?opts.onProgress:null;
+    this.nodes=[];this.entry=-1;this.maxLevel=-1;
+    if(onProgress)onProgress({built:0,total:list.length,percent:list.length?0:100});
+    for(let i=0;i<list.length;i++){
+      this.add(list[i]);
+      const built=i+1;
+      if(onProgress&&(built===list.length||built%progressEvery===0))onProgress({built,total:list.length,percent:list.length?(built/list.length*100):100});
+      if(built<list.length&&built%yieldEvery===0)await new Promise(resolve=>setImmediate(resolve));
+    }
+    this.builtAt=Date.now();this.buildMs=this.builtAt-started;
+    return this;
   }
   search(query,k,efSearch){
     if(this.entry<0||!this.nodes.length)return [];

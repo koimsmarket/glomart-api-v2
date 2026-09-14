@@ -11,7 +11,7 @@ const http=require('http');
 const router=express.Router();
 const {RepresentativeHnsw}=require('../services/image_representative_hnsw');
 const {assignIncremental}=require('../services/image_representative_assign');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V021_INCREMENTAL_AFTER_UPSERT';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V022_HNSW_PRELOAD_READY';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -133,12 +133,17 @@ async function fetchProductMetadata(pool,productUids){
 // Legacy candidate ANN and classification Tree/Leaf search removed.
 
 // Representative-net search cache.
-// Only representative vectors are held in process memory. The authoritative
-// 512-d REAL[] values remain in PostgreSQL. The cache invalidates whenever the
-// current RUN, representative count or latest updated_at changes.
+// Representative vectors and the HNSW graph are prepared outside the user search request.
+// Search never performs a synchronous HNSW build. If the index is not READY, it returns
+// INDEX_NOT_READY immediately and the preload continues in the background.
 const REP_GROUP_LIMIT=Math.max(3,Math.min(100,Number(process.env.GM_IMAGE_REP_GROUP_LIMIT||20)||20));
 let representativeCache={run_no:0,count:0,stamp:'',rows:[],loaded_at:0};
 let representativeHnswCache={run_no:0,count:0,stamp:'',index:null,built_at:0,build_ms:0};
+let representativePreloadPromise=null;
+let representativePreload={
+  state:'IDLE',phase:'IDLE',reason:'',run_no:0,total:0,loaded:0,built:0,percent:0,
+  started_at:0,finished_at:0,load_ms:0,build_ms:0,error:''
+};
 async function runtimeConfig(pool,key,def){
   const q=await pool.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[key]);
   return q.rows&&q.rows.length?C(q.rows[0].config_value):C(def);
@@ -146,13 +151,18 @@ async function runtimeConfig(pool,key,def){
 async function currentRepresentativeRun(pool){
   return Math.max(1,Math.trunc(Number(await runtimeConfig(pool,'image_vector_representative_run','1'))||1));
 }
-async function representativeSnapshot(pool){
+async function representativeMeta(pool){
   const runNo=await currentRepresentativeRun(pool);
   const meta=await pool.query(`SELECT COUNT(*)::int AS n,COALESCE(MAX(updated_at)::text,'') AS stamp
       FROM gm_image_vector_representative_map
      WHERE run_no=$1 AND representative_puid IS NOT NULL AND puid=representative_puid`,[runNo]);
-  const count=Number(meta.rows[0]&&meta.rows[0].n||0),stamp=C(meta.rows[0]&&meta.rows[0].stamp);
+  return {run_no:runNo,count:Number(meta.rows[0]&&meta.rows[0].n||0),stamp:C(meta.rows[0]&&meta.rows[0].stamp)};
+}
+async function representativeSnapshot(pool,meta){
+  meta=meta||await representativeMeta(pool);
+  const runNo=meta.run_no,count=meta.count,stamp=meta.stamp;
   if(count>0&&representativeCache.run_no===runNo&&representativeCache.count===count&&representativeCache.stamp===stamp&&representativeCache.rows.length===count)return representativeCache;
+  representativePreload.phase='CACHE_QUERY';
   const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
       FROM gm_image_vector_representative_map m
       JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
@@ -162,9 +172,22 @@ async function representativeSnapshot(pool){
        AND v.vector_image IS NOT NULL
        AND array_length(v.vector_image,1)=$2
      ORDER BY m.representative_no`,[runNo,DIM]);
-  const rows=[];
-  for(const r of q.rows||[]){const v=normalizedFloat32(r.vector_image);if(!v)continue;rows.push({representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid),vector:v});}
+  const rows=[],src=q.rows||[];
+  representativePreload.total=src.length;
+  representativePreload.phase='CACHE_NORMALIZE';
+  for(let i=0;i<src.length;i++){
+    const r=src[i],v=normalizedFloat32(r.vector_image);
+    if(v)rows.push({representative_no:Number(r.representative_no||0),representative_puid:C(r.representative_puid),vector:v});
+    r.vector_image=null; // release the parsed PostgreSQL REAL[] as soon as its Float32 copy is ready
+    if((i+1)%250===0){
+      representativePreload.loaded=rows.length;
+      representativePreload.percent=src.length?Math.min(49.9,(i+1)/src.length*50):0;
+      await new Promise(resolve=>setImmediate(resolve));
+    }
+  }
+  src.length=0; // do not retain the large query row array after normalization
   representativeCache={run_no:runNo,count:rows.length,stamp,rows,loaded_at:Date.now()};
+  representativePreload.loaded=rows.length;
   console.log('[GM_IMAGE_VECTOR_REP_CACHE]',JSON.stringify({run_no:runNo,count:rows.length,stamp,route_version:ROUTE_VERSION}));
   return representativeCache;
 }
@@ -179,25 +202,71 @@ function topRepresentativeMatches(queryNorm,rows,limit){
   }
   return out;
 }
-function representativeHnswSnapshot(snap){
-  if(representativeHnswCache.index&&representativeHnswCache.run_no===snap.run_no&&representativeHnswCache.count===snap.count&&representativeHnswCache.stamp===snap.stamp)return representativeHnswCache;
-  const started=Date.now(),index=new RepresentativeHnsw();
-  index.build(snap.rows);
-  representativeHnswCache={run_no:snap.run_no,count:snap.count,stamp:snap.stamp,index,built_at:Date.now(),build_ms:Date.now()-started};
-  console.log('[GM_IMAGE_VECTOR_REP_HNSW_BUILD]',JSON.stringify({run_no:snap.run_no,count:snap.count,build_ms:representativeHnswCache.build_ms,status:index.status(),route_version:ROUTE_VERSION}));
-  return representativeHnswCache;
+function hnswPublicStatus(){
+  const idx=representativeHnswCache.index?representativeHnswCache.index.status():null;
+  return Object.assign({},representativePreload,{
+    ready:representativePreload.state==='READY'&&!!representativeHnswCache.index,
+    cached_representatives:representativeCache.rows.length,
+    index_count:idx?Number(idx.count||0):0,
+    index:idx
+  });
+}
+function invalidateRepresentativeIndex(reason){
+  representativeCache={run_no:0,count:0,stamp:'',rows:[],loaded_at:0};
+  representativeHnswCache={run_no:0,count:0,stamp:'',index:null,built_at:0,build_ms:0};
+  representativePreload={state:'IDLE',phase:'IDLE',reason:C(reason||'invalidate'),run_no:0,total:0,loaded:0,built:0,percent:0,started_at:0,finished_at:0,load_ms:0,build_ms:0,error:''};
+}
+function startRepresentativePreload(pool,reason,force){
+  if(!pool)return false;
+  if(representativePreloadPromise)return false;
+  if(!force&&representativePreload.state==='READY'&&Date.now()-Number(representativePreload.finished_at||0)<30000)return false;
+  representativePreloadPromise=(async()=>{
+    const started=Date.now();
+    try{
+      representativePreload={state:'LOADING',phase:'META',reason:C(reason||'preload'),run_no:0,total:0,loaded:0,built:0,percent:0,started_at:started,finished_at:0,load_ms:0,build_ms:0,error:''};
+      const meta=await representativeMeta(pool);
+      representativePreload.run_no=meta.run_no;representativePreload.total=meta.count;
+      if(meta.count<1)throw new Error('representative map is empty; build representative data first');
+      if(representativeHnswCache.index&&representativeHnswCache.run_no===meta.run_no&&representativeHnswCache.count===meta.count&&representativeHnswCache.stamp===meta.stamp){
+        representativePreload={state:'READY',phase:'READY',reason:C(reason||'preload'),run_no:meta.run_no,total:meta.count,loaded:meta.count,built:meta.count,percent:100,started_at:started,finished_at:Date.now(),load_ms:0,build_ms:representativeHnswCache.build_ms,error:''};
+        return;
+      }
+      const loadStarted=Date.now();
+      const snap=await representativeSnapshot(pool,meta);
+      representativePreload.load_ms=Date.now()-loadStarted;
+      representativePreload.loaded=snap.rows.length;
+      representativePreload.total=snap.rows.length;
+      representativePreload.state='BUILDING';representativePreload.phase='HNSW_BUILD';representativePreload.percent=50;
+      const buildStarted=Date.now(),index=new RepresentativeHnsw();
+      await index.buildAsync(snap.rows,{yieldEvery:5,progressEvery:50,onProgress:p=>{
+        representativePreload.built=p.built;
+        representativePreload.percent=50+(Number(p.percent||0)*0.5);
+      }});
+      representativeHnswCache={run_no:snap.run_no,count:snap.count,stamp:snap.stamp,index,built_at:Date.now(),build_ms:Date.now()-buildStarted};
+      representativePreload={state:'READY',phase:'READY',reason:C(reason||'preload'),run_no:snap.run_no,total:snap.rows.length,loaded:snap.rows.length,built:snap.rows.length,percent:100,started_at:started,finished_at:Date.now(),load_ms:representativePreload.load_ms,build_ms:representativeHnswCache.build_ms,error:''};
+      console.log('[GM_IMAGE_VECTOR_REP_HNSW_READY]',JSON.stringify({run_no:snap.run_no,count:snap.rows.length,load_ms:representativePreload.load_ms,build_ms:representativeHnswCache.build_ms,total_ms:Date.now()-started,status:index.status(),route_version:ROUTE_VERSION}));
+    }catch(e){
+      representativePreload.state='ERROR';representativePreload.phase='ERROR';representativePreload.error=C(e&&e.message||e);representativePreload.finished_at=Date.now();
+      console.error('[GM_IMAGE_VECTOR_REP_HNSW_PRELOAD_ERROR]',JSON.stringify({error:representativePreload.error,route_version:ROUTE_VERSION}));
+    }finally{representativePreloadPromise=null;}
+  })();
+  representativePreloadPromise.catch(()=>{});
+  return true;
 }
 async function representativeNetSearch(pool,queryVector,limit,searchMode){
   searchMode=searchMode==='precise'?'precise':'fast';
   const timings={representative_cache_ms:0,hnsw_build_ms:0,representative_scan_ms:0,representative_search_ms:0,map_fetch_ms:0,vector_fetch_ms:0,exact_rerank_ms:0,product_fetch_ms:0};
   const qn=normalizedFloat32(queryVector);if(!qn)throw new Error('invalid query vector');
-  let t=Date.now();const snap=await representativeSnapshot(pool);timings.representative_cache_ms=Date.now()-t;
-  if(!snap.rows.length)throw new Error('representative map is empty; build representative data first');
+  let t=Date.now();
+  const snap=representativeCache;
+  timings.representative_cache_ms=0;
+  if(!snap.rows.length)throw new Error('INDEX_NOT_READY');
   let repTop=[];
   if(searchMode==='precise'){
     t=Date.now();repTop=topRepresentativeMatches(qn,snap.rows,REP_GROUP_LIMIT);timings.representative_scan_ms=Date.now()-t;timings.representative_search_ms=timings.representative_scan_ms;
   }else{
-    t=Date.now();const hc=representativeHnswSnapshot(snap);timings.hnsw_build_ms=Date.now()-t;
+    const hc=representativeHnswCache;
+    if(!hc.index||representativePreload.state!=='READY')throw new Error('INDEX_NOT_READY');
     t=Date.now();repTop=hc.index.search(qn,REP_GROUP_LIMIT);timings.representative_search_ms=Date.now()-t;
   }
   const repIds=repTop.map(x=>x.representative_puid);
@@ -252,8 +321,18 @@ router.get('/api/gm/image-vector/proxy',(req,res)=>{
  if(!u)return res.status(400).json({ok:false,error:'unsupported image url'});
  fetchImage(u,res,0);
 });
-router.get('/api/gm/image-vector/version',(req,res)=>res.json({ok:true,route_version:ROUTE_VERSION,dimensions:DIM,vector_version:VECTOR_VERSION,representative_hnsw:representativeHnswCache.index?representativeHnswCache.index.status():{count:0}}));
-router.get('/api/gm/image-vector/index-status',(req,res)=>res.json({ok:true,route_version:ROUTE_VERSION,representative_hnsw:representativeHnswCache.index?representativeHnswCache.index.status():{count:0}}));
+router.get('/api/gm/image-vector/version',(req,res)=>res.json({ok:true,route_version:ROUTE_VERSION,dimensions:DIM,vector_version:VECTOR_VERSION,representative_hnsw:hnswPublicStatus()}));
+router.get('/api/gm/image-vector/index-status',(req,res)=>{
+ const pool=req.app.locals.pool;
+ if(pool)startRepresentativePreload(pool,'index_status');
+ return res.json({ok:true,route_version:ROUTE_VERSION,representative_hnsw:hnswPublicStatus()});
+});
+router.post('/api/gm/image-vector/index-preload',(req,res)=>{
+ const pool=req.app.locals.pool;
+ if(!pool)return res.status(503).json({ok:false,error:'db unavailable',route_version:ROUTE_VERSION});
+ startRepresentativePreload(pool,'manual_preload',true);
+ return res.json({ok:true,route_version:ROUTE_VERSION,representative_hnsw:hnswPublicStatus()});
+});
 router.post('/api/gm/image-vector/missing',async(req,res)=>{
  const pool=req.app.locals.pool;
  const raw=Array.isArray(req.body&&req.body.product_uids)?req.body.product_uids:[];
@@ -292,10 +371,7 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
   // The upstream server already decides when a phone must create/refresh the image vector;
   // this route does not inspect thumbnail URLs or add duplicate image-url state.
   const representative=await assignIncremental(pool,uid,v);
-  if(!representative||representative.cache_action!=='keep'){
-    representativeCache={run_no:0,count:0,stamp:'',rows:[],loaded_at:0};
-    representativeHnswCache={run_no:0,count:0,stamp:'',index:null,built_at:0,build_ms:0};
-  }
+  if(!representative||representative.cache_action!=='keep')invalidateRepresentativeIndex('vector_upsert');
   console.log('[GM_IMAGE_VECTOR_REP_ASSIGN]',JSON.stringify({product_uid:uid,assignment:representative,route_version:ROUTE_VERSION}));
   return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,representative_assignment:representative,route_version:ROUTE_VERSION});
  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
@@ -308,6 +384,13 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
  try{
   const columnType=await vectorColumnType(pool);
   if(!isArrayVectorType(columnType))return res.status(409).json({ok:false,error:'representative search requires REAL[] production vectors',column_type:columnType,route_version:ROUTE_VERSION,search_ms:Date.now()-started});
+  const liveRun=await currentRepresentativeRun(pool);
+  const cacheReady=representativeCache.rows.length>0&&representativeCache.run_no===liveRun;
+  const hnswReady=representativePreload.state==='READY'&&representativeHnswCache.index&&representativeHnswCache.run_no===liveRun;
+  if(!cacheReady||(searchMode==='fast'&&!hnswReady)){
+    startRepresentativePreload(pool,'search_request');
+    return res.status(503).json({ok:false,error:'INDEX_NOT_READY',message:'대표이미지/HNSW 인덱스 준비 중입니다.',retry_after_ms:2000,route_version:ROUTE_VERSION,search_ms:Date.now()-started,representative_hnsw:hnswPublicStatus()});
+  }
   const out=await representativeNetSearch(pool,v,limit,searchMode),searchMs=Date.now()-started;
   const metaReady=out.matches.filter(m=>C(m.keyword||m.category_keyword||m.product_name)).length;
   console.log('[GM_IMAGE_VECTOR_REP_SEARCH]',JSON.stringify({mode:out.search_mode,run_no:out.run_no,representative_count:out.representative_count,rep_groups:out.representative_candidates.length,member_candidates:out.member_candidate_count,run0_candidates:out.run0_candidate_count,count:out.matches.length,best_score:out.matches[0]?Number(Number(out.matches[0].score||0).toFixed(6)):null,search_ms:searchMs,timings:out.timings,hnsw:out.hnsw_status,route_version:ROUTE_VERSION}));
