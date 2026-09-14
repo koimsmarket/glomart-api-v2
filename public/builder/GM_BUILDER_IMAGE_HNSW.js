@@ -1,6 +1,14 @@
 // GM_BUILDER_IMAGE_HNSW_UI_V001
 // Dedicated HNSW / representative-image Builder UI.
 
+// V002: this page is standalone and must not depend on GM_BUILDER_DASHBOARD.js.
+// Keep number formatting local so progress/status rendering cannot fail with `fmt is not defined`.
+function fmt(n){
+ if(n===null||n===undefined||n==='')return '-';
+ const v=Number(n);
+ return Number.isFinite(v)?v.toLocaleString():String(n);
+}
+
 function repElapsed(startedAt,finishedAt){
  if(!startedAt)return '00:00:00';
  const a=Date.parse(startedAt),b=finishedAt?Date.parse(finishedAt):Date.now();
