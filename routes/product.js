@@ -126,7 +126,6 @@ function normalizeQueueItems(p){
   const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : []);
   return items.filter(Boolean);
 }
-
 function makeRequestId(p, items){
   const raw = cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId);
   const chunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
@@ -230,6 +229,11 @@ function parseMaybeJsonAny(v){
   }
   return null;
 }
+function addIfMissingField(dst, key, val){
+  if(val === undefined || val === null) return;
+  const empty = dst[key] === undefined || dst[key] === null || (typeof dst[key] === 'string' && cleanText(dst[key]) === '') || (Array.isArray(dst[key]) && dst[key].length === 0);
+  if(empty) dst[key] = val;
+}
 function collectPayloadContainers(raw, maxDepth=4){
   const out=[]; const seen=new Set();
   const visit=(v, depth)=>{
@@ -327,8 +331,421 @@ function flattenDetailPayload(raw, parent={}){
   if(!cleanText(p.productName) && cleanText(p.gmTitle)) p.productName = p.gmTitle;
   return p;
 }
+const KEYWORD_LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+function uniqClean(arr){
+  const seen = new Set();
+  return (Array.isArray(arr) ? arr : (typeof arr === 'string' ? arr.split(/[|,\n\t]+/g) : []))
+    .map(cleanText).filter(Boolean).filter(v => { const k=v.toLowerCase(); if(seen.has(k)) return false; seen.add(k); return true; });
+}
+function pickKeywordMeta(p){
+  p = p || {};
+  const meta = p.searchKeywordMeta || p.keywordMeta || p.keyword_meta || p.search_keyword_meta || {};
+  const inputKeyword = cleanText(meta.inputKeyword || meta.input_keyword || p.inputKeyword || p.input_keyword || p.keyword || p.q || '');
+  const correctedKeyword = cleanText(meta.correctedKeyword || meta.corrected_keyword || p.correctedKeyword || p.corrected_keyword || '');
+  const mainKeyword = cleanText(meta.mainKeyword || meta.mainSearchKeyword || meta.main_search_keyword || meta.normalizedKeyword || meta.normalized_keyword || p.mainKeyword || p.mainSearchKeyword || p.normalized || p.normalizedKeyword || correctedKeyword || inputKeyword);
+  const originalKeyword = cleanText(meta.originalKeyword || meta.original_keyword || p.originalKeyword || p.original_keyword || inputKeyword);
+  const relatedKeywords = uniqClean(meta.relatedKeywords || meta.related_keywords || p.relatedKeywords || p.related_keywords || p.suggestKeywords || p.suggest_keywords);
+  const categoryMainKeywordKo = cleanText(meta.categoryMainKeywordKo || meta.category_main_keyword_ko || p.categoryMainKeywordKo || p.category_main_keyword_ko || '');
+  return { inputKeyword, correctedKeyword, originalKeyword, mainKeyword, relatedKeywords, categoryMainKeywordKo, raw:meta };
+}
+function pickTranslationValue(src, lang, baseKey){
+  src = src || {};
+  baseKey = baseKey || '';
+  return cleanText(
+    src[lang] || src[baseKey + '_' + lang] || src[baseKey + lang.toUpperCase()] ||
+    (src[baseKey] && src[baseKey][lang]) || ''
+  );
+}
+function pickKeywordTranslations(p, meta){
+  p = p || {}; meta = meta || {};
+  const root = p.keywordTranslations || p.keyword_translations || p.translations || p.translation ||
+    (p.mainKeywordTranslations ? { mainKeywordTranslations:p.mainKeywordTranslations } : null) ||
+    meta.keywordTranslations || meta.keyword_translations || meta.translations || {};
+  const main = root.mainKeywordTranslations || root.main_keyword_translations || root.mainKeyword || root.main_keyword || root.keyword || root;
+  const out = {};
+  KEYWORD_LANGS.forEach(lang => {
+    const v = lang === 'ko' ? (meta.mainKeyword || '') : pickTranslationValue(main, lang, 'keyword');
+    if(v) out[lang] = v;
+  });
+  return out;
+}
+function pickRelatedTranslations(p, meta){
+  p = p || {}; meta = meta || {};
+  const root = p.relatedKeywordTranslations || p.related_keyword_translations ||
+    p.relatedKeywordRows || p.related_keyword_rows ||
+    (p.keywordTranslations && (p.keywordTranslations.relatedKeywordTranslations || p.keywordTranslations.relatedKeywordRows || p.keywordTranslations.related_keywords)) ||
+    (meta.relatedKeywordTranslations || meta.related_keyword_translations || meta.relatedKeywordRows || meta.related_keyword_rows) || {};
+  if(Array.isArray(root)){
+    const out = {};
+    root.forEach(row => {
+      const ko = cleanText(row && (row.relatedKeywordKo || row.related_keyword_ko || row.ko || row.keyword));
+      const tr = row && (row.translations || row.relatedKeywordTranslations || row.related_keyword_translations || row);
+      if(ko) out[ko] = tr || {};
+    });
+    return out;
+  }
+  return root && typeof root === 'object' ? root : {};
+}
+function relatedTransFor(relatedTranslations, relatedKo){
+  relatedTranslations = relatedTranslations || {};
+  relatedKo = cleanText(relatedKo);
+  const norm = normalizeKeywordValue(relatedKo);
+  let direct = relatedTranslations[relatedKo] || relatedTranslations[norm] || {};
+  if(!direct && Array.isArray(relatedTranslations)){
+    direct = relatedTranslations.find(x => normalizeKeywordValue(x.related_keyword_ko || x.relatedKeywordKo || x.ko || x.keyword || '') === norm) || {};
+  }
+  if(direct && typeof direct === 'object'){
+    // {ko:'숟가락', en:'spoon'} 또는 {relatedKeywordTranslations:{...}} 모두 허용
+    direct = direct.translations || direct.relatedKeywordTranslations || direct.related_keyword_translations || direct;
+  }
+  return direct && typeof direct === 'object' ? direct : {};
+}
+function enrichTranslationKo(t, ko){
+  t = Object.assign({}, t || {});
+  if(!cleanText(t.ko)) t.ko = cleanText(ko);
+  return t;
+}
 
-// Keyword normalization/relation/translation logic moved to routes/search_keyword.js + services/keyword_relation.js.
+async function ensureKeywordTranslateTable(pool){
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_translate (
+    lang TEXT NOT NULL,
+    input_keyword TEXT NOT NULL,
+    main_keyword_ko TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (lang, input_keyword)
+  )`);
+}
+function pickLang(p){
+  return cleanText(p.lang || p.gm_lang || p.ui_lang_code || p.lang_code || p.country_lang || (p.searchKeywordMeta && (p.searchKeywordMeta.lang || p.searchKeywordMeta.gm_lang)) || 'ko').toLowerCase() || 'ko';
+}
+
+function boolToTF(v){
+  if(v === true) return 'T';
+  if(v === false) return 'F';
+  const s = cleanText(v).toUpperCase();
+  if(['T','TRUE','Y','YES','1','사용','CACHE'].includes(s)) return 'T';
+  return 'F';
+}
+async function ensureSearchLogSchema(pool){
+  // 검색로그는 분석용 최소 데이터만 저장한다. raw_json은 운영/백업 부담이 커서 제거한다.
+  try{ await pool.query(`ALTER TABLE gm_search_log DROP COLUMN IF EXISTS raw_json`); }
+  catch(e){ try{ console.warn('[GM_SEARCH_LOG_RAW_JSON_DROP_SKIP]', { message:e && e.message, code:e && e.code }); }catch(_l){} }
+  try{ await pool.query(`ALTER TABLE gm_search_log ALTER COLUMN cache_used TYPE CHAR(1) USING CASE WHEN COALESCE(cache_used::text,'') IN ('true','t','T','Y','y','1') THEN 'T' ELSE 'F' END`); }
+  catch(e){ try{ console.warn('[GM_SEARCH_LOG_CACHE_TF_SKIP]', { message:e && e.message, code:e && e.code }); }catch(_l){} }
+}
+async function lookupCategoryNameByCode(pool, cpCode){
+  cpCode = cleanText(cpCode);
+  if(!cpCode) return '';
+  try{
+    const r = await pool.query(`SELECT name_ko FROM gm_category WHERE cp_code::text=$1 LIMIT 1`, [cpCode]);
+    if(r.rows && r.rows[0] && cleanText(r.rows[0].name_ko)) return cleanText(r.rows[0].name_ko);
+  }catch(_e){}
+  try{
+    const r = await pool.query(`SELECT name_ko FROM gm_category_dynamic WHERE cp_code::text=$1 LIMIT 1`, [cpCode]);
+    if(r.rows && r.rows[0] && cleanText(r.rows[0].name_ko)) return cleanText(r.rows[0].name_ko);
+  }catch(_e){}
+  return '';
+}
+function pickSearchLogCategoryNo(p, meta){
+  return cleanText(
+    p.category_no || p.categoryNo || p.cp_selected_code || p.cpSelectedCode ||
+    p.selected_code || p.selectedCode || p.matched_category_keyword ||
+    (meta && (meta.selectedCode || meta.cp_selected_code || meta.matched_category_keyword)) ||
+    p.keyword_normalized || p.keyword_canonical || p.main_keyword || p.mainKeyword || p.keyword || p.input_keyword || ''
+  );
+}
+async function saveSearchLogPayload(pool, payload){
+  const p = parseIncomingPayloadBody(payload || {});
+  await ensureSearchLogSchema(pool);
+  const meta = pickKeywordMeta(p);
+  const keywordOriginal = cleanText(p.keyword_original || p.keywordOriginal || meta.originalKeyword || meta.inputKeyword || p.keyword || p.q || '');
+  const keywordNormalized = cleanText(p.keyword_normalized || p.keywordNormalized || p.keyword_canonical || p.keywordCanonical || meta.mainKeyword || meta.correctedKeyword || keywordOriginal);
+  const categoryCode = cleanText(p.category_code || p.categoryCode || p.cp_fix_code || p.cpFixCode || '');
+  const categoryName = cleanText(p.category_name || p.categoryName || (categoryCode ? await lookupCategoryNameByCode(pool, categoryCode) : ''));
+  const categoryNo = pickSearchLogCategoryNo(p, meta.raw || {});
+  const vals = [
+    keywordOriginal,
+    keywordNormalized,
+    cleanText(p.lang_code || p.langCode || p.ui_lang_code || p.uiLangCode || p.lang || 'kr'),
+    cleanText(p.country_code || p.countryCode || 'KR'),
+    cleanText(p.member_country_code || p.memberCountryCode || p.country_code || p.countryCode || 'KR'),
+    categoryCode || null,
+    categoryNo || null,
+    categoryName || null,
+    cleanText(p.mall_code || p.mallCode || p.mall || '').toUpperCase(),
+    toInt(p.result_count || p.resultCount, 0),
+    toInt(p.db_insert_count || p.dbInsertCount, 0),
+    toInt(p.queue_send_count || p.queueSendCount, 0),
+    boolToTF(p.cache_used !== undefined ? p.cache_used : p.cacheUsed),
+    cleanText(p.cache_key || p.cacheKey || ''),
+    cleanText(p.search_source || p.searchSource || p.source_page || p.sourcePage || 'search'),
+    cleanText(p.member_id || p.memberId || ''),
+    cleanText(p.guest_key || p.guestKey || ''),
+    cleanText(p.device_type || p.deviceType || 'app'),
+    cleanText(p.request_id || p.requestId || (meta.raw && meta.raw.requestId) || ''),
+    cleanText(p.keyword_canonical || p.keywordCanonical || keywordNormalized),
+    cleanText(p.ui_lang_code || p.uiLangCode || p.lang_code || p.langCode || 'kr'),
+    cleanText(p.keyword_lang_code || p.keywordLangCode || 'ko')
+  ];
+  const sql = `INSERT INTO gm_search_log (
+    search_at, keyword_original, keyword_normalized, lang_code, country_code, member_country_code,
+    category_code, category_no, category_name, mall_code, result_count, db_insert_count, queue_send_count,
+    cache_used, cache_key, search_source, member_id, guest_key, device_type, request_id,
+    created_at, keyword_canonical, ui_lang_code, keyword_lang_code
+  ) VALUES (now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now(), $20,$21,$22)
+  RETURNING search_id, keyword_original, keyword_normalized, category_code, category_no, category_name, mall_code, cache_used`;
+  const r = await pool.query(sql, vals);
+  try{ console.log('[GM_SEARCH_LOG_SAVE]', { row:r.rows && r.rows[0], raw_json_saved:false }); }catch(_l){}
+  return r.rows && r.rows[0] || null;
+}
+async function updateSearchLogCategoryByKeyword(pool, args){
+  args=args||{};
+  const keyword = cleanText(args.keyword);
+  const fix = cleanText(args.cp_fix_code);
+  if(!keyword || !fix) return { applied:false, reason:'keyword_or_fix_missing' };
+  await ensureSearchLogSchema(pool);
+  const name = cleanText(args.category_name || await lookupCategoryNameByCode(pool, fix));
+  const selected = cleanText(args.cp_selected_code || keyword);
+  const r = await pool.query(`
+    UPDATE gm_search_log
+    SET category_code=$2,
+        category_name=COALESCE(NULLIF($3,''), category_name),
+        category_no=COALESCE(NULLIF(category_no,''), $4),
+        cache_used=CASE WHEN COALESCE(cache_used::text,'') IN ('true','t','T','Y','y','1') THEN 'T' ELSE 'F' END
+    WHERE (keyword_normalized=$1 OR keyword_original=$1 OR keyword_canonical=$1)
+      AND (category_code IS NULL OR category_code::text='' OR category_code::text=$2)
+  `, [keyword, fix, name, selected]);
+  try{ console.log('[GM_SEARCH_LOG_CATEGORY_UPDATE]', { keyword, cp_fix_code:fix, category_name:name, category_no:selected, updated:r.rowCount||0 }); }catch(_l){}
+  return { applied:true, updated:r.rowCount||0, category_name:name };
+}
+async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, inc=1){
+  lang = cleanText(lang).toLowerCase(); inputKeyword = cleanText(inputKeyword); mainKeywordKo = cleanText(mainKeywordKo);
+  if(!lang || !inputKeyword || !mainKeywordKo) return false;
+  await pool.query(`INSERT INTO gm_keyword_translate (lang,input_keyword,main_keyword_ko,hit_count,updated_at)
+    VALUES ($1,$2,$3,$4,CURRENT_DATE)
+    ON CONFLICT (lang,input_keyword) DO UPDATE SET
+      main_keyword_ko=EXCLUDED.main_keyword_ko,
+      hit_count=gm_keyword_translate.hit_count + EXCLUDED.hit_count,
+      updated_at=CURRENT_DATE`, [lang, inputKeyword, mainKeywordKo, Math.max(1, toInt(inc,1))]);
+  return true;
+}
+async function saveKeywordTranslatePayload(pool, payload){
+  payload = payload || {};
+  await ensureKeywordTranslateTable(pool);
+  const meta = pickKeywordMeta(payload);
+  const mainKeywordKo = meta.mainKeyword;
+  const inputKeyword = meta.inputKeyword || payload.inputKeyword || payload.input_keyword || '';
+  const lang = pickLang(payload);
+  const translations = pickKeywordTranslations(payload, Object.assign({}, meta.raw || {}, { mainKeyword:mainKeywordKo }));
+  const relatedTranslations = pickRelatedTranslations(payload, meta.raw || {});
+  let alias_saved = 0, relation_saved = 0, relation_skipped = 0;
+
+  if(inputKeyword && mainKeywordKo){
+    const inputLooksKo = /[가-힣]/.test(inputKeyword);
+    const useLang = inputLooksKo ? 'ko' : lang;
+    if(await upsertKeywordTranslate(pool, useLang, inputKeyword, mainKeywordKo, 1)) alias_saved++;
+  }
+
+  for(const l of KEYWORD_LANGS){
+    if(l === 'ko') continue;
+    const v = cleanText(translations[l] || '');
+    if(v && mainKeywordKo){
+      if(await upsertKeywordTranslate(pool, l, v, mainKeywordKo, 0)) alias_saved++;
+    }
+  }
+
+  for(const rk of meta.relatedKeywords){
+    const t = relatedTransFor(relatedTranslations, rk);
+    try{
+      const ok = await saveKeywordRelationRow(pool, mainKeywordKo, rk, { categoryMainKeywordKo:meta.categoryMainKeywordKo, translations:t });
+      if(ok){ relation_saved++; await saveKeywordRelationStats(pool, mainKeywordKo, rk, meta.categoryMainKeywordKo); }
+      else relation_skipped++;
+    }catch(e){ relation_skipped++; }
+  }
+
+  return {
+    mainKeyword: mainKeywordKo,
+    inputKeyword,
+    lang,
+    alias_saved,
+    relation_saved,
+    relation_skipped,
+    related_count: meta.relatedKeywords.length,
+    mainKeywordTranslations: translations,
+    relatedKeywordTranslations: relatedTranslations
+  };
+}
+async function ensureKeywordRelationSchema(pool){
+  // 운영 DB 보호: 테이블 drop 없이 필요한 컬럼만 안전 추가한다.
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_complete CHAR(1) NOT NULL DEFAULT 'F'`); }catch(e){}
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_updated_at DATE`); }catch(e){}
+}
+function keywordRelationComplete(trans){
+  trans = trans || {};
+  return KEYWORD_LANGS.filter(l => l !== 'ko').every(lang => !!cleanText(trans[lang] || '')) ? 'T' : 'F';
+}
+async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
+  keywordKo = cleanText(keywordKo);
+  relatedKo = cleanText(relatedKo);
+  if(!keywordKo || !relatedKo) return false;
+  await ensureKeywordRelationSchema(pool);
+  const categoryMainKeywordKo = cleanText(options.categoryMainKeywordKo || '');
+  const trans = enrichTranslationKo(options.translations || {}, relatedKo);
+  const complete = keywordRelationComplete(trans);
+  const cols = ['category_main_keyword_ko','keyword_ko','related_keyword_ko'];
+  const vals = [categoryMainKeywordKo, keywordKo, relatedKo];
+  KEYWORD_LANGS.filter(l => l !== 'ko').forEach(lang => {
+    cols.push('related_keyword_' + lang);
+    vals.push(cleanText(trans[lang] || ''));
+  });
+  cols.push('translate_complete'); vals.push(complete);
+  cols.push('translate_updated_at'); vals.push(complete === 'T' ? new Date().toISOString().slice(0,10) : null);
+  const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
+  const langCols = KEYWORD_LANGS.filter(l => l !== 'ko').map(l => 'related_keyword_' + l);
+  const updateParts = [];
+  updateParts.push(`category_main_keyword_ko=CASE WHEN EXCLUDED.category_main_keyword_ko IS NULL OR EXCLUDED.category_main_keyword_ko::text='' THEN gm_keyword_relation.category_main_keyword_ko ELSE EXCLUDED.category_main_keyword_ko END`);
+  langCols.forEach(c => {
+    // 기존 row가 있어도 번역 컬럼이 비어 있고 EXCLUDED가 값을 가져오면 반드시 보강한다.
+    updateParts.push(`${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END`);
+  });
+  updateParts.push(`translate_complete=CASE WHEN ${langCols.map(c => `(CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END) IS NOT NULL AND (CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END)::text<>''`).join(' AND ')} THEN 'T' ELSE 'F' END`);
+  updateParts.push(`translate_updated_at=CASE WHEN ${langCols.map(c => `(CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END) IS NOT NULL AND (CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_relation.${c} ELSE EXCLUDED.${c} END)::text<>''`).join(' AND ')} THEN CURRENT_DATE ELSE gm_keyword_relation.translate_updated_at END`);
+  updateParts.push(`updated_at=CURRENT_DATE`);
+  const sql = `INSERT INTO gm_keyword_relation (${cols.join(',')}) VALUES (${placeholders})
+    ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET
+      ${updateParts.join(',\n      ')}`;
+  await pool.query(sql, vals);
+  try{ if(complete !== 'T') console.log('[GM_KEYWORD_RELATION_PENDING]', { keyword_ko:keywordKo, related_keyword_ko:relatedKo, complete }); }catch(_log){}
+  return true;
+}
+async function saveKeywordRelationStats(pool, keywordKo, relatedKo, categoryMainKeywordKo){
+  keywordKo = cleanText(keywordKo); relatedKo = cleanText(relatedKo);
+  if(!keywordKo || !relatedKo) return;
+  const d = new Date();
+  const ym = String(d.getFullYear()) + String(d.getMonth()+1).padStart(2,'0');
+  const yy = String(d.getFullYear());
+  const dayCol = 'day_' + String(d.getDate()).padStart(2,'0');
+  const monCol = 'month_' + String(d.getMonth()+1).padStart(2,'0');
+  const category = cleanText(categoryMainKeywordKo || '');
+  try{
+    await pool.query(`INSERT INTO gm_keyword_relation_${ym} (category_main_keyword_ko,keyword_ko,related_keyword_ko,${dayCol},month_total)
+      VALUES ($1,$2,$3,1,1)
+      ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET ${dayCol}=gm_keyword_relation_${ym}.${dayCol}+1, month_total=gm_keyword_relation_${ym}.month_total+1`, [category, keywordKo, relatedKo]);
+  }catch(e){}
+  try{
+    await pool.query(`INSERT INTO gm_keyword_relation_${yy} (category_main_keyword_ko,keyword_ko,related_keyword_ko,${monCol},year_total)
+      VALUES ($1,$2,$3,1,1)
+      ON CONFLICT (keyword_ko, related_keyword_ko) DO UPDATE SET ${monCol}=gm_keyword_relation_${yy}.${monCol}+1, year_total=gm_keyword_relation_${yy}.year_total+1`, [category, keywordKo, relatedKo]);
+  }catch(e){}
+}
+async function saveKeywordMetaPayload(pool, payload){
+  const meta = pickKeywordMeta(payload || {});
+  const keywordKo = meta.mainKeyword;
+  const related = meta.relatedKeywords;
+  const relatedTranslations = pickRelatedTranslations(payload || {}, meta.raw || {});
+  let saved = 0, skipped = 0;
+  if(!keywordKo) return { keyword_ko:'', saved, skipped, related_count:0 };
+  for(const rk of related){
+    const t = relatedTransFor(relatedTranslations, rk);
+    try{
+      const ok = await saveKeywordRelationRow(pool, keywordKo, rk, { categoryMainKeywordKo:meta.categoryMainKeywordKo, translations:t });
+      if(ok){ saved++; await saveKeywordRelationStats(pool, keywordKo, rk, meta.categoryMainKeywordKo); }
+      else skipped++;
+    }catch(e){ skipped++; }
+  }
+  return { keyword_ko:keywordKo, input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:related.length, saved, skipped };
+}
+async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relatedKeywords, parentPayload){
+  const payload = Object.assign({}, parentPayload || {});
+  if(keyword && !payload.keyword) payload.keyword = keyword;
+  if(relatedKeywords && !payload.relatedKeywords) payload.relatedKeywords = relatedKeywords;
+  const meta = pickKeywordMeta(payload);
+  const keywordKo = meta.mainKeyword || cleanText(keyword);
+  if(productUid && keywordKo){
+    try{ await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keywordKo, productUid]); }catch(e){}
+  }
+  return saveKeywordMetaPayload(pool, Object.assign({}, payload, { mainKeyword:keywordKo, relatedKeywords:meta.relatedKeywords }));
+}
+
+
+// GM_KEYWORD_TRANSLATE_WIDE_V043
+// 검색어 번역은 1개 한국어 키워드 = 1 row = 25개 언어 컬럼으로 저장한다.
+// 기존 PK(lang,input_keyword)를 유지하는 운영 DB에서도 lang='all', input_keyword=main_keyword_ko 로 1 row만 사용한다.
+const KEYWORD_WIDE_COLS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'].map(l => 'keyword_' + l);
+async function ensureKeywordTranslateTable(pool){
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_translate (
+    lang TEXT NOT NULL,
+    input_keyword TEXT NOT NULL,
+    main_keyword_ko TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    updated_at DATE NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (lang, input_keyword)
+  )`);
+  try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS keyword_ko TEXT`); }catch(_e){}
+  for(const l of KEYWORD_LANGS.filter(x=>x !== 'ko')){
+    try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS keyword_${l} TEXT`); }catch(_e){}
+  }
+  try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS translate_complete CHAR(1) NOT NULL DEFAULT 'F'`); }catch(_e){}
+  try{ await pool.query(`ALTER TABLE gm_keyword_translate ADD COLUMN IF NOT EXISTS created_at DATE NOT NULL DEFAULT CURRENT_DATE`); }catch(_e){}
+  try{ await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_keyword_translate_main_keyword_ko ON gm_keyword_translate(main_keyword_ko)`); }catch(_e){}
+}
+function keywordWideComplete(trans, mainKeywordKo){
+  const t = trans || {};
+  return KEYWORD_LANGS.every(l => !!cleanText(l === 'ko' ? (t.ko || mainKeywordKo) : t[l])) ? 'T' : 'F';
+}
+async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, inc=1, translationsArg=null){
+  mainKeywordKo = cleanText(mainKeywordKo || inputKeyword);
+  if(!mainKeywordKo) return false;
+  await ensureKeywordTranslateTable(pool);
+  const trans = Object.assign({}, translationsArg || {});
+  trans.ko = cleanText(trans.ko || mainKeywordKo);
+  // 단일어 호출 호환: 과거 방식으로 들어와도 해당 lang 컬럼만 보강한다.
+  const l0 = cleanText(lang).toLowerCase();
+  if(l0 && l0 !== 'all' && l0 !== 'ko' && cleanText(inputKeyword)) trans[l0] = cleanText(inputKeyword);
+  const complete = keywordWideComplete(trans, mainKeywordKo);
+  const cols = ['lang','input_keyword','main_keyword_ko','hit_count','updated_at','created_at','translate_complete'];
+  const vals = ['all', mainKeywordKo, mainKeywordKo, Math.max(0, toInt(inc,1)), new Date().toISOString().slice(0,10), new Date().toISOString().slice(0,10), complete];
+  for(const l of KEYWORD_LANGS){ cols.push('keyword_'+l); vals.push(cleanText(trans[l] || (l==='ko' ? mainKeywordKo : ''))); }
+  const placeholders = vals.map((_,i)=>'$'+(i+1)).join(',');
+  const upd=[];
+  upd.push(`main_keyword_ko=EXCLUDED.main_keyword_ko`);
+  upd.push(`hit_count=gm_keyword_translate.hit_count + EXCLUDED.hit_count`);
+  upd.push(`updated_at=CURRENT_DATE`);
+  for(const l of KEYWORD_LANGS){
+    const c='keyword_'+l;
+    upd.push(`${c}=CASE WHEN EXCLUDED.${c} IS NULL OR EXCLUDED.${c}::text='' THEN gm_keyword_translate.${c} ELSE EXCLUDED.${c} END`);
+  }
+  const completeExpr = KEYWORD_LANGS.map(l => `(CASE WHEN EXCLUDED.keyword_${l} IS NULL OR EXCLUDED.keyword_${l}::text='' THEN gm_keyword_translate.keyword_${l} ELSE EXCLUDED.keyword_${l} END) IS NOT NULL AND (CASE WHEN EXCLUDED.keyword_${l} IS NULL OR EXCLUDED.keyword_${l}::text='' THEN gm_keyword_translate.keyword_${l} ELSE EXCLUDED.keyword_${l} END)::text<>''`).join(' AND ');
+  upd.push(`translate_complete=CASE WHEN ${completeExpr} THEN 'T' ELSE 'F' END`);
+  await pool.query(`INSERT INTO gm_keyword_translate (${cols.join(',')}) VALUES (${placeholders}) ON CONFLICT (lang,input_keyword) DO UPDATE SET ${upd.join(', ')}`, vals);
+  return true;
+}
+async function saveKeywordTranslatePayload(pool, payload){
+  payload = payload || {};
+  await ensureKeywordTranslateTable(pool);
+  const meta = pickKeywordMeta(payload);
+  const mainKeywordKo = cleanText(meta.mainKeyword || payload.main_keyword_ko || payload.mainKeywordKo || payload.keyword_ko || payload.keyword || '');
+  const inputKeyword = cleanText(meta.inputKeyword || payload.inputKeyword || payload.input_keyword || mainKeywordKo);
+  const lang = pickLang(payload);
+  const translations = pickKeywordTranslations(payload, Object.assign({}, meta.raw || {}, { mainKeyword:mainKeywordKo }));
+  translations.ko = cleanText(translations.ko || mainKeywordKo);
+  let alias_saved = 0, relation_saved = 0, relation_skipped = 0;
+  if(mainKeywordKo){
+    if(await upsertKeywordTranslate(pool, lang, inputKeyword || mainKeywordKo, mainKeywordKo, 1, translations)) alias_saved++;
+  }
+  const relatedTranslations = pickRelatedTranslations(payload, meta.raw || {});
+  for(const rk of meta.relatedKeywords){
+    const t = relatedTransFor(relatedTranslations, rk);
+    try{
+      const ok = await saveKeywordRelationRow(pool, mainKeywordKo, rk, { categoryMainKeywordKo:meta.categoryMainKeywordKo, translations:t });
+      if(ok){ relation_saved++; await saveKeywordRelationStats(pool, mainKeywordKo, rk, meta.categoryMainKeywordKo); }
+      else relation_skipped++;
+    }catch(e){ relation_skipped++; try{ console.warn('[GM_KEYWORD_RELATION_SAVE_FAIL]', { keyword_ko:mainKeywordKo, related_keyword_ko:rk, message:e && e.message }); }catch(_l){} }
+  }
+  return { mainKeyword: mainKeywordKo, inputKeyword, lang, wide:true, alias_saved, relation_saved, relation_skipped, related_count: meta.relatedKeywords.length, mainKeywordTranslations: translations, relatedKeywordTranslations: relatedTranslations };
+}
+
 
 function ids(b){
   const mallCode = cleanText(b.mall_code || b.mallCode || b.source || b.mall || 'CPKR').toUpperCase();
@@ -489,150 +906,28 @@ function buildProductUrlFromId(id){
   return '';
 }
 function pickThumbUrl(p){
-  p=p||{};
-  const detailThumbSources=[
-    p.thumbnailImages,p.topImages,p.mainImages,p.thumbs,p.galleryImages,p.thumbnails
-  ];
-  for(const src of detailThumbSources){
-    const rows=parseThumbPipe(src);
-    for(const x of rows){
-      const u=normalizeUrl(x);
-      if(u) return u;
-    }
-  }
   return normalizeUrl(
     p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl ||
     p.thumbnail || p.thumbnail_url || p.thumbnailUrl || p.image || p.image_url || p.imageUrl || p.img || p.img_url || p.imgUrl
   );
 }
 
-function pickDeliveryTextDirect(p){
-  return firstNonEmpty(p || {}, ['delivery_eta_text','deliveryEtaText','deliveryRangeText','delivery_range_text','deliveryDateText','delivery_date_text','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
+function pickOptionName(p){
+  return cleanText(
+    p.option_name || p.optionName || p.display_option_name || p.displayOptionName ||
+    p.selected_option_name || p.selectedOptionName || p.sku_name || p.skuName ||
+    p.variant_name || p.variantName || p.optionTitle || p.option_title || ''
+  );
+}
+function pickOptionValue(p){
+  return cleanText(
+    p.option_value || p.optionValue || p.display_option_value || p.displayOptionValue ||
+    p.selected_option_value || p.selectedOptionValue || p.sku_value || p.skuValue ||
+    p.variant_value || p.variantValue || p.optionText || p.option_text || ''
+  );
 }
 function pickDeliveryText(p){
-  p=p||{};
-  // 상품 공통 배송일을 최우선으로 사용한다.
-  const direct=pickDeliveryTextDirect(p);
-  if(direct) return direct;
-
-  // ALKR 상세 payload는 상품 배송일이 옵션 행에만 남는 경로가 있다.
-  // 배송일은 상품 공통 속성이므로 옵션 중 실제 날짜/term으로 해석 가능한 첫 값을
-  // gm_product용 원문으로 승격한다. 값이 없거나 파싱 불가하면 빈값을 반환하여
-  // 기존 DB 배송 term을 유지(COALESCE/NULLIF)한다.
-  const lists=[
-    p.optionCombos,p.aliOptionCombos,p.flatOptionRows,p.optionRows,
-    p.visibleOptions,p.options,p.vendorItemOptions,p.itemOptions
-  ];
-  for(const list of lists){
-    if(!Array.isArray(list)) continue;
-    for(const row of list){
-      if(!row || typeof row!=='object' || Array.isArray(row)) continue;
-      const raw=pickDeliveryTextDirect(row);
-      if(raw && normalizeDeliveryTerm(raw,p)) return raw;
-    }
-  }
-
-  // 서버 표준 option_json.rows 배열에서 배송일은 10번째 값(index 9)이다.
-  const optionJsonCandidates=[p.option_json,p.optionJson];
-  for(const candidate of optionJsonCandidates){
-    let obj=candidate;
-    if(typeof obj==='string'){
-      try{ obj=JSON.parse(obj); }catch(_e){ obj=null; }
-    }
-    const rows=obj && Array.isArray(obj.rows) ? obj.rows : [];
-    for(const row of rows){
-      if(!Array.isArray(row)) continue;
-      const raw=cleanText(row[9] || '');
-      if(raw && normalizeDeliveryTerm(raw,p)) return raw;
-    }
-  }
-  return '';
-}
-
-// 배송일은 절대 날짜 문구를 장기 보관하지 않고 "최소일|최대일" term으로 저장한다.
-// 예: 7월 17일 ~ 7월 19일, 수집일 7월 14일 => 3|5
-// 이미 term(3|5)으로 들어온 값은 그대로 검증하여 사용한다.
-function deliveryBaseDate(p){
-  p=p||{};
-  const candidates=[
-    p.deliveryCollectedAt,p.delivery_collected_at,p.collectedAt,p.collected_at,
-    p.cacheSavedAt,p.cache_saved_at,p.cachedAt,p.cached_at,
-    p.lastSeenAt,p.last_seen_at,p.createdAt,p.created_at,p.updatedAt,p.updated_at
-  ];
-  for(const v of candidates){
-    if(v===undefined||v===null||cleanText(v)==='') continue;
-    const d=new Date(v);
-    if(!Number.isNaN(d.getTime())) return d;
-  }
-  return new Date();
-}
-function kstDayNumber(v){
-  const d=v instanceof Date?v:new Date(v);
-  if(Number.isNaN(d.getTime())) return null;
-  const kstMs=d.getTime()+(9*60*60*1000);
-  const x=new Date(kstMs);
-  return Date.UTC(x.getUTCFullYear(),x.getUTCMonth(),x.getUTCDate())/86400000;
-}
-function absoluteDeliveryDay(month,day,base){
-  const baseDay=kstDayNumber(base);
-  if(baseDay===null) return null;
-  const kstMs=base.getTime()+(9*60*60*1000);
-  const b=new Date(kstMs);
-  let year=b.getUTCFullYear();
-  let target=Date.UTC(year,Number(month)-1,Number(day))/86400000;
-  if(target+183<baseDay) target=Date.UTC(year+1,Number(month)-1,Number(day))/86400000;
-  return target;
-}
-function validDeliveryTerm(min,max){
-  min=Number(min); max=Number(max);
-  if(!Number.isFinite(min)||!Number.isFinite(max)) return '';
-  min=Math.max(0,Math.round(min)); max=Math.max(0,Math.round(max));
-  if(min>max||max>365) return '';
-  return String(min)+'|'+String(max);
-}
-function normalizeDeliveryTerm(raw,p){
-  const text=cleanText(raw||'');
-  if(!text) return '';
-  let m=text.match(/^\s*(\d{1,3})\s*[|/]\s*(\d{1,3})\s*(?:일)?\s*$/);
-  if(m) return validDeliveryTerm(m[1],m[2]);
-
-  const base=deliveryBaseDate(p);
-  const baseDay=kstDayNumber(base);
-  if(baseDay===null) return '';
-
-  m=text.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*[-~–—]\s*(?:(\d{1,2})\s*월\s*)?(\d{1,2})\s*일/);
-  if(m){
-    const d1=absoluteDeliveryDay(m[1],m[2],base);
-    let d2=absoluteDeliveryDay(m[3]||m[1],m[4],base);
-    if(d1===null||d2===null) return '';
-    if(d2<d1) d2=Date.UTC(new Date(d2*86400000).getUTCFullYear(),new Date(d2*86400000).getUTCMonth()+1,new Date(d2*86400000).getUTCDate())/86400000;
-    return validDeliveryTerm(d1-baseDay,d2-baseDay);
-  }
-  // 절대 날짜 범위를 먼저 판정한 뒤에만 순수 term 문구(예: 3~5일)를 판정한다.
-  // 그렇지 않으면 "7월 15일 ~ 17일"을 15/17로 오인한다.
-  m=text.match(/(?:^|\s)(\d{1,3})\s*(?:일)?\s*[-~–—]\s*(\d{1,3})\s*일(?:\s|$)/);
-  if(m) return validDeliveryTerm(m[1],m[2]);
-  if(/오늘/.test(text)) return '0|0';
-  if(/내일/.test(text)) return '1|1';
-  if(/모레/.test(text)) return '2|2';
-  m=text.match(/(?:주문일\s*)?\+\s*(\d{1,3})\s*일/);
-  if(m) return validDeliveryTerm(m[1],m[1]);
-  m=text.match(/(\d{1,3})\s*일\s*(?:내|이내)\s*배송\s*예정/);
-  if(m) return validDeliveryTerm(m[1],m[1]);
-  m=text.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
-  if(m){
-    const d=absoluteDeliveryDay(m[1],m[2],base);
-    return d===null?'':validDeliveryTerm(d-baseDay,d-baseDay);
-  }
-  m=text.match(/(?:^|\s)(\d{1,2})\s*\/\s*(\d{1,2})(?:\s|$)/);
-  if(m){
-    const d=absoluteDeliveryDay(m[1],m[2],base);
-    return d===null?'':validDeliveryTerm(d-baseDay,d-baseDay);
-  }
-  return '';
-}
-function pickDeliveryTerm(p){
-  return normalizeDeliveryTerm(pickDeliveryText(p),p);
+  return firstNonEmpty(p, ['delivery_eta_text','deliveryEtaText','arrival','arrivalText','arrival_text','deliveryText','delivery_text','searchShippingText','exactDeliveryText','shipping_text','shippingText','shipping_message','shippingMessage','eta_text','etaText']);
 }
 function pickDeliveryType(p){
   return cleanText(firstNonEmpty(p, ['delivery_type','deliveryType','searchDeliveryType','shipping_type','shippingType','shipLabel','shippingLabel','delivery_badge','deliveryBadge','shipping_badge','shippingBadge']));
@@ -720,6 +1015,7 @@ function normalizeProductPayload(raw, parent={}){
   return { p, id:{ productId, itemId, vendorItemId, mallCode, pi, uid }, productName };
 }
 
+function jsonCleanText(v){ return cleanText(v); }
 function safeJsonString(v){
   try{
     if(v === undefined || v === null || v === '') return '[]';
@@ -761,7 +1057,7 @@ function compactError(e){
 }
 function detailSignalStats(optionJson, thumbJson, detailJson, p){
   optionJson = optionJson || {}; detailJson = detailJson || {}; p = p || {};
-  const thumbCount = thumbPipeCount(thumbJson);
+  const thumbCount = Array.isArray(thumbJson) ? thumbJson.length : 0;
   const detailCount = (Array.isArray(detailJson.images) ? detailJson.images.length : 0) +
     (Array.isArray(detailJson.blocks) ? detailJson.blocks.length : 0) +
     (Array.isArray(detailJson.texts) ? detailJson.texts.length : 0);
@@ -780,15 +1076,14 @@ function detailSignalStats(optionJson, thumbJson, detailJson, p){
 }
 async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, returnFee){
   const stats = detailSignalStats(optionJson, thumbJson, detailJson, p);
-  const remoteDelivery = normalizeRemoteDeliveryPolicy(p);
-  const hasDetail = stats.option_count > 0 || stats.thumb_count > 0 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
+  const hasDetail = stats.option_count > 0 || stats.thumb_count > 1 || stats.detail_count > 0 || cleanText(p.supplier_name || p.supplierName) || cleanText(p.cp_fix_code || p.cpFixCode || p.cp_code || p.cpCode) || returnFee > 0 || pickBuyableQty(p) !== null;
   if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats, id };
   const q = `
     UPDATE gm_product SET
       option_count = CASE WHEN $2::int > 0 THEN $2::int ELSE option_count END,
       option_json = CASE WHEN $3::jsonb IS NOT NULL THEN option_json ELSE option_json END,
       thumb_json = CASE
-        WHEN $4::int > 0
+        WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
         THEN $5::jsonb ELSE thumb_json END,
       detail_json = CASE WHEN $6::int > 0 THEN $7::jsonb ELSE detail_json END,
       cp_selected_code = CASE
@@ -818,18 +1113,13 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       return_policy_text = COALESCE(NULLIF($24,''), return_policy_text),
       exchange_policy_text = COALESCE(NULLIF($25,''), exchange_policy_text),
       return_shipping_fee = CASE WHEN $26::int > 0 THEN $26::int ELSE return_shipping_fee END,
-      jeju_delivery_yn = CASE WHEN $27::boolean THEN $28 ELSE jeju_delivery_yn END,
-      jeju_extra_delivery_fee = CASE WHEN $27::boolean THEN $29::int ELSE jeju_extra_delivery_fee END,
-      island_delivery_yn = CASE WHEN $30::boolean THEN $31 ELSE island_delivery_yn END,
-      island_extra_delivery_fee = CASE WHEN $30::boolean THEN $32::int ELSE island_extra_delivery_fee END,
       updated_at = now()
-    WHERE product_uid = $1 OR (mall_code=$33 AND pi_ii_vi=$34)
+    WHERE product_uid = $1 OR (mall_code=$27 AND pi_ii_vi=$28)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
-      CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) WHEN jsonb_typeof(thumb_json)='string' THEN COALESCE(NULLIF(split_part(trim(both '"' from thumb_json::text),'|',1),'')::int,0) ELSE 0 END AS thumb_count,
+      CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
       COALESCE(NULLIF(detail_json->>'block_count','')::int,0) AS detail_block_count,
-      supplier_name, cp_fix_code, cp_match, buyable_qty, return_shipping_fee,
-      jeju_delivery_yn, jeju_extra_delivery_fee, island_delivery_yn, island_extra_delivery_fee
+      supplier_name, cp_fix_code, cp_match, buyable_qty, return_shipping_fee
   `;
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
@@ -850,8 +1140,6 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
     returnFee || 0,
-    remoteDelivery.jeju_provided, remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
-    remoteDelivery.island_provided, remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
     cleanText(id.mallCode || ''), cleanText(id.pi || '')
   ];
   const r = await pool.query(q, vals);
@@ -881,20 +1169,19 @@ function normalizeMallCategoryJson(p){
   if(!Array.isArray(src)) src = [];
   const out=[]; const seen=new Set();
   src.forEach((r)=>{
-    let id='', name='', href='', depth=out.length;
+    let id='', name='', href='', depth=out.length+1;
     if(r && typeof r === 'object'){
       id = cleanText(r.cp_code || r.cpCode || r.id || r.category_id || r.categoryId || r.cate_no || r.cateNo || r.code || '');
       name = cleanText(r.name_ko || r.nameKo || r.name || r.category_name || r.categoryName || r.title || r.label || '');
       href = cleanText(r.href || r.url || '');
-      depth = (r.depth !== undefined || r.level !== undefined) ? toInt(r.depth !== undefined ? r.depth : r.level, depth) : depth;
+      depth = toInt(r.depth || r.level || depth, depth);
     }else{
       name = cleanText(r);
     }
     if(!id && !name) return;
     const sig=(id||'')+'|'+name;
     if(seen.has(sig)) return; seen.add(sig);
-    // DB에는 카테고리 경로 복원에 필요한 최소값만 저장한다.
-    out.push({ depth: depth, id, name });
+    out.push({ depth: out.length + 1, id, cp_code:id, name, name_ko:name, href });
   });
   return out;
 }
@@ -911,42 +1198,33 @@ function pickMallCategoryLeaf(p, mallCategoryJson){
   return direct;
 }
 
-function parseThumbPipe(v){
-  if(v===undefined||v===null) return [];
-  if(Array.isArray(v)) return v;
-  if(typeof v==='object'){
-    if(Array.isArray(v.images)) return v.images;
-    if(Array.isArray(v.rows)) return v.rows;
-    if(Array.isArray(v.urls)) return v.urls;
-    v=v.pipe||v.value||'';
-  }
-  let t=cleanText(v);
-  if(!t) return [];
-  try{ const j=JSON.parse(t); if(j!==t) return parseThumbPipe(j); }catch(_e){}
-  const parts=t.split('|');
-  if(/^\d+$/.test(cleanText(parts[0]))) parts.shift();
-  return parts.map(cleanText).filter(Boolean);
-}
-function thumbPipeCount(v){ return parseThumbPipe(v).length; }
 function normalizeThumbJson(p){
   p=p||{};
-  const main=pickThumbUrl(p);
-  const candidates=[];
-  // 상세 수집 배열을 우선 사용한다. 대표 1번은 pickThumbUrl()이 가져가고,
-  // 여기에는 같은 배열의 2~10번 이미지만 남는다.
-  [p.thumbnailImages,p.topImages,p.mainImages,p.thumbs,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.images,p.thumb_pipe,p.thumbPipe,p.thumb_json,p.thumbJson].forEach((a)=>{
-    parseThumbPipe(a).forEach(x=>candidates.push(x));
-  });
-  const out=[]; const seen=new Set();
-  const mainKey=main;
-  for(const x of candidates){
-    const u=normalizeUrl(x);
-    if(!u || u===mainKey || seen.has(u)) continue;
-    seen.add(u); out.push(u);
-    if(out.length>=9) break;
+  if(p.thumb_json && typeof p.thumb_json === 'object' && !Array.isArray(p.thumb_json)){
+    if(Array.isArray(p.thumb_json.images) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.images;
+    if(Array.isArray(p.thumb_json.rows) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.rows;
+    if(Array.isArray(p.thumb_json.urls) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumb_json.urls;
   }
-  return String(out.length)+(out.length?'|'+out.join('|'):'');
+  if(p.thumbJson && typeof p.thumbJson === 'object' && !Array.isArray(p.thumbJson)){
+    if(Array.isArray(p.thumbJson.images) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.images;
+    if(Array.isArray(p.thumbJson.rows) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.rows;
+    if(Array.isArray(p.thumbJson.urls) && !Array.isArray(p.thumbnailImages)) p.thumbnailImages = p.thumbJson.urls;
+  }
+  const out=[]; const seen=new Set();
+  function add(v, source){
+    if(v && typeof v === 'object') v = v.url || v.src || v.image || v.thumb || '';
+    v = normalizeUrl(v);
+    if(!v || seen.has(v)) return;
+    seen.add(v);
+    out.push(v);
+  }
+  [p.thumb_json,p.thumbJson,p.thumbnailImages,p.images,p.galleryImages,p.thumbnails,p.mainThumbnailImages,p.skuThumbnailImages,p.topImages,p.mainImages,p.thumbs].forEach((a)=>{
+    if(Array.isArray(a)) a.forEach(x=>add(x,'array'));
+  });
+  add(p.thumb_origin_url || p.thumbOriginUrl || p.thumb_url || p.thumbUrl || p.thumbnail || p.image || p.mainImage, 'main');
+  return out;
 }
+
 function normalizeDetailJson(p){
   p=p||{};
   if(p.detail_json && typeof p.detail_json === 'object' && !Array.isArray(p.detail_json)){
@@ -1077,7 +1355,7 @@ function normalizeOptionJson(p, id){
       const uid=uid0 || (id.mallCode && pi0 ? id.mallCode + '_' + pi0 : pi0);
       const name0=cleanText(r[4] || r[5] || p.optionName || p.product_name || p.productName || '기본옵션');
       if(!uid && !name0) return;
-      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),normalizeDeliveryTerm(r[9]||'',p),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
+      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
       return;
     }
     if(!r || typeof r !== 'object') return;
@@ -1095,7 +1373,7 @@ function normalizeOptionJson(p, id){
     const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.delivery_type || r.shipType || p.shippingLabel || p.deliveryType || p.delivery_type || '');
     const img = normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.colorImage || r.image || r.thumbnail || r.thumb || '');
     const sold = !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || r.sale_status || '')));
-    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,normalizeDeliveryTerm(r.delivery_eta_text || r.deliveryEtaText || r.deliveryRangeText || r.delivery_range_text || r.deliveryDateText || r.delivery_date_text || r.arrivalText || r.etaText || p.delivery_eta_text || p.deliveryEtaText || p.deliveryRangeText || p.delivery_range_text || p.deliveryDateText || p.delivery_date_text || p.arrivalText || p.deliveryText || p.shippingText || p.etaText || '',p),img,sold,cleanText(r.source || '')]);
+    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || p.deliveryDateText || p.arrivalText || ''),img,sold,cleanText(r.source || '')]);
   }));
 
   // 검색결과 payload에는 옵션배열이 없지만 현재 리스트 행 자체가 대표 판매옵션이다.
@@ -1105,7 +1383,7 @@ function normalizeOptionJson(p, id){
     const uid = cleanText(id.mallCode && id.pi ? id.mallCode + '_' + id.pi : id.pi);
     rows.push([
       uid, id.productId, id.itemId || '', id.vendorItemId || id.productId, name,
-      pickPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryTerm(p),
+      pickPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryText(p),
       normalizeUrl(p.option_image_url || p.optionImageUrl || p.thumb_origin_url || p.thumbOriginUrl || p.thumbnail || p.image || ''),
       /품절|sold\s*out/i.test(cleanText(p.soldout_yn || p.soldoutYn || p.soldout || p.sale_status || '')),
       'search-row'
@@ -1119,6 +1397,9 @@ function normalizeOptionJson(p, id){
 
 // GM_PRODUCT_OPTION_TABLE_V001
 // 옵션은 상품 JSON에 중복 저장하지 않고 gm_product_option에만 운영 컬럼으로 저장한다.
+function makeEmptyOptionJson(){
+  return { iid_vid:'' };
+}
 function makeProductOptionLinkJson(optionJson, id){
   optionJson = optionJson || {}; id = id || {};
   const vals = [];
@@ -1174,7 +1455,7 @@ function optionRowsFromOptionJson(optionJson, id, p){
       normal_price: parseMoney(r[6], 0),
       discount_price: 0,
       delivery_fee: parseMoney(r[8], 0),
-      delivery_eta_text: normalizeDeliveryTerm(r[9] || '', p),
+      delivery_eta_text: cleanText(r[9] || ''),
       delivery_type: cleanText(r[7] || ''),
       soldout_yn: soldoutYn,
       sale_status: soldoutYn === 'Y' ? 'soldout' : 'active',
@@ -1268,8 +1549,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           normal_price=COALESCE(EXCLUDED.normal_price, gm_product_option.normal_price),
           discount_price=EXCLUDED.discount_price,
           delivery_fee=EXCLUDED.delivery_fee,
-          -- 옵션도 동일 정책: 유효 term만 갱신하고 빈 검색값은 기존값 유지
-          delivery_eta_text=COALESCE(NULLIF(BTRIM(EXCLUDED.delivery_eta_text),''), gm_product_option.delivery_eta_text),
+          delivery_eta_text=EXCLUDED.delivery_eta_text,
           delivery_type=EXCLUDED.delivery_type,
           soldout_yn=EXCLUDED.soldout_yn,
           sale_status=EXCLUDED.sale_status,
@@ -1329,8 +1609,6 @@ function pickTaxType(p){
 
 const {
   pickCpSelectedCode,
-  classifySelectedCode,
-  normalizeCategoryNameForMatch,
   pickCpFixCode,
   normalizeCpMatch,
   ensureProductCpColumns,
@@ -1342,174 +1620,6 @@ const {
   applyCpFixLearning
 } = require('../services/category');
 
-
-// GM_SEARCH_CATEGORY_ONCE_V020
-// 카테고리 판정은 검색 요청(requestId + keyword)마다 정확히 1회만 수행한다.
-// CPKR chunk들은 같은 requestId를 공유하고, requestId가 비어 오는 후발 ALKR 결과는
-// 동일 keyword의 가장 최근 검색 판정값만 재사용한다. 서로 다른 검색어/검색 요청 간 값 공유는 금지한다.
-const __gmSearchCategoryByRequest = new Map();
-const __gmLatestSearchCategoryByKeyword = new Map();
-const GM_SEARCH_CATEGORY_ONCE_TTL_MS = Math.max(30000, Number(process.env.GM_SEARCH_CATEGORY_ONCE_TTL_MS || 90000));
-
-function searchCategoryKeywordKey(keyword){
-  return normalizeKeywordValue(keyword);
-}
-
-function searchCategoryRequestToken(p){
-  return cleanText(
-    p.request_id || p.requestId || p.search_request_id || p.searchRequestId ||
-    p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || ''
-  );
-}
-
-function cleanupSearchCategoryOnce(now){
-  if(__gmSearchCategoryByRequest.size > 500){
-    for(const [k,v] of __gmSearchCategoryByRequest){
-      if(!v || v.expires_at <= now) __gmSearchCategoryByRequest.delete(k);
-      if(__gmSearchCategoryByRequest.size <= 300) break;
-    }
-  }
-  if(__gmLatestSearchCategoryByKeyword.size > 300){
-    for(const [k,v] of __gmLatestSearchCategoryByKeyword){
-      if(!v || v.expires_at <= now) __gmLatestSearchCategoryByKeyword.delete(k);
-      if(__gmLatestSearchCategoryByKeyword.size <= 200) break;
-    }
-  }
-}
-
-async function resolveSearchCategoryOnce(pool, keyword, requestToken){
-  const keywordKey = searchCategoryKeywordKey(keyword);
-  if(!keywordKey) return { value:'', cache_hit:false, reason:'empty_keyword' };
-
-  const now = Date.now();
-  cleanupSearchCategoryOnce(now);
-  const token = cleanText(requestToken);
-
-  // 정상 검색 요청: requestId + keyword를 절대 키로 사용한다.
-  if(token){
-    const requestKey = token + '::' + keywordKey;
-    const cached = __gmSearchCategoryByRequest.get(requestKey);
-    if(cached && cached.expires_at > now){
-      if(cached.promise){
-        const pendingValue = cleanText(await cached.promise);
-        if(!pendingValue) __gmSearchCategoryByRequest.delete(requestKey);
-        return { value:pendingValue, cache_hit:true, reason:pendingValue ? 'request_pending_reuse' : 'request_pending_empty_no_cache' };
-      }
-      return { value:cached.value, cache_hit:true, reason:'request_value_reuse' };
-    }
-
-    const promise = (async()=>{
-      try{
-        // cp_selected_code에는 실제 카테고리 코드만 허용한다.
-        // 조회 실패/미매칭 시 검색어 원문을 대입하지 않고 빈값으로 반환한다.
-        return cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
-      }catch(e){
-        console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), request_id:token, error:compactError(e) });
-        return '';
-      }
-    })();
-
-    __gmSearchCategoryByRequest.set(requestKey, { promise, expires_at:now + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
-    const value = cleanText(await promise);
-    if(!value){
-      // 빈값은 캐시하지 않는다. 다음 chunk/후속 요청에서 다시 판정할 수 있게 한다.
-      __gmSearchCategoryByRequest.delete(requestKey);
-      return { value:'', cache_hit:false, reason:'request_empty_no_cache' };
-    }
-
-    const expiresAt = Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS;
-    __gmSearchCategoryByRequest.set(requestKey, { value, expires_at:expiresAt });
-    __gmLatestSearchCategoryByKeyword.set(keywordKey, { value, request_token:token, expires_at:expiresAt });
-    return { value, cache_hit:false, reason:'request_resolved' };
-  }
-
-  // ALKR 잔여 결과처럼 requestId가 비어 있는 경우에만 같은 keyword의 최신 검색값을 사용한다.
-  const latest = __gmLatestSearchCategoryByKeyword.get(keywordKey);
-  if(latest && latest.expires_at > now){
-    return { value:latest.value, cache_hit:true, reason:'latest_keyword_reuse' };
-  }
-
-  // 선행 CPKR 요청을 찾지 못한 독립 요청은 해당 keyword로 1회 판정한다.
-  try{
-    const value = cleanText(await findCpSelectedCodeForKeyword(pool, keyword));
-    if(value){
-      __gmLatestSearchCategoryByKeyword.set(keywordKey, { value, request_token:'', expires_at:Date.now() + GM_SEARCH_CATEGORY_ONCE_TTL_MS });
-      return { value, cache_hit:false, reason:'keyword_resolved_without_request' };
-    }
-    return { value:'', cache_hit:false, reason:'keyword_empty_no_cache' };
-  }catch(e){
-    console.warn('[GM_SEARCH_CATEGORY_ONCE_ERROR]', { keyword:cleanText(keyword), request_id:'', error:compactError(e) });
-    return { value:'', cache_hit:false, reason:'keyword_error_no_fallback' };
-  }
-}
-
-
-let __gmRemoteDeliverySchemaEnsured = false;
-let __gmRemoteDeliverySchemaPromise = null;
-async function ensureProductRemoteDeliverySchema(pool){
-  if(__gmRemoteDeliverySchemaEnsured) return true;
-  if(__gmRemoteDeliverySchemaPromise) return __gmRemoteDeliverySchemaPromise;
-
-  __gmRemoteDeliverySchemaPromise = (async function(){
-    const stmts = [
-      `ALTER TABLE gm_product ALTER COLUMN jeju_delivery_yn DROP NOT NULL`,
-      `ALTER TABLE gm_product ALTER COLUMN jeju_delivery_yn DROP DEFAULT`,
-      `ALTER TABLE gm_product ALTER COLUMN jeju_extra_delivery_fee DROP NOT NULL`,
-      `ALTER TABLE gm_product ALTER COLUMN jeju_extra_delivery_fee DROP DEFAULT`,
-      `ALTER TABLE gm_product ALTER COLUMN island_delivery_yn DROP NOT NULL`,
-      `ALTER TABLE gm_product ALTER COLUMN island_delivery_yn DROP DEFAULT`,
-      `ALTER TABLE gm_product ALTER COLUMN island_extra_delivery_fee DROP NOT NULL`,
-      `ALTER TABLE gm_product ALTER COLUMN island_extra_delivery_fee DROP DEFAULT`
-    ];
-
-    for(const sql of stmts){
-      await pool.query(sql);
-    }
-
-    const verify = await pool.query(`
-      SELECT column_name, is_nullable, column_default
-      FROM information_schema.columns
-      WHERE table_schema = current_schema()
-        AND table_name = 'gm_product'
-        AND column_name = ANY($1::text[])
-      ORDER BY column_name
-    `, [[
-      'jeju_delivery_yn',
-      'jeju_extra_delivery_fee',
-      'island_delivery_yn',
-      'island_extra_delivery_fee'
-    ]]);
-
-    const rows = verify.rows || [];
-    const expected = new Set([
-      'jeju_delivery_yn',
-      'jeju_extra_delivery_fee',
-      'island_delivery_yn',
-      'island_extra_delivery_fee'
-    ]);
-    const invalid = rows.filter(function(row){
-      expected.delete(row.column_name);
-      return row.is_nullable !== 'YES' || row.column_default != null;
-    });
-
-    if(expected.size || invalid.length){
-      const e = new Error('remote delivery schema verification failed');
-      e.code = 'GM_REMOTE_DELIVERY_SCHEMA_VERIFY_FAIL';
-      e.detail = JSON.stringify({ missing:Array.from(expected), invalid:invalid });
-      throw e;
-    }
-
-    __gmRemoteDeliverySchemaEnsured = true;
-    try{ console.log('[GM_PRODUCT_REMOTE_DELIVERY_DDL_OK]', rows); }catch(_log){}
-    return true;
-  })().catch(function(e){
-    __gmRemoteDeliverySchemaPromise = null;
-    try{ console.error('[GM_PRODUCT_REMOTE_DELIVERY_DDL_FAIL]', compactError(e)); }catch(_log){}
-    throw e;
-  });
-
-  return __gmRemoteDeliverySchemaPromise;
-}
 
 let __gmLightJsonColumnsEnsured = false;
 async function ensureProductLightJsonColumns(pool){
@@ -1570,102 +1680,6 @@ function pickReturnShippingFee(p, mallSalePrice){
   return 0;
 }
 
-
-function normalizeRemoteDeliveryPolicy(p){
-  p = p || {};
-  // 서버가 지역배송 상태의 유효성만 검증한다.
-  // 필드 미제공은 기존 DB 값 유지, 명시적 null은 NULL 저장이다.
-  const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
-  const pickProvided = (snake, camel) => {
-    if(own(p, snake)) return { provided:true, value:p[snake] };
-    if(own(p, camel)) return { provided:true, value:p[camel] };
-    return { provided:false, value:undefined };
-  };
-  const normalizeMode = (v) => {
-    if(v === null || v === undefined || cleanText(v) === '') return null;
-    const m = cleanText(v).toUpperCase();
-    return (m === 'Y' || m === 'N' || m === 'F') ? m : null;
-  };
-  const normalizeOne = (statusSnake, statusCamel, feeSnake, feeCamel) => {
-    const statusRaw = pickProvided(statusSnake, statusCamel);
-    const feeRaw = pickProvided(feeSnake, feeCamel);
-    let status = statusRaw.provided ? normalizeMode(statusRaw.value) : null;
-    let fee = feeRaw.provided && feeRaw.value !== null && feeRaw.value !== ''
-      ? Math.max(0, parseMoney(feeRaw.value, 0))
-      : null;
-
-    // 상태 없이 금액만 명시된 구형 payload를 안전하게 해석한다.
-    if(!statusRaw.provided && feeRaw.provided){
-      status = fee === null ? null : (fee > 0 ? 'Y' : 'F');
-    }
-    if(status === 'N') fee = null;
-    else if(status === 'F') fee = 0;
-    else if(status === 'Y' && fee === null) fee = 0;
-    else if(status === null && statusRaw.provided) fee = null;
-
-    return {
-      provided: statusRaw.provided || feeRaw.provided,
-      status_provided: statusRaw.provided,
-      fee_provided: feeRaw.provided,
-      status,
-      fee
-    };
-  };
-  const jeju = normalizeOne('jeju_delivery_yn','jejuDeliveryYn','jeju_extra_delivery_fee','jejuExtraDeliveryFee');
-  const island = normalizeOne('island_delivery_yn','islandDeliveryYn','island_extra_delivery_fee','islandExtraDeliveryFee');
-  return {
-    jeju_provided: jeju.provided,
-    jeju_delivery_yn: jeju.status,
-    jeju_extra_delivery_fee: jeju.fee,
-    island_provided: island.provided,
-    island_delivery_yn: island.status,
-    island_extra_delivery_fee: island.fee
-  };
-}
-
-async function refreshCoupangDetailIdentity(pool, p, id){
-  const mall = cleanText(id && id.mallCode).toUpperCase();
-  if(mall !== 'CPKR') return { applied:false, reason:'not_coupang' };
-
-  const source = cleanText(
-    p && (p.source || p.collector_source || p.collectorSource || p.context || p.from || p.origin)
-  ).toLowerCase();
-  const detailSignal = source.indexOf('detail') >= 0 ||
-    cleanText(p && (p.gm_detail || p.gmDetail || p.detail_collector || p.detailCollector)) === '1' ||
-    !!(p && (p.detail_json || p.detailJson || p.option_json || p.optionJson || p.linked_product_id || p.linkedProductId));
-
-  if(!detailSignal) return { applied:false, reason:'not_detail_payload' };
-  if(!id || !id.uid || !id.productId || !id.itemId || !id.vendorItemId){
-    return { applied:false, reason:'identity_missing' };
-  }
-
-  const r = await pool.query(`
-    UPDATE gm_product
-       SET product_id=$2,
-           item_id=$3,
-           vendor_item_id=$4,
-           pi_ii_vi=$5,
-           source_uid=CASE
-             WHEN COALESCE(source_uid,'')='' OR source_uid=pi_ii_vi THEN $5
-             ELSE source_uid
-           END,
-           updated_at=now()
-     WHERE product_uid=$1
-       AND mall_code='CPKR'
-       AND product_id=$2
-       AND vendor_item_id=$4
-       AND COALESCE(item_id,'')<>$3
-    RETURNING product_uid, product_id, item_id, vendor_item_id, pi_ii_vi
-  `,[id.uid,id.productId,id.itemId,id.vendorItemId,id.pi]);
-
-  const row = r.rows && r.rows[0];
-  if(row){
-    try{ console.log('[GM_COUPANG_IID_REFRESH]', { applied:true, product_uid:row.product_uid, product_id:row.product_id, item_id:row.item_id, vendor_item_id:row.vendor_item_id, pi_ii_vi:row.pi_ii_vi }); }catch(_e){}
-    return { applied:true, item:row };
-  }
-  return { applied:false, reason:'no_matching_pid_vid_or_same_iid' };
-}
-
 async function upsertProduct(pool, raw, parent={}){
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
@@ -1676,14 +1690,6 @@ async function upsertProduct(pool, raw, parent={}){
   if(!productName) missing.push('product_name');
   if(missing.length){
     return { ok:false, skipped:true, reason:'required field missing: ' + missing.join(','), missing, uid:id.uid||'', pi_ii_vi:id.pi||'', mall_code:id.mallCode||'', product_id:id.productId||'', source_url:pickProductUrl(p), title_sample:cleanText(p.title||p.name||p.productName||p.product_name).slice(0,120) };
-  }
-
-  let identity_refresh = null;
-  try{
-    identity_refresh = await refreshCoupangDetailIdentity(pool, p, id);
-  }catch(e){
-    identity_refresh = { applied:false, error:compactError(e) };
-    console.error('[GM_COUPANG_IID_REFRESH_ERROR]', Object.assign({ product_uid:id.uid, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId }, compactError(e)));
   }
 
   // product_url 저장 중단: 필요 시 아래 줄을 부활한다.
@@ -1703,12 +1709,8 @@ async function upsertProduct(pool, raw, parent={}){
   const categoryTreeForMatch = parseCategoryTreeFromPayload(p);
   const categoryTreeForSave = (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length) ? categoryTreeForMatch : mallCategoryJson;
   let cpSelectedCode = pickCpSelectedCode(p);
-  const incomingCpSelectedCode = cpSelectedCode;
   const cpFixCode = pickCpFixCode(p);
-  const hasDetailCategoryPayload = !!(cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length));
-  if(hasDetailCategoryPayload){
-    try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
-  }
+  try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
 
   // CATEGORY_TREE 기반 신규 카테고리는 selected 매칭보다 먼저 처리한다.
   // 그래야 path에 새로 들어온 cp_code도 즉시 gm_category 후보가 되어 selected/fix 비교가 가능하다.
@@ -1718,39 +1720,19 @@ async function upsertProduct(pool, raw, parent={}){
       category_dynamic = await ensureDynamicCategoriesFromDetail(pool, Object.assign({}, p, { mall_category_json: categoryTreeForSave, mall_category: mallCategoryLeaf, cp_fix_code: cpFixCode }), { mall_code:id.mallCode, keyword:searchKeyword, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId });
     }
   }catch(e){ category_dynamic={ applied:false, error:compactError(e) }; }
-  // 검색 상품은 queue 진입 시 최초 1회 확정된 cp_selected_code를 그대로 저장한다.
-  // 여기서는 상품별 gm_category 조회나 상품별 fallback을 절대 수행하지 않는다.
-  // 상세 상품만 상세 path를 근거로 임시 GM_CODE 확정/치환을 수행한다.
-  const confirmedProvisionalMappings = category_dynamic && Array.isArray(category_dynamic.confirmed_provisional_mappings)
-    ? category_dynamic.confirmed_provisional_mappings
-        .map(x=>({ gm_code:cleanText(x && x.gm_code), cp_code:cleanText(x && x.cp_code) }))
-        .filter(x=>x.gm_code && x.cp_code)
-    : [];
-  const confirmedProvisionalCodes = Array.from(new Set(
-    (category_dynamic && Array.isArray(category_dynamic.confirmed_provisional_codes)
-      ? category_dynamic.confirmed_provisional_codes.map(cleanText).filter(Boolean)
-      : []).concat(confirmedProvisionalMappings.map(x=>x.gm_code))
-  ));
-  const hasDetailCategoryEvidence=!!(cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length));
-
-  if(hasDetailCategoryEvidence){
-    const incomingType=classifySelectedCode(cpSelectedCode);
-    if(incomingType==='EMPTY' && searchKeyword){
+  if(!cpSelectedCode){
+    if((cpFixCode || (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length)) && searchKeyword){
       cpSelectedCode = await findCpSelectedCodeForKeywordAndTree(pool, searchKeyword, categoryTreeForMatch);
-      if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
-      if(!cpSelectedCode) cpSelectedCode = searchKeyword;
     }
-    if(classifySelectedCode(cpSelectedCode)==='GM_CODE'){
-      const selectedMapping=confirmedProvisionalMappings.find(x=>x.gm_code===cleanText(cpSelectedCode));
-      if(selectedMapping) cpSelectedCode=selectedMapping.cp_code;
-    }
+    if(!cpSelectedCode) cpSelectedCode = await findCpSelectedCodeForKeyword(pool, searchKeyword);
+    // 검색어로 카테고리 후보가 잡히지 않으면 상품이 미아가 되지 않도록 검색어를 임시 selected로 보관한다.
+    if(!cpSelectedCode && searchKeyword) cpSelectedCode = searchKeyword;
   }
-
-  const previousSelectedForLearning = confirmedProvisionalCodes[0] || (classifySelectedCode(incomingCpSelectedCode)==='GM_CODE' ? incomingCpSelectedCode : '');
   const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode, cpSelectedCode);
+  // cp_selected_code는 검색어 기준 후보 코드다. 상세 leaf(cp_fix_code)가 확인되어도 selected를 leaf로 덮어쓰지 않는다.
+  // 예: 푸룬 검색은 selected=432516(건자두/푸룬), fix=445867(셀러가 올린 실제 leaf)로 함께 보관한다.
   await ensureProductCpColumns(pool);
   await ensureProductLightJsonColumns(pool);
-  await ensureProductRemoteDeliverySchema(pool);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
   const detailJsonRaw = normalizeDetailJson(p);
@@ -1759,19 +1741,15 @@ async function upsertProduct(pool, raw, parent={}){
   const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
-  const remoteDelivery = normalizeRemoteDeliveryPolicy(p);
 
   const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
-  if(hasDetailCategoryEvidence){
-    try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
-  }
+  try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
 
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
     'mall_category','mall_category_json','cp_selected_code','cp_fix_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
     'product_name','mall_product_name','option_count','option_json','thumb_json','detail_json','seasonal_text',
-    'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type',
-    'jeju_delivery_yn','jeju_extra_delivery_fee','island_delivery_yn','island_extra_delivery_fee','tax_type','overseas_direct_yn',
+    'mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','delivery_eta_text','delivery_type','tax_type','overseas_direct_yn',
     'review_count','mall_sales_count','certification_no_1','certification_no_2',
     'supplier_id','supplier_name','business_number','online_sales_number','ceo_name','supplier_mobile','supplier_phone','supplier_email','supplier_address',
     'product_url','thumb_origin_url','soldout_yn','hit_count','sale_status','product_grade',
@@ -1779,8 +1757,8 @@ async function upsertProduct(pool, raw, parent={}){
     'return_available_yn','exchange_available_yn','return_policy_text','exchange_policy_text','return_shipping_fee','exchange_shipping_fee','return_period_days','exchange_period_days',
     'last_seen_at','created_at','updated_at'
   ];
-  // V022: productColumns와 placeholder 순서를 1:1로 고정한다.
-  // soldout_yn=$54, hit_count=1, sale_status=$55 순서가 반드시 유지되어야 한다.
+  // V021: productColumns와 placeholder 순서를 1:1로 고정한다.
+  // V020 오류: soldout_yn 자리에 literal 1이 들어가고, soldout 값이 hit_count에 들어가 insert가 전부 실패했다.
   const valuesSql = [
     '$1','$2','$3','$4','$5','$6','$7','$8',
     '$9','$10::jsonb','$11','$12','$13','$14','$15','$16',
@@ -1788,9 +1766,8 @@ async function upsertProduct(pool, raw, parent={}){
     '$25','$26','$27','$28','$29','$30','$31','$32',
     '$33','$34','$35','$36','$37','$38','$39','$40',
     '$41','$42','$43','$44','$45','$46','$47','$48',
-    '$49','$50','$51','$52','$53','$54','1','$55',
+    '$49','$50','1','$51','$52','$53','$54','$55',
     '$56','$57','$58','$59','$60','$61','$62','$63',
-    '$64','$65','$66','$67',
     'now()','now()','now()'
   ];
   const sql = `
@@ -1798,49 +1775,8 @@ async function upsertProduct(pool, raw, parent={}){
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
-      -- 모든 수집 경로 공통 정책: 검색 keyword는 덮어쓰지 않고 | 구분자로 누적한다.
-      -- 기존/신규 양쪽이 이미 | 목록이어도 토큰 단위로 합치고, 공백/대소문자 정규화 기준 중복은 제거한다.
-      keyword=CASE
-        WHEN NULLIF(BTRIM(COALESCE(EXCLUDED.keyword,'')),'') IS NULL THEN gm_product.keyword
-        WHEN NULLIF(BTRIM(COALESCE(gm_product.keyword,'')),'') IS NULL THEN EXCLUDED.keyword
-        ELSE (
-          SELECT string_agg(d.val,'|' ORDER BY d.first_ord)
-          FROM (
-            SELECT
-              (array_agg(t.val ORDER BY t.ord))[1] AS val,
-              MIN(t.ord) AS first_ord
-            FROM (
-              SELECT BTRIM(x) AS val, ord,
-                     lower(regexp_replace(BTRIM(x),'[[:space:]]+','','g')) AS norm
-              FROM unnest(string_to_array(COALESCE(gm_product.keyword,'') || '|' || COALESCE(EXCLUDED.keyword,''),'|'))
-                   WITH ORDINALITY AS u(x,ord)
-              WHERE NULLIF(BTRIM(x),'') IS NOT NULL
-            ) t
-            GROUP BY t.norm
-          ) d
-        )
-      END,
-      -- mall_category는 계산값이 아닌 문자형 카테고리 번호 이력이다.
-      -- 번호가 새로 확보될 때 기존 번호를 지우지 않고 | 구분자로 중복 없이 누적한다.
-      mall_category=CASE
-        WHEN NULLIF(BTRIM(COALESCE(EXCLUDED.mall_category,'')),'') IS NULL THEN gm_product.mall_category
-        WHEN NULLIF(BTRIM(COALESCE(gm_product.mall_category,'')),'') IS NULL THEN EXCLUDED.mall_category
-        ELSE (
-          SELECT string_agg(d.val,'|' ORDER BY d.first_ord)
-          FROM (
-            SELECT
-              (array_agg(t.val ORDER BY t.ord))[1] AS val,
-              MIN(t.ord) AS first_ord
-            FROM (
-              SELECT BTRIM(x) AS val, ord, lower(BTRIM(x)) AS norm
-              FROM unnest(string_to_array(COALESCE(gm_product.mall_category,'') || '|' || COALESCE(EXCLUDED.mall_category,''),'|'))
-                   WITH ORDINALITY AS u(x,ord)
-              WHERE NULLIF(BTRIM(x),'') IS NOT NULL
-            ) t
-            GROUP BY t.norm
-          ) d
-        )
-      END,
+      keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
+      mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_selected_code=CASE
         WHEN NULLIF(EXCLUDED.cp_selected_code,'') IS NOT NULL THEN EXCLUDED.cp_selected_code
@@ -1859,7 +1795,8 @@ async function upsertProduct(pool, raw, parent={}){
       option_count=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
       option_json=CASE WHEN COALESCE(EXCLUDED.option_count,0) >= 2 THEN EXCLUDED.option_json WHEN COALESCE(EXCLUDED.option_count,0)=1 THEN NULL ELSE gm_product.option_json END,
       thumb_json=CASE
-        WHEN $70::int > 0
+        WHEN jsonb_typeof(EXCLUDED.thumb_json)='array'
+         AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) ELSE 0 END,0)
         THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
       detail_json=CASE
         WHEN jsonb_typeof(EXCLUDED.detail_json)='object'
@@ -1880,14 +1817,8 @@ async function upsertProduct(pool, raw, parent={}){
       normal_price=COALESCE(EXCLUDED.normal_price, gm_product.normal_price),
       discount_price=EXCLUDED.discount_price,
       delivery_fee=EXCLUDED.delivery_fee,
-      -- 배송 term은 유효한 신규값(예: 3|8, 8|8)만 교체한다.
-      -- 검색결과의 NULL/빈값/파싱실패는 기존 상세 수집값을 유지한다.
-      delivery_eta_text=COALESCE(NULLIF(BTRIM(EXCLUDED.delivery_eta_text),''), gm_product.delivery_eta_text),
-      delivery_type=COALESCE(NULLIF(EXCLUDED.delivery_type,''), gm_product.delivery_type),
-      jeju_delivery_yn=CASE WHEN $68::boolean THEN EXCLUDED.jeju_delivery_yn ELSE gm_product.jeju_delivery_yn END,
-      jeju_extra_delivery_fee=CASE WHEN $68::boolean THEN EXCLUDED.jeju_extra_delivery_fee ELSE gm_product.jeju_extra_delivery_fee END,
-      island_delivery_yn=CASE WHEN $69::boolean THEN EXCLUDED.island_delivery_yn ELSE gm_product.island_delivery_yn END,
-      island_extra_delivery_fee=CASE WHEN $69::boolean THEN EXCLUDED.island_extra_delivery_fee ELSE gm_product.island_extra_delivery_fee END,
+      delivery_eta_text=EXCLUDED.delivery_eta_text,
+      delivery_type=EXCLUDED.delivery_type,
       tax_type=COALESCE(NULLIF(EXCLUDED.tax_type,''), gm_product.tax_type),
       review_count=EXCLUDED.review_count,
       mall_sales_count=EXCLUDED.mall_sales_count,
@@ -1935,10 +1866,8 @@ async function upsertProduct(pool, raw, parent={}){
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     productOptionLinkJson ? safeJsonString(productOptionLinkJson) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
-    pickDeliveryFee(p), pickDeliveryTerm(p), pickDeliveryType(p),
-    remoteDelivery.jeju_delivery_yn, remoteDelivery.jeju_extra_delivery_fee,
-    remoteDelivery.island_delivery_yn, remoteDelivery.island_extra_delivery_fee,
-    taxType, cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
+    pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
+    cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
     cleanText(p.certification_no_1 || p.certificationNo1 || ''), cleanText(p.certification_no_2 || p.certificationNo2 || ''),
     standardCoupangSupplier ? '' : pickSupplierId(p), standardCoupangSupplier ? '' : pickSupplierName(p),
     standardCoupangSupplier ? '' : pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
@@ -1956,13 +1885,10 @@ async function upsertProduct(pool, raw, parent={}){
     cleanText(p.exchange_policy_text || p.exchangePolicyText || p.exchange_policy || p.exchangePolicy || ''),
     returnFee, toInt(p.exchange_shipping_fee || p.exchangeShippingFee, 0),
     p.return_period_days == null && p.returnPeriodDays == null ? null : toInt(p.return_period_days || p.returnPeriodDays, 0),
-    p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0),
-    remoteDelivery.jeju_provided,
-    remoteDelivery.island_provided,
-    thumbPipeCount(thumbJson)
+    p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
 
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, delivery_eta_text_raw:pickDeliveryText(p), delivery_eta_text:pickDeliveryTerm(p), delivery_type:pickDeliveryType(p) }); }catch(_trace){}
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);
@@ -1971,20 +1897,10 @@ async function upsertProduct(pool, raw, parent={}){
     throw e;
   }
   try{ console.log('[GM_PRODUCT_UPSERT_TRACE_OUT]', { uid:id.uid, row:(r.rows&&r.rows[0])||null }); }catch(_trace){}
-  try{ console.log('[GM_PRODUCT_REMOTE_DELIVERY_SAVE]', {
-    product_uid:id.uid,
-    jeju_delivery_yn:remoteDelivery.jeju_delivery_yn,
-    jeju_extra_delivery_fee:remoteDelivery.jeju_extra_delivery_fee,
-    island_delivery_yn:remoteDelivery.island_delivery_yn,
-    island_extra_delivery_fee:remoteDelivery.island_extra_delivery_fee,
-    return_shipping_fee:returnFee
-  }); }catch(_trace){}
   let cp_learning = null;
   try{
-    cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, previous_selected_code:previousSelectedForLearning, previous_selected_codes:confirmedProvisionalCodes, previous_selected_mappings:confirmedProvisionalMappings, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
-    if(hasDetailCategoryEvidence || (cp_learning && cp_learning.applied)){
-      try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, previous_selected_code:previousSelectedForLearning, previous_selected_codes:confirmedProvisionalCodes, previous_selected_mappings:confirmedProvisionalMappings, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
-    }
+    cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
+    try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
     if(cpFixCode && searchKeyword){
       try{ await updateSearchLogCategoryByKeyword(pool, { keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode }); }
       catch(_sl){ try{ console.warn('[GM_SEARCH_LOG_CATEGORY_UPDATE_FAIL]', Object.assign({ keyword:searchKeyword, cp_fix_code:cpFixCode }, compactError(_sl))); }catch(_l){} }
@@ -2006,15 +1922,12 @@ async function upsertProduct(pool, raw, parent={}){
     detail_patch = { applied:false, error:compactError(e) };
     console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
   }
+  await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords, Object.assign({}, parent || {}, p || {}));
   const detail_stats = detailSignalStats(optionJson, thumbJson, detailJson || {}, p);
-  // SPECIAL V017: notify vector worker only after gm_product upsert and related save work completed.
-  try{
-    process.emit('gm:special-product-upsert',{ product_uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, image_url:thumbUrl });
-  }catch(_specialVectorNotify){}
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats, identity_refresh })
+    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats })
   };
 }
 
@@ -2022,7 +1935,93 @@ async function upsertProduct(pool, raw, parent={}){
 
 
 
-// Search log and keyword-relation routes are owned by server.js/routes/search_keyword.js.
+router.post('/api/gm/keyword/relation/status', async (req,res)=>{
+  const pool=db(req), p=req.body||{};
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    await ensureKeywordRelationSchema(pool);
+    const meta = pickKeywordMeta(p);
+    const keywordKo = cleanText(p.keyword_ko || p.keywordKo || meta.mainKeyword || p.mainKeyword || p.keyword || '');
+    const related = uniqClean(p.relatedKeywords || p.related_keywords || meta.relatedKeywords || []);
+    if(!keywordKo || !related.length){
+      return ok(res, { mainKeyword:keywordKo, related_count:related.length, pending:[], complete:[], missing:[], reason:'empty_keyword_or_related' });
+    }
+    const r = await pool.query(`
+      SELECT v.related_keyword_ko,
+             COALESCE(gr.translate_complete,'F') AS translate_complete,
+             gr.related_keyword_en, gr.related_keyword_zh, gr.related_keyword_vi, gr.related_keyword_ja, gr.related_keyword_tw,
+             gr.related_keyword_th, gr.related_keyword_uz, gr.related_keyword_ne, gr.related_keyword_km, gr.related_keyword_id,
+             gr.related_keyword_tl, gr.related_keyword_mn, gr.related_keyword_my, gr.related_keyword_kk, gr.related_keyword_si,
+             gr.related_keyword_ru, gr.related_keyword_bn, gr.related_keyword_ur, gr.related_keyword_lo, gr.related_keyword_hi,
+             gr.related_keyword_tr, gr.related_keyword_fa, gr.related_keyword_es, gr.related_keyword_fr
+      FROM unnest($2::text[]) AS v(related_keyword_ko)
+      LEFT JOIN gm_keyword_relation gr
+        ON gr.keyword_ko=$1 AND gr.related_keyword_ko=v.related_keyword_ko
+    `, [keywordKo, related]);
+    const langCols = KEYWORD_LANGS.filter(l => l !== 'ko').map(l => 'related_keyword_' + l);
+    const pending=[], complete=[], missing=[];
+    for(const row of (r.rows||[])){
+      const rk = cleanText(row.related_keyword_ko);
+      const done = cleanText(row.translate_complete).toUpperCase() === 'T' && langCols.every(c => !!cleanText(row[c] || ''));
+      if(done) complete.push(rk);
+      else { pending.push(rk); missing.push({ related_keyword_ko:rk, translate_complete:cleanText(row.translate_complete)||'F' }); }
+    }
+    try{ console.log('[GM_KEYWORD_RELATION_STATUS]', { keyword_ko:keywordKo, related_count:related.length, pending:pending.length, complete:complete.length }); }catch(_l){}
+    return ok(res, { mainKeyword:keywordKo, keyword_ko:keywordKo, related_count:related.length, pending, complete, pending_count:pending.length, complete_count:complete.length, missing });
+  }catch(e){
+    console.error('[GM_KEYWORD_RELATION_STATUS_ERROR]', e);
+    return fail(res, 500, 'keyword relation status failed', { detail:String(e && e.message || e) });
+  }
+});
+
+router.post('/api/gm/keyword/translate', async (req,res)=>{
+  const pool=db(req), p=req.body||{};
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    const meta = pickKeywordMeta(p);
+    const relatedTranslations = pickRelatedTranslations(p, meta.raw || {});
+    try{ console.log('[GM_KEYWORD_TRANSLATE_START]', { mainKeyword:meta.mainKeyword, inputKeyword:meta.inputKeyword, related_count:meta.relatedKeywords.length, related_translation_keys:Object.keys(relatedTranslations||{}).length }); }catch(_l){}
+    const result = await saveKeywordTranslatePayload(pool, p);
+    try{ console.log('[GM_KEYWORD_TRANSLATE_SAVED]', result); }catch(_l){}
+    return ok(res, result);
+  }catch(e){
+    console.error('[GM_KEYWORD_TRANSLATE_SAVE_ERROR]', e);
+    return fail(res, 500, 'keyword translate save failed', { detail:String(e && e.message || e) });
+  }
+});
+
+router.post(['/api/gm/search/log','/api/gm/search_log','/api/gm/search/log/save'], async (req,res)=>{
+  const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    const row = await saveSearchLogPayload(pool, p);
+    return ok(res, { action:'search.log', item:row });
+  }catch(e){
+    console.error('[GM_SEARCH_LOG_SAVE_ERROR]', compactError(e));
+    return fail(res, 500, 'search log save failed', { detail:String(e && e.message || e), error_detail:compactError(e) });
+  }
+});
+
+router.get('/api/gm/keyword/lookup', async (req,res)=>{
+  const pool=db(req);
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  try{
+    await ensureKeywordTranslateTable(pool);
+    const input=cleanText(req.query.input_keyword || req.query.keyword || req.query.q || '');
+    const lang=cleanText(req.query.lang || req.query.gm_lang || '').toLowerCase();
+    if(!input) return fail(res, 400, 'input_keyword required');
+    let r;
+    if(lang){
+      r=await pool.query('SELECT lang,input_keyword,main_keyword_ko,hit_count,updated_at FROM gm_keyword_translate WHERE lang=$1 AND input_keyword=$2', [lang,input]);
+      if(r.rows[0]) return ok(res, { found:true, item:r.rows[0] });
+    }
+    r=await pool.query('SELECT lang,input_keyword,main_keyword_ko,hit_count,updated_at FROM gm_keyword_translate WHERE input_keyword=$1 ORDER BY hit_count DESC, updated_at DESC LIMIT 1', [input]);
+    return ok(res, { found:!!r.rows[0], item:r.rows[0]||null });
+  }catch(e){
+    return fail(res, 500, 'keyword lookup failed', { detail:String(e && e.message || e) });
+  }
+});
+
 router.post('/api/gm/product/queue', async (req,res)=>{
   const pool=db(req), p=parseIncomingPayloadBody(req.body||{});
   if(!pool) return fail(res, 500, 'DB pool is not attached');
@@ -2037,21 +2036,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
-    // 서버에서 검색어 카테고리를 최초 1회만 판정한다.
-    // 이후 같은 검색의 모든 chunk/item에는 동일 selected 값을 강제로 넣는다.
-    const categoryRequestToken = searchCategoryRequestToken(p);
-    const categoryOnce = await resolveSearchCategoryOnce(pool, keyword, categoryRequestToken);
-    const queueCpSelectedCode = cleanText(categoryOnce.value);
-    const queueParent = Object.assign({}, p, {
-      cp_selected_code:queueCpSelectedCode,
-      cpSelectedCode:queueCpSelectedCode
-    });
-    const queueItems = items.map(item=>Object.assign({}, item || {}, {
-      cp_selected_code:queueCpSelectedCode,
-      cpSelectedCode:queueCpSelectedCode
-    }));
-    console.log('[GM_SEARCH_CATEGORY_ONCE]', { keyword, cp_selected_code:queueCpSelectedCode, cache_hit:categoryOnce.cache_hit, reason:categoryOnce.reason, request_id:requestId, category_request_token:categoryRequestToken, chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
-    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:queueItems.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
+    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
         request_id, mall_code, keyword, items_json, item_count, status, retry_count, created_at
@@ -2064,83 +2049,29 @@ router.post('/api/gm/product/queue', async (req,res)=>{
         status=CASE WHEN gm_product_upsert_queue.status IN ('done','processing') THEN gm_product_upsert_queue.status ELSE 'pending' END,
         error_message=NULL
       RETURNING queue_id, request_id, status, item_count
-    `, [requestId, mallCode, keyword, JSON.stringify(queueItems), queueItems.length]);
+    `, [requestId, mallCode, keyword, JSON.stringify(items), items.length]);
     console.log('[GM_PRODUCT_QUEUE] inserted', {
       queue_id:r.rows[0] && r.rows[0].queue_id,
       request_id:r.rows[0] && r.rows[0].request_id,
       status:r.rows[0] && r.rows[0].status,
       item_count:r.rows[0] && r.rows[0].item_count,
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
-      chunk_total:toInt(p.chunk_total||p.chunkTotal,0),
-      cp_selected_code:queueCpSelectedCode
+      chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });
 
-    // GM_QUEUE_INLINE_UPSERT_V016
-    // Cloudtype에서 queue row는 정상 생성되는데 worker가 실행되지 않거나
-    // 스키마 변경 후 worker가 조용히 실패하면 gm_product가 계속 비는 문제가 있었다.
-    // 검색 chunk는 보통 10개 단위이므로 queue 수신 즉시 같은 프로세스에서 upsert까지 수행한다.
-    // 기존 queue 테이블은 진단/재처리용으로 유지한다.
-    const uidSeen = new Set();
-    const duplicateUidSamples = [];
-    const inlineResults = [];
-    for(const item of queueItems){
-      try{
-        const probe = normalizeProductPayload(item, queueParent);
-        if(probe && probe.id && probe.id.uid){
-          if(uidSeen.has(probe.id.uid)) duplicateUidSamples.push(probe.id.uid);
-          else uidSeen.add(probe.id.uid);
-        }
-      }catch(_dupProbe){}
-      try{
-        inlineResults.push(await upsertProduct(pool, item, queueParent));
-      }catch(e){
-        inlineResults.push({ ok:false, error:String(e && e.message || e), error_detail:compactError(e), uid:cleanText(item && (item.product_uid || item.productUid || item.pi_ii_vi || item.piIiVi || '')), title_sample:cleanText(item && (item.title || item.name || item.productName || item.product_name || '')).slice(0,120) });
-      }
-    }
-    const inlineSaved = inlineResults.filter(x=>x && x.ok).length;
-    const inlineSkipped = inlineResults.length - inlineSaved;
-    const inlineInserted = inlineResults.filter(x=>x && x.ok && x.action === 'inserted').length;
-    const inlineUpdated = inlineResults.filter(x=>x && x.ok && x.action !== 'inserted').length;
-    const optionAudit = inlineResults.reduce((a,x)=>{
-      const o = x && x.item && x.item.option_result || {};
-      a.received += Number(o.received || 0);
-      a.inserted += Number(o.inserted || 0);
-      a.updated += Number(o.updated || 0);
-      a.skipped += Number(o.skipped || 0);
-      a.nonactive += Number(o.nonactive || 0);
-      if(o.balance_ok === false) a.balance_ok = false;
-      return a;
-    }, { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true });
-    optionAudit.balance_ok = optionAudit.balance_ok && optionAudit.received === (optionAudit.inserted + optionAudit.updated + optionAudit.skipped);
-    const saveAudit = {
-      search_result_count:items.length,
-      product_inserted:inlineInserted,
-      product_updated:inlineUpdated,
-      product_skipped:inlineSkipped,
-      product_balance_ok:items.length === (inlineInserted + inlineUpdated + inlineSkipped),
-      option_received:optionAudit.received,
-      option_inserted:optionAudit.inserted,
-      option_updated:optionAudit.updated,
-      option_skipped:optionAudit.skipped,
-      option_nonactive:optionAudit.nonactive,
-      option_balance_ok:optionAudit.balance_ok
-    };
-    const inlineStatus = inlineSaved > 0 ? 'done' : 'failed';
-    const inlineError = inlineSaved > 0 ? null : (inlineResults.find(x=>x && (x.error || x.reason)) || {}).error || (inlineResults.find(x=>x && x.reason) || {}).reason || 'inline upsert saved 0 rows';
-    try{
-      await pool.query(`
-        UPDATE gm_product_upsert_queue
-        SET status=$2,
-            processed_at=now(),
-            error_message=$3,
-            result_json=$4::jsonb
-        WHERE queue_id=$1
-      `, [r.rows[0] && r.rows[0].queue_id, inlineStatus, inlineError, JSON.stringify({ saved:inlineSaved, skipped:inlineSkipped, audit:saveAudit, option_audit:optionAudit, sample:inlineResults.slice(0,10), errors:inlineResults.filter(x=>x && !x.ok).slice(0,30) })]);
-    }catch(_qe){
-      console.warn('[GM_PRODUCT_QUEUE] inline result update failed', String(_qe && _qe.message || _qe));
-    }
-    console.log('[GM_PRODUCT_QUEUE_SAVE_AUDIT]', Object.assign({ queue_id:r.rows[0] && r.rows[0].queue_id, request_id:r.rows[0] && r.rows[0].request_id, mall_code:mallCode, keyword }, saveAudit));
-    console.log('[GM_PRODUCT_QUEUE] inline upsert done', { saved:inlineSaved, skipped:inlineSkipped, status:inlineStatus, queue_id:r.rows[0] && r.rows[0].queue_id, audit:saveAudit, sample:inlineResults.slice(0,3) });
+    // GM_PRODUCT_QUEUE_ASYNC_V001
+    // Search/SPECIAL only enqueue durable queue rows here.
+    // Actual gm_product upsert is owned by workers/product_queue_worker.js.
+    // Do not block the HTTP response on per-product DB work.
+    console.log('[GM_PRODUCT_QUEUE] accepted async', {
+      queue_id:r.rows[0] && r.rows[0].queue_id,
+      request_id:r.rows[0] && r.rows[0].request_id,
+      mall_code:mallCode,
+      keyword,
+      item_count:items.length,
+      chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
+      chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
+    });
 
     ok(res,{
       action:'product.queue',
@@ -2150,118 +2081,14 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       request_id:r.rows[0] && r.rows[0].request_id,
       item_count:r.rows[0] && r.rows[0].item_count,
       received:items.length,
-      saved:inlineSaved,
-      skipped:inlineSkipped,
-      inline_upsert:true,
-      inline_status:inlineStatus,
-      audit:saveAudit,
-      option_audit:optionAudit,
-      inline_sample:inlineResults.slice(0,10),
-      inline_errors:inlineResults.filter(x=>x && !x.ok).slice(0,30),
-      unique_uid_count:uidSeen.size,
-      duplicate_uid_count:duplicateUidSamples.length,
-      duplicate_uid_sample:duplicateUidSamples.slice(0,30),
+      inline_upsert:false,
+      inline_status:'queued',
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });
   }catch(e){
     console.error('[GM_PRODUCT_QUEUE] insert failed', String(e && e.message || e));
     fail(res,500,'product queue failed',{detail:String(e && e.message || e)});
-  }
-});
-
-
-/* GM_DETAIL_FAST_SERVER_V002_PID_MIN
- * PID로 상품 1건 + 같은 PID의 활성 옵션을 조회한다.
- * 고객 응답에는 외부몰 원가격(mall_sale_price/final_supply_price)을 포함하지 않는다.
- */
-function gmFastThumbList(r){
-  const a=[r&&r.thumb_origin_url,...parseThumbPipe(r&&r.thumb_json)], out=[], seen=new Set();
-  for(const x of a){const u=normalizeUrl(x);if(u&&!seen.has(u)){seen.add(u);out.push(u);if(out.length===10)break;}}
-  return out;
-}
-
-router.get('/api/gm/product/detail-fast',async(req,res)=>{
-  const pool=db(req); if(!pool)return fail(res,500,'DB pool is not attached');
-  try{
-    let mall=cleanText(req.query.mall_code||req.query.mallCode||'').toUpperCase();
-    const raw=cleanText(req.query.pi_ii_vi||req.query.piIiVi||req.query.gm_key||req.query.key||req.query.product_uid||req.query.productUid||'');
-    if(/^(ALI|ALIEXPRESS)$/.test(mall))mall='ALKR';
-    if(!mall)mall=/^ALKR_/i.test(raw)?'ALKR':'CPKR';
-
-    const key=raw.replace(/^(CPKR|ALKR)_/i,'');
-    const k=key.split('_').filter(Boolean);
-    const pid=cleanText(req.query.product_id||req.query.productId||k[0]||'');
-    const iid=cleanText(k[1]||''), vid=cleanText(k[2]||'');
-    if(!pid){console.log('[GM_PRODUCT_DETAIL_FAST_MISS]',{reason:'PID_EMPTY',mall_code:mall,key:raw});return ok(res,{found:false,item:null});}
-
-    const pr=await pool.query(`
-      SELECT product_uid,mall_code,product_id,item_id,vendor_item_id,pi_ii_vi,
-             product_name,mall_product_name,normal_price,discount_price,
-             delivery_fee,delivery_eta_text,delivery_type,
-             jeju_delivery_yn,jeju_extra_delivery_fee,island_delivery_yn,island_extra_delivery_fee,
-             thumb_origin_url,thumb_json,soldout_yn,sale_status,
-             buyable_qty,min_order_qty,max_order_qty,updated_at
-        FROM gm_product
-       WHERE mall_code=$1 AND product_id=$2
-       ORDER BY updated_at DESC NULLS LAST LIMIT 1`,[mall,pid]);
-    if(!pr.rows.length){console.log('[GM_PRODUCT_DETAIL_FAST_MISS]',{reason:'PID_NOT_FOUND',mall_code:mall,product_id:pid});return ok(res,{found:false,item:null});}
-
-    const p=pr.rows[0];
-    const or=await pool.query(`
-      SELECT product_id,item_id,vendor_item_id,pi_ii_vi,option_name,option_image_url,
-             normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
-             soldout_yn,sale_status,buyable_qty,min_order_qty,max_order_qty
-        FROM gm_product_option
-       WHERE mall_code=$1 AND product_id=$2 AND COALESCE(active_yn,'Y')='Y'
-       ORDER BY option_sort_no ASC,pi_ii_vi ASC`,[p.mall_code,p.product_id]);
-
-    const options=or.rows.map(o=>{
-      const selected=(!iid||String(o.item_id||'')===iid)&&(!vid||String(o.vendor_item_id||'')===vid);
-      const sold=String(o.soldout_yn||'N').toUpperCase()==='Y';
-      return {
-        name:o.option_name||'기본상품',optionName:o.option_name||'기본상품',
-        productId:o.product_id,itemId:o.item_id,vendorItemId:o.vendor_item_id,key:o.pi_ii_vi,pi_ii_vi:o.pi_ii_vi,selected,
-        price:o.normal_price||0,priceText:o.normal_price||0,
-        normal_price:o.normal_price||0,discount_price:o.discount_price||0,
-        optionImage:o.option_image_url||'',option_image_url:o.option_image_url||'',
-        shippingBadge:o.delivery_type||'',deliveryType:o.delivery_type||'',delivery_type:o.delivery_type||'',
-        shippingFeeText:o.delivery_fee||0,deliveryFee:o.delivery_fee||0,delivery_fee:o.delivery_fee||0,
-        delivery_eta_text:o.delivery_eta_text||'',soldout:sold,disabled:sold||String(o.sale_status||'').toLowerCase()==='soldout',
-        buyable_qty:o.buyable_qty,min_order_qty:o.min_order_qty,max_order_qty:o.max_order_qty
-      };
-    });
-
-    const sel=options.find(o=>o.selected)||null, images=gmFastThumbList(p);
-    const sale=sel?sel.normal_price:(p.normal_price||0);
-    const fee=sel?sel.delivery_fee:(p.delivery_fee||0);
-    const dtype=sel?sel.delivery_type:(p.delivery_type||'');
-    const eta=sel?sel.delivery_eta_text:(p.delivery_eta_text||'');
-    const item={
-      __gmPayloadSource:'SERVER_FAST',__gmServerFast:true,__gmPartial:true,partial:true,phase:'SERVER_FAST',
-      gm_key:[pid,iid,vid].filter(Boolean).join('_')||pid,key:[pid,iid,vid].filter(Boolean).join('_')||pid,
-      product_uid:p.product_uid,mall_code:p.mall_code,mallCode:p.mall_code,
-      productId:p.product_id,product_id:p.product_id,
-      itemId:sel?sel.itemId:(iid||p.item_id),item_id:sel?sel.itemId:(iid||p.item_id),
-      vendorItemId:sel?sel.vendorItemId:(vid||p.vendor_item_id),vendor_item_id:sel?sel.vendorItemId:(vid||p.vendor_item_id),
-      pi_ii_vi:sel?sel.pi_ii_vi:([pid,iid,vid].filter(Boolean).join('_')||p.pi_ii_vi||''),
-      title:p.product_name||p.mall_product_name||'',productName:p.product_name||p.mall_product_name||'',mallProductName:p.mall_product_name||'',
-      price:sale,priceText:sale,
-      normal_price:sale,discount_price:sel?sel.discount_price:(p.discount_price||0),
-      delivery_fee:fee,deliveryFee:fee,delivery_eta_text:eta,deliveryType:dtype,delivery_type:dtype,
-      jeju_delivery_yn:p.jeju_delivery_yn,jeju_extra_delivery_fee:p.jeju_extra_delivery_fee||0,
-      island_delivery_yn:p.island_delivery_yn,island_extra_delivery_fee:p.island_extra_delivery_fee||0,
-      soldout_yn:p.soldout_yn||'N',sale_status:p.sale_status||'',
-      buyable_qty:p.buyable_qty,min_order_qty:p.min_order_qty,max_order_qty:p.max_order_qty,
-      mainImage:images[0]||'',image:images[0]||'',thumbnail:images[0]||'',thumb_url:images[0]||'',
-      images,thumbnailImages:images,flatOptionRows:options,optionRows:options,options,
-      selected_item_id:iid,selected_vendor_item_id:vid,server_updated_at:p.updated_at||null
-    };
-    console.log('[GM_PRODUCT_DETAIL_FAST_OK]',{product_id:p.product_id,selected_found:!!sel,images:images.length,options:options.length});
-    return ok(res,{found:true,item});
-  }catch(e){
-    console.error('[GM_PRODUCT_DETAIL_FAST_ERROR]',compactError(e));
-    return fail(res,500,'detail fast lookup failed',{detail:String(e&&e.message||e)});
   }
 });
 
@@ -2346,11 +2173,45 @@ router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
   }catch(e){ console.error('[GM_PRODUCT_UPSERT_ROUTE_ERROR]', compactError(e)); fail(res,500,'product upsert failed',{detail:String(e && e.message || e), error_detail:compactError(e)}); }
 });
 
-
-/* GM_EVENT_V001
- * Legacy /api/gm/product/event handler removed.
- * Product/search/order counters are centralized through routes/event.js.
- */
+router.post('/api/gm/product/event', async (req,res)=>{
+  const pool=db(req), p=req.body||{};
+  if(!pool) return fail(res, 500, 'DB pool is not attached');
+  const id = ids(p);
+  const type = cleanText(p.type || p.event_type || p.eventType).toLowerCase();
+  const qty = Math.max(1, toInt(p.quantity || p.qty, 1));
+  if(!id.uid && (!id.mallCode || !id.pi)) return fail(res, 400, 'product_uid or mall_code+pi_ii_vi required');
+  const where = id.uid ? 'product_uid=$1' : 'mall_code=$1 AND pi_ii_vi=$2';
+  const vals = id.uid ? [id.uid] : [id.mallCode, id.pi];
+  let setSql = '';
+  if(type === 'detail' || type === 'view') setSql = "detail_view_count=COALESCE(detail_view_count,0)+1";
+  else if(type === 'cart') setSql = "cart_count=COALESCE(cart_count,0)+1, last_cart_at=now()";
+  else if(type === 'wish') setSql = "wish_count=COALESCE(wish_count,0)+1, last_wish_at=now()";
+  else if(type === 'order') setSql = "order_count=COALESCE(order_count,0)+1, order_qty_total=COALESCE(order_qty_total,0)+" + qty + ", last_order_at=now()";
+  else if(type === 'return') setSql = "return_count=COALESCE(return_count,0)+1, last_return_at=now()";
+  else if(type === 'exchange') setSql = "exchange_count=COALESCE(exchange_count,0)+1, last_exchange_at=now()";
+  else if(type === 'ad_view') setSql = "ad_view_count=COALESCE(ad_view_count,0)+1, last_ad_view_at=now()";
+  else if(type === 'ad_sale') setSql = "ad_order_count=COALESCE(ad_order_count,0)+1, ad_sales_qty=COALESCE(ad_sales_qty,0)+" + qty + ", last_ad_order_at=now()";
+  else return fail(res, 400, 'event type must be detail/view/cart/wish/order/return/exchange/ad_view/ad_sale');
+  try{
+    const r=await pool.query(`UPDATE gm_product SET ${setSql}, updated_at=now() WHERE ${where} RETURNING product_uid, mall_code, product_id, pi_ii_vi`, vals);
+    let option_updated = 0;
+    if(type === 'order'){
+      const mall = cleanText(id.mallCode || (r.rows[0] && r.rows[0].mall_code) || '').toUpperCase();
+      const pi = cleanText(id.pi || (r.rows[0] && r.rows[0].pi_ii_vi) || '');
+      if(mall && pi){
+        try{
+          const or = await pool.query(`
+            UPDATE gm_product_option
+            SET sales_qty=COALESCE(sales_qty,0)+$3, updated_at=now()
+            WHERE mall_code=$1 AND pi_ii_vi=$2
+          `, [mall, pi, qty]);
+          option_updated = or.rowCount || 0;
+        }catch(oe){ console.warn('[GM_PRODUCT_OPTION_EVENT_ORDER_WARN]', Object.assign({ mall_code:mall, pi_ii_vi:pi, qty }, compactError(oe))); }
+      }
+    }
+    ok(res,{action:'product.event', type, updated:r.rowCount, option_updated, item:r.rows[0] || null});
+  }catch(e){ fail(res,500,'product event failed',{detail:String(e && e.message || e)}); }
+});
 
 router.upsertProduct = upsertProduct;
 module.exports=router;
