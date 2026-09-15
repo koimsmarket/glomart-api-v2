@@ -5,7 +5,7 @@
  */
 (function(){
 'use strict';
-const WORKER_VERSION='GM_IMAGE_WORKER_V005';
+const WORKER_VERSION='GM_IMAGE_WORKER_V006_PENDING_URL';
 const TF_URL='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
 const MODEL_ID='Xenova/mobileclip_s0';
 const DIM=512;
@@ -67,7 +67,7 @@ async function inferOne(bm){
   return vectorBase64(a);
 }
 async function upsert(item,b64){
-  const r=await fetch(API+'/api/gm/image-vector/upsert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_uid:item.product_uid,vector_base64:b64,vector_version:VECTOR_VERSION}),credentials:'omit'});
+  const r=await fetch(API+'/api/gm/image-vector/upsert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({product_uid:item.product_uid,image_url:item.image_url,vector_base64:b64,vector_version:VECTOR_VERSION}),credentials:'omit'});
   if(!r.ok)throw new Error('upsert HTTP '+r.status);
 }
 async function processQueue(){

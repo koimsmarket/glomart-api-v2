@@ -22,6 +22,8 @@ const path=require('path');
 const {fork}=require('child_process');
 const router=express.Router();
 const {parseCsv}=require('../../routes/builder/core');
+const {assignIncremental}=require('../../services/image_representative_assign');
+const representativeSearch=require('../../services/image_representative_search');
 const DIM=512;
 const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
 const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLOTS||4)));
@@ -38,6 +40,9 @@ let poolRef=null,timer=null,worker=null,seq=0,pumping=false;
 const inflight=new Map();
 const failUntil=new Map();
 let completed=0,failed=0,lastError='',lastMemory=null;
+const representativeQueue=[];
+const representativeQueued=new Set();
+let representativeRunning=false,representativeCompleted=0,representativeFailed=0,representativeLastError='';
 let mode='AUTO';
 let autoRunning=false;
 let schemaReady=false;
@@ -105,6 +110,44 @@ function markForegroundActivity(info){
 }
 function foregroundQuietRemaining(){return Math.max(0,foregroundQuietUntil-Date.now());}
 
+function enqueueRepresentative(info){
+  const uid=S(info&&info.product_uid);
+  if(!uid||representativeQueued.has(uid))return false;
+  representativeQueued.add(uid);
+  representativeQueue.push({product_uid:uid,source:S(info&&info.source)||'vector_ready'});
+  log('REP_QUEUE',{product_uid:uid,source:S(info&&info.source)||'vector_ready',queued:representativeQueue.length,running:representativeRunning});
+  setImmediate(()=>void pumpRepresentative());
+  return true;
+}
+async function pumpRepresentative(){
+  if(representativeRunning||!poolRef||!schemaReady||!representativeQueue.length)return;
+  const mem=memorySnapshot();lastMemory=mem;
+  const decision=operatingDecision(mem);
+  if(!decision.run)return;
+  const quietMs=foregroundQuietRemaining();
+  if(quietMs>0)return;
+  const rec=representativeQueue.shift();
+  if(!rec)return;
+  representativeRunning=true;
+  const started=Date.now();
+  try{
+    const q=await poolRef.query('SELECT vector_image FROM gm_product_image_vector WHERE product_uid=$1 AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2',[rec.product_uid,DIM]);
+    const vector=q.rows&&q.rows[0]&&q.rows[0].vector_image;
+    if(!Array.isArray(vector)||vector.length!==DIM)throw new Error('REP_VECTOR_NOT_READY');
+    const assignment=await assignIncremental(poolRef,rec.product_uid,vector);
+    representativeSearch.onAssignment(poolRef,assignment,vector);
+    representativeCompleted++;representativeLastError='';
+    log('REP_OK',{product_uid:rec.product_uid,source:rec.source,assignment,elapsed_ms:Date.now()-started,queued:representativeQueue.length});
+  }catch(e){
+    representativeFailed++;representativeLastError=S(e&&e.message||e);
+    log('REP_FAIL',{product_uid:rec.product_uid,source:rec.source,error:representativeLastError,elapsed_ms:Date.now()-started,queued:representativeQueue.length});
+  }finally{
+    representativeQueued.delete(rec.product_uid);
+    representativeRunning=false;
+    setImmediate(()=>void pumpRepresentative());
+  }
+}
+
 function ensureWorker(){
   if(worker&&worker.connected)return worker;
   const child=fork(path.join(__dirname,'vector_worker.js'),[],{
@@ -138,20 +181,26 @@ function releaseIdleWorker(reason){
 }
 async function finish(msg){
   const rec=inflight.get(msg.task_id);if(!rec)return;
-  inflight.delete(msg.task_id);
   try{
     if(!msg.ok)throw new Error(S(msg.error)||'VECTOR_WORKER_FAIL');
     const v=Array.isArray(msg.vector)?msg.vector:null;
     if(!v||v.length!==DIM)throw new Error('embedding dimension '+(v&&v.length||0));
     await poolRef.query('INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image',[rec.product_uid,v]);
+    // Vector generation is complete here. Remove the persistent vector job BEFORE representative work.
+    // Representative processing is a separate background stage and must never cause re-embedding.
     const del=await poolRef.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2',[rec.product_uid,rec.image_url]);
     completed++;failUntil.delete(rec.product_uid);
-    log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),pending_deleted:del.rowCount,active:inflight.size});
+    enqueueRepresentative({product_uid:rec.product_uid,source:'background_vector'});
+    log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),pending_deleted:del.rowCount,active:Math.max(0,inflight.size-1),representative_queued:representativeQueue.length});
   }catch(e){
     failed++;lastError=S(e&&e.message||e);failUntil.set(rec.product_uid,Date.now()+FAIL_COOLDOWN_MS);
-    log('VECTOR_FAIL',{product_uid:rec.product_uid,error:lastError,cooldown_ms:FAIL_COOLDOWN_MS,active:inflight.size});
+    log('VECTOR_FAIL',{product_uid:rec.product_uid,error:lastError,cooldown_ms:FAIL_COOLDOWN_MS,active:Math.max(0,inflight.size-1)});
+  }finally{
+    // Keep the UID inflight until vector save/delete has finished so pickJobs cannot redispatch it.
+    inflight.delete(msg.task_id);
   }
   setImmediate(()=>void pump());
+  setImmediate(()=>void pumpRepresentative());
 }
 async function pickJobs(limit){
   const q=await poolRef.query(`SELECT product_uid,image_url,updated_at FROM gm_image_vector_pending ORDER BY updated_at ASC,product_uid ASC LIMIT $1`,[Math.max(limit,FETCH_WINDOW)]);
@@ -164,6 +213,7 @@ async function pump(){
   try{
     const mem=memorySnapshot();lastMemory=mem;
     const decision=operatingDecision(mem);
+    if(decision.run&&representativeQueue.length&&!representativeRunning&&foregroundQuietRemaining()===0)setImmediate(()=>void pumpRepresentative());
     if(!decision.run){
       if(inflight.size===0)releaseIdleWorker(decision.state);
       return;
@@ -207,12 +257,13 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',completed,failed,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',completed,failed,representative_pending:representativeQueue.length,representative_active:representativeRunning?1:0,representative_completed:representativeCompleted,representative_failed:representativeFailed,representative_last_error:representativeLastError||null,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
   poolRef=pool;
   process.on('gm:special-product-upsert',markForegroundActivity);
+  process.on('gm:image-vector-ready',enqueueRepresentative);
   void ensureSchema().then(()=>{
     timer=setInterval(()=>void pump(),TICK_MS);if(timer&&typeof timer.unref==='function')timer.unref();
     setTimeout(()=>void pump(),Math.min(5000,TICK_MS));
@@ -282,6 +333,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
 });
 function shutdown(){
   process.removeListener('gm:special-product-upsert',markForegroundActivity);
+  process.removeListener('gm:image-vector-ready',enqueueRepresentative);
   if(timer){clearInterval(timer);timer=null;}
   if(worker){try{worker.disconnect();}catch(_){ }try{worker.kill('SIGTERM');}catch(_){ }worker=null;}
 }
