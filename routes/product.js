@@ -1468,48 +1468,11 @@ function optionRowsFromOptionJson(optionJson, id, p){
   return out;
 }
 
-async function ensureProductOptionTable(pool){
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS gm_product_option (
-      mall_code TEXT NOT NULL,
-      product_id TEXT NOT NULL,
-      item_id TEXT,
-      vendor_item_id TEXT,
-      pi_ii_vi TEXT NOT NULL,
-      option_name TEXT,
-      option_image_url TEXT,
-      option_sort_no INTEGER NOT NULL DEFAULT 0,
-      mall_sale_price INTEGER NOT NULL DEFAULT 0,
-      final_supply_price INTEGER,
-      normal_price INTEGER,
-      discount_price INTEGER NOT NULL DEFAULT 0,
-      delivery_fee INTEGER NOT NULL DEFAULT 0,
-      delivery_eta_text TEXT,
-      delivery_type TEXT,
-      soldout_yn TEXT NOT NULL DEFAULT 'N',
-      sale_status TEXT NOT NULL DEFAULT 'active',
-      active_yn TEXT NOT NULL DEFAULT 'Y',
-      buyable_qty INTEGER,
-      min_order_qty INTEGER,
-      max_order_qty INTEGER,
-      sales_qty INTEGER NOT NULL DEFAULT 0,
-      last_seen_at TIMESTAMP,
-      created_at TIMESTAMP NOT NULL DEFAULT now(),
-      updated_at TIMESTAMP,
-      PRIMARY KEY (mall_code, pi_ii_vi)
-    )
-  `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_product ON gm_product_option(mall_code, product_id)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_active ON gm_product_option(mall_code, product_id, active_yn)`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_gm_product_option_vendor ON gm_product_option(vendor_item_id)`);
-}
-
 async function upsertProductOptions(pool, id, optionJson, p, parent){
   const result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
   const optionRows = optionRowsFromOptionJson(optionJson, id, p);
   result.received = optionRows.length;
   if(!optionRows.length) return result;
-  await ensureProductOptionTable(pool);
   const seen = new Set();
   for(const opt of optionRows){
     try{
@@ -1611,7 +1574,6 @@ const {
   pickCpSelectedCode,
   pickCpFixCode,
   normalizeCpMatch,
-  ensureProductCpColumns,
   parseCategoryTreeFromPayload,
   findCpSelectedCodeForKeyword,
   findCpSelectedCodeForKeywordAndTree,
@@ -1619,6 +1581,26 @@ const {
   decideCpMatch,
   applyCpFixLearning
 } = require('../services/category');
+
+// GM_SEARCH_CATEGORY_ONCE_V020_RESTORE_MIN
+// 같은 검색(requestId + normalized keyword)의 카테고리 판정은 1회만 공유한다.
+// 미매칭도 현재 동작대로 keyword를 selected 값으로 확정해 worker의 상품별 재판정을 막는다.
+const __gmSearchCategoryOnce = new Map();
+function searchCategoryRequestToken(p){
+  return cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId || p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || '');
+}
+async function resolveSearchCategoryOnce(pool, keyword, p){
+  const kw = normalizeKeywordValue(keyword);
+  if(!kw) return { value:'', cache_hit:false };
+  const key = (searchCategoryRequestToken(p) || 'KW') + '::' + kw;
+  let promise = __gmSearchCategoryOnce.get(key);
+  if(promise) return { value:cleanText(await promise), cache_hit:true };
+  promise = (async()=>cleanText(await findCpSelectedCodeForKeyword(pool, keyword)) || cleanText(keyword))();
+  __gmSearchCategoryOnce.set(key, promise);
+  const timer = setTimeout(()=>{ if(__gmSearchCategoryOnce.get(key) === promise) __gmSearchCategoryOnce.delete(key); }, 90000);
+  if(timer && typeof timer.unref === 'function') timer.unref();
+  return { value:cleanText(await promise), cache_hit:false };
+}
 
 
 let __gmLightJsonColumnsEnsured = false;
@@ -1731,7 +1713,6 @@ async function upsertProduct(pool, raw, parent={}){
   const cpMatch = decideCpMatch(p, id.mallCode, cpFixCode, cpSelectedCode);
   // cp_selected_code는 검색어 기준 후보 코드다. 상세 leaf(cp_fix_code)가 확인되어도 selected를 leaf로 덮어쓰지 않는다.
   // 예: 푸룬 검색은 selected=432516(건자두/푸룬), fix=445867(셀러가 올린 실제 leaf)로 함께 보관한다.
-  await ensureProductCpColumns(pool);
   await ensureProductLightJsonColumns(pool);
   const optionJson = normalizeOptionJson(p, id);
   const thumbJson = normalizeThumbJson(p);
@@ -2036,7 +2017,11 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
-    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:items.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
+    const categoryOnce = await resolveSearchCategoryOnce(pool, keyword, p);
+    const queueCpSelectedCode = cleanText(categoryOnce.value);
+    const queueItems = items.map(item=>Object.assign({}, item || {}, { cp_selected_code:queueCpSelectedCode, cpSelectedCode:queueCpSelectedCode }));
+    console.log('[GM_SEARCH_CATEGORY_ONCE]', { keyword, cp_selected_code:queueCpSelectedCode, cache_hit:categoryOnce.cache_hit, request_id:requestId, chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
+    console.log('[GM_PRODUCT_QUEUE] insert request', { item_count:queueItems.length, mall_code:mallCode, keyword, request_id:requestId, search_run_id:cleanText(p.search_run_id||p.searchRunId||''), chunk_index:toInt(p.chunk_index||p.chunkIndex,0), chunk_total:toInt(p.chunk_total||p.chunkTotal,0) });
     const r = await pool.query(`
       INSERT INTO gm_product_upsert_queue (
         request_id, mall_code, keyword, items_json, item_count, status, retry_count, created_at
@@ -2049,7 +2034,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
         status=CASE WHEN gm_product_upsert_queue.status IN ('done','processing') THEN gm_product_upsert_queue.status ELSE 'pending' END,
         error_message=NULL
       RETURNING queue_id, request_id, status, item_count
-    `, [requestId, mallCode, keyword, JSON.stringify(items), items.length]);
+    `, [requestId, mallCode, keyword, JSON.stringify(queueItems), queueItems.length]);
     console.log('[GM_PRODUCT_QUEUE] inserted', {
       queue_id:r.rows[0] && r.rows[0].queue_id,
       request_id:r.rows[0] && r.rows[0].request_id,
@@ -2068,7 +2053,7 @@ router.post('/api/gm/product/queue', async (req,res)=>{
       request_id:r.rows[0] && r.rows[0].request_id,
       mall_code:mallCode,
       keyword,
-      item_count:items.length,
+      item_count:queueItems.length,
       chunk_index:toInt(p.chunk_index||p.chunkIndex,0),
       chunk_total:toInt(p.chunk_total||p.chunkTotal,0)
     });
