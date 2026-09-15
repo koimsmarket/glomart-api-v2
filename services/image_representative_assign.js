@@ -186,5 +186,100 @@ async function assignIncremental(db,puid,newVector){
   }catch(e){await client.query('ROLLBACK');throw e;}finally{console.log('[GM_HNSW_DIAG ASSIGN_EXIT]',JSON.stringify({puid:S(puid),elapsed_ms:Date.now()-diagStarted}));client.release();}
 }
 
+
+async function categoryKeyForPuid(db,puid){
+  const meta=await productMeta(db,puid);if(!meta)return '';
+  const code=S(meta.cp_fix_code)||S(meta.cp_selected_code);
+  if(code)return `CP:${code}`;
+  const kw=norm(S(meta.category_keyword)||S(meta.keyword));
+  return kw?`KW:${kw}`:'';
+}
+function aliasesForResolvedGroup(ref,group){
+  const out=new Set();
+  if(!group)return out;
+  if(group.startsWith('KW:')){const kw=norm(group.slice(3));if(kw)out.add(kw);return out;}
+  if(group.startsWith('CAT:')){
+    const code=S(group.slice(4)),row=ref.byCode.get(code);
+    if(row){
+      [row.name_ko,row.keyword,row.keyword_seed].forEach(v=>{const x=norm(v);if(x)out.add(x);});
+      for(const x of splitComma(`${S(row.keyword)},${S(row.keyword_seed)}`))out.add(x);
+      for(const x of splitSlash(row.name_ko))out.add(x);
+    }
+  }
+  return out;
+}
+async function categoryProductsWithVectors(client,ref,group){
+  const aliases=[...aliasesForResolvedGroup(ref,group)];
+  let q;
+  if(group.startsWith('CAT:')){
+    const code=S(group.slice(4));
+    q=await client.query(`
+      SELECT p.product_uid,p.product_id,p.mall_code,p.cp_fix_code,p.cp_selected_code,p.category_keyword,p.keyword,v.vector_image
+        FROM gm_product p
+        JOIN gm_product_image_vector v ON v.product_uid=p.product_uid
+       WHERE v.vector_image IS NOT NULL AND array_length(v.vector_image,1)=$1
+         AND (
+           p.cp_fix_code=$2 OR p.cp_selected_code=$2
+           OR LOWER(BTRIM(COALESCE(p.category_keyword,'')))=ANY($3::text[])
+           OR LOWER(BTRIM(COALESCE(p.keyword,'')))=ANY($3::text[])
+         )
+       ORDER BY p.product_uid`,[DIM,code,aliases]);
+  }else{
+    const kw=norm(group.slice(3));
+    q=await client.query(`
+      SELECT p.product_uid,p.product_id,p.mall_code,p.cp_fix_code,p.cp_selected_code,p.category_keyword,p.keyword,v.vector_image
+        FROM gm_product p
+        JOIN gm_product_image_vector v ON v.product_uid=p.product_uid
+       WHERE v.vector_image IS NOT NULL AND array_length(v.vector_image,1)=$1
+         AND (LOWER(BTRIM(COALESCE(p.category_keyword,'')))=$2 OR LOWER(BTRIM(COALESCE(p.keyword,'')))=$2)
+       ORDER BY p.product_uid`,[DIM,kw]);
+  }
+  const out=[];
+  for(const row of q.rows||[]){
+    const cat=resolveProductCategory(ref,row);
+    if(cat.group!==group){row.vector_image=null;continue;}
+    const vector=normalizedFloat32(row.vector_image);row.vector_image=null;
+    if(vector)out.push({puid:S(row.product_uid),vector});
+  }
+  return out;
+}
+async function rebuildCategoryFromPuid(db,seedPuid){
+  const started=Date.now(),client=await db.connect();
+  try{
+    await client.query('BEGIN');
+    const lockStarted=Date.now();
+    await client.query('SELECT pg_advisory_xact_lock($1)',[LOCK_KEY]);
+    const st=await settings(client),ref=await loadCategoryReference(client),meta=await productMeta(client,seedPuid),cat=resolveProductCategory(ref,meta||{});
+    if(!cat.group){await client.query('COMMIT');return {action:'category_run0',run_no:0,threshold:st.threshold,category_group:'',category_reason:cat.reason,product_count:0,representative_count:0,new_representatives:[],removed_representatives:0,elapsed_ms:Date.now()-started};}
+    const rows=await categoryProductsWithVectors(client,ref,cat.group);
+    const ids=rows.map(r=>r.puid);
+    if(!rows.length){await client.query('COMMIT');return {action:'category_empty',run_no:st.run_no,threshold:st.threshold,category_group:cat.group,category_reason:cat.reason,product_count:0,representative_count:0,new_representatives:[],removed_representatives:0,elapsed_ms:Date.now()-started};}
+    const oldQ=await client.query(`SELECT puid,representative_no,representative_puid FROM gm_image_vector_representative_map WHERE run_no=$1 AND puid=ANY($2::text[])`,[st.run_no,ids]);
+    const oldByPuid=new Map(),oldSelf=new Map();
+    for(const r of oldQ.rows||[]){oldByPuid.set(S(r.puid),r);if(S(r.puid)&&S(r.puid)===S(r.representative_puid))oldSelf.set(S(r.puid),N(r.representative_no));}
+    rows.sort((a,b)=>{const ar=oldSelf.has(a.puid)?0:1,br=oldSelf.has(b.puid)?0:1;if(ar!==br)return ar-br;if(ar===0){const d=N(oldSelf.get(a.puid))-N(oldSelf.get(b.puid));if(d)return d;}return a.puid.localeCompare(b.puid);});
+    const maxQ=await client.query('SELECT COALESCE(MAX(representative_no),0)::bigint AS n FROM gm_image_vector_representative_map WHERE run_no=$1',[st.run_no]);
+    let nextNo=N(maxQ.rows&&maxQ.rows[0]&&maxQ.rows[0].n)+1;
+    const reps=[],assignments=[],usedNos=new Set();
+    for(const row of rows){
+      const best=bestRep(row.vector,reps,'');
+      if(best.rep&&best.score>=st.threshold){assignments.push({puid:row.puid,representative_no:best.rep.representative_no,representative_puid:best.rep.representative_puid,similarity:best.score,vector:row.vector});continue;}
+      let no=oldSelf.get(row.puid)||0;
+      if(!no||usedNos.has(no))no=nextNo++;
+      usedNos.add(no);
+      const rep={representative_no:no,representative_puid:row.puid,vector:row.vector};reps.push(rep);
+      assignments.push({puid:row.puid,representative_no:no,representative_puid:row.puid,similarity:1,vector:row.vector});
+    }
+    const newRepresentatives=[];const currentSelf=new Set(reps.map(r=>r.representative_puid));
+    for(const a of assignments)await upsertMap(client,a.puid,st.run_no,a.representative_no,a.representative_puid,a.similarity);
+    const touched=new Set([...oldSelf.keys(),...currentSelf]);
+    for(const uid of touched)await refreshStat(client,st.run_no,uid);
+    for(const r of reps)if(!oldSelf.has(r.representative_puid))newRepresentatives.push({representative_no:r.representative_no,representative_puid:r.representative_puid,vector:Array.from(r.vector)});
+    let removed=0;for(const uid of oldSelf.keys())if(!currentSelf.has(uid))removed++;
+    await client.query('COMMIT');
+    return {action:'category_rebuilt',run_no:st.run_no,threshold:st.threshold,category_group:cat.group,category_reason:cat.reason,product_count:rows.length,representative_count:reps.length,new_representatives:newRepresentatives,removed_representatives:removed,lock_wait_ms:Date.now()-lockStarted,elapsed_ms:Date.now()-started};
+  }catch(e){try{await client.query('ROLLBACK');}catch(_){ }throw e;}finally{client.release();}
+}
+
 function invalidate(){/* no persistent representative-vector cache */}
-module.exports={assignIncremental,invalidate,settings};
+module.exports={assignIncremental,categoryKeyForPuid,rebuildCategoryFromPuid,invalidate,settings};

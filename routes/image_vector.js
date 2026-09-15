@@ -124,10 +124,11 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
     // Foreground/mobile embedding is complete at the vector save boundary.
     // Clear any background-vector pending row so the same image is never embedded again.
     const pending=imageUrl?await pool.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2',[uid,imageUrl]):{rowCount:0};
-    // Representative assignment is intentionally deferred to the background controller.
-    // The background listener applies OFF/AUTO/ON, memory and foreground-yield policy.
-    process.emit('gm:image-vector-ready',{product_uid:uid,source:'foreground_upsert'});
-    return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,pending_deleted:pending.rowCount,representative_assignment:'BACKGROUND_DEFERRED',route_version:ROUTE_VERSION});
+    // Vector save is the end of the foreground request path.
+    // Emit only a lightweight vector-saved signal; representative work is decided later
+    // by the background controller under OFF/AUTO/ON and never blocks this response.
+    process.emit('gm:image-vector-saved',{product_uid:uid,source:'foreground_upsert'});
+    return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,pending_deleted:pending.rowCount,representative_assignment:'BACKGROUND_CATEGORY_DEFERRED',route_version:ROUTE_VERSION});
   }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{

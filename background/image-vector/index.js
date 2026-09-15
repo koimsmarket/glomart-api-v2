@@ -22,7 +22,7 @@ const path=require('path');
 const {fork}=require('child_process');
 const router=express.Router();
 const {parseCsv}=require('../../routes/builder/core');
-const {assignIncremental}=require('../../services/image_representative_assign');
+const {categoryKeyForPuid,rebuildCategoryFromPuid}=require('../../services/image_representative_assign');
 const representativeSearch=require('../../services/image_representative_search');
 const DIM=512;
 const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
@@ -30,7 +30,6 @@ const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLO
 const FETCH_WINDOW=Math.max(8,Math.min(100,Number(process.env.GM_IMAGE_VECTOR_FETCH_WINDOW||30)));
 const FAIL_COOLDOWN_MS=Math.max(60000,Number(process.env.GM_IMAGE_VECTOR_FAIL_COOLDOWN_MS||600000));
 // Vector is always lowest priority, even in ON mode. Product/search saves get a quiet window first.
-const FOREGROUND_QUIET_MS=Math.max(3000,Number(process.env.GM_IMAGE_VECTOR_FOREGROUND_QUIET_MS||10000));
 const AUTO_START_HOUR=0;
 const AUTO_END_HOUR=8;
 const AUTO_START_RATIO=0.70;
@@ -40,14 +39,12 @@ let poolRef=null,timer=null,worker=null,seq=0,pumping=false;
 const inflight=new Map();
 const failUntil=new Map();
 let completed=0,failed=0,lastError='',lastMemory=null;
-const representativeQueue=[];
-const representativeQueued=new Set();
-let representativeRunning=false,representativeCompleted=0,representativeFailed=0,representativeLastError='';
+const representativeCategories=new Map();
+const REP_CATEGORY_SETTLE_MS=Math.max(3000,Number(process.env.GM_IMAGE_REP_CATEGORY_SETTLE_MS||10000));
+let representativeRunning=false,representativeRunningKey='',representativeCompleted=0,representativeFailed=0,representativeLastError='';
 let mode='AUTO';
 let autoRunning=false;
 let schemaReady=false;
-let foregroundQuietUntil=0;
-let foregroundEventCount=0;
 const S=v=>String(v==null?'':v).trim();
 function log(tag,o){console.log('[GM_IMAGE_VECTOR_BACKGROUND_V008 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function readNumber(file){try{const s=fs.readFileSync(file,'utf8').trim();if(!s||s==='max')return null;const n=Number(s);return Number.isFinite(n)&&n>0?n:null;}catch(_){return null;}}
@@ -102,48 +99,74 @@ async function ensureSchema(){
 }
 
 
-function markForegroundActivity(info){
-  const now=Date.now();
-  foregroundQuietUntil=Math.max(foregroundQuietUntil,now+FOREGROUND_QUIET_MS);
-  foregroundEventCount++;
-  log('FOREGROUND_PRIORITY',{quiet_ms:FOREGROUND_QUIET_MS,quiet_until:new Date(foregroundQuietUntil).toISOString(),product_uid:S(info&&info.product_uid),mall_code:S(info&&info.mall_code)});
-}
-function foregroundQuietRemaining(){return Math.max(0,foregroundQuietUntil-Date.now());}
-
-function enqueueRepresentative(info){
-  const uid=S(info&&info.product_uid);
-  if(!uid||representativeQueued.has(uid))return false;
-  representativeQueued.add(uid);
-  representativeQueue.push({product_uid:uid,source:S(info&&info.source)||'vector_ready'});
-  log('REP_QUEUE',{product_uid:uid,source:S(info&&info.source)||'vector_ready',queued:representativeQueue.length,running:representativeRunning});
+function markRepresentativeCategory(key,puid,source){
+  key=S(key);puid=S(puid);if(!key||!puid)return false;
+  const now=Date.now(),prev=representativeCategories.get(key);
+  representativeCategories.set(key,{key,seed_puid:puid,source:S(source)||'vector_saved',last_signal_at:now,dirty_while_running:!!(prev&&prev.dirty_while_running)});
+  log('REP_CATEGORY_DIRTY',{category_key:key,seed_puid:puid,source:S(source)||'vector_saved',pending_categories:representativeCategories.size,running:representativeRunning,running_key:representativeRunningKey||null});
   setImmediate(()=>void pumpRepresentative());
   return true;
 }
+function noteVectorSaved(info){
+  const uid=S(info&&info.product_uid),source=S(info&&info.source)||'vector_saved';
+  if(!uid||!poolRef||!schemaReady)return;
+  // Never make the vector/upsert caller wait for category resolution.
+  setImmediate(async()=>{
+    try{
+      const key=await categoryKeyForPuid(poolRef,uid);
+      if(!key){log('REP_CATEGORY_SKIP',{product_uid:uid,source,reason:'NO_CATEGORY_KEY'});return;}
+      if(representativeRunning&&representativeRunningKey===key){
+        const prev=representativeCategories.get(key)||{key,seed_puid:uid,source,last_signal_at:Date.now()};
+        prev.seed_puid=uid;prev.source=source;prev.last_signal_at=Date.now();prev.dirty_while_running=true;
+        representativeCategories.set(key,prev);
+        log('REP_CATEGORY_REDIRECT_DIRTY',{category_key:key,product_uid:uid,source});
+        return;
+      }
+      markRepresentativeCategory(key,uid,source);
+    }catch(e){representativeLastError=S(e&&e.message||e);log('REP_CATEGORY_KEY_FAIL',{product_uid:uid,source,error:representativeLastError});}
+  });
+}
+function nextReadyRepresentativeCategory(){
+  const now=Date.now();
+  let best=null;
+  for(const rec of representativeCategories.values()){
+    if(!rec||!rec.key)continue;
+    if(now-Number(rec.last_signal_at||0)<REP_CATEGORY_SETTLE_MS)continue;
+    if(!best||Number(rec.last_signal_at||0)<Number(best.last_signal_at||0))best=rec;
+  }
+  return best;
+}
 async function pumpRepresentative(){
-  if(representativeRunning||!poolRef||!schemaReady||!representativeQueue.length)return;
+  if(representativeRunning||!poolRef||!schemaReady||!representativeCategories.size)return;
   const mem=memorySnapshot();lastMemory=mem;
   const decision=operatingDecision(mem);
   if(!decision.run)return;
-  const quietMs=foregroundQuietRemaining();
-  if(quietMs>0)return;
-  const rec=representativeQueue.shift();
+  const rec=nextReadyRepresentativeCategory();
   if(!rec)return;
-  representativeRunning=true;
+  representativeCategories.delete(rec.key);
+  representativeRunning=true;representativeRunningKey=rec.key;
   const started=Date.now();
   try{
-    const q=await poolRef.query('SELECT vector_image FROM gm_product_image_vector WHERE product_uid=$1 AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2',[rec.product_uid,DIM]);
-    const vector=q.rows&&q.rows[0]&&q.rows[0].vector_image;
-    if(!Array.isArray(vector)||vector.length!==DIM)throw new Error('REP_VECTOR_NOT_READY');
-    const assignment=await assignIncremental(poolRef,rec.product_uid,vector);
-    representativeSearch.onAssignment(poolRef,assignment,vector);
+    const result=await rebuildCategoryFromPuid(poolRef,rec.seed_puid);
+    const adds=Array.isArray(result&&result.new_representatives)?result.new_representatives:[];
+    for(const a of adds){
+      if(a&&Array.isArray(a.vector)&&a.vector.length===DIM){
+        representativeSearch.onAssignment(poolRef,{action:'new_representative',run_no:result.run_no,representative_no:a.representative_no,representative_puid:a.representative_puid},a.vector);
+      }
+    }
+    if(result&&result.removed_representatives>0)representativeSearch.onAssignment(poolRef,{action:'category_rebuilt',run_no:result.run_no});
     representativeCompleted++;representativeLastError='';
-    log('REP_OK',{product_uid:rec.product_uid,source:rec.source,assignment,elapsed_ms:Date.now()-started,queued:representativeQueue.length});
+    log('REP_CATEGORY_OK',{category_key:rec.key,seed_puid:rec.seed_puid,source:rec.source,elapsed_ms:Date.now()-started,product_count:Number(result&&result.product_count||0),representative_count:Number(result&&result.representative_count||0),new_representatives:adds.length,removed_representatives:Number(result&&result.removed_representatives||0),pending_categories:representativeCategories.size});
   }catch(e){
     representativeFailed++;representativeLastError=S(e&&e.message||e);
-    log('REP_FAIL',{product_uid:rec.product_uid,source:rec.source,error:representativeLastError,elapsed_ms:Date.now()-started,queued:representativeQueue.length});
+    log('REP_CATEGORY_FAIL',{category_key:rec.key,seed_puid:rec.seed_puid,source:rec.source,error:representativeLastError,elapsed_ms:Date.now()-started,pending_categories:representativeCategories.size});
+    // Keep the category dirty for a later retry without blocking vector work.
+    representativeCategories.set(rec.key,{key:rec.key,seed_puid:rec.seed_puid,source:rec.source,last_signal_at:Date.now(),dirty_while_running:false});
   }finally{
-    representativeQueued.delete(rec.product_uid);
-    representativeRunning=false;
+    const key=representativeRunningKey;
+    representativeRunning=false;representativeRunningKey='';
+    const again=representativeCategories.get(key);
+    if(again&&again.dirty_while_running){again.dirty_while_running=false;again.last_signal_at=Date.now();representativeCategories.set(key,again);}
     setImmediate(()=>void pumpRepresentative());
   }
 }
@@ -190,8 +213,8 @@ async function finish(msg){
     // Representative processing is a separate background stage and must never cause re-embedding.
     const del=await poolRef.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2',[rec.product_uid,rec.image_url]);
     completed++;failUntil.delete(rec.product_uid);
-    enqueueRepresentative({product_uid:rec.product_uid,source:'background_vector'});
-    log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),pending_deleted:del.rowCount,active:Math.max(0,inflight.size-1),representative_queued:representativeQueue.length});
+    noteVectorSaved({product_uid:rec.product_uid,source:'background_vector'});
+    log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),pending_deleted:del.rowCount,active:Math.max(0,inflight.size-1),representative_pending_categories:representativeCategories.size});
   }catch(e){
     failed++;lastError=S(e&&e.message||e);failUntil.set(rec.product_uid,Date.now()+FAIL_COOLDOWN_MS);
     log('VECTOR_FAIL',{product_uid:rec.product_uid,error:lastError,cooldown_ms:FAIL_COOLDOWN_MS,active:Math.max(0,inflight.size-1)});
@@ -213,16 +236,9 @@ async function pump(){
   try{
     const mem=memorySnapshot();lastMemory=mem;
     const decision=operatingDecision(mem);
-    if(decision.run&&representativeQueue.length&&!representativeRunning&&foregroundQuietRemaining()===0)setImmediate(()=>void pumpRepresentative());
+    if(decision.run&&representativeCategories.size&&!representativeRunning)setImmediate(()=>void pumpRepresentative());
     if(!decision.run){
       if(inflight.size===0)releaseIdleWorker(decision.state);
-      return;
-    }
-    const quietMs=foregroundQuietRemaining();
-    if(quietMs>0){
-      // Never kill an inference already in progress; just stop taking new work.
-      // The child runs at OS nice=19 so foreground/server work preempts its CPU time.
-      log('YIELD_FOREGROUND',{mode,state:decision.state,quiet_remaining_ms:quietMs,active:inflight.size,memory_percent:mem.percent});
       return;
     }
     const free=Math.max(0,MAX_SLOTS-inflight.size);
@@ -257,17 +273,16 @@ async function statusPayload(){
   const decision=operatingDecision(mem);
   let pending=null;
   try{if(poolRef&&schemaReady){const q=await poolRef.query('SELECT COUNT(*)::int AS n FROM gm_image_vector_pending');pending=Number(q.rows[0]&&q.rows[0].n||0);}}catch(e){lastError=S(e&&e.message||e);}
-  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,foreground_quiet:foregroundQuietRemaining()>0,foreground_quiet_remaining_ms:foregroundQuietRemaining(),foreground_quiet_ms:FOREGROUND_QUIET_MS,foreground_event_count:foregroundEventCount,worker_priority:'nice 19 (lowest)',completed,failed,representative_pending:representativeQueue.length,representative_active:representativeRunning?1:0,representative_completed:representativeCompleted,representative_failed:representativeFailed,representative_last_error:representativeLastError||null,last_error:lastError||null};
+  return {ok:true,version:'GM_IMAGE_VECTOR_BACKGROUND_V008',mode,state:decision.state,running:decision.run,pending,active:inflight.size,max_slots:MAX_SLOTS,memory_percent:mem.percent,memory_used_mb:Math.round(mem.used_bytes/1048576*10)/10,memory_limit_mb:Math.round(mem.total_bytes/1048576*10)/10,memory_source:mem.source,auto_window:'00:00~08:00',auto_start_percent:70,auto_stop_percent:80,inside_auto_window:decision.inside,worker_priority:'nice 19 (lowest)',completed,failed,representative_pending_categories:representativeCategories.size,representative_active:representativeRunning?1:0,representative_running_key:representativeRunningKey||null,representative_settle_ms:REP_CATEGORY_SETTLE_MS,representative_completed:representativeCompleted,representative_failed:representativeFailed,representative_last_error:representativeLastError||null,last_error:lastError||null};
 }
 function init(pool){
   if(poolRef)return;
   poolRef=pool;
-  process.on('gm:special-product-upsert',markForegroundActivity);
-  process.on('gm:image-vector-ready',enqueueRepresentative);
+  process.on('gm:image-vector-saved',noteVectorSaved);
   void ensureSchema().then(()=>{
     timer=setInterval(()=>void pump(),TICK_MS);if(timer&&typeof timer.unref==='function')timer.unref();
     setTimeout(()=>void pump(),Math.min(5000,TICK_MS));
-    log('INIT',{tick_ms:TICK_MS,max_slots:MAX_SLOTS,mode,auto_window:'00:00~08:00',start_percent:70,stop_percent:80,foreground_quiet_ms:FOREGROUND_QUIET_MS,worker_priority:'nice 19'});
+    log('INIT',{tick_ms:TICK_MS,max_slots:MAX_SLOTS,mode,auto_window:'00:00~08:00',start_percent:70,stop_percent:80,worker_priority:'nice 19'});
   }).catch(e=>{
     lastError=S(e&&e.message||e);log('SCHEMA_FAIL',{error:lastError});
     const retry=setInterval(()=>{void ensureSchema().then(()=>{clearInterval(retry);if(!timer){timer=setInterval(()=>void pump(),TICK_MS);if(timer&&typeof timer.unref==='function')timer.unref();}void pump();}).catch(err=>{lastError=S(err&&err.message||err);log('SCHEMA_RETRY_FAIL',{error:lastError});});},30000);
@@ -332,8 +347,7 @@ router.post('/api/gm/background/image-vector/pending/import',express.text({type:
   }
 });
 function shutdown(){
-  process.removeListener('gm:special-product-upsert',markForegroundActivity);
-  process.removeListener('gm:image-vector-ready',enqueueRepresentative);
+  process.removeListener('gm:image-vector-saved',noteVectorSaved);
   if(timer){clearInterval(timer);timer=null;}
   if(worker){try{worker.disconnect();}catch(_){ }try{worker.kill('SIGTERM');}catch(_){ }worker=null;}
 }
