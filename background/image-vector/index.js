@@ -22,6 +22,8 @@ const path=require('path');
 const {fork}=require('child_process');
 const router=express.Router();
 const {parseCsv}=require('../../routes/builder/core');
+const {assignIncremental}=require('../../services/image_representative_assign');
+const representativeSearch=require('../../services/image_representative_search');
 const DIM=512;
 const TICK_MS=Math.max(2000,Number(process.env.GM_IMAGE_VECTOR_TICK_MS||5000));
 const MAX_SLOTS=Math.max(1,Math.min(8,Number(process.env.GM_IMAGE_VECTOR_MAX_SLOTS||4)));
@@ -144,6 +146,11 @@ async function finish(msg){
     const v=Array.isArray(msg.vector)?msg.vector:null;
     if(!v||v.length!==DIM)throw new Error('embedding dimension '+(v&&v.length||0));
     await poolRef.query('INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image',[rec.product_uid,v]);
+    // Representative assignment is part of the background vector pipeline, not the request path.
+    // Therefore it runs only for jobs admitted by the same OFF/AUTO/ON controller.
+    const representative=await assignIncremental(poolRef,rec.product_uid,v);
+    representativeSearch.onAssignment(poolRef,representative,v);
+    log('REP_ASSIGN',{product_uid:rec.product_uid,assignment:representative});
     const del=await poolRef.query('DELETE FROM gm_image_vector_pending WHERE product_uid=$1 AND image_url=$2',[rec.product_uid,rec.image_url]);
     completed++;failUntil.delete(rec.product_uid);
     log('VECTOR_OK',{product_uid:rec.product_uid,elapsed_ms:Number(msg.elapsed_ms||0),pending_deleted:del.rowCount,active:inflight.size});

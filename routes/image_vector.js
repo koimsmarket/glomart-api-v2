@@ -7,7 +7,6 @@ const express=require('express');
 const https=require('https');
 const http=require('http');
 const router=express.Router();
-const {assignIncremental}=require('../services/image_representative_assign');
 const representativeSearch=require('../services/image_representative_search');
 const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V025_MEMORY_MODE_NO_MIGRATION';
 
@@ -122,12 +121,9 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
     if(isArrayVectorType(columnType))await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::real[]) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[uid,v]);
     else if(isPgVectorType(columnType))await pool.query(`INSERT INTO gm_product_image_vector(product_uid,vector_image) VALUES($1,$2::vector) ON CONFLICT(product_uid) DO UPDATE SET vector_image=EXCLUDED.vector_image`,[uid,vectorLiteral(v)]);
     else throw new Error('unsupported vector_image type '+columnType);
-    const representative=await assignIncremental(pool,uid,v);
-    // Critical: do NOT invalidate/clear ACTIVE HNSW. Existing-member assignment does nothing;
-    // a new representative is added incrementally; structural changes rebuild NEXT later.
-    representativeSearch.onAssignment(pool,representative,v);
-    console.log('[GM_IMAGE_VECTOR_REP_ASSIGN]',JSON.stringify({product_uid:uid,assignment:representative,route_version:ROUTE_VERSION}));
-    return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,representative_assignment:representative,route_version:ROUTE_VERSION});
+    // Foreground/mobile vector upload must end here. Representative assignment is background-only
+    // and follows GM_IMAGE_VECTOR_BACKGROUND OFF/AUTO/ON scheduling.
+    return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,representative_assignment:'BACKGROUND_DEFERRED',route_version:ROUTE_VERSION});
   }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
 router.post('/api/gm/image-vector/search',async(req,res)=>{
