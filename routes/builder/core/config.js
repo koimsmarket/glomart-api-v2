@@ -1,4 +1,4 @@
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V022_CATEGORY_LAST_SEARCH';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V021_SPLIT_DOMAIN';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -183,11 +183,13 @@ const TABLES = {
   },
   category: {
     table: 'gm_category',
-    // DEV: use Coupang category no as the upsert key. Before official launch this can be changed to ['gm_code'].
-    key: ['cp_code'],
-    keyAny: [['cp_code'], ['gm_code']],
+    // GM_CATEGORY_SAFE_KEY_V003
+    // Glomart category code(gm_code) is the only safe-update comparison key.
+    // cp_code is source metadata and may legitimately be blank; never use it to identify a row.
+    key: ['gm_code'],
+    keyAny: [['gm_code']],
     order: 'depth ASC, sort_order ASC, gm_code ASC',
-    critical: ['cp_code','gm_code','name_ko'],
+    critical: ['gm_code','name_ko'],
     numeric: ['category_id','depth','sort_order','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
     defaults: { leaf_yn:'N', display_yn:'Y', depth:'0', sort_order:'0' },
     enums: { leaf_yn:['Y','N'], display_yn:['Y','N'] },

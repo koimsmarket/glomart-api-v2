@@ -2,8 +2,11 @@ const { VERSION, LIMITS } = require('./config');
 const { dbFrom, fail, qIdent } = require('./common');
 const { clean, toCsv } = require('./csv');
 const { getColumns, pickKey, validateCell } = require('./schema');
-// GM_CATEGORY_BATCH_IMPORT_V022_LAST_SEARCH_PRESERVE_UPDATED_AT
 async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
+  // GM_CATEGORY_LAST_SEARCH_BACKFILL_V002
+  // last_search_at is SPECIAL-owned history. Updating only this field must not
+  // rewrite gm_category.updated_at, because updated_at is used to detect recent
+  // ordinary/single-search category activity.
   // updated_at is owned by the server for this batch route.
   // Keep this guard here as well as config.blocked so an uploaded file can
   // never generate both `updated_at=$n` and `updated_at=NOW()` in one UPDATE.
@@ -140,11 +143,9 @@ async function safeUpdateCategoryBatch(req, res, spec, rows, apply) {
                 const params = parts.updateVals.slice();
                 key.values.forEach(v => params.push(v));
                 const where2 = key.keys.map((k,i)=>`${qIdent(k)}=$${parts.updateVals.length+i+1}`).join(' AND ');
-                // last_search_at is SPECIAL progress metadata. Importing only this field must never
-                // make the category look like a recent single-search/category update.
-                const lastSearchOnly = parts.updateCols.length > 0 && parts.updateCols.every(c => c === 'last_search_at');
-                const touchUpdatedAt = lastSearchOnly ? '' : ', updated_at=NOW()';
-                const ur = await client.query(`UPDATE ${qIdent(table)} SET ${setSql}${touchUpdatedAt} WHERE ${where2} RETURNING leaf_yn`, params);
+                const onlyLastSearchAt = parts.updateCols.length === 1 && parts.updateCols[0] === 'last_search_at';
+                const serverTouchSql = onlyLastSearchAt ? '' : ', updated_at=NOW()';
+                const ur = await client.query(`UPDATE ${qIdent(table)} SET ${setSql}${serverTouchSql} WHERE ${where2} RETURNING leaf_yn`, params);
                 if (ur.rowCount !== 1) throw new Error(`UPDATE_ROWCOUNT_${ur.rowCount}`);
                 if (leafOnly) {
                   const expectedLeaf = String(row.leaf_yn || '').trim().toUpperCase();
