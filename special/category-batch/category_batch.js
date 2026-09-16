@@ -1,10 +1,10 @@
 'use strict';
-/* GM_CATEGORY_BATCH_SPECIAL_V020
+/* GM_CATEGORY_BATCH_SPECIAL_V022_LAST_SEARCH_TEXT_CAST
  * Special category product collection module.
  * V020:
  * - last_search_at is the SPECIAL completion timestamp.
  * - updated_at is only a target freshness filter; recent single-search/category updates are skipped.
- * - one-time migration copies existing created_at -> last_search_at, then never repeats it.
+ * - existing last_search_at backfill is managed explicitly in Builder; runtime never rewrites history.
  * - category claims no longer hold a PostgreSQL pool client/advisory lock for the full search.
  * - apply month and top-category order are persisted in gm_runtime_config.
  */
@@ -15,7 +15,6 @@ const control={mode:'STOPPED',batch_date:'',updated_at:null,updated_by:'',comman
 const CONTROL_CONFIG_KEY='special_category_batch_control';
 const APPLY_YM_CONFIG_KEY='special_category_apply_ym';
 const ORDER_CONFIG_KEY='special_category_order';
-const BACKFILL_CONFIG_KEY='special_category_last_search_backfill_v1';
 const DEFAULT_APPLY_YM='2026-08';
 const DEFAULT_ORDER=[
  {no:1,prefix:'FD',name:'식품'},
@@ -33,7 +32,7 @@ let poolRef=null;
 const S=v=>String(v==null?'':v).trim();
 function pool(req){const p=req.app&&req.app.locals&&req.app.locals.pool;if(!p)throw new Error('DB_POOL_NOT_AVAILABLE');poolRef=p;return p;}
 function auth(req,res){const m=S((req.body&&req.body.member_id)||(req.query&&req.query.member_id));if(!ADMIN_IDS.has(m)){res.status(403).json({ok:false,error:'ADMIN_ID_REQUIRED'});return null;}return m;}
-function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V020 '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
+function log(tag,o){console.log('[GM_CATEGORY_BATCH_SPECIAL_V022_LAST_SEARCH_TEXT_CAST '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},o||{})));}
 function splitKeywords(v){return [...new Set(S(v).split('/').map(g=>S(g).split('|').map(x=>S(x)).filter(Boolean)[0]||'').filter(Boolean))];}
 function categoryPayload(r){if(!r)return null;const source=S(r.keyword)||S(r.name_ko);return Object.assign({},r,{keywords:splitKeywords(source)});}
 function NK(v){return S(v).toLowerCase().replace(/\s+/g,'');}
@@ -108,22 +107,6 @@ async function loadSpecialPlan(p){
  const order=normalizeOrder(m[ORDER_CONFIG_KEY]);
  return {apply_ym,cutoff:applyYmCutoffIso(apply_ym),order};
 }
-async function ensureLastSearchBackfill(p){
- const c=await p.connect();
- try{
-  await c.query('BEGIN');
-  await c.query("SELECT pg_advisory_xact_lock(hashtext($1))",[BACKFILL_CONFIG_KEY]);
-  const done=await c.query('SELECT 1 FROM gm_runtime_config WHERE config_key=$1 LIMIT 1',[BACKFILL_CONFIG_KEY]);
-  if(done.rows.length){await c.query('COMMIT');return {applied:false,rows:0};}
-  const u=await c.query("UPDATE gm_category SET last_search_at=created_at WHERE UPPER(COALESCE(leaf_yn,''))='Y' AND last_search_at IS NULL AND created_at IS NOT NULL");
-  await c.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
-   VALUES($1,$2,'STRING','SPECIAL','FIXED',TRUE,$3,now())`,
-   [BACKFILL_CONFIG_KEY,new Date().toISOString(),'V020 최초 1회: 기존 created_at을 last_search_at으로 이관']);
-  await c.query('COMMIT');
-  log('LAST_SEARCH_BACKFILL',{rows:Number(u.rowCount||0)});
-  return {applied:true,rows:Number(u.rowCount||0)};
- }catch(e){try{await c.query('ROLLBACK');}catch(_e){}throw e;}finally{c.release();}
-}
 function pruneLeases(){
  const now=Date.now();
  for(const [d,l] of leases){if(!l||Number(l.expires_at||0)<=now){leases.delete(d);log('CLAIM_EXPIRE',{device_id:d,category_id:l&&l.category_id});}}
@@ -168,13 +151,13 @@ async function persistControl(p){
  log('CONTROL_PERSIST',{mode:snap.mode,batch_date:snap.batch_date,updated_by:snap.updated_by,updated_at:snap.updated_at});
 }
 
-router.get('/api/special/category-batch/control',async(req,res)=>{const m=auth(req,res);if(!m)return;try{const p=pool(req);await ensureControl(p);await ensureLastSearchBackfill(p);const plan=await loadSpecialPlan(p);res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V020',control,plan});}catch(e){log('CONTROL_READ_ERROR',{member:m,error:S(e&&e.message||e)});res.status(500).json({ok:false,error:'CONTROL_READ_FAILED'});}});
-router.post('/api/special/category-batch/command',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req);try{await ensureControl(p);await ensureLastSearchBackfill(p);const plan=await loadSpecialPlan(p);const cmd=S(req.body&&req.body.command);if(cmd==='#카테고리 검색#')control.mode='RUN';else if(cmd==='#카테고리 일시정지#')control.mode='PAUSE';else if(cmd==='#카테고리 중지#')control.mode='STOPPED';else return res.status(400).json({ok:false,error:'UNKNOWN_COMMAND'});if(cmd==='#카테고리 검색#')control.batch_date=batchDate(req.body&&req.body.batch_date||control.batch_date);control.updated_at=new Date().toISOString();control.updated_by=m;control.command=cmd;await persistControl(p);log('COMMAND',{member:m,mode:control.mode,batch_date:control.batch_date});res.json({ok:true,control,plan});}catch(e){log('COMMAND_ERROR',{member:m,error:S(e&&e.message||e)});res.status(500).json({ok:false,error:'CONTROL_SAVE_FAILED'});}});
+router.get('/api/special/category-batch/control',async(req,res)=>{const m=auth(req,res);if(!m)return;try{const p=pool(req);await ensureControl(p);const plan=await loadSpecialPlan(p);res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V022_LAST_SEARCH_TEXT_CAST',control,plan});}catch(e){log('CONTROL_READ_ERROR',{member:m,error:S(e&&e.message||e)});res.status(500).json({ok:false,error:'CONTROL_READ_FAILED'});}});
+router.post('/api/special/category-batch/command',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req);try{await ensureControl(p);const plan=await loadSpecialPlan(p);const cmd=S(req.body&&req.body.command);if(cmd==='#카테고리 검색#')control.mode='RUN';else if(cmd==='#카테고리 일시정지#')control.mode='PAUSE';else if(cmd==='#카테고리 중지#')control.mode='STOPPED';else return res.status(400).json({ok:false,error:'UNKNOWN_COMMAND'});if(cmd==='#카테고리 검색#')control.batch_date=batchDate(req.body&&req.body.batch_date||control.batch_date);control.updated_at=new Date().toISOString();control.updated_by=m;control.command=cmd;await persistControl(p);log('COMMAND',{member:m,mode:control.mode,batch_date:control.batch_date});res.json({ok:true,control,plan});}catch(e){log('COMMAND_ERROR',{member:m,error:S(e&&e.message||e)});res.status(500).json({ok:false,error:'CONTROL_SAVE_FAILED'});}});
 
 async function release(deviceId,complete,p){
  const l=leases.get(deviceId);if(!l)return null;
  try{
-  if(complete)await p.query('UPDATE gm_category SET last_search_at=NOW() WHERE category_id=$1',[l.category_id]);
+  if(complete)await p.query(`UPDATE gm_category SET last_search_at=to_char((NOW() AT TIME ZONE 'UTC'),'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE category_id=$1`,[l.category_id]);
  }finally{leases.delete(deviceId);}
  return l.category_id;
 }
@@ -188,38 +171,48 @@ router.post('/api/special/category-batch/next',async(req,res)=>{
  const m=auth(req,res);if(!m)return;
  const p=pool(req),deviceId=S(req.body&&req.body.device_id);
  if(!deviceId)return res.status(400).json({ok:false,error:'device_id required'});
- try{await ensureControl(p);await ensureLastSearchBackfill(p);}catch(e){log('CONTROL_READ_ERROR',{member:m,stage:'next',error:S(e&&e.message||e)});return res.status(500).json({ok:false,error:'CONTROL_READ_FAILED'});}
- const plan=await loadSpecialPlan(p),bd=batchDate(req.body&&req.body.batch_date||control.batch_date);
- if(control.mode!=='RUN')return res.json({ok:true,state:control.mode,category:null,batch_date:bd,plan});
- pruneLeases();
- if(leases.has(deviceId)){
-  const l=leases.get(deviceId);l.expires_at=Date.now()+CLAIM_TTL_MS;
-  const r=await refreshLeaseCategory(p,l);
-  return res.json({ok:true,state:'LEASED',batch_date:bd,category:categoryPayload(r),plan});
+ try{
+  await ensureControl(p);
+  const plan=await loadSpecialPlan(p),bd=batchDate(req.body&&req.body.batch_date||control.batch_date);
+  if(control.mode!=='RUN')return res.json({ok:true,state:control.mode,category:null,batch_date:bd,plan});
+  pruneLeases();
+  if(leases.has(deviceId)){
+   const l=leases.get(deviceId);l.expires_at=Date.now()+CLAIM_TTL_MS;
+   const r=await refreshLeaseCategory(p,l);
+   return res.json({ok:true,state:'LEASED',batch_date:bd,category:categoryPayload(r),plan});
+  }
+  const prefixes=plan.order.map(x=>x.prefix);
+  if(!prefixes.length)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
+  const caseSql=plan.order.map((x,i)=>`WHEN gm_code LIKE $${i+3} THEN ${Number(x.no)}`).join(' ');
+  const params=[plan.cutoff,prefixes].concat(prefixes.map(x=>x+'-%'));
+  const q=await p.query(`SELECT category_id,gm_code,name_ko,keyword,leaf_yn,depth,sort_order,created_at,updated_at,last_search_at
+    FROM gm_category
+    WHERE COALESCE(name_ko,'')<>''
+      AND UPPER(COALESCE(leaf_yn,''))='Y'
+      AND split_part(gm_code,'-',1)=ANY($2::text[])
+      -- SPECIAL 진행상태는 last_search_at만 본다.
+      AND (NULLIF(BTRIM(last_search_at),'') IS NULL OR NULLIF(BTRIM(last_search_at),'')::timestamptz < $1::timestamptz)
+      -- 기준시각 이후 일반 단건/카테고리 갱신은 이번 회차에서 건너뛴다.
+      AND (updated_at IS NULL OR updated_at < ($1::timestamptz AT TIME ZONE 'UTC'))
+    ORDER BY CASE ${caseSql} ELSE 999999 END ASC, depth ASC, sort_order ASC, category_id ASC
+    LIMIT 240`,params);
+  const claimedNow=claimedIds(deviceId);
+  let chosen=null;
+  for(const row of q.rows){if(!claimedNow.has(Number(row.category_id))){chosen=row;break;}}
+  if(!chosen)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
+  const lease={category_id:Number(chosen.category_id),member_id:m,leased_at:Date.now(),expires_at:Date.now()+CLAIM_TTL_MS,apply_ym:plan.apply_ym,cutoff:plan.cutoff};
+  leases.set(deviceId,lease);
+  log('CLAIM',{device_id:deviceId,category_id:lease.category_id,gm_code:chosen.gm_code,name_ko:chosen.name_ko,last_search_at:chosen.last_search_at||null,updated_at:chosen.updated_at||null,apply_ym:plan.apply_ym,cutoff:plan.cutoff,ttl_ms:CLAIM_TTL_MS});
+  const refreshed=await refreshLeaseCategory(p,lease);
+  return res.json({ok:true,state:'LEASED',batch_date:bd,category:categoryPayload(refreshed||chosen),plan});
+ }catch(e){
+  log('NEXT_ERROR',{member:m,device_id:deviceId,error:S(e&&e.stack||e&&e.message||e)});
+  return res.status(500).json({ok:false,error:'NEXT_FAILED'});
  }
- const prefixes=plan.order.map(x=>x.prefix);
- if(!prefixes.length)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
- const caseSql=plan.order.map((x,i)=>`WHEN gm_code LIKE $${i+3} THEN ${Number(x.no)}`).join(' ');
- const params=[plan.cutoff,prefixes].concat(prefixes.map(x=>x+'-%'));
- const q=await p.query(`SELECT category_id,gm_code,name_ko,keyword,leaf_yn,depth,sort_order,created_at,updated_at,last_search_at
-   FROM gm_category
-   WHERE COALESCE(name_ko,'')<>''
-     AND UPPER(COALESCE(leaf_yn,''))='Y'
-     AND split_part(gm_code,'-',1)=ANY($2::text[])
-     AND (updated_at IS NULL OR updated_at < $1::timestamptz)
-     AND (last_search_at IS NULL OR last_search_at < $1::timestamptz)
-   ORDER BY CASE ${caseSql} ELSE 999999 END ASC, depth ASC, sort_order ASC, category_id ASC
-   LIMIT 240`,params);
- const claimedNow=claimedIds(deviceId);
- let chosen=null;
- for(const row of q.rows){if(!claimedNow.has(Number(row.category_id))){chosen=row;break;}}
- if(!chosen)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
- const lease={category_id:Number(chosen.category_id),member_id:m,leased_at:Date.now(),expires_at:Date.now()+CLAIM_TTL_MS,apply_ym:plan.apply_ym,cutoff:plan.cutoff};
- leases.set(deviceId,lease);
- log('CLAIM',{device_id:deviceId,category_id:lease.category_id,gm_code:chosen.gm_code,name_ko:chosen.name_ko,apply_ym:plan.apply_ym,cutoff:plan.cutoff,ttl_ms:CLAIM_TTL_MS});
- const refreshed=await refreshLeaseCategory(p,lease);
- return res.json({ok:true,state:'LEASED',batch_date:bd,category:categoryPayload(refreshed||chosen),plan});
 });
+
+/* V021 body replacement guard */
+/* OLD_NEXT_BODY_REMOVED */
 router.post('/api/special/category-batch/complete',async(req,res)=>{
  const m=auth(req,res);if(!m)return;const p=pool(req);
  const d=S(req.body&&req.body.device_id),id=Number(req.body&&req.body.category_id||0);pruneLeases();const l=leases.get(d);
