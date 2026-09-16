@@ -1,4 +1,4 @@
-const VERSION = 'GM_SAFE_UPDATE_BUILDER_V021_SPLIT_DOMAIN';
+const VERSION = 'GM_SAFE_UPDATE_BUILDER_V022_CATEGORY_LAST_SEARCH';
 
 // V002 기본 원칙:
 // - UPDATE ONLY
@@ -192,7 +192,7 @@ const TABLES = {
     defaults: { leaf_yn:'N', display_yn:'Y', depth:'0', sort_order:'0' },
     enums: { leaf_yn:['Y','N'], display_yn:['Y','N'] },
     // Do not overwrite AI/runtime learning columns or counters from translation uploads.
-    blocked: ['category_id','created_at','updated_at','cp_id','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount','last_search_at','last_view_at','last_order_at','last_return_at','last_exchange_at','last_ad_view_at','last_ad_order_at'],
+    blocked: ['category_id','created_at','updated_at','cp_id','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount','last_view_at','last_order_at','last_return_at','last_exchange_at','last_ad_view_at','last_ad_order_at'],
     allowInsert: true
   },
 

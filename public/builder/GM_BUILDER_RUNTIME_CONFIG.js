@@ -28,4 +28,32 @@ async function nextGmV2(){const r=await fetch(`${API}/api/gm/builder/config/gm-v
 
 loadRuntimeConfig();
 
-function toggleRuntimeConfig(){const c=document.getElementById('runtimeConfigCard');if(!c)return;const open=c.style.display==='none';c.style.display=open?'block':'none';if(open)loadRuntimeConfig();}
+function toggleRuntimeConfig(){const c=document.getElementById('runtimeConfigCard');if(!c)return;const open=c.style.display==='none';c.style.display=open?'block':'none';if(open){loadRuntimeConfig();loadSpecialCategoryPlan();}}
+
+// GM_BUILDER_SPECIAL_CATEGORY_PLAN_V002_V046_COMPAT
+function specialPlanEsc(v){return cfgEsc(v);}
+async function loadSpecialCategoryPlan(){
+  const tb=document.getElementById('specialCategoryPlanRows'),st=document.getElementById('specialCategoryPlanStatus'),ym=document.getElementById('specialApplyYm');if(!tb||!ym)return;
+  try{
+    const r=await fetch(`${API}/api/gm/builder/config/special-category-plan?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    ym.value=j.apply_ym||'';
+    const rows=j.categories||[];
+    tb.innerHTML=rows.map(x=>`<tr data-prefix="${specialPlanEsc(x.prefix)}"><td><input class="sp-order" type="number" min="1" step="1" value="${x.no==null?'':specialPlanEsc(x.no)}" style="width:80px"></td><td><b>${specialPlanEsc(x.prefix)}</b></td><td>${specialPlanEsc(x.name_ko)}</td><td>${specialPlanEsc(x.sort_order)}</td></tr>`).join('')||'<tr><td colspan="4">대분류 없음</td></tr>';
+    if(st)st.textContent=`적용연월 ${j.apply_ym||'-'} · 번호 지정 ${rows.filter(x=>x.no!=null).length}개 · 번호 없음은 대기`;
+  }catch(e){tb.innerHTML=`<tr><td colspan="4">SPECIAL 계획 조회 실패: ${specialPlanEsc(e&&e.message||e)}</td></tr>`;if(st)st.textContent='조회 실패';}
+}
+async function saveSpecialCategoryPlan(){
+  const ym=document.getElementById('specialApplyYm'),tb=document.getElementById('specialCategoryPlanRows');if(!ym||!tb)return;
+  const categories=[];const used=new Set();
+  for(const tr of tb.querySelectorAll('tr[data-prefix]')){
+    const raw=tr.querySelector('.sp-order').value.trim();if(!raw)continue;
+    const no=Number(raw);if(!Number.isInteger(no)||no<1){alert('번호는 1 이상의 정수만 가능합니다.');return;}
+    if(used.has(no)){alert(`중복 번호 ${no}가 있습니다.`);return;}used.add(no);categories.push({prefix:tr.dataset.prefix,no});
+  }
+  if(!/^\d{4}-\d{2}$/.test(ym.value)){alert('적용연월을 선택하세요.');return;}
+  if(!categories.length){alert('최소 1개 대분류에 번호를 지정하세요.');return;}
+  categories.sort((a,b)=>a.no-b.no||a.prefix.localeCompare(b.prefix));
+  const r=await fetch(`${API}/api/gm/builder/config/special-category-plan`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apply_ym:ym.value,categories})});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}
+  log({action:'special-category-plan.saved',apply_ym:ym.value,order:categories});await loadRuntimeConfig();await loadSpecialCategoryPlan();
+}
+
