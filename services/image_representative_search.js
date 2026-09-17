@@ -76,22 +76,37 @@ function topRepresentativeMatches(queryNorm,rows,limit){
   return out;
 }
 async function topRepresentativeMatchesDb(pool,runNo,queryNorm,limit){
-  const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
-      FROM gm_image_vector_representative_map m
-      JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
-     WHERE m.run_no=$1
-       AND m.representative_puid IS NOT NULL
-       AND m.puid=m.representative_puid
-       AND v.vector_image IS NOT NULL
-       AND array_length(v.vector_image,1)=$2`,[runNo,DIM]);
-  const ranked=[];
-  for(const r of q.rows||[]){
-    const score=exactCosine(queryNorm,r.vector_image);
-    if(Number.isFinite(score))ranked.push({representative_no:N(r.representative_no),representative_puid:C(r.representative_puid),score});
-    r.vector_image=null;
+  const topLimit=Math.max(1,limit),batchSize=Math.max(50,Math.min(1000,Number(process.env.GM_IMAGE_REP_DB_SCAN_BATCH||250)||250));
+  const ranked=[];let lastNo=-1,lastPuid='',done=false;
+  function keepTop(row,score){
+    const hit={representative_no:N(row.representative_no),representative_puid:C(row.representative_puid),score};
+    if(ranked.length<topLimit){ranked.push(hit);ranked.sort((a,b)=>b.score-a.score);return;}
+    if(score<=ranked[ranked.length-1].score)return;
+    ranked[ranked.length-1]=hit;ranked.sort((a,b)=>b.score-a.score);
   }
-  ranked.sort((a,b)=>b.score-a.score);
-  return ranked.slice(0,Math.max(1,limit));
+  while(!done){
+    const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
+        FROM gm_image_vector_representative_map m
+        JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
+       WHERE m.run_no=$1
+         AND m.representative_puid IS NOT NULL
+         AND m.puid=m.representative_puid
+         AND v.vector_image IS NOT NULL
+         AND array_length(v.vector_image,1)=$2
+         AND (m.representative_no>$3 OR (m.representative_no=$3 AND m.representative_puid>$4))
+       ORDER BY m.representative_no,m.representative_puid
+       LIMIT $5`,[runNo,DIM,lastNo,lastPuid,batchSize]);
+    const rows=q.rows||[];
+    if(!rows.length)break;
+    for(const r of rows){
+      const score=exactCosine(queryNorm,r.vector_image);
+      if(Number.isFinite(score))keepTop(r,score);
+      lastNo=N(r.representative_no);lastPuid=C(r.representative_puid);r.vector_image=null;
+    }
+    done=rows.length<batchSize;
+    if(!done)await new Promise(resolve=>setImmediate(resolve));
+  }
+  return ranked;
 }
 async function fetchProductMetadata(pool,productUids){
   const wanted=[],seen=new Set();
