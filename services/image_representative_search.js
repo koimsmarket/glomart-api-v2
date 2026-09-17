@@ -76,18 +76,22 @@ function topRepresentativeMatches(queryNorm,rows,limit){
   return out;
 }
 async function topRepresentativeMatchesDb(pool,runNo,queryNorm,limit){
-  const q=await pool.query(`SELECT m.representative_no,m.representative_puid,
-           1 - ((('[' || array_to_string(v.vector_image, ',') || ']')::vector(512)) <=> $2::vector(512)) AS score
+  const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
       FROM gm_image_vector_representative_map m
       JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
      WHERE m.run_no=$1
        AND m.representative_puid IS NOT NULL
        AND m.puid=m.representative_puid
        AND v.vector_image IS NOT NULL
-       AND array_length(v.vector_image,1)=$3
-     ORDER BY (('[' || array_to_string(v.vector_image, ',') || ']')::vector(512)) <=> $2::vector(512)
-     LIMIT $4`,[runNo,vectorLiteral(queryNorm),DIM,limit]);
-  return (q.rows||[]).map(r=>({representative_no:N(r.representative_no),representative_puid:C(r.representative_puid),score:Number(r.score||0)}));
+       AND array_length(v.vector_image,1)=$2`,[runNo,DIM]);
+  const ranked=[];
+  for(const r of q.rows||[]){
+    const score=exactCosine(queryNorm,r.vector_image);
+    if(Number.isFinite(score))ranked.push({representative_no:N(r.representative_no),representative_puid:C(r.representative_puid),score});
+    r.vector_image=null;
+  }
+  ranked.sort((a,b)=>b.score-a.score);
+  return ranked.slice(0,Math.max(1,limit));
 }
 async function fetchProductMetadata(pool,productUids){
   const wanted=[],seen=new Set();
