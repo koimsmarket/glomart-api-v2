@@ -50,6 +50,14 @@
   <div style="overflow:auto;max-height:420px;margin-top:12px"><table><thead><tr><th>국가</th><th>회원</th><th>오늘/어제</th><th>이번달/지난달</th><th>올해/작년</th><th>총방문</th></tr></thead><tbody id="countryStatRows"><tr><td colspan="6">조회 전</td></tr></tbody></table></div>
 </div>
 
+<div class="card" id="productQueueParallelCard"><h2>PRODUCT QUEUE PARALLEL</h2>
+  <div class="small">V002 adaptive concurrency 실시간 모니터 · 표시 전용(제어하지 않음)</div>
+  <div class="grid" style="margin-top:12px"><div><table><tbody>
+    <tr><th>판단 대상</th><td>pending / active / CPU / memory / DB pool</td></tr>
+    <tr><th>목적</th><td>사용자 검색 우선 · 남는 서버 자원으로 Queue 병렬 UPSERT</td></tr>
+  </tbody></table></div><div><table><tbody id="productQueueParallelStatus"><tr><td>조회 전</td></tr></tbody></table></div></div>
+  <button class="green" onclick="loadProductQueueParallelStatus()">Queue 상태 새로고침</button>
+</div>
 <div class="card" id="ivBackgroundCard"><h2>IMAGE VECTOR BACKGROUND</h2>
   <div class="small">자동검색과 완전히 분리된 서버 백그라운드 작업</div>
   <div id="ivForcedWarning">⚠ 강제 ON 상태입니다. 시간 및 메모리 제한을 무시하고 이미지 Vector 변환을 계속 수행합니다.</div>
@@ -75,4 +83,5 @@
 <script src="/builder/GM_BUILDER_RUNTIME_CONFIG.js?v=gm_builder_v065"></script>
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v065"></script>
 <script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v071"></script>
+<script src="/builder/GM_BUILDER_PRODUCT_QUEUE.js?v=gm_builder_v001"></script>
 </body></html>

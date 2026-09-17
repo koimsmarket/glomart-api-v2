@@ -21,6 +21,7 @@ router.use(require('./members'));       // Cafe24 member import/export
 router.use(require('./record_editor')); // direct record maintenance
 router.use(require('./runtime_config'));// central runtime configuration
 router.use(require('./device_lang'));   // language-pack administration
+router.use(require('./product_queue')); // product queue adaptive-concurrency monitor only
 
 // ---- Domain Builder modules --------------------------------------------------
 router.use(require('./image_vector'));  // vector production / sync only

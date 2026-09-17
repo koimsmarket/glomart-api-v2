@@ -8,6 +8,7 @@ function C(v){ return String(v==null?'':v).replace(/[\u00A0\u200B-\u200D\uFEFF]/
 function num(v,d){ const x=Number(v); return Number.isFinite(x)?x:d; }
 let cfgCache={at:0,values:{}};
 let lastConcurrencyLog={value:null,at:0};
+let lastConcurrencyStatus={ready:false,updated_at:null};
 
 async function loadConfig(pool){
   const now=Date.now();
@@ -80,7 +81,10 @@ async function allowedConcurrency(pool, active){
   const q=await pool.query(`SELECT COUNT(*) FILTER (WHERE status='pending')::int AS pending FROM gm_product_upsert_queue WHERE status='pending'`);
   const pending=Number(q.rows[0]&&q.rows[0].pending||0);
   const activeNow=Math.max(0,Number(active)||0);
-  if(pending<=0 && activeNow<=0) return min;
+  if(pending<=0 && activeNow<=0){
+    lastConcurrencyStatus={ready:true,updated_at:new Date().toISOString(),allowedConcurrency:min,min,max,pending:0,active:0,idle:true};
+    return min;
+  }
 
   const load1=(os.loadavg&&os.loadavg()[0])||0;
   const cpuRatio=load1/cpuCount;
@@ -99,17 +103,21 @@ async function allowedConcurrency(pool, active){
     allowed=Math.max(min,Math.min(allowed,Math.max(min,Math.ceil(max/2))));
   }
 
+  const status={
+    ready:true,updated_at:new Date().toISOString(),allowedConcurrency:allowed,min,max,pending,active:activeNow,
+    cpu_count:cpuCount,cpu_load_ratio:Number(cpuRatio.toFixed(3)),
+    memory_used_ratio:Number(memUsedRatio.toFixed(3)),
+    db_pool_max:poolMax,db_pool_total:poolTotal,db_pool_idle:poolIdle,db_pool_waiting:poolWaiting,db_busy_ratio:Number(dbBusyRatio.toFixed(3))
+  };
+  lastConcurrencyStatus=status;
   const now=Date.now();
   if(lastConcurrencyLog.value!==allowed || now-lastConcurrencyLog.at>=15000){
     lastConcurrencyLog={value:allowed,at:now};
-    console.log('[GM_PRODUCT_QUEUE_CONCURRENCY]',{
-      allowedConcurrency:allowed,min,max,pending,active:activeNow,
-      cpu_count:cpuCount,cpu_load_ratio:Number(cpuRatio.toFixed(3)),
-      memory_used_ratio:Number(memUsedRatio.toFixed(3)),
-      db_pool_max:poolMax,db_pool_total:poolTotal,db_pool_idle:poolIdle,db_pool_waiting:poolWaiting,db_busy_ratio:Number(dbBusyRatio.toFixed(3))
-    });
+    console.log('[GM_PRODUCT_QUEUE_CONCURRENCY]',status);
   }
   return allowed;
 }
 
-module.exports={externalSearchDecision,allowedConcurrency};
+function getConcurrencyStatus(){ return Object.assign({},lastConcurrencyStatus); }
+
+module.exports={externalSearchDecision,allowedConcurrency,getConcurrencyStatus};
