@@ -1,10 +1,12 @@
 'use strict';
-// GM_PRODUCT_QUEUE_WORKER_V017_DIAG_NO_HARD_ZERO_SAVE_THROW
+// GM_PRODUCT_QUEUE_WORKER_V018_ADAPTIVE_QUEUE_PARALLEL
 
 const productRouter = require('../routes/product');
+const searchController = require('../services/search_controller');
 
 let started = false;
-let running = false;
+let scheduling = false;
+let active = 0;
 let timer = null;
 
 function toInt(v, def){
@@ -137,23 +139,35 @@ async function processRow(pool, row){
   return result;
 }
 
-async function tick(pool, opts){
-  if(running) return;
-  running = true;
+async function runClaimed(pool, row, opts){
+  active += 1;
   try{
-    const rows = await fetchQueueRows(pool, opts.batchRows);
+    const result = await processRow(pool, row);
+    await markDone(pool, row, result);
+  }catch(e){
+    await markFailed(pool, row, e, opts.maxRetry);
+  }finally{
+    active = Math.max(0, active - 1);
+    setImmediate(function(){ tick(pool, opts); });
+  }
+}
+
+async function tick(pool, opts){
+  if(scheduling) return;
+  scheduling = true;
+  try{
+    const allowedConcurrency = await searchController.allowedConcurrency(pool, active);
+    const available = Math.max(0, allowedConcurrency - active);
+    if(available <= 0) return;
+    const rows = await fetchQueueRows(pool, Math.min(opts.batchRows, available));
     for(const row of rows){
-      try{
-        const result = await processRow(pool, row);
-        await markDone(pool, row, result);
-      }catch(e){
-        await markFailed(pool, row, e, opts.maxRetry);
-      }
+      // Claim is already committed as status=processing. Each claimed queue_id gets one runner.
+      void runClaimed(pool, row, opts);
     }
   }catch(e){
     console.error('[GM_PRODUCT_QUEUE_WORKER] tick failed:', String(e && e.message || e));
   }finally{
-    running = false;
+    scheduling = false;
   }
 }
 

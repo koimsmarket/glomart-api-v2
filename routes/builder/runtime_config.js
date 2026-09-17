@@ -1,5 +1,5 @@
 'use strict';
-// GM_RUNTIME_CONFIG_V006_SPECIAL_CATEGORY_PLAN_V046_COMPAT
+// GM_RUNTIME_CONFIG_V007_SEARCH_CONTROL
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -38,7 +38,10 @@ async function ensureSpecialCategoryDefaults(db){
   if(specialCategoryDefaultsEnsured)return;
   const rows=[
     ['special_category_apply_ym',SPECIAL_DEFAULT_APPLY_YM,'STRING','SPECIAL','AUTO','SPECIAL 카테고리 대상 기준 연월(UTC, YYYY-MM)'],
-    ['special_category_order',JSON.stringify(SPECIAL_DEFAULT_ORDER),'JSON','SPECIAL','AUTO','SPECIAL 대분류 처리 번호순']
+    ['special_category_order',JSON.stringify(SPECIAL_DEFAULT_ORDER),'JSON','SPECIAL','AUTO','SPECIAL 대분류 처리 번호순'],
+    ['external_search_interval_hours','24','NUMBER','SEARCH','AUTO','동일 정규화 검색어 외부검색 재실행 간격(시간, CPKR/ALKR 공통)'],
+    ['product_queue_concurrency_min','2','NUMBER','SEARCH','AUTO','상품 업서트 큐 최소 동시 처리수'],
+    ['product_queue_concurrency_max','0','NUMBER','SEARCH','AUTO','상품 업서트 큐 최대 동시 처리수(0=CPU/DB pool 기준 자동)']
   ];
   for(const x of rows){
     await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)

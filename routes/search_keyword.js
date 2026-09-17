@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const keywordRelation = require('../services/keyword_relation');
+const searchController = require('../services/search_controller');
 
 /* GM_SEARCH_KEYWORD_ROUTE_V018_RELATION_3COL_SIMPLE
  * External search keyword normalization only.
@@ -17,7 +18,7 @@ const keywordRelation = require('../services/keyword_relation');
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V018_RELATION_3COL_SIMPLE';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V019_EXTERNAL_INTERVAL';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -338,7 +339,20 @@ async function handler(req,res){
   const params = Object.assign({}, req.query || {}, req.body || {});
   try{
     const out = await normalizeKeyword(pool, params);
-    try{ console.log('[GM_SEARCH_KEYWORD_NORMALIZE_V002]', { input:out.input_keyword, lang:out.lang, keyword_ko:out.keyword_ko, source:out.source, fallback:out.fallback }); }catch(_log){}
+    const ctl = await searchController.externalSearchDecision(pool, out);
+    out.external_search_required = ctl.external_search_required;
+    out.external_search_reason = ctl.reason;
+    out.external_search_interval_hours = ctl.interval_hours;
+    out.external_search_db_count = ctl.db_count;
+    out.external_search_last_success_at = ctl.last_success_at;
+    out.searchKeywordMeta = Object.assign({}, out.searchKeywordMeta || {}, {
+      externalSearchRequired: ctl.external_search_required,
+      externalSearchReason: ctl.reason,
+      externalSearchIntervalHours: ctl.interval_hours,
+      externalSearchDbCount: ctl.db_count,
+      externalSearchLastSuccessAt: ctl.last_success_at
+    });
+    try{ console.log('[GM_SEARCH_KEYWORD_NORMALIZE_V003]', { input:out.input_keyword, lang:out.lang, keyword_ko:out.keyword_ko, source:out.source, fallback:out.fallback, external_search_required:ctl.external_search_required, external_search_reason:ctl.reason, db_count:ctl.db_count, interval_hours:ctl.interval_hours }); }catch(_log){}
     return res.json(out);
   }catch(e){
     console.error('[GM_SEARCH_KEYWORD_NORMALIZE_ERROR_V002]', String(e && e.message || e));
