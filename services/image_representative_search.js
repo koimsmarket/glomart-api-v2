@@ -32,6 +32,26 @@ function pidFromVectorUid(raw){const s=C(raw);if(!s)return '';const m=s.match(/^
 function mallHintFromVectorUid(raw){const s=C(raw);if(/^CPKR_/i.test(s))return 'CPKR';if(/^ALKR_/i.test(s))return 'ALKR';if(/^\d+_\d+_\d+$/.test(s))return 'CPKR';return '';}
 function metaFromRow(r){return {product_uid:C(r.product_uid),product_id:C(r.product_id),product_name:C(r.product_name),product_url:C(r.product_url),image_url:C(r.thumb_origin_url),mall_code:C(r.mall_code),keyword:C(r.keyword),category_keyword:C(r.category_keyword)};}
 
+function categoryStem(raw){
+  const code=C(raw).toUpperCase();
+  if(!/^[A-Z0-9]{2}-\d{2}-\d{3}-\d{4}-\d{4}(?:-\d{4})?$/.test(code))return '';
+  const a=code.split('-'),out=[a[0]];
+  for(let i=1;i<a.length;i++){if(/^0+$/.test(a[i]))break;out.push(a[i]);}
+  return out.join('-');
+}
+function categoryFamily(raw){
+  const code=C(raw).toUpperCase(),a=code.split('-');
+  if(!categoryStem(code))return 0;
+  let hasNonZero=false;for(let i=1;i<a.length;i++){if(!/^0+$/.test(a[i])){hasNonZero=true;break;}}
+  return hasNonZero?a.length:0;
+}
+function categoryMatchSql(alias,codeParam,stemParam,familyParam){
+  return `EXISTS (SELECT 1 FROM unnest(string_to_array(COALESCE(${alias}.glomart_code,''),'|')) AS gc(code)
+                  WHERE (BTRIM(gc.code)=$${codeParam} OR BTRIM(gc.code) LIKE $${stemParam})
+                    AND ($${familyParam}::int=0 OR array_length(string_to_array(BTRIM(gc.code),'-'),1)=$${familyParam}))`;
+}
+
+
 async function runtimeConfig(pool,key,def){
   const q=await pool.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[key]);
   return q.rows&&q.rows.length?C(q.rows[0].config_value):C(def);
@@ -251,11 +271,43 @@ function onAssignment(pool,assignment,vector){
   markDirty(action||'representative_changed');
 }
 
-async function finishSearch(pool,qn,runNo,repTop,limit,searchMode,searchEngine,representativeCount,hnswStatus,timings){
-  const repIds=repTop.map(x=>x.representative_puid);let t=Date.now();
-  const mq=repIds.length?await pool.query(`SELECT puid,representative_no,representative_puid,run_no
+async function topRepresentativeMatchesDbCategory(pool,runNo,queryNorm,limit,categoryCode){
+  const stem=categoryStem(categoryCode);if(!stem)return {rows:[],count:0};
+  const like=stem+'-%',q=await pool.query(`SELECT r.representative_no,r.representative_puid,v.vector_image
+      FROM gm_image_vector_representative_map r
+      JOIN gm_product_image_vector v ON v.product_uid=r.representative_puid
+     WHERE r.run_no=$1
+       AND r.puid=r.representative_puid
+       AND r.representative_puid IS NOT NULL
+       AND v.vector_image IS NOT NULL
+       AND array_length(v.vector_image,1)=$2
+       AND EXISTS (
+         SELECT 1
+           FROM gm_image_vector_representative_map m
+           JOIN gm_product p ON p.product_uid=m.puid
+          WHERE m.run_no=$1
+            AND m.representative_puid=r.representative_puid
+            AND ${categoryMatchSql('p',3,4,5)}
+       )
+     ORDER BY r.representative_no`,[runNo,DIM,C(categoryCode).toUpperCase(),like,categoryFamily(categoryCode)]);
+  const rows=[];for(const r of q.rows||[]){const v=normalizedFloat32(r.vector_image);if(v)rows.push({representative_no:N(r.representative_no),representative_puid:C(r.representative_puid),vector:v});r.vector_image=null;}
+  return {rows:topRepresentativeMatches(queryNorm,rows,Math.max(1,limit)),count:rows.length};
+}
+
+async function finishSearch(pool,qn,runNo,repTop,limit,searchMode,searchEngine,representativeCount,hnswStatus,timings,categoryCode){
+  const repIds=repTop.map(x=>x.representative_puid);let t=Date.now(),mq;
+  if(categoryCode&&repIds.length){
+    const stem=categoryStem(categoryCode),like=stem+'-%';
+    mq=await pool.query(`SELECT m.puid,m.representative_no,m.representative_puid,m.run_no
+      FROM gm_image_vector_representative_map m
+      JOIN gm_product p ON p.product_uid=m.puid
+     WHERE ((m.run_no=$1 AND m.representative_puid=ANY($2::text[])) OR m.run_no=0)
+       AND ${categoryMatchSql('p',3,4,5)}`,[runNo,repIds,C(categoryCode).toUpperCase(),like,categoryFamily(categoryCode)]);
+  }else{
+    mq=repIds.length?await pool.query(`SELECT puid,representative_no,representative_puid,run_no
       FROM gm_image_vector_representative_map
      WHERE (run_no=$1 AND representative_puid=ANY($2::text[])) OR run_no=0`,[runNo,repIds]):{rows:[]};
+  }
   timings.map_fetch_ms=Date.now()-t;
   const candidateIds=[...new Set((mq.rows||[]).map(r=>C(r.puid)).filter(Boolean))],run0Count=(mq.rows||[]).filter(r=>N(r.run_no)===0).length;
   if(!candidateIds.length)return {search_mode:searchMode,search_engine:searchEngine,memory_mode:memoryMode,run_no:runNo,representative_count:representativeCount,representative_candidates:repTop,member_candidate_count:0,run0_candidate_count:run0Count,matches:[],timings,hnsw_status:hnswStatus};
@@ -266,13 +318,18 @@ async function finishSearch(pool,qn,runNo,repTop,limit,searchMode,searchEngine,r
   return {search_mode:searchMode,search_engine:searchEngine,memory_mode:memoryMode,run_no:runNo,representative_count:representativeCount,representative_candidates:repTop,member_candidate_count:candidateIds.length,run0_candidate_count:run0Count,matches,timings,hnsw_status:hnswStatus};
 }
 
-async function search(pool,queryVector,limit,searchMode){
+async function search(pool,queryVector,limit,searchMode,categoryCode){
   lastPool=pool||lastPool;
+  categoryCode=C(categoryCode).toUpperCase();
   const mode=await getMemoryMode(pool,false),liveRun=await currentRepresentativeRun(pool);
   const qn=normalizedFloat32(queryVector);if(!qn)throw new Error('invalid query vector');
   const timings={representative_scan_ms:0,representative_search_ms:0,map_fetch_ms:0,vector_fetch_ms:0,exact_rerank_ms:0,product_fetch_ms:0};
   let t=Date.now(),repTop,engine,repCount=0,hnswStatus=null;
-  if(mode==='LOADING'&&active.index&&active.run_no===liveRun){
+  if(categoryCode){
+    const scoped=await topRepresentativeMatchesDbCategory(pool,liveRun,qn,REP_GROUP_LIMIT,categoryCode);
+    repTop=scoped.rows;repCount=scoped.count;engine='DB_CATEGORY_SCOPE';hnswStatus=publicStatus();
+    timings.representative_search_ms=Date.now()-t;timings.representative_scan_ms=timings.representative_search_ms;
+  }else if(mode==='LOADING'&&active.index&&active.run_no===liveRun){
     if(searchMode==='precise')repTop=topRepresentativeMatches(qn,active.rows,REP_GROUP_LIMIT);
     else repTop=active.index.search(qn,REP_GROUP_LIMIT);
     timings.representative_search_ms=Date.now()-t;if(searchMode==='precise')timings.representative_scan_ms=timings.representative_search_ms;
@@ -284,7 +341,7 @@ async function search(pool,queryVector,limit,searchMode){
     const meta=await representativeMeta(pool);repCount=meta.count;
     hnswStatus=publicStatus();
   }
-  return finishSearch(pool,qn,liveRun,repTop,limit,searchMode,engine,repCount,hnswStatus,timings);
+  return finishSearch(pool,qn,liveRun,repTop,limit,searchMode,engine,repCount,hnswStatus,timings,categoryCode);
 }
 
 module.exports={
