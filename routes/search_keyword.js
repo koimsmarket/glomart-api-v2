@@ -18,7 +18,7 @@ const searchController = require('../services/search_controller');
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V019_EXTERNAL_INTERVAL';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V020_FOREIGN_FALLBACK_KO';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -191,7 +191,19 @@ async function normalizeKeyword(pool, params){
   const fallback = best.source === 'fallback';
   const learnedDictionary = best.source === 'gm_category_keyword';
   const resolved = cleanText(best.search_keyword_ko || input);
-  const ko = learnedDictionary ? (hasKo(resolved)?resolved:'') : (fallback ? koOrEmpty(input) : koOrEmpty(resolved));
+
+  // GM_SEARCH_KEYWORD_ROUTE_V020_FOREIGN_FALLBACK_KO
+  // The client sends the first translated Korean search term before this server normalization step.
+  // When DB/category mapping misses, do NOT promote the foreign original into mainKeyword/canonical.
+  // Reuse the already translated Korean request value and keep fallback=true so Coupang refinement/dictionary learning continues.
+  const requestTranslatedKo = koOrEmpty(
+    p.translated_keyword || p.translatedKeyword ||
+    p.first_search_keyword || p.firstSearchKeyword ||
+    p.search_keyword_ko || p.searchKeywordKo || ''
+  );
+  const ko = learnedDictionary
+    ? (hasKo(resolved) ? resolved : '')
+    : (fallback ? (koOrEmpty(input) || requestTranslatedKo) : koOrEmpty(resolved));
   const searchText = learnedDictionary ? (resolved || input) : (ko || input);
 
   return {

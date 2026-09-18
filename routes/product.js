@@ -171,11 +171,32 @@ function makeRequestId(p, items){
 function normalizeKeywordValue(v){
   return cleanText(v).toLowerCase().replace(/\s+/g, '');
 }
+function hasKoText(v){ return /[가-힣]/.test(cleanText(v)); }
+function firstKoText(){
+  for(let i=0;i<arguments.length;i++){
+    const v=cleanText(arguments[i]);
+    if(v && hasKoText(v)) return v;
+  }
+  return '';
+}
 function pickSearchKeyword(p, parent){
-  return cleanText(
-    p.keyword || p.q || p.search_keyword || p.searchKeyword || p.keyword_original || p.keywordOriginal ||
-    (parent && (parent.keyword || parent.q || parent.search_keyword || parent.searchKeyword)) || ''
+  p=p||{}; parent=parent||{};
+  const m=p.searchKeywordMeta || p.keywordMeta || p.keyword_meta || p.search_keyword_meta || {};
+  const pm=parent.searchKeywordMeta || parent.keywordMeta || parent.keyword_meta || parent.search_keyword_meta || {};
+  // GM_PRODUCT_KEYWORD_KO_ONLY_V013
+  // Product keyword/category keyword are Korean canonical fields. Foreign original text belongs in search log/translation mapping only.
+  return firstKoText(
+    m.keyword_ko, m.keywordKo, m.main_keyword_ko, m.mainKeyword, m.mainSearchKeyword, m.normalizedKeyword, m.correctedKeyword,
+    p.keyword_ko, p.keywordKo, p.main_keyword_ko, p.mainKeyword, p.mainSearchKeyword, p.normalizedKeyword, p.correctedKeyword,
+    pm.keyword_ko, pm.keywordKo, pm.main_keyword_ko, pm.mainKeyword, pm.mainSearchKeyword, pm.normalizedKeyword, pm.correctedKeyword,
+    parent.keyword_ko, parent.keywordKo, parent.main_keyword_ko, parent.mainKeyword, parent.mainSearchKeyword, parent.normalizedKeyword, parent.correctedKeyword,
+    p.keyword, p.q, p.search_keyword, p.searchKeyword,
+    parent.keyword, parent.q, parent.search_keyword, parent.searchKeyword
   );
+}
+function pickCategoryKeyword(p, parent, fallbackKo){
+  p=p||{}; parent=parent||{};
+  return firstKoText(p.category_keyword, p.categoryKeyword, parent.category_keyword, parent.categoryKeyword, fallbackKo);
 }
 function pickRelatedKeywords(p, parent){
   const raw = p.related_keywords || p.relatedKeywords || p.suggest_keywords || p.suggestKeywords ||
@@ -662,11 +683,14 @@ async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relat
   if(keyword && !payload.keyword) payload.keyword = keyword;
   if(relatedKeywords && !payload.relatedKeywords) payload.relatedKeywords = relatedKeywords;
   const meta = pickKeywordMeta(payload);
-  const keywordKo = meta.mainKeyword || cleanText(keyword);
-  if(productUid && keywordKo){
+  const keywordKo = firstKoText(meta.mainKeyword, meta.correctedKeyword, meta.inputKeyword, keyword);
+  if(!keywordKo){
+    return { keyword_ko:'', input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:0, saved:0, skipped:0, reason:'NO_KOREAN_CANONICAL' };
+  }
+  if(productUid){
     try{ await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keywordKo, productUid]); }catch(e){}
   }
-  return saveKeywordMetaPayload(pool, Object.assign({}, payload, { mainKeyword:keywordKo, relatedKeywords:meta.relatedKeywords }));
+  return saveKeywordMetaPayload(pool, Object.assign({}, payload, { mainKeyword:keywordKo, normalizedKeyword:keywordKo, keyword_ko:keywordKo, relatedKeywords:meta.relatedKeywords }));
 }
 
 
@@ -1683,6 +1707,7 @@ async function upsertProduct(pool, raw, parent={}){
   const sourceMallStored = cleanText(sourceMall).toUpperCase() === cleanText(id.mallCode).toUpperCase() ? '' : sourceMall;
   const sourceUid = sourceUidFrom(p, sourceMall);
   const searchKeyword = pickSearchKeyword(p, parent);
+  const categoryKeyword = pickCategoryKeyword(p, parent, searchKeyword);
   const relatedKeywords = pickRelatedKeywords(p, parent);
   const mallSalePrice = pickPrice(p);
   const normalPrice = pickNormalPrice(p);
@@ -1734,7 +1759,7 @@ async function upsertProduct(pool, raw, parent={}){
       cp_fix_code:cpFixCode,
       cp_selected_code:cpSelectedCode,
       category_code:cleanText(p.category_code || p.categoryCode || ''),
-      category_keyword:cleanText(p.category_keyword || p.categoryKeyword || p.keyword),
+      category_keyword:categoryKeyword,
       keyword:searchKeyword
     });
   }catch(e){
@@ -1870,7 +1895,7 @@ async function upsertProduct(pool, raw, parent={}){
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
     id.uid, resolvedGlomartCode, cleanText(p.gm_category || p.gmCategory),
-    cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
+    categoryKeyword, searchKeyword,
     id.mallCode, sourceMallStored, sourceUid, mallCategoryStored, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
