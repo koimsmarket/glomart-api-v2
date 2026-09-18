@@ -1,0 +1,27 @@
+// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V002
+'use strict';
+async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);return j;}
+function gmCodeEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function gmCodeSummary(j){const s=j.summary||{};return `매칭 ${s.matched||0} · 애매 ${s.ambiguous||0} · 미매칭 ${s.unmatched||0}`;}
+async function loadProductGmCodeStatus(){
+  const el=document.getElementById('gmCodeStatus'); if(!el)return;
+  try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/status?t='+Date.now());
+    el.innerHTML=`전체 <b>${j.total||0}</b> · glomart_code 있음 <b>${j.filled||0}</b> · 미분류 <b>${j.empty||0}</b>`;
+  }catch(e){el.textContent=String(e.message||e);}
+}
+async function previewProductGmCode(){
+  const btn=document.getElementById('gmCodePreviewBtn'), body=document.getElementById('gmCodePreviewRows'), sum=document.getElementById('gmCodePreviewSummary');
+  const timer=startButtonTimer(btn,'미리보기');
+  try{const limit=Math.min(Math.max(Number(document.getElementById('gmCodePreviewLimit').value||300),1),2000);const j=await gmCodeFetch(`/api/gm/builder/product-gm-code/preview?limit=${limit}&t=${Date.now()}`);
+    sum.textContent=gmCodeSummary(j)+' · '+JSON.stringify((j.summary&&j.summary.by)||{});
+    body.innerHTML=(j.items||[]).map(x=>`<tr><td>${gmCodeEsc(x.product_uid)}</td><td>${gmCodeEsc(x.cp_selected_code)}</td><td>${gmCodeEsc(x.cp_fix_code)}</td><td>${gmCodeEsc(x.category_keyword)}</td><td>${gmCodeEsc(x.keyword)}</td><td>${gmCodeEsc(x.match_by)}</td><td>${gmCodeEsc(x.source_field)}</td><td>${gmCodeEsc(x.source_value)}</td><td><b>${gmCodeEsc(x.gm_code)}</b></td><td>${gmCodeEsc(x.category_name)}</td></tr>`).join('')||'<tr><td colspan="10">대상 없음</td></tr>';
+    log({action:j.action,summary:j.summary});
+  }catch(e){sum.textContent=String(e.message||e);log(String(e.message||e));}finally{stopButtonTimer(timer);}
+}
+async function applyProductGmCode(){
+  if(!confirm('glomart_code가 비어 있는 상품만 매칭하여 저장합니다. 기존 glomart_code는 덮어쓰지 않습니다. 적용할까요?'))return;
+  const btn=document.getElementById('gmCodeApplyBtn'),timer=startButtonTimer(btn,'적용');
+  try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/apply?confirm=YES',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});log(j);document.getElementById('gmCodePreviewSummary').textContent=`적용 완료 · ${j.updated||0}건 업데이트 · ${gmCodeSummary(j)}`;await loadProductGmCodeStatus();}
+  catch(e){log(String(e.message||e));alert(String(e.message||e));}finally{stopButtonTimer(timer);}
+}
+window.addEventListener('DOMContentLoaded',()=>loadProductGmCodeStatus());
