@@ -1,4 +1,4 @@
-// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V010_KEYWORD_CLEANUP
+// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V011_ORPHAN_PRODUCT_CLEANUP
 'use strict';
 async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);return j;}
 function gmCodeEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -17,8 +17,9 @@ async function loadGmKeywordCleanupCandidates(){
   if(!body||!sum)return; const timer=startButtonTimer(btn,'후보 조회');
   try{
     const j=await gmCodeFetch('/api/gm/builder/product-gm-code/cleanup-candidates?limit=1000&t='+Date.now());
-    sum.textContent=`검색 0~1회 · 미분류 키워드 후보 ${j.count||0}개 · 자동삭제하지 않고 선택한 값만 삭제합니다.`;
-    body.innerHTML=(j.items||[]).map((x,i)=>`<tr><td><input type="checkbox" class="gmKwCleanCheck" data-index="${i}"></td><td>${gmCodeEsc(x.value)}</td><td>${gmCodeEsc((x.fields||[]).join(' | '))}</td><td>${gmCodeEsc(x.product_count||0)}</td><td>${gmCodeEsc(x.search_count||0)}</td><td>${gmCodeEsc(x.first_search_at||'')}</td><td>${gmCodeEsc(x.last_search_at||'')}</td><td>${gmCodeEsc((x.samples||[]).join(' / '))}</td></tr>`).join('')||'<tr><td colspan="8">후보 없음</td></tr>';
+    const totalDelete=(j.items||[]).reduce((a,x)=>a+Number(x.deletable_count||0),0), totalProtect=(j.items||[]).reduce((a,x)=>a+Number(x.protected_count||0),0);
+    sum.textContent=`검색 0~1회 · 미분류 키워드 후보 ${j.count||0}개 · 삭제가능 합계 ${totalDelete} · 보호 합계 ${totalProtect} (키워드간 중복 포함)`;
+    body.innerHTML=(j.items||[]).map((x,i)=>`<tr><td><input type="checkbox" class="gmKwCleanCheck" data-index="${i}"></td><td>${gmCodeEsc(x.value)}</td><td>${gmCodeEsc((x.fields||[]).join(' | '))}</td><td>${gmCodeEsc(x.product_count||0)}</td><td><b>${gmCodeEsc(x.deletable_count||0)}</b></td><td>${gmCodeEsc(x.protected_count||0)}</td><td>${gmCodeEsc(x.protected_order||0)}</td><td>${gmCodeEsc(x.protected_basket||0)}</td><td>${gmCodeEsc(x.protected_wish||0)}</td><td>${gmCodeEsc(x.search_count||0)}</td><td>${gmCodeEsc(x.first_search_at||'')}</td><td>${gmCodeEsc(x.last_search_at||'')}</td><td>${gmCodeEsc((x.samples||[]).join(' / '))}</td></tr>`).join('')||'<tr><td colspan="13">후보 없음</td></tr>';
     window.__GM_KW_CLEAN_ITEMS=j.items||[];
   }catch(e){sum.textContent=String(e.message||e);log(String(e.message||e));}finally{stopButtonTimer(timer);}
 }
@@ -26,8 +27,11 @@ function gmKeywordCleanupSelectAll(on){document.querySelectorAll('.gmKwCleanChec
 async function deleteSelectedGmKeywords(){
   const all=window.__GM_KW_CLEAN_ITEMS||[],sel=[];
   document.querySelectorAll('.gmKwCleanCheck:checked').forEach(c=>{const x=all[Number(c.dataset.index)];if(x)sel.push({value:x.value,fields:x.fields});});
-  if(!sel.length){alert('삭제할 키워드를 선택해 주세요.');return;}
-  if(!confirm(`선택한 ${sel.length}개 키워드 값을 미분류 상품의 category_keyword/keyword에서만 삭제합니다. 상품 자체는 삭제하지 않습니다. 진행할까요?`))return;
-  const btn=document.getElementById('gmKeywordCleanupDeleteBtn'),timer=startButtonTimer(btn,'선택 삭제');
-  try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/cleanup-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:sel})});document.getElementById('gmKeywordCleanupSummary').textContent=`삭제 완료 · 선택 ${j.selected||0}개 · 필드 ${j.field_updates||0}건 정리`;await loadGmKeywordCleanupCandidates();await loadProductGmCodeStatus();}catch(e){alert(String(e.message||e));log(String(e.message||e));}finally{stopButtonTimer(timer);}
+  if(!sel.length){alert('정리할 이상 키워드를 선택해 주세요.');return;}
+  const allSelected=sel.map(x=>all.find(y=>y.value===x.value)).filter(Boolean);
+  const deleteEstimate=allSelected.reduce((a,x)=>a+Number(x.deletable_count||0),0);
+  const protectEstimate=allSelected.reduce((a,x)=>a+Number(x.protected_count||0),0);
+  if(!confirm(`선택한 ${sel.length}개 이상 키워드에 연결된 미분류 상품을 정리합니다.\n\n삭제가능 표시 합계: ${deleteEstimate}건 (키워드간 중복 가능)\n보호 표시 합계: ${protectEstimate}건\n\n주문/판매/장바구니/찜 이력이 있는 상품은 서버에서 다시 검사하여 삭제하지 않습니다. 실제 상품 행을 삭제할까요?`))return;
+  const btn=document.getElementById('gmKeywordCleanupDeleteBtn'),timer=startButtonTimer(btn,'상품 정리');
+  try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/cleanup-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:sel,confirm:'DELETE UNCLASSIFIED PRODUCTS'})});document.getElementById('gmKeywordCleanupSummary').textContent=`정리 완료 · 후보상품 ${j.candidate_products||0} · 삭제 ${j.deleted_products||0} · 보호 ${j.protected_products||0}`;log(j);await loadGmKeywordCleanupCandidates();await loadProductGmCodeStatus();}catch(e){alert(String(e.message||e));log(String(e.message||e));}finally{stopButtonTimer(timer);}
 }
