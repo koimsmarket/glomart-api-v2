@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_GLOMART_CODE_V011_ORPHAN_PRODUCT_CLEANUP
+// GM_PRODUCT_GLOMART_CODE_V012_CLEANUP_OPTION_KEY_FIX
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -111,14 +111,25 @@ router.post('/api/gm/builder/product-gm-code/cleanup-delete',async(req,res)=>{
       if(await tableExists(client,'gm_product_image_vector')){const d=await client.query('DELETE FROM gm_product_image_vector WHERE product_uid=ANY($1::text[])',[ids]);vectorDeleted=d.rowCount||0;}
       if(await tableExists(client,'gm_image_vector_pending')){const d=await client.query('DELETE FROM gm_image_vector_pending WHERE product_uid=ANY($1::text[])',[ids]);pendingDeleted=d.rowCount||0;}
       if(await tableExists(client,'gm_product_image_embedding_v1')){const d=await client.query('DELETE FROM gm_product_image_embedding_v1 WHERE product_uid=ANY($1::text[])',[ids]);embeddingDeleted=d.rowCount||0;}
-      if(await tableExists(client,'gm_product_option')){const d=await client.query('DELETE FROM gm_product_option WHERE product_uid=ANY($1::text[])',[ids]);optionDeleted=d.rowCount||0;}
+      if(await tableExists(client,'gm_product_option')){
+        // gm_product_option has no product_uid column. Its real key is (mall_code, pi_ii_vi).
+        // Delete only option rows belonging to the exact product rows being removed.
+        const pairs=deletable.map(x=>({mall_code:raw(x.mall_code),pi_ii_vi:raw(x.pi_ii_vi)})).filter(x=>x.mall_code&&x.pi_ii_vi);
+        if(pairs.length){
+          const malls=pairs.map(x=>x.mall_code), pivs=pairs.map(x=>x.pi_ii_vi);
+          const d=await client.query(`DELETE FROM gm_product_option o
+             USING unnest($1::text[],$2::text[]) AS x(mall_code,pi_ii_vi)
+             WHERE o.mall_code=x.mall_code AND o.pi_ii_vi=x.pi_ii_vi`,[malls,pivs]);
+          optionDeleted=d.rowCount||0;
+        }
+      }
       const d=await client.query(`DELETE FROM gm_product WHERE product_uid=ANY($1::text[]) AND COALESCE(glomart_code,'')=''`,[ids]);deleted=d.rowCount||0;
       if(deleted!==ids.length)throw new Error(`DELETE_COUNT_MISMATCH expected=${ids.length} actual=${deleted}`);
     }
     await client.query('COMMIT');inTx=false;invalidateContext(db);
-    console.log(`[GM_PRODUCT_GLOMART_CODE_V011] cleanup_products selected_keywords=${selected.length} candidates=${q.rows.length} deleted=${deleted} protected=${protectedRows.length} vector=${vectorDeleted} pending=${pendingDeleted} embedding=${embeddingDeleted} option=${optionDeleted}`);
+    console.log(`[GM_PRODUCT_GLOMART_CODE_V012] cleanup_products selected_keywords=${selected.length} candidates=${q.rows.length} deleted=${deleted} protected=${protectedRows.length} vector=${vectorDeleted} pending=${pendingDeleted} embedding=${embeddingDeleted} option=${optionDeleted}`);
     ok(res,{action:'product-gm-code.cleanup-delete',selected_keywords:selected.length,candidate_products:q.rows.length,deleted_products:deleted,protected_products:protectedRows.length,protected_samples:protectedRows.slice(0,20),dependent_deleted:{image_vector:vectorDeleted,pending:pendingDeleted,embedding:embeddingDeleted,option:optionDeleted}});
-  }catch(e){if(client&&inTx){try{await client.query('ROLLBACK');}catch(_){}}fail(res,500,'PRODUCT_GM_CODE_CLEANUP_DELETE_FAILED',{detail:String(e&&e.message||e)});}finally{if(release)client.release();}
+  }catch(e){if(client&&inTx){try{await client.query('ROLLBACK');}catch(_){}}console.error('[GM_PRODUCT_GLOMART_CODE_V012] cleanup_delete_failed',String(e&&e.stack||e));fail(res,500,'PRODUCT_GM_CODE_CLEANUP_DELETE_FAILED',{detail:String(e&&e.message||e)});}finally{if(release)client.release();}
 });
 
 function csvCell(v){if(v===null||v===undefined)return '';const x=String(v);return /[",\r\n]/.test(x)?'"'+x.replace(/"/g,'""')+'"':x;}
