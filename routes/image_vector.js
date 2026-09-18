@@ -8,7 +8,7 @@ const https=require('https');
 const http=require('http');
 const router=express.Router();
 const representativeSearch=require('../services/image_representative_search');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V026_CATEGORY_FILTER_TEST';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V025_MEMORY_MODE_NO_MIGRATION';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -131,31 +131,18 @@ router.post('/api/gm/image-vector/upsert',async(req,res)=>{
     return res.json({ok:true,product_uid:uid,dimensions:DIM,bytes:BYTE_LEN,vector_version:VECTOR_VERSION,column_type:columnType,pending_deleted:pending.rowCount,representative_assignment:'BACKGROUND_CATEGORY_DEFERRED',route_version:ROUTE_VERSION});
   }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
 });
-router.get('/api/gm/image-vector/search-categories',async(req,res)=>{
-  const pool=req.app.locals.pool;if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
-  try{
-    const q=await pool.query(`SELECT gm_code,name_ko,depth,sort_order
-        FROM gm_category
-       WHERE COALESCE(display_yn,'Y')='Y'
-         AND COALESCE(name_ko,'')<>''
-         AND (COALESCE(gm_parent_code,'')='' OR COALESCE(depth,0)<=1)
-       ORDER BY COALESCE(sort_order,0),gm_code`);
-    const seen=new Set(),categories=[];for(const row of q.rows||[]){const code=C(row.gm_code);if(!code||seen.has(code))continue;seen.add(code);categories.push({code:code,name:C(row.name_ko),depth:Number(row.depth||0)});}
-    return res.json({ok:true,categories:categories,route_version:ROUTE_VERSION});
-  }catch(e){return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION});}
-});
 router.post('/api/gm/image-vector/search',async(req,res)=>{
-  const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(30,Number(req.body&&req.body.limit||30)||30)),searchMode=C(req.body&&req.body.search_mode).toLowerCase()==='precise'?'precise':'fast',categoryCode=C(req.body&&req.body.category_code);
+  const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(30,Number(req.body&&req.body.limit||30)||30)),searchMode=C(req.body&&req.body.search_mode).toLowerCase()==='precise'?'precise':'fast';
   if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
   if(!v)return res.status(400).json({ok:false,error:'vector_base64(1024-byte Float16) required'});
   const started=Date.now();
   try{
     const columnType=await vectorColumnType(pool);
     if(!isArrayVectorType(columnType))return res.status(409).json({ok:false,error:'representative search requires REAL[] production vectors',column_type:columnType,route_version:ROUTE_VERSION,search_ms:Date.now()-started});
-    const out=await representativeSearch.search(pool,v,limit,searchMode,categoryCode),searchMs=Date.now()-started;
+    const out=await representativeSearch.search(pool,v,limit,searchMode),searchMs=Date.now()-started;
     const metaReady=out.matches.filter(m=>C(m.keyword||m.category_keyword||m.product_name)).length;
-    console.log('[GM_IMAGE_VECTOR_REP_SEARCH]',JSON.stringify({mode:out.search_mode,engine:out.search_engine,memory_mode:out.memory_mode,run_no:out.run_no,representative_count:out.representative_count,rep_groups:out.representative_candidates.length,member_candidates:out.member_candidate_count,run0_candidates:out.run0_candidate_count,count:out.matches.length,best_score:out.matches[0]?Number(Number(out.matches[0].score||0).toFixed(6)):null,search_ms:searchMs,timings:out.timings,hnsw:out.hnsw_status,category_code:C(out.category_code),category_name:C(out.category_name),route_version:ROUTE_VERSION}));
-    return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:out.search_mode,search_mode_label:out.search_mode==='fast'?'신속검색':'정밀검색',search_engine:out.search_engine,memory_mode:out.memory_mode,run_no:out.run_no,representative_count:out.representative_count,representative_group_limit:representativeSearch.REP_GROUP_LIMIT,representative_candidates:out.representative_candidates,representative_scanned:out.search_mode==='precise'?out.representative_count:null,candidate_count:out.member_candidate_count,run0_candidate_count:out.run0_candidate_count,hnsw_status:out.hnsw_status,category_code:C(out.category_code),category_name:C(out.category_name),search_ms:searchMs,timings:out.timings});
+    console.log('[GM_IMAGE_VECTOR_REP_SEARCH]',JSON.stringify({mode:out.search_mode,engine:out.search_engine,memory_mode:out.memory_mode,run_no:out.run_no,representative_count:out.representative_count,rep_groups:out.representative_candidates.length,member_candidates:out.member_candidate_count,run0_candidates:out.run0_candidate_count,count:out.matches.length,best_score:out.matches[0]?Number(Number(out.matches[0].score||0).toFixed(6)):null,search_ms:searchMs,timings:out.timings,hnsw:out.hnsw_status,route_version:ROUTE_VERSION}));
+    return res.json({ok:true,count:out.matches.length,matches:out.matches,metadata_ready:metaReady,vector_version:VECTOR_VERSION,column_type:columnType,route_version:ROUTE_VERSION,search_mode:out.search_mode,search_mode_label:out.search_mode==='fast'?'신속검색':'정밀검색',search_engine:out.search_engine,memory_mode:out.memory_mode,run_no:out.run_no,representative_count:out.representative_count,representative_group_limit:representativeSearch.REP_GROUP_LIMIT,representative_candidates:out.representative_candidates,representative_scanned:out.search_mode==='precise'?out.representative_count:null,candidate_count:out.member_candidate_count,run0_candidate_count:out.run0_candidate_count,hnsw_status:out.hnsw_status,search_ms:searchMs,timings:out.timings});
   }catch(e){
     return res.status(500).json({ok:false,error:C(e&&e.message||e),route_version:ROUTE_VERSION,search_ms:Date.now()-started});
   }
