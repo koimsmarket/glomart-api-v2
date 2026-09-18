@@ -1897,6 +1897,8 @@ installSearchLogService({
 app.use(require('./routes/health'));
 app.use(require('./routes/event'));
 console.log('[EVENT_ROUTE_V009] routes/event registered');
+app.use(require('./routes/category_menu'));
+console.log('[GM_CATEGORY_MENU_V001] routes/category_menu registered');
 app.use(require('./routes/search_keyword'));
 console.log('[GM_SEARCH_KEYWORD_ROUTE_V002] routes/search_keyword registered');
 app.use(require('./routes/search_local'));
