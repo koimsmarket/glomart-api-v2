@@ -1,4 +1,5 @@
 const express = require('express');
+const {classifyProduct}=require('../services/glomart_code'); // GM_GLOMART_CODE_SHARED_V010
 const router = express.Router();
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function cleanText(v){ return String(v || '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
@@ -1726,6 +1727,22 @@ async function upsertProduct(pool, raw, parent={}){
   const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
   try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
 
+  let serverGlomartMatch={gm_code:'',match_by:'NO_MATCH'};
+  try{
+    serverGlomartMatch=await classifyProduct(pool,{
+      mall_category:mallCategoryStored,
+      cp_fix_code:cpFixCode,
+      cp_selected_code:cpSelectedCode,
+      category_code:cleanText(p.category_code || p.categoryCode || ''),
+      category_keyword:cleanText(p.category_keyword || p.categoryKeyword || p.keyword),
+      keyword:searchKeyword
+    });
+  }catch(e){
+    console.warn('[GM_GLOMART_CODE_MATCH_WARN]', {uid:id.uid, error:String(e&&e.message||e)});
+  }
+  // glomart_code is decided on the server. Client-provided glomart_code is not used as a classification source.
+  const resolvedGlomartCode=cleanText(serverGlomartMatch.gm_code);
+
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
     'mall_category','mall_category_json','cp_selected_code','cp_fix_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
@@ -1756,6 +1773,18 @@ async function upsertProduct(pool, raw, parent={}){
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
+      glomart_code=CASE
+        WHEN NULLIF(EXCLUDED.glomart_code,'') IS NULL THEN gm_product.glomart_code
+        WHEN NULLIF(gm_product.glomart_code,'') IS NULL THEN EXCLUDED.glomart_code
+        ELSE (
+          SELECT string_agg(code,'|' ORDER BY code)
+            FROM (
+              SELECT DISTINCT btrim(x) AS code
+                FROM unnest(string_to_array(gm_product.glomart_code || '|' || EXCLUDED.glomart_code,'|')) AS t(x)
+               WHERE btrim(x)<>''
+            ) q
+        )
+      END,
       keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
@@ -1840,7 +1869,7 @@ async function upsertProduct(pool, raw, parent={}){
   const productOptionLinkJson = optionCount >= 2 ? makeProductOptionLinkJson(optionJson, id) : null;
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
-    id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
+    id.uid, resolvedGlomartCode, cleanText(p.gm_category || p.gmCategory),
     cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
     id.mallCode, sourceMallStored, sourceUid, mallCategoryStored, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
@@ -1869,7 +1898,7 @@ async function upsertProduct(pool, raw, parent={}){
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
 
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, glomart_code:resolvedGlomartCode, glomart_match_by:serverGlomartMatch.match_by }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);

@@ -16,7 +16,7 @@
 <button class="builder-tab-btn" data-tab="vector" onclick="openBuilderTab('vector')">IMAGE VECTOR</button>
 <button class="builder-tab-btn" data-tab="lang" onclick="openBuilderTab('lang')">언어 / 국가</button>
 <span class="tab-spacer"></span>
-<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V067</span>
+<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V069</span>
 </div>
 <div class="head" data-builder-tab="status"><div><h1>GM Data Builder</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div></div></div>
 <div class="warning" data-builder-tab="status"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
@@ -33,7 +33,7 @@
 
 <div class="card" id="runtimeConfigCard" data-builder-tab="runtime">
   <h2>설정</h2>
-  <div class="small"><b>Builder V067</b> · 산출물 V005</div>
+  <div class="small"><b>Builder V069</b> · 산출물 V010</div>
 
   <div class="card" style="margin:14px 0 0 0;padding:16px">
     <h3 style="margin-top:0">SPECIAL 작업 순서</h3>
@@ -96,6 +96,12 @@
   <button class="gray" onclick="downloadUnmatchedProductGmCode()">미매칭 CSV 다운로드</button></p>
   <div id="gmCodePreviewSummary" class="small"></div>
   <div style="overflow:auto;max-height:520px;margin-top:10px"><table><thead><tr><th>product_uid</th><th>cp_selected</th><th>cp_fix</th><th>mall_category</th><th>category_keyword</th><th>keyword</th><th>match_by</th><th>source</th><th>value</th><th>resolved gm_code</th><th>카테고리</th><th>근거건수</th></tr></thead><tbody id="gmCodePreviewRows"><tr><td colspan="12">미리보기 전</td></tr></tbody></table></div>
+  <hr style="margin:18px 0;border:0;border-top:1px solid #ddd">
+  <h3>미분류 키워드 정리</h3>
+  <div class="small">운영 전 데이터이므로 검색 0~1회라는 이유만으로 자동삭제하지 않습니다. 미분류 상품의 category_keyword/keyword를 묶어 보여주며, <b>말이 안 되는 STT/명령문 등만 직접 선택 삭제</b>합니다. 상품 행은 삭제하지 않습니다.</div>
+  <p><button id="gmKeywordCleanupLoadBtn" class="green" onclick="loadGmKeywordCleanupCandidates()">검색 0~1회 후보 조회</button> <button class="gray" onclick="gmKeywordCleanupSelectAll(true)">전체 선택</button> <button class="gray" onclick="gmKeywordCleanupSelectAll(false)">선택 해제</button> <button id="gmKeywordCleanupDeleteBtn" onclick="deleteSelectedGmKeywords()">선택 삭제</button></p>
+  <div id="gmKeywordCleanupSummary" class="small">조회 전</div>
+  <div style="overflow:auto;max-height:420px;margin-top:10px"><table><thead><tr><th>선택</th><th>키워드</th><th>필드</th><th>상품수</th><th>검색수</th><th>최초검색</th><th>마지막검색</th><th>상품 예시</th></tr></thead><tbody id="gmKeywordCleanupRows"><tr><td colspan="8">후보 조회 전</td></tr></tbody></table></div>
 </div>
 <div class="card" id="productQueueParallelCard" data-builder-tab="status"><h2>PRODUCT QUEUE PARALLEL</h2>
   <div class="small">V002 adaptive concurrency 실시간 모니터 · 표시 전용(제어하지 않음)</div>
@@ -131,6 +137,6 @@
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v065"></script>
 <script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v071"></script>
 <script src="/builder/GM_BUILDER_PRODUCT_QUEUE.js?v=gm_builder_v001"></script>
-<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v006"></script>
+<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v008"></script>
 <script src="/builder/GM_BUILDER_TABS.js?v=gm_builder_v002"></script>
 </body></html>

@@ -1,4 +1,4 @@
-// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V006
+// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V010_KEYWORD_CLEANUP
 'use strict';
 async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);return j;}
 function gmCodeEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -10,3 +10,24 @@ async function analyzeProductGmCode(){const btn=document.getElementById('gmCodeA
 async function applyProductGmCode(){if(!confirm('glomart_code가 비어 있는 상품만 매칭하여 저장합니다. 복수 정확매칭은 | 구분자로 저장하고 기존 glomart_code는 덮어쓰지 않습니다. 적용할까요?'))return;const btn=document.getElementById('gmCodeApplyBtn'),timer=startButtonTimer(btn,'적용');try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/apply?confirm=YES',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});log(j);document.getElementById('gmCodePreviewSummary').textContent=`적용 완료 · ${j.updated||0}건 업데이트 · ${gmCodeSummary(j)}`;await loadProductGmCodeStatus();}catch(e){log(String(e.message||e));alert(String(e.message||e));}finally{stopButtonTimer(timer);}}
 window.addEventListener('DOMContentLoaded',()=>loadProductGmCodeStatus());
 function downloadUnmatchedProductGmCode(){window.location.href=`${API}/api/gm/builder/product-gm-code/unmatched.csv?t=${Date.now()}`;}
+
+
+async function loadGmKeywordCleanupCandidates(){
+  const body=document.getElementById('gmKeywordCleanupRows'),sum=document.getElementById('gmKeywordCleanupSummary'),btn=document.getElementById('gmKeywordCleanupLoadBtn');
+  if(!body||!sum)return; const timer=startButtonTimer(btn,'후보 조회');
+  try{
+    const j=await gmCodeFetch('/api/gm/builder/product-gm-code/cleanup-candidates?limit=1000&t='+Date.now());
+    sum.textContent=`검색 0~1회 · 미분류 키워드 후보 ${j.count||0}개 · 자동삭제하지 않고 선택한 값만 삭제합니다.`;
+    body.innerHTML=(j.items||[]).map((x,i)=>`<tr><td><input type="checkbox" class="gmKwCleanCheck" data-index="${i}"></td><td>${gmCodeEsc(x.value)}</td><td>${gmCodeEsc((x.fields||[]).join(' | '))}</td><td>${gmCodeEsc(x.product_count||0)}</td><td>${gmCodeEsc(x.search_count||0)}</td><td>${gmCodeEsc(x.first_search_at||'')}</td><td>${gmCodeEsc(x.last_search_at||'')}</td><td>${gmCodeEsc((x.samples||[]).join(' / '))}</td></tr>`).join('')||'<tr><td colspan="8">후보 없음</td></tr>';
+    window.__GM_KW_CLEAN_ITEMS=j.items||[];
+  }catch(e){sum.textContent=String(e.message||e);log(String(e.message||e));}finally{stopButtonTimer(timer);}
+}
+function gmKeywordCleanupSelectAll(on){document.querySelectorAll('.gmKwCleanCheck').forEach(x=>x.checked=!!on);}
+async function deleteSelectedGmKeywords(){
+  const all=window.__GM_KW_CLEAN_ITEMS||[],sel=[];
+  document.querySelectorAll('.gmKwCleanCheck:checked').forEach(c=>{const x=all[Number(c.dataset.index)];if(x)sel.push({value:x.value,fields:x.fields});});
+  if(!sel.length){alert('삭제할 키워드를 선택해 주세요.');return;}
+  if(!confirm(`선택한 ${sel.length}개 키워드 값을 미분류 상품의 category_keyword/keyword에서만 삭제합니다. 상품 자체는 삭제하지 않습니다. 진행할까요?`))return;
+  const btn=document.getElementById('gmKeywordCleanupDeleteBtn'),timer=startButtonTimer(btn,'선택 삭제');
+  try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/cleanup-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:sel})});document.getElementById('gmKeywordCleanupSummary').textContent=`삭제 완료 · 선택 ${j.selected||0}개 · 필드 ${j.field_updates||0}건 정리`;await loadGmKeywordCleanupCandidates();await loadProductGmCodeStatus();}catch(e){alert(String(e.message||e));log(String(e.message||e));}finally{stopButtonTimer(timer);}
+}
