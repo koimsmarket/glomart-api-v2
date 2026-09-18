@@ -171,11 +171,10 @@ function makeRequestId(p, items){
 function normalizeKeywordValue(v){
   return cleanText(v).toLowerCase().replace(/\s+/g, '');
 }
-function hasKoText(v){ return /[가-힣]/.test(cleanText(v)); }
-function firstKoText(){
+function firstKeywordText(){
   for(let i=0;i<arguments.length;i++){
     const v=cleanText(arguments[i]);
-    if(v && hasKoText(v)) return v;
+    if(v) return v;
   }
   return '';
 }
@@ -183,9 +182,9 @@ function pickSearchKeyword(p, parent){
   p=p||{}; parent=parent||{};
   const m=p.searchKeywordMeta || p.keywordMeta || p.keyword_meta || p.search_keyword_meta || {};
   const pm=parent.searchKeywordMeta || parent.keywordMeta || parent.keyword_meta || parent.search_keyword_meta || {};
-  // GM_PRODUCT_KEYWORD_KO_ONLY_V013
-  // Product keyword/category keyword are Korean canonical fields. Foreign original text belongs in search log/translation mapping only.
-  return firstKoText(
+  // GM_PRODUCT_KEYWORD_PRIORITY_V014
+  // Prefer normalized/canonical keyword metadata first, without restricting valid ASCII-only keywords such as USB/SSD/PC.
+  return firstKeywordText(
     m.keyword_ko, m.keywordKo, m.main_keyword_ko, m.mainKeyword, m.mainSearchKeyword, m.normalizedKeyword, m.correctedKeyword,
     p.keyword_ko, p.keywordKo, p.main_keyword_ko, p.mainKeyword, p.mainSearchKeyword, p.normalizedKeyword, p.correctedKeyword,
     pm.keyword_ko, pm.keywordKo, pm.main_keyword_ko, pm.mainKeyword, pm.mainSearchKeyword, pm.normalizedKeyword, pm.correctedKeyword,
@@ -196,7 +195,7 @@ function pickSearchKeyword(p, parent){
 }
 function pickCategoryKeyword(p, parent, fallbackKo){
   p=p||{}; parent=parent||{};
-  return firstKoText(p.category_keyword, p.categoryKeyword, parent.category_keyword, parent.categoryKeyword, fallbackKo);
+  return firstKeywordText(p.category_keyword, p.categoryKeyword, parent.category_keyword, parent.categoryKeyword, fallbackKo);
 }
 function pickRelatedKeywords(p, parent){
   const raw = p.related_keywords || p.relatedKeywords || p.suggest_keywords || p.suggestKeywords ||
@@ -683,9 +682,9 @@ async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relat
   if(keyword && !payload.keyword) payload.keyword = keyword;
   if(relatedKeywords && !payload.relatedKeywords) payload.relatedKeywords = relatedKeywords;
   const meta = pickKeywordMeta(payload);
-  const keywordKo = firstKoText(meta.mainKeyword, meta.correctedKeyword, meta.inputKeyword, keyword);
+  const keywordKo = firstKeywordText(meta.mainKeyword, meta.correctedKeyword, meta.inputKeyword, keyword);
   if(!keywordKo){
-    return { keyword_ko:'', input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:0, saved:0, skipped:0, reason:'NO_KOREAN_CANONICAL' };
+    return { keyword_ko:'', input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:0, saved:0, skipped:0, reason:'NO_CANONICAL_KEYWORD' };
   }
   if(productUid){
     try{ await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keywordKo, productUid]); }catch(e){}
