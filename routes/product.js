@@ -195,7 +195,7 @@ function pickSearchKeyword(p, parent){
 }
 function pickCategoryKeyword(p, parent, fallbackKo){
   p=p||{}; parent=parent||{};
-  return firstKeywordText(p.category_keyword, p.categoryKeyword, parent.category_keyword, parent.categoryKeyword, fallbackKo);
+  return firstKeywordText(fallbackKo, p.category_keyword, p.categoryKeyword, parent.category_keyword, parent.categoryKeyword);
 }
 function pickRelatedKeywords(p, parent){
   const raw = p.related_keywords || p.relatedKeywords || p.suggest_keywords || p.suggestKeywords ||
