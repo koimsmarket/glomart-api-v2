@@ -69,14 +69,10 @@ function translationFallback(name){
   return base;
 }
 function translationKeywordString(t){
-  const seen = new Set();
-  const arr=[];
-  CATEGORY_LANGS.forEach(l => {
-    cleanText(t && t[l]).split(/[|,\/]+/g).forEach(v=>{
-      v=cleanText(v); if(!v) return; const k=v.toLowerCase(); if(seen.has(k)) return; seen.add(k); arr.push(v);
-    });
-  });
-  return arr.join(',');
+  // GM_CATEGORY_KEYWORD_KO_ONLY_V019
+  // Category keyword is the Korean canonical search term. 25-language translations
+  // belong only in name_xx columns and must never be concatenated into keyword/keyword_seed.
+  return cleanText(t && t.ko);
 }
 function categoryTranslationComplete(t){
   t = t || {};

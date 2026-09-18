@@ -1,6 +1,6 @@
 'use strict';
 
-/* GM_CATEGORY_MENU_V001_GLOMART_CODE_TREE
+/* GM_CATEGORY_MENU_V019_CANONICAL_TREE
  * Read-only Glomart hamburger category API.
  * - Never uses Cafe24 category_no/category parent relationships.
  * - Never uses gm_parent_code.
@@ -58,13 +58,10 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       const stem=stemForDepth(parent,pd);
       const q=await pool.query(baseSelect+` AND depth=$1 AND gm_code LIKE $2 ORDER BY COALESCE(sort_order,2147483647),category_id`,[depth,stem+'-%']);
       rows=q.rows||[];
-      // A root may legitimately own both five- and six-segment direct-child families.
-      // Below root, remain inside the selected parent's segment family so a branch
-      // never crosses into another code family that shares the same visible prefix.
-      if(pd>0){
-        const family=parts.length;
-        rows=rows.filter(r=>C(r.gm_code).split('-').length===family);
-      }
+      // V019: the published Glomart shopping tree is the five-segment family.
+      // Six-segment rows are dynamic/detail-auto branches and must never be mixed into
+      // the user-facing hamburger tree. Root itself is six-segment, its published children are five-segment.
+      rows=rows.filter(r=>C(r.gm_code).split('-').length===5);
     }else{
       const q=await pool.query(baseSelect+` AND depth=0 ORDER BY COALESCE(sort_order,2147483647),category_id`);
       rows=q.rows||[];
@@ -77,12 +74,12 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       sort_order:Number(r.sort_order||0),
       name_ko:C(r.name_ko),
       name:C(r.display_name)||C(r.name_ko),
-      keyword:C(r.keyword),
-      translate_required:translateRequired
+      keyword:C(r.keyword)||C(r.name_ko),
+      translate_required:translateRequired || (rawLang!=='ko' && rawLang!=='kr' && !C(r.display_name))
     }));
     return res.json({ok:true,parent_code:parent,depth,lang:rawLang,translate_required:translateRequired,count:items.length,items});
   }catch(e){
-    console.error('[GM_CATEGORY_MENU_V001]',String(e&&e.stack||e));
+    console.error('[GM_CATEGORY_MENU_V019]',String(e&&e.stack||e));
     return res.status(500).json({ok:false,error:C(e&&e.message||e)});
   }
 });
