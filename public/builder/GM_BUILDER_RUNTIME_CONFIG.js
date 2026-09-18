@@ -1,4 +1,4 @@
-// GM_BUILDER_RUNTIME_CONFIG_UI_V002_SETTINGS_GEAR
+// GM_BUILDER_RUNTIME_CONFIG_UI_V003_SPECIAL_ORDER
 // Central runtime-config UI only. No image-vector or device-language logic belongs here.
 
 function cfgEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -32,6 +32,13 @@ function toggleRuntimeConfig(){const c=document.getElementById('runtimeConfigCar
 
 // GM_BUILDER_SPECIAL_CATEGORY_PLAN_V002_V046_COMPAT
 function specialPlanEsc(v){return cfgEsc(v);}
+function paintSpecialOrderPreview(){
+  const el=document.getElementById('specialCategoryPlanPreview'),tb=document.getElementById('specialCategoryPlanRows');if(!el||!tb)return;
+  const rows=[];
+  for(const tr of tb.querySelectorAll('tr[data-prefix]')){const input=tr.querySelector('.sp-order');const no=Number(input&&input.value||0);if(Number.isInteger(no)&&no>0)rows.push({no,prefix:tr.dataset.prefix,name:(tr.children[2]&&tr.children[2].textContent||'').trim()});}
+  rows.sort((a,b)=>a.no-b.no||a.prefix.localeCompare(b.prefix));
+  el.textContent=rows.length?('실행순서: '+rows.map(x=>`${x.no}. ${x.name}(${x.prefix})`).join(' → ')):'실행순서: 번호를 지정한 카테고리 없음';
+}
 async function loadSpecialCategoryPlan(){
   const tb=document.getElementById('specialCategoryPlanRows'),st=document.getElementById('specialCategoryPlanStatus'),ym=document.getElementById('specialApplyYm');if(!tb||!ym)return;
   try{
@@ -39,8 +46,9 @@ async function loadSpecialCategoryPlan(){
     ym.value=j.apply_ym||'';
     const rows=j.categories||[];
     tb.innerHTML=rows.map(x=>`<tr data-prefix="${specialPlanEsc(x.prefix)}"><td><input class="sp-order" type="number" min="1" step="1" value="${x.no==null?'':specialPlanEsc(x.no)}" style="width:80px"></td><td><b>${specialPlanEsc(x.prefix)}</b></td><td>${specialPlanEsc(x.name_ko)}</td><td>${specialPlanEsc(x.sort_order)}</td></tr>`).join('')||'<tr><td colspan="4">대분류 없음</td></tr>';
-    if(st)st.textContent=`적용연월 ${j.apply_ym||'-'} · 번호 지정 ${rows.filter(x=>x.no!=null).length}개 · 번호 없음은 대기`;
-  }catch(e){tb.innerHTML=`<tr><td colspan="4">SPECIAL 계획 조회 실패: ${specialPlanEsc(e&&e.message||e)}</td></tr>`;if(st)st.textContent='조회 실패';}
+    tb.querySelectorAll('.sp-order').forEach(el=>el.addEventListener('input',paintSpecialOrderPreview));
+    if(st)st.textContent=`적용연월 ${j.apply_ym||'-'} · 번호 지정 ${rows.filter(x=>x.no!=null).length}개 · 번호 없음은 SPECIAL 제외`; paintSpecialOrderPreview();
+  }catch(e){tb.innerHTML=`<tr><td colspan="4">SPECIAL 계획 조회 실패: ${specialPlanEsc(e&&e.message||e)}</td></tr>`;if(st)st.textContent='조회 실패';const pv=document.getElementById('specialCategoryPlanPreview');if(pv)pv.textContent='실행순서 조회 실패';}
 }
 async function saveSpecialCategoryPlan(){
   const ym=document.getElementById('specialApplyYm'),tb=document.getElementById('specialCategoryPlanRows');if(!ym||!tb)return;
@@ -54,6 +62,6 @@ async function saveSpecialCategoryPlan(){
   if(!categories.length){alert('최소 1개 대분류에 번호를 지정하세요.');return;}
   categories.sort((a,b)=>a.no-b.no||a.prefix.localeCompare(b.prefix));
   const r=await fetch(`${API}/api/gm/builder/config/special-category-plan`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apply_ym:ym.value,categories})});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}
-  log({action:'special-category-plan.saved',apply_ym:ym.value,order:categories});await loadRuntimeConfig();await loadSpecialCategoryPlan();
+  log({action:'special-category-plan.saved',apply_ym:ym.value,order:j.order||categories});const st=document.getElementById('specialCategoryPlanStatus');if(st)st.textContent=`저장 완료 · ${ym.value} · ${(j.order||categories).length}개`;await loadRuntimeConfig();await loadSpecialCategoryPlan();
 }
 

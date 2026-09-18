@@ -9,7 +9,7 @@ const cors=require('cors');
 const {Pool}=require('pg');
 const path=require('path');
 
-const VERSION='GM_CATEGORY_BATCH_SPECIAL_SERVER_V003';
+const VERSION='GM_CATEGORY_BATCH_SPECIAL_SERVER_V004_ORDER_CONFIG';
 const PORT=Number(process.env.PORT||3000);
 const ADMIN_IDS=new Set(['derzon','derzon1287','msoon']);
 const DIM=512;
@@ -40,6 +40,9 @@ function auth(req,res){
 function log(tag,obj){console.log('[GM_CATEGORY_BATCH '+tag+']',JSON.stringify(Object.assign({ts:new Date().toISOString()},obj||{})));}
 function splitKeywords(v){return [...new Set(S(v).split('/').map(x=>x.trim()).filter(Boolean))];}
 function vectorValidSql(alias='v'){return `${alias}.vector_image IS NOT NULL AND array_length(${alias}.vector_image,1)=${DIM}`;}
+const SPECIAL_DEFAULT_ORDER=[{no:1,prefix:'FD'},{no:2,prefix:'HS'},{no:3,prefix:'KW'},{no:4,prefix:'BP'},{no:5,prefix:'FA'}];
+function cleanSpecialOrder(v){let a=v;try{if(typeof a==='string')a=JSON.parse(a);}catch(_){a=[];}if(!Array.isArray(a))a=[];const seenP=new Set(),seenN=new Set(),out=[];for(const x of a){const prefix=S(x&&x.prefix||x&&x.code).toUpperCase().replace(/[^A-Z0-9]/g,'');const no=Number(x&&x.no!=null?x.no:x&&x.order);if(!prefix||!Number.isInteger(no)||no<1||seenP.has(prefix)||seenN.has(no))continue;seenP.add(prefix);seenN.add(no);out.push({no,prefix});}out.sort((a,b)=>a.no-b.no||a.prefix.localeCompare(b.prefix));return out;}
+async function loadSpecialOrder(){try{const q=await pool.query(`SELECT config_value FROM gm_runtime_config WHERE config_key='special_category_order' AND enabled=TRUE LIMIT 1`);const o=cleanSpecialOrder(q.rows[0]&&q.rows[0].config_value);return o.length?o:SPECIAL_DEFAULT_ORDER.slice();}catch(e){log('ORDER_CONFIG_FALLBACK',{error:S(e&&e.message||e)});return SPECIAL_DEFAULT_ORDER.slice();}}
 
 app.get('/health',async(_req,res)=>{
   try{await pool.query('SELECT 1');res.json({ok:true,version:VERSION,control,cycles:cycles.size,server_queue:serverQueue.length});}
@@ -80,7 +83,11 @@ app.post('/api/special/category-batch/next',async(req,res)=>{
     const row=q.rows[0]||null;
     return res.json({ok:true,state:'LEASED',category:row?Object.assign(row,{keywords:splitKeywords(row.name_ko)}):null});
   }
-  const candidates=await pool.query(`SELECT category_id,name_ko FROM gm_category WHERE created_at IS NULL AND COALESCE(name_ko,'')<>'' ORDER BY category_id ASC LIMIT 80`);
+  const order=await loadSpecialOrder();
+  const prefixes=order.map(x=>x.prefix);
+  const caseSql=order.map((x,i)=>`WHEN gm_code LIKE $${i+2} THEN ${Number(x.no)}`).join(' ');
+  const params=[prefixes].concat(prefixes.map(x=>x+'-%'));
+  const candidates=await pool.query(`SELECT category_id,name_ko,gm_code FROM gm_category WHERE created_at IS NULL AND COALESCE(name_ko,'')<>'' AND split_part(gm_code,'-',1)=ANY($1::text[]) ORDER BY CASE ${caseSql} ELSE 999999 END ASC, category_id ASC LIMIT 80`,params);
   for(const row of candidates.rows){
     const client=await pool.connect();
     try{
@@ -89,7 +96,7 @@ app.post('/api/special/category-batch/next',async(req,res)=>{
         const still=await client.query('SELECT category_id,name_ko,created_at FROM gm_category WHERE category_id=$1',[row.category_id]);
         if(still.rows[0]&&!still.rows[0].created_at){
           deviceLeases.set(deviceId,{category_id:row.category_id,client,member_id:member,leased_at:Date.now()});
-          log('CATEGORY_LEASE',{device_id:deviceId,category_id:row.category_id,name_ko:row.name_ko});
+          log('CATEGORY_LEASE',{device_id:deviceId,category_id:row.category_id,gm_code:row.gm_code,name_ko:row.name_ko,order});
           return res.json({ok:true,state:'LEASED',category:Object.assign(row,{keywords:splitKeywords(row.name_ko)})});
         }
         await client.query('SELECT pg_advisory_unlock($1::bigint)',[row.category_id]);
