@@ -1,5 +1,5 @@
-// GM_BUILDER_RUNTIME_CONFIG_UI_V003_SPECIAL_ORDER
-// Central runtime-config UI only. No image-vector or device-language logic belongs here.
+// GM_BUILDER_RUNTIME_CONFIG_UI_V004_SPECIAL_ORDER_BOARD
+// Central runtime-config UI only. SPECIAL order is managed by a dedicated ordered board.
 
 function cfgEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function cfgRowValue(items,key){const x=(items||[]).find(r=>r.config_key===key);return x?x.config_value:'-';}
@@ -26,42 +26,50 @@ async function addRuntimeConfig(){
 }
 async function nextGmV2(){const r=await fetch(`${API}/api/gm/builder/config/gm-v2/next`,{method:'POST'});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'gm_v2.next',value:j.item&&j.item.config_value});await loadRuntimeConfig();}
 
-loadRuntimeConfig();
-
-function toggleRuntimeConfig(){const c=document.getElementById('runtimeConfigCard');if(!c)return;const open=c.style.display==='none';c.style.display=open?'block':'none';if(open){loadRuntimeConfig();loadSpecialCategoryPlan();}}
-
-// GM_BUILDER_SPECIAL_CATEGORY_PLAN_V002_V046_COMPAT
+let specialPlanAll=[];
+let specialPlanSelected=[];
 function specialPlanEsc(v){return cfgEsc(v);}
+function specialPlanByPrefix(prefix){return specialPlanAll.find(x=>x.prefix===prefix)||null;}
 function paintSpecialOrderPreview(){
-  const el=document.getElementById('specialCategoryPlanPreview'),tb=document.getElementById('specialCategoryPlanRows');if(!el||!tb)return;
-  const rows=[];
-  for(const tr of tb.querySelectorAll('tr[data-prefix]')){const input=tr.querySelector('.sp-order');const no=Number(input&&input.value||0);if(Number.isInteger(no)&&no>0)rows.push({no,prefix:tr.dataset.prefix,name:(tr.children[2]&&tr.children[2].textContent||'').trim()});}
-  rows.sort((a,b)=>a.no-b.no||a.prefix.localeCompare(b.prefix));
-  el.textContent=rows.length?('실행순서: '+rows.map(x=>`${x.no}. ${x.name}(${x.prefix})`).join(' → ')):'실행순서: 번호를 지정한 카테고리 없음';
+  const el=document.getElementById('specialCategoryPlanPreview');if(!el)return;
+  el.textContent=specialPlanSelected.length?'실행순서: '+specialPlanSelected.map((x,i)=>`${i+1}. ${x.name_ko}(${x.prefix})`).join(' → '):'실행순서: 선택된 카테고리 없음';
 }
+function renderSpecialPlan(){
+  const selectedEl=document.getElementById('specialSelectedList'),availableEl=document.getElementById('specialAvailableList');
+  if(!selectedEl||!availableEl)return;
+  selectedEl.innerHTML=specialPlanSelected.length?specialPlanSelected.map((x,i)=>`<div data-prefix="${specialPlanEsc(x.prefix)}" style="display:grid;grid-template-columns:42px 1fr auto;gap:8px;align-items:center;border:1px solid #d7d7d7;border-radius:9px;padding:8px 10px;background:#fff"><b>${i+1}</b><span><b>${specialPlanEsc(x.name_ko)}</b> <span class="small">${specialPlanEsc(x.prefix)}</span></span><span style="white-space:nowrap"><button onclick="moveSpecialCategory('${specialPlanEsc(x.prefix)}',-1)" ${i===0?'disabled':''}>↑</button> <button onclick="moveSpecialCategory('${specialPlanEsc(x.prefix)}',1)" ${i===specialPlanSelected.length-1?'disabled':''}>↓</button> <button class="gray" onclick="removeSpecialCategory('${specialPlanEsc(x.prefix)}')">제외</button></span></div>`).join(''):'<div class="status">선택된 SPECIAL 카테고리가 없습니다.</div>';
+  const selectedSet=new Set(specialPlanSelected.map(x=>x.prefix));
+  const available=specialPlanAll.filter(x=>!selectedSet.has(x.prefix));
+  availableEl.innerHTML=available.length?available.map(x=>`<div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;border:1px solid #d7d7d7;border-radius:9px;padding:8px 10px;background:#fff"><span><b>${specialPlanEsc(x.name_ko)}</b> <span class="small">${specialPlanEsc(x.prefix)}</span></span><button onclick="addSpecialCategory('${specialPlanEsc(x.prefix)}')">추가</button></div>`).join(''):'<div class="status">모든 대분류가 실행 순서에 들어 있습니다.</div>';
+  paintSpecialOrderPreview();
+}
+window.moveSpecialCategory=function(prefix,delta){
+  const i=specialPlanSelected.findIndex(x=>x.prefix===prefix);if(i<0)return;const j=i+Number(delta||0);if(j<0||j>=specialPlanSelected.length)return;
+  [specialPlanSelected[i],specialPlanSelected[j]]=[specialPlanSelected[j],specialPlanSelected[i]];renderSpecialPlan();
+};
+window.removeSpecialCategory=function(prefix){specialPlanSelected=specialPlanSelected.filter(x=>x.prefix!==prefix);renderSpecialPlan();};
+window.addSpecialCategory=function(prefix){const x=specialPlanByPrefix(prefix);if(!x||specialPlanSelected.some(y=>y.prefix===prefix))return;specialPlanSelected.push(x);renderSpecialPlan();};
 async function loadSpecialCategoryPlan(){
-  const tb=document.getElementById('specialCategoryPlanRows'),st=document.getElementById('specialCategoryPlanStatus'),ym=document.getElementById('specialApplyYm');if(!tb||!ym)return;
+  const st=document.getElementById('specialCategoryPlanStatus'),ym=document.getElementById('specialApplyYm');if(!ym)return;
   try{
     const r=await fetch(`${API}/api/gm/builder/config/special-category-plan?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
     ym.value=j.apply_ym||'';
-    const rows=j.categories||[];
-    tb.innerHTML=rows.map(x=>`<tr data-prefix="${specialPlanEsc(x.prefix)}"><td><input class="sp-order" type="number" min="1" step="1" value="${x.no==null?'':specialPlanEsc(x.no)}" style="width:80px"></td><td><b>${specialPlanEsc(x.prefix)}</b></td><td>${specialPlanEsc(x.name_ko)}</td><td>${specialPlanEsc(x.sort_order)}</td></tr>`).join('')||'<tr><td colspan="4">대분류 없음</td></tr>';
-    tb.querySelectorAll('.sp-order').forEach(el=>el.addEventListener('input',paintSpecialOrderPreview));
-    if(st)st.textContent=`적용연월 ${j.apply_ym||'-'} · 번호 지정 ${rows.filter(x=>x.no!=null).length}개 · 번호 없음은 SPECIAL 제외`; paintSpecialOrderPreview();
-  }catch(e){tb.innerHTML=`<tr><td colspan="4">SPECIAL 계획 조회 실패: ${specialPlanEsc(e&&e.message||e)}</td></tr>`;if(st)st.textContent='조회 실패';const pv=document.getElementById('specialCategoryPlanPreview');if(pv)pv.textContent='실행순서 조회 실패';}
+    specialPlanAll=(j.categories||[]).map(x=>({prefix:String(x.prefix||''),name_ko:String(x.name_ko||''),sort_order:x.sort_order,no:x.no==null?null:Number(x.no)}));
+    specialPlanSelected=specialPlanAll.filter(x=>Number.isInteger(x.no)&&x.no>0).sort((a,b)=>a.no-b.no||a.prefix.localeCompare(b.prefix));
+    if(st)st.textContent=`적용연월 ${j.apply_ym||'-'} · 실행 ${specialPlanSelected.length}개 · 제외 ${Math.max(0,specialPlanAll.length-specialPlanSelected.length)}개`;
+    renderSpecialPlan();
+  }catch(e){if(st)st.textContent='SPECIAL 순서 조회 실패: '+String(e&&e.message||e);const pv=document.getElementById('specialCategoryPlanPreview');if(pv)pv.textContent='실행순서 조회 실패';}
 }
 async function saveSpecialCategoryPlan(){
-  const ym=document.getElementById('specialApplyYm'),tb=document.getElementById('specialCategoryPlanRows');if(!ym||!tb)return;
-  const categories=[];const used=new Set();
-  for(const tr of tb.querySelectorAll('tr[data-prefix]')){
-    const raw=tr.querySelector('.sp-order').value.trim();if(!raw)continue;
-    const no=Number(raw);if(!Number.isInteger(no)||no<1){alert('번호는 1 이상의 정수만 가능합니다.');return;}
-    if(used.has(no)){alert(`중복 번호 ${no}가 있습니다.`);return;}used.add(no);categories.push({prefix:tr.dataset.prefix,no});
-  }
+  const ym=document.getElementById('specialApplyYm');if(!ym)return;
   if(!/^\d{4}-\d{2}$/.test(ym.value)){alert('적용연월을 선택하세요.');return;}
-  if(!categories.length){alert('최소 1개 대분류에 번호를 지정하세요.');return;}
-  categories.sort((a,b)=>a.no-b.no||a.prefix.localeCompare(b.prefix));
-  const r=await fetch(`${API}/api/gm/builder/config/special-category-plan`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apply_ym:ym.value,categories})});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}
-  log({action:'special-category-plan.saved',apply_ym:ym.value,order:j.order||categories});const st=document.getElementById('specialCategoryPlanStatus');if(st)st.textContent=`저장 완료 · ${ym.value} · ${(j.order||categories).length}개`;await loadRuntimeConfig();await loadSpecialCategoryPlan();
+  if(!specialPlanSelected.length){alert('SPECIAL에서 처리할 대분류를 최소 1개 선택하세요.');return;}
+  const categories=specialPlanSelected.map((x,i)=>({prefix:x.prefix,no:i+1}));
+  const r=await fetch(`${API}/api/gm/builder/config/special-category-plan`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apply_ym:ym.value,categories})});const j=await r.json();
+  if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}
+  log({action:'special-category-plan.saved',apply_ym:ym.value,order:j.order||categories});
+  const st=document.getElementById('specialCategoryPlanStatus');if(st)st.textContent=`저장 완료 · ${ym.value} · ${(j.order||categories).length}개`;
+  await loadSpecialCategoryPlan();
 }
 
+window.addEventListener('DOMContentLoaded',()=>{loadRuntimeConfig();loadSpecialCategoryPlan();});
