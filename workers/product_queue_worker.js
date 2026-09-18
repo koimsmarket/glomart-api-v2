@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_QUEUE_WORKER_V018_ADAPTIVE_QUEUE_PARALLEL
+// GM_PRODUCT_QUEUE_WORKER_V019_UNCLASSIFIED_CATEGORY_KEYWORD_BATCH
 
 const productRouter = require('../routes/product');
 const searchController = require('../services/search_controller');
@@ -63,6 +63,56 @@ async function markFailed(pool, row, err, maxRetry){
   `, [row.queue_id, nextStatus, nextRetry, String(err && err.message || err).slice(0, 2000)]);
 }
 
+
+async function applyUnclassifiedCategoryKeywordBatch(pool, productUids, incomingKeyword){
+  const uids = Array.from(new Set((productUids || []).map(v => String(v || '').trim()).filter(Boolean)));
+  const newKeyword = String(incomingKeyword || '').trim();
+  if(!uids.length || !newKeyword) return { applied:false, reason:'empty_uid_or_keyword', updated:0 };
+
+  const r = await pool.query(`
+    WITH target AS (
+      SELECT p.product_uid, p.category_keyword, $2::text AS new_keyword
+      FROM gm_product p
+      WHERE p.product_uid = ANY($1::text[])
+        AND COALESCE(BTRIM(p.glomart_code),'') = ''
+        AND EXISTS (
+          SELECT 1
+          FROM gm_keyword_translate kt
+          WHERE BTRIM(COALESCE(kt.main_keyword_ko,'')) = BTRIM($2::text)
+        )
+    ), merged AS (
+      SELECT t.product_uid,
+             (
+               SELECT string_agg(v.keyword, '|' ORDER BY v.keyword)
+               FROM (
+                 SELECT DISTINCT BTRIM(t.new_keyword) AS keyword
+                 UNION
+                 SELECT DISTINCT BTRIM(x) AS keyword
+                 FROM unnest(string_to_array(COALESCE(t.category_keyword,''), '|')) AS x
+                 WHERE BTRIM(x) <> ''
+                   AND EXISTS (
+                     SELECT 1
+                     FROM gm_keyword_translate kt2
+                     WHERE BTRIM(COALESCE(kt2.main_keyword_ko,'')) = BTRIM(x)
+                   )
+               ) v
+               WHERE v.keyword <> ''
+             ) AS category_keyword
+      FROM target t
+    )
+    UPDATE gm_product p
+       SET category_keyword = m.category_keyword,
+           updated_at = now()
+      FROM merged m
+     WHERE p.product_uid = m.product_uid
+       AND COALESCE(m.category_keyword,'') <> ''
+       AND COALESCE(p.category_keyword,'') IS DISTINCT FROM COALESCE(m.category_keyword,'')
+    RETURNING p.product_uid, p.category_keyword
+  `, [uids, newKeyword]);
+
+  return { applied:true, checked:uids.length, updated:r.rowCount || 0, keyword:newKeyword };
+}
+
 async function processRow(pool, row){
   const raw = row.items_json;
   const items = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : []);
@@ -80,11 +130,13 @@ async function processRow(pool, row){
   const skip_reason_count = {};
   const samples = [];
   const errors = [];
+  const savedProductUids = [];
   for(const item of items){
     try{
       const r = await productRouter.upsertProduct(pool, item, parent);
       if(r && r.ok){
         saved += 1;
+        if(r.item && r.item.product_uid) savedProductUids.push(r.item.product_uid);
         if(r.action === 'inserted') inserted += 1;
         else updated += 1;
         const opt = r.item && r.item.option_result || {};
@@ -114,6 +166,13 @@ async function processRow(pool, row){
     }
   }
   option_balance_ok = option_balance_ok && option_received === (option_inserted + option_updated + option_skipped);
+  let category_keyword_batch = { applied:false, reason:'not_run', updated:0 };
+  try{
+    category_keyword_batch = await applyUnclassifiedCategoryKeywordBatch(pool, savedProductUids, row.keyword);
+  }catch(e){
+    category_keyword_batch = { applied:false, reason:'error', updated:0, error:String(e && e.message || e) };
+    console.warn('[GM_PRODUCT_QUEUE_CATEGORY_KEYWORD_BATCH_WARN]', { queue_id:row.queue_id, request_id:row.request_id, keyword:row.keyword, error:category_keyword_batch.error });
+  }
   const audit = {
     search_result_count:items.length,
     product_inserted:inserted,
@@ -127,7 +186,7 @@ async function processRow(pool, row){
     option_nonactive,
     option_balance_ok
   };
-  const result = { received: items.length, saved, inserted, updated, skipped, audit, skip_reason_count, samples, errors: errors.slice(0, 5) };
+  const result = { received: items.length, saved, inserted, updated, skipped, audit, category_keyword_batch, skip_reason_count, samples, errors: errors.slice(0, 5) };
   console.log('[GM_PRODUCT_QUEUE_WORKER_SAVE_AUDIT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...audit });
   console.log('[GM_PRODUCT_QUEUE_WORKER_RESULT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...result });
   if(items.length && saved === 0){
