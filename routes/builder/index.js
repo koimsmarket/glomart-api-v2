@@ -21,6 +21,7 @@ router.use(require('./members'));       // Cafe24 member import/export
 router.use(require('./record_editor')); // direct record maintenance
 router.use(require('./runtime_config'));// central runtime configuration
 router.use(require('./device_lang'));   // language-pack administration
+router.use(require('./product_queue')); // product queue adaptive-concurrency monitor only
 router.use(require('./product_gm_code')); // gm_category.gm_code -> gm_product.glomart_code reconciliation
 
 // ---- Domain Builder modules --------------------------------------------------

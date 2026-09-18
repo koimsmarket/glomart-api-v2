@@ -12,13 +12,14 @@ function csvCell(v){
   return /[",\r\n]/.test(x) ? '"' + x.replace(/"/g,'""') + '"' : x;
 }
 
-async function streamProductImageVectorCsv(db,res,cols,limit){
+async function streamProductUidCsv(db,res,table,cols,limit){
   res.setHeader('Content-Type','text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition',`attachment; filename="gm_product_image_vector_${Date.now()}.csv"`);
+  res.setHeader('Content-Disposition',`attachment; filename="${table}_${Date.now()}.csv"`);
   res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
   res.setHeader('X-Content-Type-Options','nosniff');
 
-  res.write('\ufeff' + cols.map(csvCell).join(',') + '\n');
+  const writeChunk=async chunk=>{if(res.write(chunk))return;if(res.destroyed)throw new Error('client disconnected');await new Promise(resolve=>res.once('drain',resolve));};
+  await writeChunk('\ufeff' + cols.map(csvCell).join(',') + '\n');
 
   const pageSize=250;
   let lastUid='';
@@ -29,7 +30,7 @@ async function streamProductImageVectorCsv(db,res,cols,limit){
     const take=limit ? Math.min(pageSize,limit-sent) : pageSize;
     const r=await db.query(
       `SELECT ${cols.map(qIdent).join(', ')}
-         FROM ${qIdent('gm_product_image_vector')}
+         FROM ${qIdent(table)}
         WHERE product_uid > $1
         ORDER BY product_uid ASC
         LIMIT $2`,
@@ -38,7 +39,7 @@ async function streamProductImageVectorCsv(db,res,cols,limit){
     if(!r.rows.length) break;
 
     for(const row of r.rows){
-      res.write(cols.map(c=>csvCell(row[c])).join(',') + '\n');
+      await writeChunk(cols.map(c=>csvCell(row[c])).join(',') + '\n');
     }
 
     sent+=r.rows.length;
@@ -67,10 +68,11 @@ router.get('/api/gm/builder/export', async (req,res)=>{
     let cols = await getColumns(db, spec.table);
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
 
-    // Large-file exception only: gm_product_image_vector is streamed in small DB pages.
-    // Other tables keep the existing download path unchanged.
-    if (spec.table === 'gm_product_image_vector' && format !== 'json') {
-      return await streamProductImageVectorCsv(db,res,cols,limit);
+    // Large-file tables: stream by product_uid in small DB pages.
+    // gm_product can be too large for one-shot Node memory loading, so CSV is streamed incrementally.
+    // JSON behavior stays unchanged.
+    if ((spec.table === 'gm_product' || spec.table === 'gm_product_image_vector') && format !== 'json') {
+      return await streamProductUidCsv(db,res,spec.table,cols,limit);
     }
 
     const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');

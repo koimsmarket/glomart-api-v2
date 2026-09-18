@@ -1,4 +1,4 @@
-// GM_BUILDER_PRODUCT_GLOMART_CODE_V002
+// GM_BUILDER_PRODUCT_GLOMART_CODE_V003
 // Builder-only category reconciliation.
 // Purpose: derive gm_product.glomart_code from gm_category using exact Coupang-code
 // mappings first, then exact/unique category-keyword mappings.
@@ -129,4 +129,48 @@ router.post('/api/gm/builder/product-gm-code/apply',async(req,res)=>{
   }catch(e){try{if(client)await client.query('ROLLBACK');}catch(_){} fail(res,500,'PRODUCT_GM_CODE_APPLY_FAILED',{detail:String(e&&e.message||e)});
   }finally{if(release)client.release();}
 });
+
+function csvCell(v){
+  if(v===null || v===undefined)return '';
+  const x=String(v);
+  return /[",\r\n]/.test(x) ? '"'+x.replace(/"/g,'""')+'"' : x;
+}
+router.get('/api/gm/builder/product-gm-code/unmatched.csv',async(req,res)=>{
+  const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');
+  try{
+    const maps=await loadMaps(db);
+    const cols=['product_uid','mall_code','product_name','cp_selected_code','cp_fix_code','category_code','category_keyword','keyword','match_by','source_field','source_value','candidate_count'];
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition',`attachment; filename="gm_product_glomart_code_unmatched_${Date.now()}.csv"`);
+    res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
+    res.setHeader('X-Content-Type-Options','nosniff');
+    const writeChunk=async chunk=>{if(res.write(chunk))return;if(res.destroyed)throw new Error('client disconnected');await new Promise(resolve=>res.once('drain',resolve));};
+    await writeChunk('\ufeff'+cols.join(',')+'\n');
+    const pageSize=1000;
+    let lastUid='';
+    let sent=0;
+    while(true){
+      const r=await db.query(`SELECT product_uid,glomart_code,cp_selected_code,cp_fix_code,category_code,category_keyword,keyword,product_name,mall_code
+        FROM gm_product
+        WHERE COALESCE(glomart_code,'')='' AND product_uid > $1
+        ORDER BY product_uid ASC
+        LIMIT $2`,[lastUid,pageSize]);
+      if(!r.rows.length)break;
+      for(const row of r.rows){
+        const c=classify(row,maps);
+        const out={...row,...c};
+        await writeChunk(cols.map(k=>csvCell(out[k])).join(',')+'\n');
+        sent++;
+      }
+      lastUid=String(r.rows[r.rows.length-1].product_uid||'');
+      if(r.rows.length<pageSize)break;
+    }
+    console.log(`[GM_PRODUCT_GLOMART_CODE_V003] unmatched export sent=${sent}`);
+    res.end();
+  }catch(e){
+    if(!res.headersSent)return fail(res,500,'PRODUCT_GM_CODE_UNMATCHED_EXPORT_FAILED',{detail:String(e&&e.message||e)});
+    try{res.end();}catch(_){}
+  }
+});
+
 module.exports=router;

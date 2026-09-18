@@ -25,3 +25,7 @@ async function applyProductGmCode(){
   catch(e){log(String(e.message||e));alert(String(e.message||e));}finally{stopButtonTimer(timer);}
 }
 window.addEventListener('DOMContentLoaded',()=>loadProductGmCodeStatus());
+
+function downloadUnmatchedProductGmCode(){
+  window.location.href=`${API}/api/gm/builder/product-gm-code/unmatched.csv?t=${Date.now()}`;
+}
