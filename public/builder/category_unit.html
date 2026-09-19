@@ -1,7 +1,65 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>카테고리 단위가격</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v065"></head><body><div class="wrap"><div class="head"><h1>카테고리 단위가격</h1></div><div class="warning">키워드당 비교 기준단위는 1개입니다. 기준 변경 후 해당 카테고리의 상품 + 옵션을 함께 재계산합니다. g↔kg, ml↔L만 환산하며 다른 단위군은 자동 변환하지 않습니다.</div><div class="card"><input id="q" placeholder="카테고리/키워드/코드"><button onclick="load()">조회</button><div id="rows"></div></div><div class="card"><h2>전체 재계산</h2><button onclick="allCheck()">전체 검증</button><button class="green" onclick="allApply()">전체 적용</button><pre id="log"></pre></div></div><script>
-const log=x=>document.getElementById('log').textContent=typeof x==='string'?x:JSON.stringify(x,null,2);async function load(){let j=await fetch('/api/gm/builder/category-unit/list?q='+encodeURIComponent(q.value)).then(r=>r.json());rows.innerHTML=(j.items||[]).map(x=>`<div style="padding:8px;border-bottom:1px solid #ddd"><b>${x.name_ko||''}</b> ${x.keyword||''}<br><small>${x.gm_code}</small><br><input id="q_${x.gm_code}" value="${x.unit_rule_qty||''}" style="width:70px"><input id="u_${x.gm_code}" value="${x.unit_rule_unit||''}" style="width:70px"><button onclick="save('${x.gm_code}')">저장</button><button onclick="recalc('${x.gm_code}',false)">검증</button><button onclick="recalc('${x.gm_code}',true)">재계산</button></div>`).join('');}
-async function save(c){let b={gm_code:c,unit_rule_qty:document.getElementById('q_'+c).value,unit_rule_unit:document.getElementById('u_'+c).value};log(await fetch('/api/gm/builder/category-unit/save',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()));}
-async function recalc(c,a){log(await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({gm_code:c,apply:a})}).then(r=>r.json()));}
-async function allCheck(){log(await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:false})}).then(r=>r.json()));}
-async function allApply(){if(!confirm('전체 상품 + 옵션 단위가격을 재계산합니다. 계속할까요?'))return;log(await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:true})}).then(r=>r.json()));}
-load();</script></body></html>
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>카테고리 단위가격 일괄작업</title>
+<link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v070">
+<style>
+  .step{display:grid;grid-template-columns:42px 1fr;gap:12px;align-items:start}.num{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1666d8;color:#fff;font-weight:700}.muted{color:#666}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.file{padding:10px;border:1px solid #ccc;border-radius:6px;background:#fff;min-width:320px}.summary{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-top:12px}.box{background:#f7f8fa;border:1px solid #ddd;border-radius:8px;padding:10px}.danger{background:#fff0f0;border-color:#ffb7b7}.ok{background:#eef9f0;border-color:#b9e2bf}pre{max-height:420px;overflow:auto;white-space:pre-wrap}.wide{width:100%}@media(max-width:700px){.summary{grid-template-columns:repeat(2,1fr)}.file{min-width:0;width:100%}}</style>
+</head><body><div class="wrap">
+<div class="head"><h1>카테고리 단위가격 일괄작업</h1></div>
+<div class="warning">카테고리 단위는 개별 입력하지 않습니다. 상품+옵션 분석으로 만든 CSV를 먼저 검증하고, 문제가 없으면 일괄 적용합니다. 이후 상품+옵션 전체 단위가격을 검증/재계산합니다. 검색 가격순 후처리는 이 작업이 확정된 뒤 별도로 연결합니다.</div>
+
+<div class="card step"><div class="num">1</div><div>
+<h2 style="margin-top:0">단위룰 CSV 선택</h2>
+<p class="muted">필수 컬럼: <b>gm_code, unit_rule_qty, unit_rule_unit</b></p>
+<div class="row"><input class="file" id="ruleFile" type="file" accept=".csv,text/csv"><a href="/api/gm/builder/category-unit/export"><button type="button">현재 적용값 다운로드</button></a></div>
+</div></div>
+
+<div class="card step"><div class="num">2</div><div>
+<h2 style="margin-top:0">전체 검증</h2>
+<p class="muted">DB는 수정하지 않습니다. 없는 gm_code, 중복 코드, 잘못된 수량/단위를 먼저 찾습니다.</p>
+<div class="row"><button onclick="uploadRules(false)">CSV 전체 검증</button></div>
+<div id="ruleSummary" class="summary"></div>
+<pre id="ruleLog"></pre>
+</div></div>
+
+<div class="card step"><div class="num">3</div><div>
+<h2 style="margin-top:0">카테고리 룰 일괄 적용</h2>
+<p class="muted">검증 오류가 1건이라도 있으면 적용을 차단합니다. 적용 대상은 gm_category의 기준수량/기준단위 두 값뿐입니다.</p>
+<button class="green" onclick="uploadRules(true)">검증된 CSV 일괄 적용</button>
+</div></div>
+
+<div class="card step"><div class="num">4</div><div>
+<h2 style="margin-top:0">상품 + 옵션 단위가격</h2>
+<p class="muted">카테고리 룰 적용 후 실행합니다. 먼저 검증으로 계산 가능 건수를 보고, 이상 없으면 전체 재계산합니다.</p>
+<div class="row"><button onclick="recalc(false)">상품+옵션 전체 검증</button><button class="green" onclick="recalc(true)">상품+옵션 전체 재계산</button></div>
+<div id="recalcSummary" class="summary"></div>
+<pre id="recalcLog"></pre>
+</div></div>
+</div>
+<script>
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function box(label,value,bad){return `<div class="box ${bad?'danger':'ok'}"><b>${esc(label)}</b><div style="font-size:24px;font-weight:700;margin-top:4px">${esc(value)}</div></div>`;}
+function renderRule(j){
+  ruleSummary.innerHTML=box('입력행',j.input_rows||0)+box('정상',j.valid||0)+box('변경',j.changed||0)+box('그대로',j.unchanged||0)+box('오류',j.invalid||0,(j.invalid||0)>0)+box('없는 카테고리',j.missing_category||0,(j.missing_category||0)>0)+box('중복코드',j.duplicate_code||0,(j.duplicate_code||0)>0)+box('실제 적용',j.applied||0);
+  const bad=(j.items||[]).filter(x=>x.errors&&x.errors.length);
+  ruleLog.textContent=bad.length?JSON.stringify(bad,null,2):((j.mode==='APPLY'?'일괄 적용 완료':'검증 완료: 오류 없음')+'\n'+JSON.stringify(j,null,2));
+}
+async function uploadRules(apply){
+  const f=ruleFile.files&&ruleFile.files[0]; if(!f){alert('단위룰 CSV를 먼저 선택하세요.');return;}
+  if(apply&&!confirm('검증된 카테고리 단위룰을 일괄 적용합니다. 계속할까요?'))return;
+  ruleLog.textContent=apply?'적용 중...':'검증 중...';
+  const fd=new FormData(); fd.append('file',f);
+  try{const r=await fetch('/api/gm/builder/category-unit/import?apply='+(apply?'YES':'NO'),{method:'POST',body:fd});const j=await r.json();renderRule(j);if(!r.ok)alert(j.error||'처리 실패');}
+  catch(e){ruleLog.textContent=String(e);}
+}
+function renderRecalc(j){
+  recalcSummary.innerHTML=box('카테고리룰',j.rules||0)+box('상품',j.products||0)+box('상품 계산가능',j.product_ok||0)+box('옵션',j.options||0)+box('옵션 계산가능',j.option_ok||0);
+  recalcLog.textContent=JSON.stringify(j,null,2);
+}
+async function recalc(apply){
+  if(apply&&!confirm('전체 상품 + 옵션의 단위가격을 다시 계산합니다. 계속할까요?'))return;
+  recalcLog.textContent=apply?'전체 재계산 중...':'전체 검증 중...';
+  try{const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply})});const j=await r.json();renderRecalc(j);if(!r.ok)alert(j.error||'처리 실패');}
+  catch(e){recalcLog.textContent=String(e);}
+}
+</script></body></html>
