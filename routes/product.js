@@ -1,5 +1,6 @@
-const { recalcProductUnitByUid } = require('../services/unit_price');
 const express = require('express');
+const {classifyProduct}=require('../services/glomart_code'); // GM_GLOMART_CODE_SHARED_V010
+const {recalcProductUnitByUid}=require('../services/unit_price'); // GM_CATEGORY_V036_UNIT_PRICE
 const router = express.Router();
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function cleanText(v){ return String(v || '').replace(/[\u00A0\u200B-\u200D\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
@@ -171,11 +172,31 @@ function makeRequestId(p, items){
 function normalizeKeywordValue(v){
   return cleanText(v).toLowerCase().replace(/\s+/g, '');
 }
+function firstKeywordText(){
+  for(let i=0;i<arguments.length;i++){
+    const v=cleanText(arguments[i]);
+    if(v) return v;
+  }
+  return '';
+}
 function pickSearchKeyword(p, parent){
-  return cleanText(
-    p.keyword || p.q || p.search_keyword || p.searchKeyword || p.keyword_original || p.keywordOriginal ||
-    (parent && (parent.keyword || parent.q || parent.search_keyword || parent.searchKeyword)) || ''
+  p=p||{}; parent=parent||{};
+  const m=p.searchKeywordMeta || p.keywordMeta || p.keyword_meta || p.search_keyword_meta || {};
+  const pm=parent.searchKeywordMeta || parent.keywordMeta || parent.keyword_meta || parent.search_keyword_meta || {};
+  // GM_PRODUCT_KEYWORD_PRIORITY_V014
+  // Prefer normalized/canonical keyword metadata first, without restricting valid ASCII-only keywords such as USB/SSD/PC.
+  return firstKeywordText(
+    m.keyword_ko, m.keywordKo, m.main_keyword_ko, m.mainKeyword, m.mainSearchKeyword, m.normalizedKeyword, m.correctedKeyword,
+    p.keyword_ko, p.keywordKo, p.main_keyword_ko, p.mainKeyword, p.mainSearchKeyword, p.normalizedKeyword, p.correctedKeyword,
+    pm.keyword_ko, pm.keywordKo, pm.main_keyword_ko, pm.mainKeyword, pm.mainSearchKeyword, pm.normalizedKeyword, pm.correctedKeyword,
+    parent.keyword_ko, parent.keywordKo, parent.main_keyword_ko, parent.mainKeyword, parent.mainSearchKeyword, parent.normalizedKeyword, parent.correctedKeyword,
+    p.keyword, p.q, p.search_keyword, p.searchKeyword,
+    parent.keyword, parent.q, parent.search_keyword, parent.searchKeyword
   );
+}
+function pickCategoryKeyword(p, parent, fallbackKo){
+  p=p||{}; parent=parent||{};
+  return firstKeywordText(fallbackKo, p.category_keyword, p.categoryKeyword, parent.category_keyword, parent.categoryKeyword);
 }
 function pickRelatedKeywords(p, parent){
   const raw = p.related_keywords || p.relatedKeywords || p.suggest_keywords || p.suggestKeywords ||
@@ -662,11 +683,14 @@ async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relat
   if(keyword && !payload.keyword) payload.keyword = keyword;
   if(relatedKeywords && !payload.relatedKeywords) payload.relatedKeywords = relatedKeywords;
   const meta = pickKeywordMeta(payload);
-  const keywordKo = meta.mainKeyword || cleanText(keyword);
-  if(productUid && keywordKo){
+  const keywordKo = firstKeywordText(meta.mainKeyword, meta.correctedKeyword, meta.inputKeyword, keyword);
+  if(!keywordKo){
+    return { keyword_ko:'', input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:0, saved:0, skipped:0, reason:'NO_CANONICAL_KEYWORD' };
+  }
+  if(productUid){
     try{ await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keywordKo, productUid]); }catch(e){}
   }
-  return saveKeywordMetaPayload(pool, Object.assign({}, payload, { mainKeyword:keywordKo, relatedKeywords:meta.relatedKeywords }));
+  return saveKeywordMetaPayload(pool, Object.assign({}, payload, { mainKeyword:keywordKo, normalizedKeyword:keywordKo, keyword_ko:keywordKo, relatedKeywords:meta.relatedKeywords }));
 }
 
 
@@ -1683,6 +1707,7 @@ async function upsertProduct(pool, raw, parent={}){
   const sourceMallStored = cleanText(sourceMall).toUpperCase() === cleanText(id.mallCode).toUpperCase() ? '' : sourceMall;
   const sourceUid = sourceUidFrom(p, sourceMall);
   const searchKeyword = pickSearchKeyword(p, parent);
+  const categoryKeyword = pickCategoryKeyword(p, parent, searchKeyword);
   const relatedKeywords = pickRelatedKeywords(p, parent);
   const mallSalePrice = pickPrice(p);
   const normalPrice = pickNormalPrice(p);
@@ -1727,6 +1752,22 @@ async function upsertProduct(pool, raw, parent={}){
   const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
   try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
 
+  let serverGlomartMatch={gm_code:'',match_by:'NO_MATCH'};
+  try{
+    serverGlomartMatch=await classifyProduct(pool,{
+      mall_category:mallCategoryStored,
+      cp_fix_code:cpFixCode,
+      cp_selected_code:cpSelectedCode,
+      category_code:cleanText(p.category_code || p.categoryCode || ''),
+      category_keyword:categoryKeyword,
+      keyword:searchKeyword
+    });
+  }catch(e){
+    console.warn('[GM_GLOMART_CODE_MATCH_WARN]', {uid:id.uid, error:String(e&&e.message||e)});
+  }
+  // glomart_code is decided on the server. Client-provided glomart_code is not used as a classification source.
+  const resolvedGlomartCode=cleanText(serverGlomartMatch.gm_code);
+
   const productColumns = [
     'product_uid','glomart_code','gm_category','category_keyword','keyword','mall_code','source_mall','source_uid',
     'mall_category','mall_category_json','cp_selected_code','cp_fix_code','cp_match','product_id','item_id','vendor_item_id','pi_ii_vi','internal_product_code',
@@ -1757,6 +1798,18 @@ async function upsertProduct(pool, raw, parent={}){
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
+      glomart_code=CASE
+        WHEN NULLIF(EXCLUDED.glomart_code,'') IS NULL THEN gm_product.glomart_code
+        WHEN NULLIF(gm_product.glomart_code,'') IS NULL THEN EXCLUDED.glomart_code
+        ELSE (
+          SELECT string_agg(code,'|' ORDER BY code)
+            FROM (
+              SELECT DISTINCT btrim(x) AS code
+                FROM unnest(string_to_array(gm_product.glomart_code || '|' || EXCLUDED.glomart_code,'|')) AS t(x)
+               WHERE btrim(x)<>''
+            ) q
+        )
+      END,
       keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
@@ -1841,8 +1894,8 @@ async function upsertProduct(pool, raw, parent={}){
   const productOptionLinkJson = optionCount >= 2 ? makeProductOptionLinkJson(optionJson, id) : null;
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
-    id.uid, cleanText(p.glomart_code || p.glomartCode), cleanText(p.gm_category || p.gmCategory),
-    cleanText(p.category_keyword || p.categoryKeyword || p.keyword), searchKeyword,
+    id.uid, resolvedGlomartCode, cleanText(p.gm_category || p.gmCategory),
+    categoryKeyword, searchKeyword,
     id.mallCode, sourceMallStored, sourceUid, mallCategoryStored, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
@@ -1870,7 +1923,7 @@ async function upsertProduct(pool, raw, parent={}){
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
 
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch }); }catch(_trace){}
+  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, glomart_code:resolvedGlomartCode, glomart_match_by:serverGlomartMatch.match_by }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);
@@ -1897,15 +1950,6 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
   }
 
-  // V035: one category rule is applied to both representative product and all options of the same PID.
-  // unit_price_text stays as source reference on gm_product only; calculated values are numeric + basis.
-  try{
-    const unit_result = await recalcProductUnitByUid(pool, id.uid);
-    try{ console.log('[GM_UNIT_PRICE_V035]', { uid:id.uid, result:unit_result }); }catch(_u){}
-  }catch(e){
-    try{ console.warn('[GM_UNIT_PRICE_V035_FAIL]', Object.assign({ uid:id.uid }, compactError(e))); }catch(_u){}
-  }
-
   let detail_patch = null;
   try{
     detail_patch = await applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson || {}, returnFee);
@@ -1914,11 +1958,21 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_DETAIL_PATCH_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode }, compactError(e)));
   }
   await saveProductKeywordMeta(pool, id.uid, id.mallCode, searchKeyword, relatedKeywords, Object.assign({}, parent || {}, p || {}));
+  let unit_result = null;
+  try{
+    // V036: product + all options share the category comparison-unit rule.
+    // Unit calculation is post-upsert only; it must never block the existing product/option save flow.
+    unit_result = await recalcProductUnitByUid(pool, id.uid);
+    try{ console.log('[GM_PRODUCT_UNIT_V036]', { uid:id.uid, category_keyword:categoryKeyword, result:unit_result }); }catch(_log){}
+  }catch(e){
+    unit_result = { ok:false, error:compactError(e) };
+    try{ console.warn('[GM_PRODUCT_UNIT_V036_WARN]', Object.assign({ uid:id.uid, category_keyword:categoryKeyword }, compactError(e))); }catch(_log){}
+  }
   const detail_stats = detailSignalStats(optionJson, thumbJson, detailJson || {}, p);
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats })
+    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats, unit_result })
   };
 }
 
