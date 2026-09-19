@@ -1,7 +1,7 @@
 'use strict';
 
-/* GM_CATEGORY_MENU_V019_CANONICAL_TREE
- * Read-only Glomart hamburger category API.
+/* GM_CATEGORY_MENU_V028_LANG_SELF_HEAL
+ * Glomart hamburger category API with on-demand language self-heal.
  * - Never uses Cafe24 category_no/category parent relationships.
  * - Never uses gm_parent_code.
  * - Direct children are selected by gm_code segment prefix + depth.
@@ -21,8 +21,78 @@ function C(v){return String(v==null?'':v).trim();}
 function normLang(v){
   let s=C(v).toLowerCase().replace('_','-');
   if(s==='jp')s='ja'; else if(s==='cn')s='zh'; else if(s==='vn')s='vi'; else if(s==='zh-tw')s='tw';
+  if(!LANG_COLUMN[s] && s.includes('-')){
+    const base=s.split('-')[0];
+    if(LANG_COLUMN[base]) s=base;
+  }
   return s;
 }
+const TRANSLATE_TARGET={tw:'zh-TW'};
+const FALLBACK_CACHE=new Map();
+function safeTargetLang(lang){
+  const s=C(lang).toLowerCase();
+  return /^[a-z]{2,3}(?:-[a-z]{2,4})?$/.test(s)?s:'';
+}
+async function translateKo(text,lang){
+  text=C(text); lang=C(lang).toLowerCase();
+  if(!text||!lang||lang==='ko'||lang==='kr') return text;
+  const target=TRANSLATE_TARGET[lang]||safeTargetLang(lang);
+  if(!target) return '';
+  const key=target+'\u0000'+text;
+  if(FALLBACK_CACHE.has(key)) return FALLBACK_CACHE.get(key);
+  let lastErr=null;
+  for(let attempt=1;attempt<=3;attempt++){
+    const ctrl=new AbortController();
+    const timer=setTimeout(()=>ctrl.abort(),8000);
+    try{
+      const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl='+encodeURIComponent(target)+'&dt=t&q='+encodeURIComponent(text);
+      const r=await fetch(url,{headers:{accept:'application/json'},signal:ctrl.signal});
+      if(!r.ok) throw new Error('translate_http_'+r.status);
+      const j=await r.json();
+      let out='';
+      if(j&&Array.isArray(j[0])) for(const row of j[0]) if(row&&row[0]) out+=row[0];
+      out=C(out);
+      if(!out) throw new Error('translate_empty');
+      if(FALLBACK_CACHE.size>2000) FALLBACK_CACHE.clear();
+      FALLBACK_CACHE.set(key,out);
+      return out;
+    }catch(e){
+      lastErr=e;
+      if(attempt<3) await new Promise(r=>setTimeout(r,160*attempt));
+    }finally{ clearTimeout(timer); }
+  }
+  try{console.warn('[GM_CATEGORY_MENU_TRANSLATE_FAIL]',{name_ko:text,lang,error:String(lastErr&&lastErr.message||lastErr)});}catch(_e){}
+  return '';
+}
+async function healDisplayNames(pool,rows,rawLang,col){
+  if(!rows||!rows.length) return rows||[];
+  const supported=!!LANG_COLUMN[rawLang];
+  if(rawLang==='ko'||rawLang==='kr') return rows;
+  const pending=[];
+  for(const row of rows){
+    if(supported && C(row.display_name)) continue;
+    pending.push(row);
+  }
+  const batch=6;
+  for(let i=0;i<pending.length;i+=batch){
+    const part=pending.slice(i,i+batch);
+    await Promise.all(part.map(async row=>{
+      const tr=await translateKo(row.name_ko,rawLang);
+      if(!tr) return;
+      row.display_name=tr;
+      if(supported && col!=='name_ko'){
+        try{
+          await pool.query(`UPDATE gm_category SET ${col}=$1, updated_at=now() WHERE gm_code=$2 AND (NULLIF(BTRIM(${col}),'') IS NULL)`,[tr,C(row.gm_code).toUpperCase()]);
+          try{console.log('[GM_CATEGORY_MENU_LANG_HEALED]',{gm_code:C(row.gm_code).toUpperCase(),name_ko:C(row.name_ko),lang:rawLang});}catch(_l){}
+        }catch(e){
+          try{console.warn('[GM_CATEGORY_MENU_LANG_HEAL_DB_FAIL]',{gm_code:C(row.gm_code).toUpperCase(),lang:rawLang,error:String(e&&e.message||e)});}catch(_l){}
+        }
+      }
+    }));
+  }
+  return rows;
+}
+
 function depthFromCode(code){
   const a=C(code).toUpperCase().split('-');
   if(a.length!==5&&a.length!==6)return -1;
@@ -66,6 +136,7 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       const q=await pool.query(baseSelect+` AND depth=0 ORDER BY COALESCE(sort_order,2147483647),category_id`);
       rows=q.rows||[];
     }
+    rows=await healDisplayNames(pool,rows,rawLang,col);
     const items=rows.map(r=>({
       gm_code:C(r.gm_code).toUpperCase(),
       depth:Number(r.depth||0),
@@ -79,7 +150,7 @@ router.get('/api/gm/category/menu',async(req,res)=>{
     }));
     return res.json({ok:true,parent_code:parent,depth,lang:rawLang,translate_required:translateRequired,count:items.length,items});
   }catch(e){
-    console.error('[GM_CATEGORY_MENU_V019]',String(e&&e.stack||e));
+    console.error('[GM_CATEGORY_MENU_V028]',String(e&&e.stack||e));
     return res.status(500).json({ok:false,error:C(e&&e.message||e)});
   }
 });

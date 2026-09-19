@@ -79,7 +79,7 @@ function categoryTranslationComplete(t){
   return CATEGORY_LANGS.filter(l => l !== 'ko').every(l => !!cleanText(t[l]));
 }
 
-// GM_CATEGORY_NEW_AUTO_TRANSLATE_V022
+// GM_CATEGORY_NEW_AUTO_TRANSLATE_V028_RETRY_TREE_FALLBACK
 // 신규 카테고리 생성 시 비어 있는 24개 외국어 표시명만 Google 번역으로 채운다.
 // 기존 번역값은 재번역/덮어쓰기하지 않는다.
 const CATEGORY_TRANSLATE_TARGET = { tw:'zh-TW' };
@@ -99,6 +99,19 @@ async function translateNewCategoryName(text, lang){
     return cleanText(out);
   }finally{ clearTimeout(timer); }
 }
+async function translateNewCategoryNameWithRetry(text, lang, maxTry){
+  maxTry=Math.max(1,Number(maxTry||3));
+  let lastErr=null;
+  for(let n=1;n<=maxTry;n++){
+    try{
+      const v=await translateNewCategoryName(text,lang);
+      if(cleanText(v)) return cleanText(v);
+      lastErr=new Error('translate_empty');
+    }catch(e){ lastErr=e; }
+    if(n<maxTry) await new Promise(r=>setTimeout(r,180*n));
+  }
+  throw lastErr||new Error('translate_failed');
+}
 async function completeNewCategoryTranslations(name, seed){
   const ko=cleanText(name);
   const out=Object.assign({}, translationFallback(ko), seed||{});
@@ -109,13 +122,18 @@ async function completeNewCategoryTranslations(name, seed){
   for(let i=0;i<need.length;i+=batch){
     const part=need.slice(i,i+batch);
     const vals=await Promise.all(part.map(async l=>{
-      try{return [l,await translateNewCategoryName(ko,l)];}
+      try{return [l,await translateNewCategoryNameWithRetry(ko,l,3)];}
       catch(e){
         try{console.warn('[GM_CATEGORY_NEW_TRANSLATE_FAIL]',{name_ko:ko,lang:l,error:String(e&&e.message||e)});}catch(_l){}
         return [l,''];
       }
     }));
     vals.forEach(([l,v])=>{ if(cleanText(v)) out[l]=cleanText(v); });
+  }
+  const missing=CATEGORY_LANGS.filter(l=>l!=='ko' && !cleanText(out[l]));
+  if(missing.length){
+    // V028: 카테고리 자체 생성은 막지 않는다. 트리 조회시 현재 DEVICE_LANG만 다시 번역해 DB에 자가복구한다.
+    try{console.warn('[GM_CATEGORY_NEW_TRANSLATE_PENDING]',{name_ko:ko,missing_langs:missing});}catch(_l){}
   }
   return out;
 }
