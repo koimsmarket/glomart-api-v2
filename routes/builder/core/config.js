@@ -29,15 +29,13 @@ const TABLES = {
     },
     blocked: ['product_uid','created_at']
   },
+
   product_options: {
-    // V034: gm_product_option Builder download restored.
-    // Download/inspection first; no schema change and no option unit-price fields added here.
     table: 'gm_product_option',
-    recordKey: ['mall_code','pi_ii_vi'],
     key: ['mall_code','pi_ii_vi'],
-    order: 'updated_at DESC NULLS LAST, last_seen_at DESC NULLS LAST, product_id ASC, option_sort_no ASC',
-    critical: ['mall_code','product_id','pi_ii_vi'],
-    numeric: ['option_sort_no','mall_sale_price','final_supply_price','normal_price','discount_price','delivery_fee','buyable_qty','min_order_qty','max_order_qty','sales_qty'],
+    order: 'updated_at DESC NULLS LAST, created_at DESC NULLS LAST',
+    critical: ['mall_code','product_id','pi_ii_vi','option_name','mall_sale_price'],
+    numeric: ['option_sort_no','mall_sale_price','mall_discount_price','final_supply_price','normal_price','discount_price','delivery_fee','buyable_qty','min_order_qty','max_order_qty','sales_qty','unit_price_value','unit_base_qty','total_unit_qty'],
     defaults: { soldout_yn:'N', sale_status:'active', active_yn:'Y' },
     enums: { soldout_yn:['Y','N'], active_yn:['Y','N'] },
     blocked: ['created_at']
@@ -203,9 +201,9 @@ const TABLES = {
     keyAny: [['gm_code']],
     order: 'depth ASC, sort_order ASC, gm_code ASC',
     critical: ['gm_code','name_ko'],
-    numeric: ['category_id','depth','sort_order','unit_rule_qty','unit_rule_confidence','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
+    numeric: ['category_id','depth','sort_order','unit_rule_qty','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount'],
     defaults: { leaf_yn:'N', display_yn:'Y', depth:'0', sort_order:'0' },
-    enums: { leaf_yn:['Y','N'], display_yn:['Y','N'], unit_rule_family:['WEIGHT','VOLUME','COUNT',''] },
+    enums: { leaf_yn:['Y','N'], display_yn:['Y','N'] },
     // Do not overwrite AI/runtime learning columns or counters from translation uploads.
     blocked: ['category_id','created_at','updated_at','cp_id','view_count','search_count','wish_count','cart_count','order_count','sales_qty','sales_amount','purchase_amount','gross_profit','return_count','exchange_count','ad_view_count','ad_order_count','ad_sales_qty','ad_sales_amount','last_view_at','last_order_at','last_return_at','last_exchange_at','last_ad_view_at','last_ad_order_at'],
     allowInsert: true
