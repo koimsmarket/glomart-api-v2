@@ -78,6 +78,47 @@ function categoryTranslationComplete(t){
   t = t || {};
   return CATEGORY_LANGS.filter(l => l !== 'ko').every(l => !!cleanText(t[l]));
 }
+
+// GM_CATEGORY_NEW_AUTO_TRANSLATE_V022
+// 신규 카테고리 생성 시 비어 있는 24개 외국어 표시명만 Google 번역으로 채운다.
+// 기존 번역값은 재번역/덮어쓰기하지 않는다.
+const CATEGORY_TRANSLATE_TARGET = { tw:'zh-TW' };
+async function translateNewCategoryName(text, lang){
+  text=cleanText(text); lang=cleanText(lang).toLowerCase();
+  if(!text || !lang || lang==='ko') return text;
+  const target=CATEGORY_TRANSLATE_TARGET[lang] || lang;
+  const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl='+encodeURIComponent(target)+'&dt=t&q='+encodeURIComponent(text);
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(),8000);
+  try{
+    const r=await fetch(url,{headers:{accept:'application/json'},signal:ctrl.signal});
+    if(!r.ok) throw new Error('translate_http_'+r.status);
+    const j=await r.json();
+    let out='';
+    if(j&&Array.isArray(j[0])) for(const row of j[0]) if(row&&row[0]) out+=row[0];
+    return cleanText(out);
+  }finally{ clearTimeout(timer); }
+}
+async function completeNewCategoryTranslations(name, seed){
+  const ko=cleanText(name);
+  const out=Object.assign({}, translationFallback(ko), seed||{});
+  out.ko=ko;
+  const need=CATEGORY_LANGS.filter(l=>l!=='ko' && !cleanText(out[l]));
+  if(!need.length) return out;
+  const batch=6;
+  for(let i=0;i<need.length;i+=batch){
+    const part=need.slice(i,i+batch);
+    const vals=await Promise.all(part.map(async l=>{
+      try{return [l,await translateNewCategoryName(ko,l)];}
+      catch(e){
+        try{console.warn('[GM_CATEGORY_NEW_TRANSLATE_FAIL]',{name_ko:ko,lang:l,error:String(e&&e.message||e)});}catch(_l){}
+        return [l,''];
+      }
+    }));
+    vals.forEach(([l,v])=>{ if(cleanText(v)) out[l]=cleanText(v); });
+  }
+  return out;
+}
 async function findNameTranslations(pool, name){
   const ko = cleanText(name);
   const out = translationFallback(ko);
@@ -673,10 +714,14 @@ async function createOrReuseCategoryNode(pool, row){
 
       const made=await makeUniqueChildGmCode(client, {gm_code:parentGm,cp_code:parentCp}, depth);
       const sortOrder=toInt(row.sort_order,0)>0 ? toInt(row.sort_order,0) : await nextCategorySortOrder(client, {gm_code:parentGm,cp_code:parentCp}, depth);
+      // V022: 실제 신규 INSERT 직전에만 누락된 외국어 표시명을 자동 번역한다.
+      // 재사용/기존 행은 여기까지 오지 않으므로 기존 번역값을 다시 번역하지 않는다.
+      const newTranslations=await completeNewCategoryTranslations(name, row.translations || translationFallback(name));
       const inserted=await insertGmCategoryRow(client, Object.assign({}, row, {
         gm_code: made.gm_code,
         sort_order: sortOrder,
-        category_status: cp ? 'CONFIRMED' : 'PROVISIONAL'
+        category_status: cp ? 'CONFIRMED' : 'PROVISIONAL',
+        translations: newTranslations
       }));
       await markCategoryParentNonLeaf(client, parentGm, parentCp);
       await client.query('COMMIT');
