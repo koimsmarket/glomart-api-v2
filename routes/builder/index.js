@@ -24,6 +24,7 @@ router.use(require('./device_lang'));   // language-pack administration
 router.use(require('./product_queue')); // product queue adaptive-concurrency monitor only
 router.use(require('./product_gm_code')); // gm_category.gm_code -> gm_product.glomart_code reconciliation
 router.use(require('./category_unit')); // category unit rule + product/option recalculation
+router.use(require('./ai_usage'));      // monthly AI/API token + cost monitor (read-only)
 
 // ---- Domain Builder modules --------------------------------------------------
 router.use(require('./image_vector'));  // vector production / sync only
