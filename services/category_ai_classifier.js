@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V011
+// GM_AI_CATEGORY_CONNECT_V012
 // Builder-stage AI category classification + persistent decision cache.
 // Stage 1 only: classify and save decision in gm_category_keyword_map.
 // Does NOT create categories or update gm_product yet.
@@ -64,6 +64,48 @@ async function saveDecision(db,item,result){
     classification_source='AI',classified_at=now(),updated_at=now()
   RETURNING id,status,selection_type,final_gm_code,parent_gm_code,context_hash`,vals);
   return q.rows&&q.rows[0]||null;
+}
+
+
+async function registerPending(db,items){
+  const list=Array.isArray(items)?items:[];
+  let inserted=0,refreshed=0,preserved=0,failed=0;
+  const errors=[];
+  for(const item of list){
+    const keyword=S(item&&item.category_keyword);
+    if(!keyword) continue;
+    const keywordNormalized=normalizeKeyword(keyword);
+    const contextHash=makeContextHash(item);
+    const samples=Array.isArray(item&&item.examples)?item.examples.slice(0,20):[];
+    const candidateJson={
+      gm_codes:Array.isArray(item&&item.candidate_gm_codes)?item.candidate_gm_codes:[],
+      names:Array.isArray(item&&item.candidate_names)?item.candidate_names:[]
+    };
+    try{
+      const q=await db.query(`INSERT INTO gm_category_keyword_map (
+        mall_code,category_keyword,keyword_normalized,context_hash,sample_products,candidate_json,candidate_round,
+        selection_type,classification_source,status,is_current,created_at,updated_at
+      ) VALUES ('CPKR',$1,$2,$3,$4::jsonb,$5::jsonb,0,'PENDING','AI','AI_PENDING','Y',now(),now())
+      ON CONFLICT (mall_code,keyword_normalized,context_hash) WHERE is_current='Y'
+      DO UPDATE SET category_keyword=EXCLUDED.category_keyword,
+        sample_products=EXCLUDED.sample_products,candidate_json=EXCLUDED.candidate_json,updated_at=now()
+      WHERE gm_category_keyword_map.status IN ('PENDING','AI_PENDING')
+      RETURNING id,status,(xmax=0) AS inserted`,[
+        keyword,keywordNormalized,contextHash,JSON.stringify(samples),JSON.stringify(candidateJson)
+      ]);
+      if(q.rowCount){
+        if(q.rows[0]&&q.rows[0].inserted) inserted++;
+        else refreshed++;
+      }else{
+        // Existing decided/review row is intentionally preserved and must never be downgraded to AI_PENDING.
+        preserved++;
+      }
+    }catch(e){
+      failed++;
+      if(errors.length<10) errors.push({keyword,error:S(e&&e.message||e)});
+    }
+  }
+  return {requested:list.length,inserted,refreshed,preserved,failed,errors};
 }
 
 async function guardedCall(db,{prompt,dedupKey,maxOutputTokens=180}){
@@ -144,4 +186,4 @@ async function classifySelected(db,items){
   }
   return {results,selected_count:items.length,processed_count:results.length,success_count:results.filter(x=>x.ok).length,total_tokens:results.reduce((s,x)=>s+Number(x.usage?.total_tokens||0),0),estimated_cost:Number(results.reduce((s,x)=>s+Number(x.estimated_cost||0),0).toFixed(8))};
 }
-module.exports={classifySelected};
+module.exports={classifySelected,registerPending};

@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V011 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
+// GM_AI_CATEGORY_CONNECT_V012 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
 // No CSV upload/master table. Analyze gm_category + gm_product for representative units. Options are used only by recalc.
 const express=require('express');
 const router=express.Router();
@@ -130,9 +130,13 @@ router.get('/api/gm/builder/category-unit/ai-results.csv',async(req,res)=>{try{
 
 router.post('/api/gm/builder/category-unit/analyze',express.json({limit:'1mb'}),async(req,res)=>{try{
   const out=await analyzeCategoryUnitRules(db(req),{sampleLimit:Number(req.body&&req.body.sample_limit||200)});
+  // V012: 전체 자동분석에서 발견된 카테고리 미매칭을 즉시 AI 의뢰대상으로 등록한다.
+  // MIXED_TIE 등 단위가격 예외는 카테고리 AI 의뢰대상이 아니므로 저장하지 않는다.
+  const aiPendingItems=(Array.isArray(out&&out.reviewItems)?out.reviewItems:[]).filter(x=>String(x&&x.status||'').trim().toUpperCase()==='NO_CATEGORY');
+  const aiPendingSync=await CategoryAiClassifier.registerPending(db(req),aiPendingItems);
   await attachAiStatus(db(req),out);
   delete out.allItems;
-  res.json({ok:true,mode:'ANALYZE',...out});
+  res.json({ok:true,mode:'ANALYZE',ai_pending_sync:aiPendingSync,...out});
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 
 router.post('/api/gm/builder/category-unit/apply-auto',express.json({limit:'1mb'}),async(req,res)=>{try{
