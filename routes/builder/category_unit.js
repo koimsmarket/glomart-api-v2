@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V008 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
+// GM_AI_CATEGORY_CONNECT_V011 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
 // No CSV upload/master table. Analyze gm_category + gm_product for representative units. Options are used only by recalc.
 const express=require('express');
 const router=express.Router();
@@ -9,6 +9,34 @@ const OpenAIClient=require('../../services/openai_client');
 const AiGuard=require('../../services/ai_guard');
 const CategoryAiClassifier=require('../../services/category_ai_classifier');
 const db=req=>req.app.locals.db||req.app.locals.pool;
+
+const S=v=>String(v==null?'':v).trim();
+const normalizeKeyword=v=>S(v).normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim();
+async function attachAiStatus(pool,out){
+  const items=Array.isArray(out&&out.reviewItems)?out.reviewItems:[];
+  if(!items.length)return out;
+  const keys=[...new Set(items.map(x=>normalizeKeyword(x.category_keyword)).filter(Boolean))];
+  if(!keys.length)return out;
+  try{
+    const r=await pool.query(`SELECT DISTINCT ON (keyword_normalized)
+      id,category_keyword,keyword_normalized,context_hash,ai_target_gm_code,final_gm_code,parent_gm_code,
+      selection_type,ai_confidence,ai_reason,ai_model,total_tokens,status,classified_at,updated_at
+      FROM gm_category_keyword_map
+      WHERE is_current='Y' AND keyword_normalized = ANY($1::text[])
+      ORDER BY keyword_normalized,updated_at DESC,id DESC`,[keys]);
+    const map=new Map((r.rows||[]).map(x=>[S(x.keyword_normalized),x]));
+    for(const item of items){item.ai_map=map.get(normalizeKeyword(item.category_keyword))||null;}
+  }catch(e){
+    console.warn('[GM_AI_CATEGORY_CONNECT_V011 AI_STATUS_ATTACH_FAIL]',String(e&&e.message||e));
+  }
+  return out;
+}
+function csvCell(v){
+  if(v==null)return '';
+  const s=typeof v==='object'?JSON.stringify(v):String(v);
+  return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;
+}
+
 
 
 
@@ -71,7 +99,6 @@ router.post('/api/gm/builder/category-unit/ai-test',express.json({limit:'16kb'})
 router.post('/api/gm/builder/category-unit/ai-classify-selected',express.json({limit:'64kb'}),async(req,res)=>{try{
   const keywords=[...new Set((Array.isArray(req.body&&req.body.keywords)?req.body.keywords:[]).map(x=>String(x||'').trim()).filter(Boolean))];
   if(!keywords.length)return res.status(400).json({ok:false,error:'선택된 키워드가 없습니다.'});
-  if(keywords.length>10)return res.status(400).json({ok:false,error:'테스트 분류는 한 번에 최대 10건입니다.'});
   const analyzed=await analyzeCategoryUnitRules(db(req),{sampleLimit:2000,includeItems:false});
   const map=new Map((analyzed.reviewItems||[]).map(x=>[String(x.category_keyword||'').trim(),x]));
   const missing=keywords.filter(k=>!map.has(k));
@@ -86,14 +113,31 @@ router.post('/api/gm/builder/category-unit/ai-classify-selected',express.json({l
   res.status(status).json({ok:false,error:String(e.message||e),code});
 }});
 
+
+router.get('/api/gm/builder/category-unit/ai-results.csv',async(req,res)=>{try{
+  const r=await db(req).query(`SELECT id,mall_code,category_keyword,keyword_normalized,status,selection_type,
+    ai_target_gm_code,final_gm_code,parent_gm_code,ai_confidence,ai_reason,ai_model,
+    candidate_round,prompt_tokens,completion_tokens,total_tokens,classified_at,updated_at,
+    sample_products,candidate_json,context_hash
+    FROM gm_category_keyword_map WHERE is_current='Y' ORDER BY updated_at DESC,id DESC`);
+  const cols=['id','mall_code','category_keyword','keyword_normalized','status','selection_type','ai_target_gm_code','final_gm_code','parent_gm_code','ai_confidence','ai_reason','ai_model','candidate_round','prompt_tokens','completion_tokens','total_tokens','classified_at','updated_at','sample_products','candidate_json','context_hash'];
+  const lines=[cols.join(',')];
+  for(const row of (r.rows||[]))lines.push(cols.map(c=>csvCell(row[c])).join(','));
+  res.setHeader('Content-Type','text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition','attachment; filename="gm_category_ai_results.csv"');
+  res.send('\ufeff'+lines.join('\r\n'));
+}catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
+
 router.post('/api/gm/builder/category-unit/analyze',express.json({limit:'1mb'}),async(req,res)=>{try{
   const out=await analyzeCategoryUnitRules(db(req),{sampleLimit:Number(req.body&&req.body.sample_limit||200)});
+  await attachAiStatus(db(req),out);
   delete out.allItems;
   res.json({ok:true,mode:'ANALYZE',...out});
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 
 router.post('/api/gm/builder/category-unit/apply-auto',express.json({limit:'1mb'}),async(req,res)=>{try{
   const out=await applyCategoryUnitRules(db(req),{sampleLimit:Number(req.body&&req.body.sample_limit||200)});
+  await attachAiStatus(db(req),out);
   res.json({ok:true,mode:'APPLY_AUTO',...out});
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 
