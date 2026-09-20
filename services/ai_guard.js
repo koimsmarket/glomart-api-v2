@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V004
+// GM_AI_CATEGORY_CONNECT_V005
 // Persistent AI billing/rate guard using the existing gm_runtime_config table.
 // No new table: settings + rolling hour/day state are kept as config rows.
 
@@ -34,11 +34,13 @@ function kstParts(date=new Date()){
 }
 async function ensureDefaults(db){
   for(const [key,[value,type,category,description]] of Object.entries(DEFAULTS)){
-    await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
-      VALUES($1,$2,$3,$4,'FIXED',TRUE,$5,now()) ON CONFLICT(config_key) DO NOTHING`,[key,value,type,category,description]);
+    // V005: 운영 DB의 구버전 gm_runtime_config에서 description이 VARCHAR(40)인 경우도 안전하게 동작하도록
+    // description은 여기서 저장하지 않는다. 설정 의미/라벨은 Builder UI가 담당한다.
+    await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,updated_at)
+      VALUES($1,$2,$3,$4,'FIXED',TRUE,now()) ON CONFLICT(config_key) DO NOTHING`,[key,value,type,category]);
   }
-  await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
-    VALUES($1,$2,'JSON','AI_GUARD_STATE','AUTO',TRUE,'AI guard rolling hour/day counters and duplicate cooldown state',now())
+  await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,updated_at)
+    VALUES($1,$2,'JSON','AI_STATE','AUTO',TRUE,now())
     ON CONFLICT(config_key) DO NOTHING`,[STATE_KEY,JSON.stringify({hour:'',hour_count:0,day:'',day_count:0,day_cost_usd:0,dedup:{}})]);
 }
 async function settings(db){
