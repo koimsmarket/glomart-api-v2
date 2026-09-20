@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V005
+// GM_AI_CATEGORY_CONNECT_V006
 // Persistent AI billing/rate guard using the existing gm_runtime_config table.
 // No new table: settings + rolling hour/day state are kept as config rows.
 
@@ -12,13 +12,13 @@ const DEFAULTS={
   ai_daily_budget_usd:['2','NUMBER','AI_GUARD','서버 자체 일 예산 USD'],
   ai_hourly_request_limit:['30','NUMBER','AI_GUARD','시간당 최대 AI 요청 수'],
   ai_daily_request_limit:['300','NUMBER','AI_GUARD','일 최대 AI 요청 수'],
-  ai_max_output_tokens:['256','NUMBER','AI 1회 요청 최대 출력 토큰'],
-  ai_retry_max:['2','NUMBER','AI 호출 실패 시 최대 재시도 횟수. 호출 모듈이 재시도를 사용할 때 적용'],
-  ai_duplicate_cooldown_sec:['300','NUMBER','동일 작업키 중복 호출 차단 시간(초)'],
-  ai_price_gpt_5_6_luna_input:['0.20','NUMBER','gpt-5.6-luna 입력 100만 토큰당 USD'],
-  ai_price_gpt_5_6_luna_output:['1.20','NUMBER','gpt-5.6-luna 출력 100만 토큰당 USD'],
-  ai_price_gpt_5_6_sol_input:['4.00','NUMBER','gpt-5.6-sol 입력 100만 토큰당 USD'],
-  ai_price_gpt_5_6_sol_output:['20.00','NUMBER','gpt-5.6-sol 출력 100만 토큰당 USD']
+  ai_max_output_tokens:['256','NUMBER','AI_GUARD','AI 1회 요청 최대 출력 토큰'],
+  ai_retry_max:['2','NUMBER','AI_GUARD','AI 호출 실패 시 최대 재시도 횟수. 호출 모듈이 재시도를 사용할 때 적용'],
+  ai_duplicate_cooldown_sec:['300','NUMBER','AI_GUARD','동일 작업키 중복 호출 차단 시간(초)'],
+  ai_price_gpt_5_6_luna_input:['0.20','NUMBER','AI_GUARD','gpt-5.6-luna 입력 100만 토큰당 USD'],
+  ai_price_gpt_5_6_luna_output:['1.20','NUMBER','AI_GUARD','gpt-5.6-luna 출력 100만 토큰당 USD'],
+  ai_price_gpt_5_6_sol_input:['4.00','NUMBER','AI_GUARD','gpt-5.6-sol 입력 100만 토큰당 USD'],
+  ai_price_gpt_5_6_sol_output:['20.00','NUMBER','AI_GUARD','gpt-5.6-sol 출력 100만 토큰당 USD']
 };
 const STATE_KEY='ai_guard_usage_state';
 
