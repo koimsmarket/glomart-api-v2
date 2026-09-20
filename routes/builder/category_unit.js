@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V012 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
+// GM_AI_CATEGORY_CONNECT_V013 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
 // No CSV upload/master table. Analyze gm_category + gm_product for representative units. Options are used only by recalc.
 const express=require('express');
 const router=express.Router();
@@ -8,6 +8,7 @@ const {analyzeCategoryUnitRules,applyCategoryUnitRules}=require('../../services/
 const OpenAIClient=require('../../services/openai_client');
 const AiGuard=require('../../services/ai_guard');
 const CategoryAiClassifier=require('../../services/category_ai_classifier');
+const {normalizeProductKeywords}=require('../../services/product_keyword_normalizer');
 const db=req=>req.app.locals.db||req.app.locals.pool;
 
 const S=v=>String(v==null?'':v).trim();
@@ -129,14 +130,17 @@ router.get('/api/gm/builder/category-unit/ai-results.csv',async(req,res)=>{try{
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 
 router.post('/api/gm/builder/category-unit/analyze',express.json({limit:'1mb'}),async(req,res)=>{try{
+  // V013: legacy multilingual product keywords are normalized to Korean first.
+  // Search logs are never updated here; only gm_product.keyword/category_keyword are cleaned.
+  const normalization=await normalizeProductKeywords(db(req),{apply:true});
   const out=await analyzeCategoryUnitRules(db(req),{sampleLimit:Number(req.body&&req.body.sample_limit||200)});
-  // V012: 전체 자동분석에서 발견된 카테고리 미매칭을 즉시 AI 의뢰대상으로 등록한다.
-  // MIXED_TIE 등 단위가격 예외는 카테고리 AI 의뢰대상이 아니므로 저장하지 않는다.
+  // Rebuild only unresolved AI request rows. Already decided/reviewed rows are preserved.
+  const aiPendingClear=await CategoryAiClassifier.clearPending(db(req));
   const aiPendingItems=(Array.isArray(out&&out.reviewItems)?out.reviewItems:[]).filter(x=>String(x&&x.status||'').trim().toUpperCase()==='NO_CATEGORY');
   const aiPendingSync=await CategoryAiClassifier.registerPending(db(req),aiPendingItems);
   await attachAiStatus(db(req),out);
   delete out.allItems;
-  res.json({ok:true,mode:'ANALYZE',ai_pending_sync:aiPendingSync,...out});
+  res.json({ok:true,mode:'ANALYZE',keyword_normalization:normalization,ai_pending_clear:aiPendingClear,ai_pending_sync:aiPendingSync,...out});
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 
 router.post('/api/gm/builder/category-unit/apply-auto',express.json({limit:'1mb'}),async(req,res)=>{try{

@@ -16,7 +16,7 @@
 <button class="builder-tab-btn" data-tab="vector" onclick="openBuilderTab('vector')">IMAGE VECTOR</button>
 <button class="builder-tab-btn" data-tab="lang" onclick="openBuilderTab('lang')">언어 / 국가</button>
 <span class="tab-spacer"></span>
-<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V071</span>
+<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V072</span>
 </div>
 <div class="head" data-builder-tab="status"><div><h1>GM Data Builder</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div></div></div>
 <div class="warning" data-builder-tab="status"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
@@ -41,7 +41,7 @@
 
 <div class="card" id="runtimeConfigCard" data-builder-tab="runtime">
   <h2>설정</h2>
-  <div class="small"><b>Builder V070</b> · 산출물 V011</div>
+  <div class="small"><b>Builder V072</b> · 상품 키워드 한국어 정제</div>
 
   <div class="card" style="margin:14px 0 0 0;padding:16px">
     <h3 style="margin-top:0">SPECIAL 작업 순서</h3>
@@ -95,10 +95,11 @@
 
 <div class="card" id="productGmCodeCard" data-builder-tab="gmcode">
   <h2>PRODUCT GLOMART_CODE MATCH</h2>
-  <div class="small">gm_category의 <b>gm_code</b>를 상품의 <b>glomart_code</b>에 채웁니다. 직접 코드 → mall_category/cp_code → 기존 정상상품 이력 → 카테고리 keyword 정확/토큰일치 순으로 판정합니다. 카테고리명에 <b>/</b> 등으로 묶인 항목도 토큰으로 분리하며, 복수 후보는 최대 8개까지 <b>|</b> 구분자로 저장합니다. <b>기존 glomart_code는 덮어쓰지 않습니다.</b></div>
+  <div class="small">gm_category의 <b>gm_code</b>를 상품의 <b>glomart_code</b>에 채웁니다. 먼저 과거 상품의 외국어 검색 키워드를 기존 번역/검색 canonical/카테고리 다국어명으로 <b>한국어 기준어로 정제</b>한 뒤 다시 매칭합니다. 검색 로그의 사용자가 입력한 원문은 수정하지 않습니다. 직접 코드 → mall_category/cp_code → 기존 정상상품 이력 → 카테고리 keyword 정확/토큰일치 순으로 판정하며 <b>기존 glomart_code는 덮어쓰지 않습니다.</b></div>
   <div id="gmCodeStatus" class="status" style="margin-top:10px">조회 전</div>
   <p><label>미리보기 건수</label> <input id="gmCodePreviewLimit" type="number" min="1" max="2000" value="300" style="max-width:120px">
   <button id="gmCodePreviewBtn" class="green" onclick="previewProductGmCode()">매칭 미리보기</button>
+  <button id="gmCodeNormalizeBtn" class="green" onclick="normalizeProductKeywords()">한국어 키워드 정제</button>
   <button id="gmCodeAnalyzeBtn" class="gray" onclick="analyzeProductGmCode()">전체 분석</button>
   <button id="gmCodeApplyBtn" onclick="applyProductGmCode()">glomart_code 적용</button>
   <button class="gray" onclick="downloadUnmatchedProductGmCode()">미매칭 CSV 다운로드</button></p>
@@ -145,7 +146,7 @@
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v065"></script>
 <script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v071"></script>
 <script src="/builder/GM_BUILDER_PRODUCT_QUEUE.js?v=gm_builder_v001"></script>
-<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v011"></script>
+<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v012"></script>
 <script src="/builder/GM_BUILDER_AI_USAGE.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_TABS.js?v=gm_builder_v002"></script>
 </body></html>

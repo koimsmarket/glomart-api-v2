@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V012
+// GM_AI_CATEGORY_CONNECT_V013
 // Builder-stage AI category classification + persistent decision cache.
 // Stage 1 only: classify and save decision in gm_category_keyword_map.
 // Does NOT create categories or update gm_product yet.
@@ -66,6 +66,12 @@ async function saveDecision(db,item,result){
   return q.rows&&q.rows[0]||null;
 }
 
+
+
+async function clearPending(db){
+  const r=await db.query(`DELETE FROM gm_category_keyword_map WHERE is_current='Y' AND status IN ('PENDING','AI_PENDING') RETURNING id`);
+  return {deleted:r.rowCount||0};
+}
 
 async function registerPending(db,items){
   const list=Array.isArray(items)?items:[];
@@ -186,4 +192,4 @@ async function classifySelected(db,items){
   }
   return {results,selected_count:items.length,processed_count:results.length,success_count:results.filter(x=>x.ok).length,total_tokens:results.reduce((s,x)=>s+Number(x.usage?.total_tokens||0),0),estimated_cost:Number(results.reduce((s,x)=>s+Number(x.estimated_cost||0),0).toFixed(8))};
 }
-module.exports={classifySelected,registerPending};
+module.exports={classifySelected,registerPending,clearPending};
