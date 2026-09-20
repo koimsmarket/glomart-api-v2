@@ -5,7 +5,36 @@ const express=require('express');
 const router=express.Router();
 const {recalcCategory}=require('../../services/unit_price');
 const {analyzeCategoryUnitRules,applyCategoryUnitRules}=require('../../services/category_unit_analyzer');
+const OpenAIClient=require('../../services/openai_client');
 const db=req=>req.app.locals.db||req.app.locals.pool;
+
+
+
+// GM_AI_CATEGORY_CONNECT_V001: status exposes no secret; test is one explicit tiny request only.
+router.get('/api/gm/builder/category-unit/ai-status',async(req,res)=>{try{
+  const c=OpenAIClient.config();
+  res.json({ok:true,configured:c.configured,model:c.model,review_model:c.reviewModel,timeout_ms:c.timeoutMs});
+}catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
+
+router.post('/api/gm/builder/category-unit/ai-test',express.json({limit:'16kb'}),async(req,res)=>{try{
+  const out=await OpenAIClient.connectionTest();
+  let usage_recorded=false,usage_error='';
+  try{
+    const {recordUsage}=require('../../services/ai_usage');
+    const u=out.usage||{};
+    await recordUsage(db(req),{
+      service_group:'CATEGORY',task_type:'CATEGORY_CLASSIFICATION',task_name_ko:'카테고리 분류 작업',
+      provider:'OPENAI',model_name:out.model,
+      prompt_tokens:u.input_tokens,completion_tokens:u.output_tokens,total_tokens:u.total_tokens,
+      estimated_cost:0,currency:'USD'
+    });
+    usage_recorded=true;
+  }catch(ue){usage_error=String(ue.message||ue);}
+  res.json({ok:!!out.ok,configured:true,model:out.model,response:out.text,usage:out.usage,usage_recorded,usage_error:usage_recorded?'':usage_error});
+}catch(e){
+  const status=String(e.message||e)==='OPENAI_API_KEY_NOT_CONFIGURED'?400:502;
+  res.status(status).json({ok:false,error:String(e.message||e)});
+}});
 
 router.post('/api/gm/builder/category-unit/analyze',express.json({limit:'1mb'}),async(req,res)=>{try{
   const out=await analyzeCategoryUnitRules(db(req),{sampleLimit:Number(req.body&&req.body.sample_limit||200)});
