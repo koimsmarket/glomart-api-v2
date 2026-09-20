@@ -1,5 +1,5 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V004 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
+// GM_AI_CATEGORY_CONNECT_V008 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
 // No CSV upload/master table. Analyze gm_category + gm_product for representative units. Options are used only by recalc.
 const express=require('express');
 const router=express.Router();
@@ -7,6 +7,7 @@ const {recalcCategory}=require('../../services/unit_price');
 const {analyzeCategoryUnitRules,applyCategoryUnitRules}=require('../../services/category_unit_analyzer');
 const OpenAIClient=require('../../services/openai_client');
 const AiGuard=require('../../services/ai_guard');
+const CategoryAiClassifier=require('../../services/category_ai_classifier');
 const db=req=>req.app.locals.db||req.app.locals.pool;
 
 
@@ -65,6 +66,25 @@ async function aiConnectionTestHandler(req,res){
 // POST remains for compatibility/manual testing.
 router.get('/api/gm/builder/category-unit/ai-test',aiConnectionTestHandler);
 router.post('/api/gm/builder/category-unit/ai-test',express.json({limit:'16kb'}),aiConnectionTestHandler);
+
+
+router.post('/api/gm/builder/category-unit/ai-classify-selected',express.json({limit:'64kb'}),async(req,res)=>{try{
+  const keywords=[...new Set((Array.isArray(req.body&&req.body.keywords)?req.body.keywords:[]).map(x=>String(x||'').trim()).filter(Boolean))];
+  if(!keywords.length)return res.status(400).json({ok:false,error:'선택된 키워드가 없습니다.'});
+  if(keywords.length>10)return res.status(400).json({ok:false,error:'테스트 분류는 한 번에 최대 10건입니다.'});
+  const analyzed=await analyzeCategoryUnitRules(db(req),{sampleLimit:2000,includeItems:false});
+  const map=new Map((analyzed.reviewItems||[]).map(x=>[String(x.category_keyword||'').trim(),x]));
+  const missing=keywords.filter(k=>!map.has(k));
+  if(missing.length)return res.status(400).json({ok:false,error:'현재 자동분석 예외목록에서 찾을 수 없는 키워드: '+missing.join(', ')});
+  const items=keywords.map(k=>map.get(k));
+  const out=await CategoryAiClassifier.classifySelected(db(req),items);
+  res.json({ok:true,...out});
+}catch(e){
+  const code=String(e&&e.code||'');
+  const status=code.startsWith('AI_')?429:500;
+  console.error('[GM_AI_CATEGORY_CONNECT_V008 CLASSIFY_FAIL]',JSON.stringify({error:String(e.message||e),code}));
+  res.status(status).json({ok:false,error:String(e.message||e),code});
+}});
 
 router.post('/api/gm/builder/category-unit/analyze',express.json({limit:'1mb'}),async(req,res)=>{try{
   const out=await analyzeCategoryUnitRules(db(req),{sampleLimit:Number(req.body&&req.body.sample_limit||200)});
