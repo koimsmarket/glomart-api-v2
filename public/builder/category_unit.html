@@ -1,64 +1,16 @@
-<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>카테고리 단위가격 자동분석</title>
-<link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v070">
-<style>
-  .step{display:grid;grid-template-columns:42px 1fr;gap:12px;align-items:start}.num{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1666d8;color:#fff;font-weight:700}.muted{color:#666}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.summary{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-top:12px}.box{background:#f7f8fa;border:1px solid #ddd;border-radius:8px;padding:10px}.danger{background:#fff0f0;border-color:#ffb7b7}.ok{background:#eef9f0;border-color:#b9e2bf}pre{max-height:520px;overflow:auto;white-space:pre-wrap}.wide{width:100%}.note{font-size:13px;line-height:1.55;color:#555}@media(max-width:700px){.summary{grid-template-columns:repeat(2,1fr)}}</style>
-</head><body><div class="wrap">
-<div class="head"><h1>카테고리 단위가격 자동분석</h1></div>
-<div class="warning">CSV나 별도 단위룰 DB를 관리하지 않습니다. 현재 <b>gm_category + gm_product + gm_product_option</b>을 직접 분석하여 카테고리 대표단위를 계산합니다. 옵션은 부모 상품의 분석근거에 합치되 옵션이 많은 상품이 과대반영되지 않도록 상품 1개당 1표로 계산합니다.</div>
-
-<div class="card step"><div class="num">1</div><div>
-<h2 style="margin-top:0">카테고리 + 상품 + 옵션 전체 분석</h2>
-<p class="muted">DB는 수정하지 않습니다. 카테고리 정확매칭 여부와 쿠팡 상품/옵션의 kg·g·L·ml·정·매·롤·켤레 표기를 분석해 대표단위를 자동 제안합니다.</p>
-<div class="row"><button onclick="analyzeUnits()">전체 자동분석</button></div>
-<div id="analyzeSummary" class="summary"></div>
-<pre id="analyzeLog"></pre>
-</div></div>
-
-<div class="card step"><div class="num">2</div><div>
-<h2 style="margin-top:0">분석 결과 자동 적용</h2>
-<p class="muted">분석을 다시 실행한 현재 결과를 기존 <b>gm_category.unit_rule_qty / unit_rule_unit</b> 두 칼럼에 바로 적용합니다. 별도 테이블이나 CSV는 만들지 않습니다.</p>
-<p class="note">중량·용량이 함께 강하게 나타나는 혼합 카테고리는 자동 적용 시 보수적으로 1개 기준을 사용합니다. 카테고리와 정확히 연결되지 않는 검색키워드는 적용할 gm_category 행이 없으므로 건너뜁니다.</p>
-<button class="green" onclick="applyUnits()">자동분석 결과 일괄 적용</button>
-<div id="applySummary" class="summary"></div>
-<pre id="applyLog"></pre>
-</div></div>
-
-<div class="card step"><div class="num">3</div><div>
-<h2 style="margin-top:0">상품 + 옵션 단위가격</h2>
-<p class="muted">카테고리 대표단위 적용 후 실행합니다. 500g×2, 120g×5, 330ml×24 같은 복합표현을 포함해 상품과 옵션을 같은 계산엔진으로 처리합니다.</p>
-<div class="row"><button onclick="recalc(false)">상품+옵션 전체 검증</button><button class="green" onclick="recalc(true)">상품+옵션 전체 재계산</button></div>
-<div id="recalcSummary" class="summary"></div>
-<pre id="recalcLog"></pre>
-</div></div>
-</div>
-<script>
-function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function box(label,value,bad){return `<div class="box ${bad?'danger':'ok'}"><b>${esc(label)}</b><div style="font-size:24px;font-weight:700;margin-top:4px">${esc(value)}</div></div>`;}
-function renderAnalyze(j,targetSummary,targetLog){
-  const s=j.summary||{};
-  targetSummary.innerHTML=box('분석 키워드',s.keywords||0)+box('카테고리 매칭',s.matched_keywords||0)+box('미매칭',s.no_category_keywords||0,(s.no_category_keywords||0)>0)+box('쿠팡 상품',s.coupang_products||0)+box('중량',s.auto_weight||0)+box('용량',s.auto_volume||0)+box('소비단위',s.auto_count_special||0)+box('기본 1개',s.default_count||0)+box('중량/용량 혼재',s.conflict_fallback||0,(s.conflict_fallback||0)>0)+box('쿠팡 없음',s.no_coupang||0);
-  const review=(j.items||[]).filter(x=>x.status==='CONFLICT_FALLBACK'||x.status==='NO_CATEGORY'||x.confidence==='LOW').slice(0,200);
-  targetLog.textContent=(review.length?'우선 확인 대상(최대 200건)\n':'분석 완료\n')+JSON.stringify(review.length?review:j.items||[],null,2);
-}
-async function analyzeUnits(){
-  analyzeLog.textContent='카테고리·상품·옵션 전체 분석 중...'; analyzeSummary.innerHTML='';
-  try{const r=await fetch('/api/gm/builder/category-unit/analyze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sample_limit:500})});const j=await r.json();if(!r.ok)throw new Error(j.error||'분석 실패');renderAnalyze(j,analyzeSummary,analyzeLog);}catch(e){analyzeLog.textContent=String(e);}
-}
-async function applyUnits(){
-  if(!confirm('현재 DB의 카테고리·상품·옵션을 다시 분석하여 gm_category 기준단위를 일괄 적용합니다. 계속할까요?'))return;
-  applyLog.textContent='자동분석 및 적용 중...'; applySummary.innerHTML='';
-  try{const r=await fetch('/api/gm/builder/category-unit/apply-auto',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sample_limit:500})});const j=await r.json();if(!r.ok)throw new Error(j.error||'적용 실패');renderAnalyze(j,applySummary,applyLog);applySummary.innerHTML+=box('변경',j.changed||0)+box('그대로',j.unchanged||0)+box('미매칭 건너뜀',j.skipped_no_category||0,(j.skipped_no_category||0)>0);applyLog.textContent='적용 완료\n'+applyLog.textContent;}catch(e){applyLog.textContent=String(e);}
-}
-function renderRecalc(j){
-  recalcSummary.innerHTML=box('카테고리룰',j.rules||0)+box('상품',j.products||0)+box('상품 계산가능',j.product_ok||0)+box('옵션',j.options||0)+box('옵션 계산가능',j.option_ok||0);
-  recalcLog.textContent=JSON.stringify(j,null,2);
-}
-async function recalc(apply){
-  if(apply&&!confirm('전체 상품 + 옵션의 단위가격을 다시 계산합니다. 계속할까요?'))return;
-  recalcLog.textContent=apply?'전체 재계산 중...':'전체 검증 중...';
-  try{const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply})});const j=await r.json();renderRecalc(j);if(!r.ok)alert(j.error||'처리 실패');}
-  catch(e){recalcLog.textContent=String(e);}
-}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>카테고리 단위가격 자동분석</title><link rel="stylesheet" href="/builder/GM_BUILDER_COMMON.css?v=gm_builder_v070"><style>
+.step{display:grid;grid-template-columns:42px 1fr;gap:12px;align-items:start}.num{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1666d8;color:#fff;font-weight:700}.muted{color:#666}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.summary{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-top:12px}.box{background:#f7f8fa;border:1px solid #ddd;border-radius:8px;padding:10px}.danger{background:#fff0f0;border-color:#ffb7b7}.ok{background:#eef9f0;border-color:#b9e2bf}.warn{background:#fff8e6;border-color:#f0d47a}pre{max-height:420px;overflow:auto;white-space:pre-wrap}.note{font-size:13px;line-height:1.55;color:#555}.tbl{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}.tbl th,.tbl td{border:1px solid #ddd;padding:7px;vertical-align:top}.tbl th{background:#f5f6f8;position:sticky;top:0}.tableWrap{max-height:520px;overflow:auto;border:1px solid #ddd;border-radius:8px;margin-top:10px}@media(max-width:700px){.summary{grid-template-columns:repeat(2,1fr)}}
+</style></head><body><div class="wrap"><div class="head"><h1>카테고리 단위가격 자동분석</h1></div>
+<div class="warning">대표단위 판정은 <b>gm_category + gm_product</b>만 사용합니다. <b>gm_product_option은 이번 판정에서 제외</b>하며, 카테고리 기준 확정 후 상품+옵션 단위가격 재계산 단계에서만 사용합니다. 중량/용량이 혼재하면 상품 건수가 많은 쪽을 자동 선택합니다.</div>
+<div class="card step"><div class="num">1</div><div><h2 style="margin-top:0">카테고리 + 상품 전체 분석</h2><p class="muted">DB는 수정하지 않습니다. 쿠팡 상품명에서 kg·g·L·ml·정·매·롤·켤레 표기를 분석합니다. 옵션은 판정 근거에 넣지 않습니다.</p><button onclick="analyzeUnits()">전체 자동분석</button><div id="analyzeSummary" class="summary"></div><pre id="analyzeLog"></pre></div></div>
+<div class="card step"><div class="num">2</div><div><h2 style="margin-top:0">예외 분석</h2><p class="muted">중량/용량 혼재는 많은 쪽으로 자동 정리합니다. 여기에는 <b>카테고리 미매칭</b>과 <b>중량·용량 완전 동률</b>만 남깁니다.</p><div id="exceptionSummary" class="summary"></div><div class="tableWrap"><table class="tbl"><thead><tr><th>키워드</th><th>상태</th><th>상품수</th><th>중량/용량</th><th>정규화 후보</th><th>대표 상품 예시</th></tr></thead><tbody id="exceptionBody"><tr><td colspan="6">1번 전체 자동분석을 먼저 실행하세요.</td></tr></tbody></table></div></div></div>
+<div class="card step"><div class="num">3</div><div><h2 style="margin-top:0">분석 결과 자동 적용</h2><p class="muted">현재 DB를 다시 분석하여 기존 <b>gm_category.unit_rule_qty / unit_rule_unit</b>에 바로 적용합니다. 별도 CSV/단위룰 DB는 만들지 않습니다.</p><p class="note">미매칭은 적용할 gm_category 행이 없어 건너뜁니다. 중량/용량 완전 동률도 자동 적용하지 않습니다. 나머지 혼재는 상품 건수가 많은 쪽으로 자동 적용됩니다.</p><button class="green" onclick="applyUnits()">자동분석 결과 일괄 적용</button><div id="applySummary" class="summary"></div><pre id="applyLog"></pre></div></div>
+<div class="card step"><div class="num">4</div><div><h2 style="margin-top:0">상품 + 옵션 단위가격</h2><p class="muted">대표단위 확정 후 실행합니다. 이 단계부터 옵션을 포함하며 500g×2, 120g×5, 330ml×24 같은 복합표현도 같은 계산엔진으로 처리합니다.</p><div class="row"><button onclick="recalc(false)">상품+옵션 전체 검증</button><button class="green" onclick="recalc(true)">상품+옵션 전체 재계산</button></div><div id="recalcSummary" class="summary"></div><pre id="recalcLog"></pre></div></div>
+</div><script>
+let lastAnalysis=null;function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function box(label,value,kind){return `<div class="box ${kind||'ok'}"><b>${esc(label)}</b><div style="font-size:24px;font-weight:700;margin-top:4px">${esc(value)}</div></div>`;}
+function renderExceptions(j){const a=j.reviewItems||[];exceptionSummary.innerHTML=box('미매칭',j.summary?.no_category_keywords||0,(j.summary?.no_category_keywords||0)?'danger':'ok')+box('정규화 후보 있음',j.summary?.normalized_candidate_keywords||0,(j.summary?.normalized_candidate_keywords||0)?'warn':'ok')+box('혼재→중량',j.summary?.mixed_majority_weight||0)+box('혼재→용량',j.summary?.mixed_majority_volume||0)+box('혼재 동률',j.summary?.mixed_tie||0,(j.summary?.mixed_tie||0)?'danger':'ok');exceptionBody.innerHTML=a.length?a.map(x=>`<tr><td>${esc(x.category_keyword)}</td><td>${esc(x.status)}<br>${esc(x.reason)}</td><td>전체 ${esc(x.total_products)}<br>쿠팡 ${esc(x.coupang_products)}</td><td>kg ${esc(x.kg_products)} / g ${esc(x.g_products)}<br>L ${esc(x.l_products)} / ml ${esc(x.ml_products)}</td><td>${x.candidate_gm_codes?.length?esc(x.candidate_gm_codes.join(', '))+'<br>'+esc((x.candidate_names||[]).join(', ')):'없음'}</td><td>${esc((x.examples||[]).join(' | '))}</td></tr>`).join(''):'<tr><td colspan="6">예외 없음</td></tr>';}
+function renderAnalyze(j,targetSummary,targetLog){const s=j.summary||{};targetSummary.innerHTML=box('분석 키워드',s.keywords||0)+box('카테고리 매칭',s.matched_keywords||0)+box('미매칭',s.no_category_keywords||0,(s.no_category_keywords||0)?'danger':'ok')+box('쿠팡 상품',s.coupang_products||0)+box('중량',s.auto_weight||0)+box('용량',s.auto_volume||0)+box('소비단위',s.auto_count_special||0)+box('기본 1개',s.default_count||0)+box('혼재→중량',s.mixed_majority_weight||0)+box('혼재→용량',s.mixed_majority_volume||0)+box('혼재 동률',s.mixed_tie||0,(s.mixed_tie||0)?'danger':'ok')+box('쿠팡 없음',s.no_coupang||0);targetLog.textContent='분석 완료\n'+JSON.stringify(s,null,2);renderExceptions(j);}
+async function analyzeUnits(){analyzeLog.textContent='카테고리·상품 전체 분석 중...';analyzeSummary.innerHTML='';try{const r=await fetch('/api/gm/builder/category-unit/analyze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sample_limit:500})});const j=await r.json();if(!r.ok)throw new Error(j.error||'분석 실패');lastAnalysis=j;renderAnalyze(j,analyzeSummary,analyzeLog);}catch(e){analyzeLog.textContent=String(e);}}
+async function applyUnits(){if(!confirm('현재 DB의 카테고리·상품을 다시 분석하여 gm_category 기준단위를 일괄 적용합니다. 옵션은 대표단위 판정에서 제외됩니다. 계속할까요?'))return;applyLog.textContent='자동분석 및 적용 중...';applySummary.innerHTML='';try{const r=await fetch('/api/gm/builder/category-unit/apply-auto',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sample_limit:500})});const j=await r.json();if(!r.ok)throw new Error(j.error||'적용 실패');renderAnalyze(j,applySummary,applyLog);applySummary.innerHTML+=box('변경',j.changed||0)+box('그대로',j.unchanged||0)+box('미매칭 건너뜀',j.skipped_no_category||0,(j.skipped_no_category||0)?'danger':'ok')+box('동률 건너뜀',j.skipped_mixed_tie||0,(j.skipped_mixed_tie||0)?'danger':'ok');applyLog.textContent='적용 완료\n'+applyLog.textContent;}catch(e){applyLog.textContent=String(e);}}
+function renderRecalc(j){recalcSummary.innerHTML=box('카테고리룰',j.rules||0)+box('상품',j.products||0)+box('상품 계산가능',j.product_ok||0)+box('옵션',j.options||0)+box('옵션 계산가능',j.option_ok||0);recalcLog.textContent=JSON.stringify(j,null,2);}async function recalc(apply){if(apply&&!confirm('전체 상품 + 옵션의 단위가격을 다시 계산합니다. 계속할까요?'))return;recalcLog.textContent=apply?'전체 재계산 중...':'전체 검증 중...';try{const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply})});const j=await r.json();renderRecalc(j);if(!r.ok)alert(j.error||'처리 실패');}catch(e){recalcLog.textContent=String(e);}}
 </script></body></html>

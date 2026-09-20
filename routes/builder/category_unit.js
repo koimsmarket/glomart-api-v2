@@ -1,6 +1,6 @@
 'use strict';
-// GM_CATEGORY_V038_BUILDER_CATEGORY_UNIT_AUTO
-// No CSV upload/master table. Analyze gm_category + gm_product + gm_product_option directly.
+// GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
+// No CSV upload/master table. Analyze gm_category + gm_product for representative units. Options are used only by recalc.
 const express=require('express');
 const router=express.Router();
 const {recalcCategory}=require('../../services/unit_price');
