@@ -284,7 +284,7 @@ const TABLES = {
   keyword_relation: {
     table: 'gm_keyword_relation',
     key: ['keyword_ko','related_keyword_ko'],
-    order: 'updated_at DESC NULLS LAST, keyword_ko ASC, related_keyword_ko ASC',
+    order: 'keyword_ko ASC, related_keyword_ko ASC',
     critical: ['keyword_ko','related_keyword_ko'],
     numeric: [],
     defaults: { category_main_keyword_ko:'' },
