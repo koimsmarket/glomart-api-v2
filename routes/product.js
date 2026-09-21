@@ -2058,6 +2058,26 @@ router.post('/api/gm/product/queue', async (req,res)=>{
   const mallCode = cleanText(p.mall_code || p.mallCode || p.source || (items[0] && (items[0].mall_code || items[0].mallCode)) || '').toUpperCase();
   const keyword = cleanText(p.keyword || p.q || p.search_keyword || p.searchKeyword || '');
   try{
+    // GM_KEYWORD_RELATION_QUEUE_V016
+    // Collector -> Runtime payload already carries relatedKeywords/searchKeywordMeta.
+    // Persist relation once at CPKR first-chunk receive time, before async product queue loses parent meta.
+    // Relation UPSERT is intentionally independent from product worker/items_json and does not touch search UI/runtime.
+    const relationChunkIndex = toInt(p.chunk_index || p.chunkIndex, 0);
+    const relationMeta = pickKeywordMeta(p);
+    if(mallCode === 'CPKR' && (relationChunkIndex === 0 || relationChunkIndex === 1) && relationMeta.relatedKeywords.length){
+      let relationSaved = 0, relationSkipped = 0;
+      for(const relatedKo of relationMeta.relatedKeywords){
+        try{
+          const saved = await saveKeywordRelationRow(pool, relationMeta.mainKeyword || keyword, relatedKo, { categoryMainKeywordKo:relationMeta.categoryMainKeywordKo });
+          if(saved) relationSaved++; else relationSkipped++;
+        }catch(_relationSaveError){
+          relationSkipped++;
+          try{ console.warn('[GM_KEYWORD_RELATION_QUEUE_SAVE_SKIP]', { keyword_ko:relationMeta.mainKeyword || keyword, related_keyword_ko:relatedKo, error:String(_relationSaveError && _relationSaveError.message || _relationSaveError) }); }catch(_log){}
+        }
+      }
+      try{ console.log('[GM_KEYWORD_RELATION_QUEUE_SAVE_V016]', { mall_code:mallCode, chunk_index:relationChunkIndex, keyword_ko:relationMeta.mainKeyword || keyword, related_count:relationMeta.relatedKeywords.length, saved:relationSaved, skipped:relationSkipped }); }catch(_log){}
+    }
+
     const categoryOnce = await resolveSearchCategoryOnce(pool, keyword, p);
     const queueCpSelectedCode = cleanText(categoryOnce.value);
     const queueItems = items.map(item=>Object.assign({}, item || {}, { cp_selected_code:queueCpSelectedCode, cpSelectedCode:queueCpSelectedCode }));
