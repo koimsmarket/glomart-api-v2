@@ -598,71 +598,16 @@ async function saveKeywordTranslatePayload(pool, payload){
   };
 }
 async function ensureKeywordRelationSchema(pool){
-  // GM_KEYWORD_RELATION_THREE_COL_V004
-  // relation은 한국어 관계만 저장한다. 다국어는 gm_keyword_translate에서만 관리한다.
-  try{
-    await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_relation (
-      category_main_keyword_ko TEXT NOT NULL DEFAULT '',
-      keyword_ko TEXT NOT NULL,
-      related_keyword_ko TEXT NOT NULL,
-      PRIMARY KEY (keyword_ko,related_keyword_ko)
-    )`);
-  }catch(e){}
-
-  // legacy 3컬럼의 gm_lang은 category_main_keyword_ko로 이름만 바꿔 row를 보존한다.
-  try{
-    await pool.query(`DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema=current_schema()
-           AND table_name='gm_keyword_relation'
-           AND column_name='gm_lang'
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-         WHERE table_schema=current_schema()
-           AND table_name='gm_keyword_relation'
-           AND column_name='category_main_keyword_ko'
-      ) THEN
-        ALTER TABLE gm_keyword_relation RENAME COLUMN gm_lang TO category_main_keyword_ko;
-      END IF;
-    END $$;`);
-  }catch(e){}
-
+  // GM_KEYWORD_RELATION_THREE_COL_V006
+  // Final runtime policy: relation table is non-destructive.
+  // Never DROP table/columns here. Only ensure the final 3-column shape exists.
+  await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_relation (
+    category_main_keyword_ko TEXT NOT NULL DEFAULT '',
+    keyword_ko TEXT NOT NULL,
+    related_keyword_ko TEXT NOT NULL,
+    PRIMARY KEY (keyword_ko,related_keyword_ko)
+  )`);
   try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS category_main_keyword_ko TEXT NOT NULL DEFAULT ''`); }catch(e){}
-
-  // V002에서 다시 붙었던 relation 전용 25개국 번역/상태 컬럼을 제거한다.
-  // 핵심 3컬럼 데이터는 삭제하지 않는다.
-  for(const lang of KEYWORD_LANGS.filter(l => l !== 'ko')){
-    try{ await pool.query(`ALTER TABLE gm_keyword_relation DROP COLUMN IF EXISTS related_keyword_${lang}`); }catch(e){}
-  }
-  for(const col of ['translate_complete','translate_updated_at','created_at','updated_at','gm_lang']){
-    try{
-      if(col === 'gm_lang'){
-        await pool.query(`DO $$
-        BEGIN
-          IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-             WHERE table_schema=current_schema()
-               AND table_name='gm_keyword_relation'
-               AND column_name='gm_lang'
-          )
-          AND EXISTS (
-            SELECT 1 FROM information_schema.columns
-             WHERE table_schema=current_schema()
-               AND table_name='gm_keyword_relation'
-               AND column_name='category_main_keyword_ko'
-          ) THEN
-            ALTER TABLE gm_keyword_relation DROP COLUMN gm_lang;
-          END IF;
-        END $$;`);
-      }else{
-        await pool.query(`ALTER TABLE gm_keyword_relation DROP COLUMN IF EXISTS ${col}`);
-      }
-    }catch(e){}
-  }
-
   try{ await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_keyword_relation_pair ON gm_keyword_relation(keyword_ko,related_keyword_ko)`); }catch(e){
     try{ console.warn('[GM_KEYWORD_RELATION_PAIR_INDEX_SKIP]', {message:e&&e.message, code:e&&e.code, reason:'existing rows preserved'}); }catch(_log){}
   }

@@ -22,10 +22,9 @@ function pickMeta(payload){
 }
 let relationSchemaReadyPromise = null;
 async function reconcileRelationTable(pool){
-  // GM_KEYWORD_RELATION_THREE_COL_V004
-  // relation은 한국어 관계만 저장한다.
-  // 최종 컬럼: category_main_keyword_ko, keyword_ko, related_keyword_ko
-  // 기존 핵심 3컬럼 row는 보존하고, 과거 25개국 번역/상태 컬럼만 제거한다.
+  // GM_KEYWORD_RELATION_THREE_COL_V006
+  // Final runtime policy: never DROP relation columns/table here.
+  // The one-time V002 cleanup is finished; runtime now only ensures the 3-column target.
   const client=await pool.connect();
   try{
     await client.query('BEGIN');
@@ -35,40 +34,7 @@ async function reconcileRelationTable(pool){
       related_keyword_ko TEXT NOT NULL,
       PRIMARY KEY (keyword_ko,related_keyword_ko)
     )`);
-
-    const columns=await client.query(`
-      SELECT column_name
-        FROM information_schema.columns
-       WHERE table_schema=current_schema()
-         AND table_name='gm_keyword_relation'
-    `);
-    const names=new Set((columns.rows||[]).map(r=>r.column_name));
-
-    if(names.has('gm_lang') && !names.has('category_main_keyword_ko')){
-      await client.query(`ALTER TABLE gm_keyword_relation RENAME COLUMN gm_lang TO category_main_keyword_ko`);
-      names.delete('gm_lang'); names.add('category_main_keyword_ko');
-    }
-    if(!names.has('category_main_keyword_ko')){
-      await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN category_main_keyword_ko TEXT NOT NULL DEFAULT ''`);
-      names.add('category_main_keyword_ko');
-    }
-
-    const dropCols=[
-      ...LANGS.filter(l=>l!=='ko').map(l=>'related_keyword_'+l),
-      'translate_complete','translate_updated_at','created_at','updated_at'
-    ];
-    for(const col of dropCols){
-      if(names.has(col)){
-        await client.query(`ALTER TABLE gm_keyword_relation DROP COLUMN IF EXISTS ${col}`);
-        names.delete(col);
-      }
-    }
-
-    if(names.has('gm_lang') && names.has('category_main_keyword_ko')){
-      await client.query(`ALTER TABLE gm_keyword_relation DROP COLUMN IF EXISTS gm_lang`);
-      names.delete('gm_lang');
-    }
-
+    try{await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS category_main_keyword_ko TEXT NOT NULL DEFAULT ''`);}catch(_add){}
     try{
       await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_keyword_relation_pair
         ON gm_keyword_relation(keyword_ko,related_keyword_ko)`);
@@ -79,12 +45,11 @@ async function reconcileRelationTable(pool){
         reason:'existing duplicate pair preserved'
       });
     }
-
     await client.query('COMMIT');
     console.log('[GM_KEYWORD_RELATION_THREE_COL_READY]', {
       columns:['category_main_keyword_ko','keyword_ko','related_keyword_ko'],
       translation_columns:0,
-      drop_table:false
+      destructive_ddl:false
     });
   }catch(err){
     try{await client.query('ROLLBACK');}catch(_rollback){}
