@@ -599,9 +599,21 @@ async function saveKeywordTranslatePayload(pool, payload){
   };
 }
 async function ensureKeywordRelationSchema(pool){
-  // 운영 DB 보호: 테이블 drop 없이 필요한 컬럼만 안전 추가한다.
+  // GM_KEYWORD_RELATION_PRESERVE_V002
+  // 운영 자산 보호: DROP 없이 현재 저장 코드가 사용하는 컬럼만 보강한다.
+  try{ await pool.query(`CREATE TABLE IF NOT EXISTS gm_keyword_relation (category_main_keyword_ko TEXT NOT NULL DEFAULT '', keyword_ko TEXT NOT NULL, related_keyword_ko TEXT NOT NULL, PRIMARY KEY (keyword_ko,related_keyword_ko))`); }catch(e){}
+  try{ await pool.query(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='gm_lang') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='gm_keyword_relation' AND column_name='category_main_keyword_ko') THEN ALTER TABLE gm_keyword_relation RENAME COLUMN gm_lang TO category_main_keyword_ko; END IF; END $$;`); }catch(e){}
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS category_main_keyword_ko TEXT NOT NULL DEFAULT ''`); }catch(e){}
+  for(const lang of KEYWORD_LANGS.filter(l => l !== 'ko')){
+    try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS related_keyword_${lang} TEXT`); }catch(e){}
+  }
   try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_complete CHAR(1) NOT NULL DEFAULT 'F'`); }catch(e){}
   try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS translate_updated_at DATE`); }catch(e){}
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS created_at DATE NOT NULL DEFAULT CURRENT_DATE`); }catch(e){}
+  try{ await pool.query(`ALTER TABLE gm_keyword_relation ADD COLUMN IF NOT EXISTS updated_at DATE NOT NULL DEFAULT CURRENT_DATE`); }catch(e){}
+  try{ await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_keyword_relation_pair ON gm_keyword_relation(keyword_ko,related_keyword_ko)`); }catch(e){
+    try{ console.warn('[GM_KEYWORD_RELATION_PAIR_INDEX_SKIP]', {message:e&&e.message, code:e&&e.code, reason:'existing rows preserved'}); }catch(_log){}
+  }
 }
 function keywordRelationComplete(trans){
   trans = trans || {};

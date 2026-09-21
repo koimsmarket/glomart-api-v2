@@ -22,52 +22,86 @@ function pickMeta(payload){
 }
 let relationSchemaReadyPromise = null;
 async function reconcileRelationTable(pool){
-  // 개발 단계 확정 방식: 기존 구조가 정확하지 않으면 보존/변환하지 않고
-  // 테이블을 삭제한 뒤 최종 3컬럼 구조로 새로 만든다.
+  // GM_KEYWORD_RELATION_PRESERVE_V002
+  // 관계 데이터는 운영 자산이다. 기존 테이블/row는 절대 DROP 하지 않는다.
+  // migration/26의 최종 키(category_main_keyword_ko, keyword_ko, related_keyword_ko)를 기준으로
+  // 필요한 컬럼만 ALTER ADD/RENAME 하며, 기존 3컬럼 legacy 구조도 데이터 보존 상태로 승격한다.
   const client=await pool.connect();
   try{
     await client.query('BEGIN');
+    await client.query(`CREATE TABLE IF NOT EXISTS gm_keyword_relation (
+      category_main_keyword_ko TEXT NOT NULL DEFAULT '',
+      keyword_ko TEXT NOT NULL,
+      related_keyword_ko TEXT NOT NULL,
+      PRIMARY KEY (keyword_ko,related_keyword_ko)
+    )`);
 
-    const exists=await client.query(`
-      SELECT to_regclass('public.gm_keyword_relation') AS table_name
+    const columns=await client.query(`
+      SELECT column_name
+        FROM information_schema.columns
+       WHERE table_schema='public'
+         AND table_name='gm_keyword_relation'
     `);
+    const names=new Set((columns.rows||[]).map(r=>r.column_name));
 
-    let exact=false;
-    if(exists.rows[0]&&exists.rows[0].table_name){
-      const columns=await client.query(`
-        SELECT column_name,data_type,is_nullable,ordinal_position
-          FROM information_schema.columns
-         WHERE table_schema='public'
-           AND table_name='gm_keyword_relation'
-         ORDER BY ordinal_position
-      `);
-      const names=(columns.rows||[]).map(r=>r.column_name);
-      exact=(
-        names.length===3 &&
-        names[0]==='gm_lang' &&
-        names[1]==='keyword_ko' &&
-        names[2]==='related_keyword_ko'
-      );
+    // 구버전의 gm_lang 컬럼은 실제로는 최종 구조의 첫 컬럼으로 쓰여 왔다.
+    // category_main_keyword_ko가 아직 없을 때만 rename하여 기존 값을 보존한다.
+    if(names.has('gm_lang') && !names.has('category_main_keyword_ko')){
+      await client.query(`ALTER TABLE gm_keyword_relation RENAME COLUMN gm_lang TO category_main_keyword_ko`);
+      names.delete('gm_lang'); names.add('category_main_keyword_ko');
+    }
+    if(!names.has('category_main_keyword_ko')){
+      await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN category_main_keyword_ko TEXT NOT NULL DEFAULT ''`);
+      names.add('category_main_keyword_ko');
     }
 
-    if(!exact){
-      await client.query('DROP TABLE IF EXISTS gm_keyword_relation CASCADE');
-      await client.query(`CREATE TABLE gm_keyword_relation (
-        gm_lang VARCHAR(10) NOT NULL,
-        keyword_ko TEXT NOT NULL,
-        related_keyword_ko TEXT NOT NULL,
-        CONSTRAINT gm_keyword_relation_pkey
-          PRIMARY KEY (gm_lang,keyword_ko,related_keyword_ko)
-      )`);
-      console.log('[GM_KEYWORD_RELATION_RECREATE_OK]', {
-        columns:['gm_lang','keyword_ko','related_keyword_ko']
+    // routes/product.js가 실제로 저장/조회하는 관계 번역 컬럼을 보존형으로 보강한다.
+    for(const lang of LANGS.filter(l=>l!=='ko')){
+      const col='related_keyword_'+lang;
+      if(!names.has(col)){
+        await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN ${col} TEXT`);
+        names.add(col);
+      }
+    }
+    if(!names.has('translate_complete')){
+      await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN translate_complete CHAR(1) NOT NULL DEFAULT 'F'`);
+      names.add('translate_complete');
+    }
+    if(!names.has('translate_updated_at')){
+      await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN translate_updated_at DATE`);
+      names.add('translate_updated_at');
+    }
+    if(!names.has('created_at')){
+      await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN created_at DATE NOT NULL DEFAULT CURRENT_DATE`);
+      names.add('created_at');
+    }
+    if(!names.has('updated_at')){
+      await client.query(`ALTER TABLE gm_keyword_relation ADD COLUMN updated_at DATE NOT NULL DEFAULT CURRENT_DATE`);
+      names.add('updated_at');
+    }
+
+    // 최종 UPSERT 키는 (keyword_ko, related_keyword_ko)다.
+    // 현재 데이터에 중복이 없다면 unique index를 추가한다. 중복이 있으면 데이터를 삭제하지 않고 경고만 남긴다.
+    try{
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_gm_keyword_relation_pair
+        ON gm_keyword_relation(keyword_ko,related_keyword_ko)`);
+    }catch(indexErr){
+      console.warn('[GM_KEYWORD_RELATION_PAIR_INDEX_SKIP]', {
+        message:indexErr&&indexErr.message,
+        code:indexErr&&indexErr.code,
+        reason:'existing duplicate pair preserved; no rows deleted'
       });
     }
 
     await client.query('COMMIT');
+    console.log('[GM_KEYWORD_RELATION_SCHEMA_PRESERVE_OK]', {
+      drop_table:false,
+      key:['keyword_ko','related_keyword_ko'],
+      translation_columns:LANGS.length-1
+    });
   }catch(err){
     try{await client.query('ROLLBACK');}catch(_rollback){}
-    console.error('[GM_KEYWORD_RELATION_RECREATE_ERROR]', {
+    console.error('[GM_KEYWORD_RELATION_SCHEMA_PRESERVE_ERROR]', {
       message:err&&err.message,
       code:err&&err.code
     });
@@ -88,48 +122,55 @@ async function ensureRelationTable(pool){
 function normalizeRows(params){
   const p=params||{}; const meta=pickMeta(p); const rows=[]; const seen=new Set();
   const inputRows=Array.isArray(p.rows)?p.rows:(Array.isArray(p.relatedKeywordRows)?p.relatedKeywordRows:[]);
+  const defaultCategory=cleanText(p.category_main_keyword_ko||p.categoryMainKeywordKo||p.category_keyword||p.categoryKeyword||'');
   function push(r){
     r=r||{};
-    const gm_lang=normalizeLang(r.gm_lang||r.gmLang||r.lang||meta.gm_lang);
+    const category_main_keyword_ko=cleanText(r.category_main_keyword_ko||r.categoryMainKeywordKo||r.category_keyword||r.categoryKeyword||defaultCategory);
     const keyword_ko=cleanText(r.keyword_ko||r.keywordKo||r.keyword||r.mainKeyword||meta.keyword_ko);
     const related_keyword_ko=cleanText(r.related_keyword_ko||r.relatedKeywordKo||r.related_keyword||r.relatedKeyword||r.value||r.text||'');
     if(!keyword_ko||!related_keyword_ko) return;
-    const sig=gm_lang+'|'+norm(keyword_ko)+'|'+norm(related_keyword_ko);
-    if(seen.has(sig)) return; seen.add(sig); rows.push({gm_lang,keyword_ko,related_keyword_ko});
+    const sig=norm(keyword_ko)+'|'+norm(related_keyword_ko);
+    if(seen.has(sig)) return; seen.add(sig); rows.push({category_main_keyword_ko,keyword_ko,related_keyword_ko});
   }
   inputRows.forEach(push);
-  meta.related.forEach(v=>push({gm_lang:meta.gm_lang,keyword_ko:meta.keyword_ko,related_keyword_ko:v}));
+  meta.related.forEach(v=>push({keyword_ko:meta.keyword_ko,related_keyword_ko:v}));
   return rows.slice(0,100);
 }
 async function saveRelations(pool, params){
   await ensureRelationTable(pool);
   const rows=normalizeRows(params); let saved=0,updated=0;
   for(const row of rows){
-    const r=await pool.query(`INSERT INTO gm_keyword_relation (gm_lang,keyword_ko,related_keyword_ko)
-      VALUES ($1,$2,$3)
-      ON CONFLICT (gm_lang,keyword_ko,related_keyword_ko) DO NOTHING
-      RETURNING 1`,[row.gm_lang,row.keyword_ko,row.related_keyword_ko]);
-    if(r.rowCount) saved++; else updated++;
+    const r=await pool.query(`INSERT INTO gm_keyword_relation (category_main_keyword_ko,keyword_ko,related_keyword_ko,updated_at)
+      VALUES ($1,$2,$3,CURRENT_DATE)
+      ON CONFLICT (keyword_ko,related_keyword_ko) DO UPDATE SET
+        category_main_keyword_ko=CASE WHEN EXCLUDED.category_main_keyword_ko='' THEN gm_keyword_relation.category_main_keyword_ko ELSE EXCLUDED.category_main_keyword_ko END,
+        updated_at=CURRENT_DATE
+      RETURNING (xmax = 0) AS inserted`,[row.category_main_keyword_ko,row.keyword_ko,row.related_keyword_ko]);
+    if(r.rows[0]&&r.rows[0].inserted) saved++; else updated++;
   }
-  return {ok:true,received:rows.length,saved,updated,mode:'gm_lang_keyword_ko_related_keyword_ko'};
+  return {ok:true,received:rows.length,saved,updated,mode:'category_main_keyword_ko_keyword_ko_related_keyword_ko'};
 }
 async function relationStatus(pool, params){
   await ensureRelationTable(pool);
   const meta=pickMeta(params||{}); const related=meta.related;
-  if(!meta.keyword_ko||!related.length) return {ok:true,gm_lang:meta.gm_lang,keyword_ko:meta.keyword_ko,related_count:related.length,pending:[],complete:[],missing:[]};
+  if(!meta.keyword_ko||!related.length) return {ok:true,keyword_ko:meta.keyword_ko,related_count:related.length,pending:[],complete:[],missing:[]};
   const r=await pool.query(`SELECT v.related_keyword_ko,
     CASE WHEN gr.related_keyword_ko IS NULL THEN 'F' ELSE 'T' END AS saved
-    FROM unnest($3::text[]) AS v(related_keyword_ko)
-    LEFT JOIN gm_keyword_relation gr ON gr.gm_lang=$1 AND gr.keyword_ko=$2 AND gr.related_keyword_ko=v.related_keyword_ko`,[meta.gm_lang,meta.keyword_ko,related]);
+    FROM unnest($2::text[]) AS v(related_keyword_ko)
+    LEFT JOIN gm_keyword_relation gr ON gr.keyword_ko=$1 AND gr.related_keyword_ko=v.related_keyword_ko`,[meta.keyword_ko,related]);
   const pending=[],complete=[],missing=[];
   for(const row of r.rows||[]){ const k=cleanText(row.related_keyword_ko); if(row.saved==='T') complete.push(k); else {pending.push(k);missing.push({related_keyword_ko:k,saved:'F'});} }
-  return {ok:true,gm_lang:meta.gm_lang,keyword_ko:meta.keyword_ko,related_count:related.length,pending,complete,pending_count:pending.length,complete_count:complete.length,missing};
+  return {ok:true,keyword_ko:meta.keyword_ko,related_count:related.length,pending,complete,pending_count:pending.length,complete_count:complete.length,missing};
 }
 async function captureProductKeywordMeta(pool, productUid, payload){
-  const meta=pickMeta(payload||{});
+  const p=payload||{}; const meta=pickMeta(p);
   if(productUid&&meta.keyword_ko){ try{await pool.query('UPDATE gm_product SET keyword=$1,updated_at=now() WHERE product_uid=$2',[meta.keyword_ko,productUid]);}catch(_e){} }
   if(!meta.keyword_ko||!meta.related.length) return {saved:0,updated:0,received:0};
-  return saveRelations(pool,{gm_lang:meta.gm_lang,keyword_ko:meta.keyword_ko,relatedKeywords:meta.related});
+  return saveRelations(pool,{
+    category_main_keyword_ko:cleanText(p.category_main_keyword_ko||p.categoryMainKeywordKo||p.category_keyword||p.categoryKeyword||''),
+    keyword_ko:meta.keyword_ko,
+    relatedKeywords:meta.related
+  });
 }
 
 async function ensureTranslateTable(pool){
