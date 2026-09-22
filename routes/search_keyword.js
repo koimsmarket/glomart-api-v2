@@ -18,7 +18,7 @@ const searchController = require('../services/search_controller');
  */
 'use strict';
 
-const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V020_FOREIGN_FALLBACK_KO';
+const VERSION = 'GM_SEARCH_KEYWORD_ROUTE_V021_PARALLEL_NORMALIZE';
 const LANGS = ['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -178,11 +178,19 @@ async function normalizeKeyword(pool, params){
   }
 
   const candidates = [];
-  const learned = await matchCategoryKeyword(pool, input, lang); if(learned) candidates.push(learned);
+  // V021: live keyword normalization DB lookups are independent.
+  // Start all three at once so latency is bounded by the slowest lookup instead of their sum.
+  // gm_search_log is intentionally not part of the live normalization path.
+  const [learned, c1, c3] = await Promise.all([
+    matchCategoryKeyword(pool, input, lang),
+    matchCategory(pool, input, lang),
+    matchKeywordTranslate(pool, input, lang)
+  ]);
+  if(learned) candidates.push(learned);
   const overrideKo = koOverride(input);
   if(overrideKo) candidates.push(buildCandidate('local_ko_override', overrideKo, input, {}, 80));
-  const c1 = await matchCategory(pool, input, lang); if(c1) candidates.push(c1);
-  const c3 = await matchKeywordTranslate(pool, input, lang); if(c3) candidates.push(c3);
+  if(c1) candidates.push(c1);
+  if(c3) candidates.push(c3);
 
   const priority = { gm_category_keyword:0.5, gm_category:1, gm_keyword_translate:2, local_ko_override:3, fallback:9 };
   candidates.sort((a,b)=> (priority[a.source] || 99) - (priority[b.source] || 99) || b.score - a.score);
