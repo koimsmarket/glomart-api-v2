@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_GLOMART_CODE_V013_FD_HS_6DEPTH_REMATCH
+// GM_PRODUCT_GLOMART_CODE_V014_FD_HS_CATEGORY_REPLACE
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -201,6 +201,194 @@ router.post('/api/gm/builder/product-gm-code/cleanup-delete',async(req,res)=>{
     console.log(`[GM_PRODUCT_GLOMART_CODE_V012] cleanup_products selected_keywords=${selected.length} candidates=${q.rows.length} deleted=${deleted} protected=${protectedRows.length} vector=${vectorDeleted} pending=${pendingDeleted} embedding=${embeddingDeleted} option=${optionDeleted}`);
     ok(res,{action:'product-gm-code.cleanup-delete',selected_keywords:selected.length,candidate_products:q.rows.length,deleted_products:deleted,protected_products:protectedRows.length,protected_samples:protectedRows.slice(0,20),dependent_deleted:{image_vector:vectorDeleted,pending:pendingDeleted,embedding:embeddingDeleted,option:optionDeleted}});
   }catch(e){if(client&&inTx){try{await client.query('ROLLBACK');}catch(_){}}console.error('[GM_PRODUCT_GLOMART_CODE_V012] cleanup_delete_failed',String(e&&e.stack||e));fail(res,500,'PRODUCT_GM_CODE_CLEANUP_DELETE_FAILED',{detail:String(e&&e.message||e)});}finally{if(release)client.release();}
+});
+
+
+const FD_HS_CATEGORY_PREFIX_RE=/^(FD|HS)$/;
+function parseBuilderCsv(text){
+  text=String(text==null?'':text).replace(/^\uFEFF/,'');
+  const rows=[];let row=[],cell='',q=false;
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+    if(q){
+      if(ch==='"'){
+        if(text[i+1]==='"'){cell+='"';i++;}else q=false;
+      }else cell+=ch;
+      continue;
+    }
+    if(ch==='"'){q=true;continue;}
+    if(ch===','){row.push(cell);cell='';continue;}
+    if(ch==='\n'||ch==='\r'){
+      if(ch==='\r'&&text[i+1]==='\n')i++;
+      row.push(cell);cell='';
+      if(row.some(v=>String(v).trim()!==''))rows.push(row);
+      row=[];continue;
+    }
+    cell+=ch;
+  }
+  if(q)throw new Error('CSV_UNCLOSED_QUOTE');
+  row.push(cell);if(row.some(v=>String(v).trim()!==''))rows.push(row);
+  if(rows.length<2)throw new Error('CSV_EMPTY_OR_HEADER_ONLY');
+  const headers=rows.shift().map(v=>raw(v));
+  const seen=new Set();
+  for(const h of headers){
+    if(!h)throw new Error('CSV_EMPTY_HEADER');
+    if(seen.has(h))throw new Error(`CSV_DUPLICATE_HEADER:${h}`);
+    seen.add(h);
+  }
+  return {headers,rows:rows.map((a,idx)=>{const o={};headers.forEach((h,i)=>o[h]=a[i]==null?'':a[i]);o.__row=idx+2;return o;})};
+}
+async function categoryColumnMeta(db){
+  const r=await db.query(`SELECT column_name,data_type,udt_name,column_default,is_identity
+      FROM information_schema.columns
+     WHERE table_schema='public' AND table_name='gm_category'
+     ORDER BY ordinal_position`);
+  const m=new Map();for(const x of r.rows)m.set(x.column_name,x);return m;
+}
+function categoryDbValue(v,meta){
+  const x=String(v==null?'':v);
+  const t=String(meta&&meta.data_type||'').toLowerCase();
+  if(x===''){
+    if(t.includes('character')||t==='text'||t==='json'||t==='jsonb')return '';
+    return null;
+  }
+  if(t==='boolean')return /^(1|y|yes|true|on)$/i.test(x);
+  return x;
+}
+function categoryReplacePrefix(req){
+  const p=String((req.query&&req.query.prefix)||'').trim().toUpperCase();
+  return FD_HS_CATEGORY_PREFIX_RE.test(p)?p:'';
+}
+async function validateFdHsCategoryMaster(db,prefix,csvText){
+  const {headers,rows}=parseBuilderCsv(csvText);
+  for(const h of ['category_id','gm_code','gm_parent_code','name_ko']){
+    if(!headers.includes(h))throw new Error(`CSV_REQUIRED_COLUMN_MISSING:${h}`);
+  }
+  const meta=await categoryColumnMeta(db);
+  if(!meta.size)throw new Error('GM_CATEGORY_SCHEMA_NOT_FOUND');
+  const unknown=headers.filter(h=>!meta.has(h));
+  if(unknown.length)throw new Error(`CSV_UNKNOWN_COLUMNS:${unknown.join('|')}`);
+
+  const codeRe=new RegExp(`^${prefix}-\\d{2}-\\d{3}-\\d{4}-\\d{4}-\\d{4}$`,'i');
+  const codes=new Set(),cpCodes=new Set(),ids=new Set();let newRows=0;
+  for(const r of rows){
+    const code=raw(r.gm_code),id=raw(r.category_id),cp=raw(r.cp_code);
+    if(!codeRe.test(code))throw new Error(`ROW_${r.__row}_INVALID_${prefix}_6SEG_CODE:${code}`);
+    if(codes.has(code))throw new Error(`ROW_${r.__row}_DUP_GM_CODE:${code}`);
+    codes.add(code);
+    if(cp){
+      if(cpCodes.has(cp))throw new Error(`ROW_${r.__row}_DUP_CP_CODE:${cp}`);
+      cpCodes.add(cp);
+    }
+    if(id){
+      if(!/^\d+$/.test(id))throw new Error(`ROW_${r.__row}_INVALID_CATEGORY_ID:${id}`);
+      if(ids.has(id))throw new Error(`ROW_${r.__row}_DUP_CATEGORY_ID:${id}`);
+      ids.add(id);
+    }else newRows++;
+  }
+  for(const r of rows){
+    const p=raw(r.gm_parent_code);
+    if(p&&!codes.has(p))throw new Error(`ROW_${r.__row}_PARENT_NOT_IN_FILE:${p}`);
+  }
+
+  const cur=await db.query(
+    `SELECT category_id::text AS category_id,gm_code FROM gm_category WHERE gm_code LIKE $1 ORDER BY category_id`,
+    [prefix+'-%']
+  );
+  const currentIds=new Set(cur.rows.map(x=>String(x.category_id)));
+  const missing=[...currentIds].filter(x=>!ids.has(x));
+  const foreign=[...ids].filter(x=>!currentIds.has(x));
+  if(missing.length)throw new Error(`CURRENT_${prefix}_ROWS_MISSING_FROM_FILE:${missing.slice(0,20).join('|')}${missing.length>20?'...':''}`);
+  if(foreign.length)throw new Error(`FILE_CATEGORY_ID_NOT_CURRENT_${prefix}:${foreign.slice(0,20).join('|')}${foreign.length>20?'...':''}`);
+  if(ids.size!==currentIds.size)throw new Error(`CURRENT_ID_COUNT_MISMATCH:file=${ids.size},db=${currentIds.size}`);
+  return {prefix,headers,rows,meta,existing:ids.size,new_rows:newRows,current_rows:cur.rows.length,total_rows:rows.length};
+}
+
+const categoryCsvText=express.text({type:['text/csv','text/plain','application/csv','application/vnd.ms-excel'],limit:'40mb'});
+
+router.post('/api/gm/builder/product-gm-code/fd-hs-category/preview',categoryCsvText,async(req,res)=>{
+  const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');
+  const prefix=categoryReplacePrefix(req);if(!prefix)return fail(res,400,'PREFIX_REQUIRED',{hint:'prefix=FD or HS'});
+  try{
+    const v=await validateFdHsCategoryMaster(db,prefix,req.body);
+    ok(res,{action:'fd-hs-category.preview',prefix,current_rows:v.current_rows,file_rows:v.total_rows,existing_rows:v.existing,new_rows:v.new_rows,all_current_ids_present:true,gm_code_unique:true,parent_check:true});
+  }catch(e){
+    fail(res,400,'FD_HS_CATEGORY_PREVIEW_FAILED',{detail:String(e&&e.message||e)});
+  }
+});
+
+router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvText,async(req,res)=>{
+  const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');
+  const prefix=categoryReplacePrefix(req);if(!prefix)return fail(res,400,'PREFIX_REQUIRED',{hint:'prefix=FD or HS'});
+  const confirm=String(req.query.confirm||'').toUpperCase();
+  if(confirm!==`${prefix}_CATEGORY_REPLACE`)return fail(res,400,'CONFIRM_REQUIRED',{hint:`confirm=${prefix}_CATEGORY_REPLACE`});
+  let client=null,release=false,inTx=false;
+  try{
+    client=typeof db.connect==='function'?await db.connect():db;
+    release=client!==db&&typeof client.release==='function';
+    await client.query('BEGIN');inTx=true;
+
+    const v=await validateFdHsCategoryMaster(client,prefix,req.body);
+    await client.query('CREATE TEMP TABLE gm_category_fdhs_stage ON COMMIT DROP AS SELECT * FROM gm_category WITH NO DATA');
+
+    const stageCols=v.headers.filter(h=>h!=='updated_at');
+    const batchSize=80;
+    for(let start=0;start<v.rows.length;start+=batchSize){
+      const batch=v.rows.slice(start,start+batchSize),params=[],groups=[];
+      for(const row of batch){
+        const ph=[];
+        for(const c of stageCols){
+          params.push(categoryDbValue(row[c],v.meta.get(c)));
+          ph.push(`$${params.length}`);
+        }
+        groups.push('('+ph.join(',')+')');
+      }
+      const quoted=stageCols.map(c=>`"${c.replace(/"/g,'""')}"`).join(',');
+      await client.query(`INSERT INTO gm_category_fdhs_stage (${quoted}) VALUES ${groups.join(',')}`,params);
+    }
+
+    const editableBase=[
+      'gm_code','cp_code','gm_parent_code','cp_parent_code','cp_id','parent_name_ko','depth','leaf_yn','display_yn','sort_order',
+      'name_ko','name_en','name_zh','name_vi','name_ja','name_tw','name_th','name_uz','name_ne','name_km','name_id','name_tl','name_mn','name_my',
+      'name_kk','name_si','name_ru','name_bn','name_ur','name_lo','name_hi','name_tr','name_fa','name_es','name_fr',
+      'keyword_seed','raw_json','keyword','unit_rule_qty','unit_rule_unit'
+    ];
+    const editable=editableBase.filter(c=>v.headers.includes(c)&&v.meta.has(c));
+
+    // Unique gm_code 충돌을 피하기 위해 해당 prefix의 기존 코드만 transaction 내부에서 임시 치환.
+    await client.query(`UPDATE gm_category SET gm_code='__GM6TMP__'||category_id::text WHERE gm_code LIKE $1`,[prefix+'-%']);
+
+    const setSql=editable.map(c=>`"${c}"=s."${c}"`).join(',');
+    const upd=await client.query(`UPDATE gm_category g
+       SET ${setSql}${v.meta.has('updated_at')?',updated_at=NOW()':''}
+      FROM gm_category_fdhs_stage s
+     WHERE s.category_id IS NOT NULL AND g.category_id=s.category_id`);
+
+    const insertCols=v.headers.filter(c=>c!=='category_id'&&c!=='created_at'&&c!=='updated_at'&&v.meta.has(c));
+    const qcols=insertCols.map(c=>`"${c}"`).join(',');
+    const ins=await client.query(`INSERT INTO gm_category (${qcols})
+      SELECT ${qcols} FROM gm_category_fdhs_stage WHERE category_id IS NULL`);
+
+    const verify=await client.query(`SELECT COUNT(*)::int AS n,
+       COUNT(DISTINCT gm_code)::int AS u,
+       COUNT(*) FILTER(WHERE gm_code !~ $2)::int AS bad
+      FROM gm_category WHERE gm_code LIKE $1`,
+      [prefix+'-%',`^${prefix}-[0-9]{2}-[0-9]{3}-[0-9]{4}-[0-9]{4}-[0-9]{4}$`]);
+    const vr=verify.rows[0]||{};
+    if(Number(vr.n)!==v.total_rows||Number(vr.u)!==v.total_rows||Number(vr.bad)!==0){
+      throw new Error(`POST_VERIFY_FAILED count=${vr.n} unique=${vr.u} bad=${vr.bad} expected=${v.total_rows}`);
+    }
+
+    await client.query('COMMIT');inTx=false;invalidateContext(db);
+    console.log(`[GM_PRODUCT_GLOMART_CODE_V014] category_replace prefix=${prefix} existing=${upd.rowCount||0} inserted=${ins.rowCount||0} total=${v.total_rows}`);
+    ok(res,{action:'fd-hs-category.apply',prefix,updated_existing:upd.rowCount||0,inserted_new:ins.rowCount||0,total_rows:v.total_rows,post_verify:true});
+  }catch(e){
+    if(client&&inTx){try{await client.query('ROLLBACK');}catch(_){}}
+    console.error('[GM_PRODUCT_GLOMART_CODE_V014] category_replace_failed',String(e&&e.stack||e));
+    fail(res,500,'FD_HS_CATEGORY_APPLY_FAILED',{detail:String(e&&e.message||e)});
+  }finally{
+    if(release)client.release();
+  }
 });
 
 function csvCell(v){if(v===null||v===undefined)return '';const x=String(v);return /[",\r\n]/.test(x)?'"'+x.replace(/"/g,'""')+'"':x;}

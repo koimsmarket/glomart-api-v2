@@ -1,4 +1,4 @@
-// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V013_FD_HS_6DEPTH_REMATCH
+// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V014_FD_HS_CATEGORY_REPLACE
 'use strict';
 async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);return j;}
 function gmCodeEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -36,6 +36,46 @@ async function deleteSelectedGmKeywords(){
   if(!confirm(`선택한 ${sel.length}개 이상 키워드에 연결된 미분류 상품을 정리합니다.\n\n삭제가능 표시 합계: ${deleteEstimate}건 (키워드간 중복 가능)\n보호 표시 합계: ${protectEstimate}건\n\n주문/판매/장바구니/찜 이력이 있는 상품은 서버에서 다시 검사하여 삭제하지 않습니다. 실제 상품 행을 삭제할까요?`))return;
   const btn=document.getElementById('gmKeywordCleanupDeleteBtn'),timer=startButtonTimer(btn,'상품 정리');
   try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/cleanup-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:sel,confirm:'DELETE UNCLASSIFIED PRODUCTS'})});document.getElementById('gmKeywordCleanupSummary').textContent=`정리 완료 · 후보상품 ${j.candidate_products||0} · 삭제 ${j.deleted_products||0} · 보호 ${j.protected_products||0}`;log(j);await loadGmKeywordCleanupCandidates();await loadProductGmCodeStatus();}catch(e){alert(String(e.message||e));log(String(e.message||e));}finally{stopButtonTimer(timer);}
+}
+
+
+async function gmFdHsCategoryFileText(){
+  const el=document.getElementById('gmFdHsCategoryFile'),f=el&&el.files&&el.files[0];
+  if(!f)throw new Error('FD/HS 최종 CSV 파일을 선택하세요.');
+  if(!/\.csv$/i.test(f.name))throw new Error('최종 업로드는 CSV 파일만 사용하세요.');
+  return {file:f,text:await f.text(),prefix:String(document.getElementById('gmFdHsCategoryPrefix').value||'').toUpperCase()};
+}
+function gmFdHsCategorySummary(j){
+  return `${j.prefix||''} · 현재 ${j.current_rows||0}행 · 파일 ${j.file_rows||0}행 · 기존 갱신 ${j.existing_rows||0}행 · 신규 ${j.new_rows||0}행 · 기존 ID 전체포함 ${j.all_current_ids_present?'Y':'N'} · 부모검증 ${j.parent_check?'Y':'N'}`;
+}
+async function previewFdHsCategoryReplace(){
+  const btn=document.getElementById('gmFdHsCategoryPreviewBtn'),sum=document.getElementById('gmFdHsCategorySummary'),timer=startButtonTimer(btn,'카테고리 검증');
+  try{
+    const x=await gmFdHsCategoryFileText();
+    const j=await gmCodeFetch(`/api/gm/builder/product-gm-code/fd-hs-category/preview?prefix=${encodeURIComponent(x.prefix)}&t=${Date.now()}`,{
+      method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:x.text
+    });
+    sum.textContent='검증 완료 · '+gmFdHsCategorySummary(j);log(j);
+  }catch(e){
+    sum.textContent=String(e.message||e);log(String(e.message||e));alert(String(e.message||e));
+  }finally{stopButtonTimer(timer);}
+}
+async function applyFdHsCategoryReplace(){
+  let x;try{x=await gmFdHsCategoryFileText();}catch(e){alert(String(e.message||e));return;}
+  const token=`${x.prefix} CATEGORY APPLY`;
+  const typed=prompt(`${x.prefix} 최종 6세그먼트 카테고리 CSV로 현재 ${x.prefix} 영역을 교체합니다.\n기존 category_id는 유지하고 신규 행만 추가합니다.\n현재 ${x.prefix} 기존 행이 파일에 하나라도 빠져 있으면 서버가 적용을 거부합니다.\n\n실행하려면 ${token} 를 입력하세요.`);
+  if(typed!==token)return;
+  const btn=document.getElementById('gmFdHsCategoryApplyBtn'),sum=document.getElementById('gmFdHsCategorySummary'),timer=startButtonTimer(btn,'카테고리 적용');
+  try{
+    const confirmCode=`${x.prefix}_CATEGORY_REPLACE`;
+    const j=await gmCodeFetch(`/api/gm/builder/product-gm-code/fd-hs-category/apply?prefix=${encodeURIComponent(x.prefix)}&confirm=${encodeURIComponent(confirmCode)}`,{
+      method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:x.text
+    });
+    sum.textContent=`적용 완료 · ${j.prefix} 기존 ${j.updated_existing||0}행 갱신 · 신규 ${j.inserted_new||0}행 · 최종 ${j.total_rows||0}행 · 검증 ${j.post_verify?'OK':'NG'}`;
+    log(j);
+  }catch(e){
+    sum.textContent=String(e.message||e);log(String(e.message||e));alert(String(e.message||e));
+  }finally{stopButtonTimer(timer);}
 }
 
 function gmFdHs6Summary(j){const s=j&&j.summary||{};return `대상 ${s.target||0} · 매칭 ${s.matched||0} · 변경 ${s.changed||0} · 동일 ${s.same||0} · 미매칭 ${s.unmatched||0} · 범위외 ${s.outside_scope||0}`;}
