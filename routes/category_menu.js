@@ -1,6 +1,6 @@
 'use strict';
 
-/* GM_CATEGORY_MENU_V028_LANG_SELF_HEAL
+/* GM_CATEGORY_MENU_V029_SEGMENT_FAMILY_INDEX_DIAG
  * Glomart hamburger category API with on-demand language self-heal.
  * - Never uses Cafe24 category_no/category parent relationships.
  * - Never uses gm_parent_code.
@@ -108,6 +108,7 @@ function stemForDepth(code,depth){
 }
 
 router.get('/api/gm/category/menu',async(req,res)=>{
+  const startedAt=Date.now();
   const pool=req.app.locals.pool;
   if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
   const parent=C(req.query&&req.query.parent_code).toUpperCase();
@@ -126,17 +127,25 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       if(pd<0||pd>=parts.length-1)return res.json({ok:true,parent_code:parent,depth:pd+1,lang:rawLang,translate_required:translateRequired,items:[]});
       depth=pd+1;
       const stem=stemForDepth(parent,pd);
+      const queryStartedAt=Date.now();
       const q=await pool.query(baseSelect+` AND depth=$1 AND gm_code LIKE $2 ORDER BY COALESCE(sort_order,2147483647),category_id`,[depth,stem+'-%']);
+      const queryMs=Date.now()-queryStartedAt;
       rows=q.rows||[];
-      // V019: the published Glomart shopping tree is the five-segment family.
-      // Six-segment rows are dynamic/detail-auto branches and must never be mixed into
-      // the user-facing hamburger tree. Root itself is six-segment, its published children are five-segment.
-      rows=rows.filter(r=>C(r.gm_code).split('-').length===5);
+      // V029: keep the published segment family of the selected parent.
+      // Five-segment parents keep five-segment children, while legitimate six-segment
+      // families such as BP (Beauty) keep six-segment children. This still prevents
+      // six-segment dynamic/detail-auto rows from leaking into five-segment families.
+      const parentSegmentCount=parts.length;
+      rows=rows.filter(r=>C(r.gm_code).split('-').length===parentSegmentCount);
+      req.__gmCategoryMenuQueryMs=queryMs;
+      req.__gmCategoryMenuSegmentCount=parentSegmentCount;
     }else{
       const q=await pool.query(baseSelect+` AND depth=0 ORDER BY COALESCE(sort_order,2147483647),category_id`);
       rows=q.rows||[];
     }
+    const healStartedAt=Date.now();
     rows=await healDisplayNames(pool,rows,rawLang,col);
+    const healMs=Date.now()-healStartedAt;
     const items=rows.map(r=>({
       gm_code:C(r.gm_code).toUpperCase(),
       depth:Number(r.depth||0),
@@ -148,9 +157,15 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       keyword:C(r.keyword)||C(r.name_ko),
       translate_required:translateRequired || (rawLang!=='ko' && rawLang!=='kr' && !C(r.display_name))
     }));
+    try{console.log('[GM_CATEGORY_MENU_V029]',{
+      parent_code:parent||'', depth, lang:rawLang, count:items.length,
+      segment_count:req.__gmCategoryMenuSegmentCount||0,
+      query_ms:Number(req.__gmCategoryMenuQueryMs||0), heal_ms:healMs,
+      total_ms:Date.now()-startedAt
+    });}catch(_log){}
     return res.json({ok:true,parent_code:parent,depth,lang:rawLang,translate_required:translateRequired,count:items.length,items});
   }catch(e){
-    console.error('[GM_CATEGORY_MENU_V028]',String(e&&e.stack||e));
+    console.error('[GM_CATEGORY_MENU_V029]',String(e&&e.stack||e));
     return res.status(500).json({ok:false,error:C(e&&e.message||e)});
   }
 });
