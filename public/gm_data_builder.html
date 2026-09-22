@@ -16,7 +16,7 @@
 <button class="builder-tab-btn" data-tab="vector" onclick="openBuilderTab('vector')">IMAGE VECTOR</button>
 <button class="builder-tab-btn" data-tab="lang" onclick="openBuilderTab('lang')">언어 / 국가</button>
 <span class="tab-spacer"></span>
-<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V072</span>
+<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V073</span>
 </div>
 <div class="head" data-builder-tab="status"><div><h1>GM Data Builder</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div></div></div>
 <div class="warning" data-builder-tab="status"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
@@ -41,7 +41,7 @@
 
 <div class="card" id="runtimeConfigCard" data-builder-tab="runtime">
   <h2>설정</h2>
-  <div class="small"><b>Builder V072</b> · 상품 키워드 한국어 정제</div>
+  <div class="small"><b>Builder V073</b> · 상품 키워드 한국어 정제 · FD/HS 6단계 전환 지원</div>
 
   <div class="card" style="margin:14px 0 0 0;padding:16px">
     <h3 style="margin-top:0">SPECIAL 작업 순서</h3>
@@ -50,6 +50,7 @@
       <label>적용연월</label><input id="specialApplyYm" type="month" style="max-width:180px">
       <button class="green" onclick="saveSpecialCategoryPlan()">SPECIAL 순서 저장</button>
       <button onclick="loadSpecialCategoryPlan()">새로고침</button>
+      <button style="background:#8b5cf6;color:#fff" onclick="prepareFdHs6DepthSpecial()">FD/HS 6단계 SPECIAL 준비</button>
     </div>
     <div id="specialCategoryPlanStatus" class="small" style="margin-top:8px">조회 전</div>
     <div id="specialCategoryPlanPreview" class="status" style="margin-top:8px">실행순서 조회 전</div>
@@ -104,6 +105,12 @@
   <button id="gmCodeApplyBtn" onclick="applyProductGmCode()">glomart_code 적용</button>
   <button class="gray" onclick="downloadUnmatchedProductGmCode()">미매칭 CSV 다운로드</button></p>
   <div id="gmCodePreviewSummary" class="small"></div>
+  <hr style="margin:18px 0;border:0;border-top:1px solid #ddd">
+  <h3>FD / HS 6단계 전환 재매칭</h3>
+  <div class="small">식품(FD)·생활용품(HS) 카테고리 구조를 6단계로 교체한 뒤 사용합니다. <b>현재 glomart_code에 FD 또는 HS가 들어 있는 상품만</b> 대상으로 하며, 후보 카테고리도 <b>현재 gm_category의 6세그먼트 FD/HS 코드만</b> 사용합니다. 일반 glomart_code 적용의 “기존값 보호” 정책은 그대로 유지됩니다.</div>
+  <p><button id="gmFdHs6PreviewBtn" class="green" onclick="previewFdHs6DepthRematch()">FD/HS 6단계 재매칭 미리보기</button> <button id="gmFdHs6ApplyBtn" style="background:#8b5cf6;color:#fff" onclick="applyFdHs6DepthRematch()">FD/HS 6단계 적용</button></p>
+  <div id="gmFdHs6Summary" class="small">카테고리 업로드 후 미리보기를 먼저 실행하세요.</div>
+  <div style="overflow:auto;max-height:420px;margin-top:10px"><table><thead><tr><th>product_uid</th><th>현재 glomart_code</th><th>새 6단계 code</th><th>판정</th><th>match_by</th><th>source</th><th>value</th><th>keyword</th><th>category_keyword</th></tr></thead><tbody id="gmFdHs6Rows"><tr><td colspan="9">미리보기 전</td></tr></tbody></table></div>
   <div style="overflow:auto;max-height:520px;margin-top:10px"><table><thead><tr><th>product_uid</th><th>cp_selected</th><th>cp_fix</th><th>mall_category</th><th>category_keyword</th><th>keyword</th><th>match_by</th><th>source</th><th>value</th><th>resolved gm_code</th><th>카테고리</th><th>근거건수</th></tr></thead><tbody id="gmCodePreviewRows"><tr><td colspan="12">미리보기 전</td></tr></tbody></table></div>
   <hr style="margin:18px 0;border:0;border-top:1px solid #ddd">
   <h3>미분류 이상 키워드 상품 정리</h3>
@@ -142,11 +149,11 @@
 </div><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="/builder/GM_BUILDER_COMMON.js?v=gm_builder_v065"></script>
 <!-- Builder UI modules are intentionally separate. Do not merge feature logic back into DASHBOARD.js. -->
 <script src="/builder/GM_BUILDER_DASHBOARD.js?v=gm_builder_v065"></script>
-<script src="/builder/GM_BUILDER_RUNTIME_CONFIG.js?v=gm_builder_v067"></script>
+<script src="/builder/GM_BUILDER_RUNTIME_CONFIG.js?v=gm_builder_v068"></script>
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v065"></script>
 <script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v071"></script>
 <script src="/builder/GM_BUILDER_PRODUCT_QUEUE.js?v=gm_builder_v001"></script>
-<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v012"></script>
+<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v013"></script>
 <script src="/builder/GM_BUILDER_AI_USAGE.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_TABS.js?v=gm_builder_v002"></script>
 </body></html>

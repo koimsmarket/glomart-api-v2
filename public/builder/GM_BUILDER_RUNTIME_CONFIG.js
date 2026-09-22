@@ -1,4 +1,4 @@
-// GM_BUILDER_RUNTIME_CONFIG_UI_V004_SPECIAL_ORDER_BOARD
+// GM_BUILDER_RUNTIME_CONFIG_UI_V005_FD_HS_6DEPTH_SPECIAL_PREP
 // Central runtime-config UI only. SPECIAL order is managed by a dedicated ordered board.
 
 function cfgEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -73,3 +73,23 @@ async function saveSpecialCategoryPlan(){
 }
 
 window.addEventListener('DOMContentLoaded',()=>{loadRuntimeConfig();loadSpecialCategoryPlan();});
+
+function currentKoreaYm(){
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit'}).formatToParts(new Date());
+  const y=(parts.find(x=>x.type==='year')||{}).value,m=(parts.find(x=>x.type==='month')||{}).value;
+  return y&&m?`${y}-${m}`:'';
+}
+async function prepareFdHs6DepthSpecial(){
+  const ym=document.getElementById('specialApplyYm');if(!ym)return;
+  if(!specialPlanAll.length)await loadSpecialCategoryPlan();
+  const fd=specialPlanByPrefix('FD'),hs=specialPlanByPrefix('HS');
+  if(!fd||!hs){alert('FD/HS 대분류 root를 gm_category에서 찾지 못했습니다. 6단계 카테고리 업로드 상태를 먼저 확인하세요.');return;}
+  const rest=specialPlanSelected.filter(x=>x.prefix!=='FD'&&x.prefix!=='HS');
+  specialPlanSelected=[fd,hs,...rest];
+  ym.value=currentKoreaYm();
+  renderSpecialPlan();
+  if(!confirm(`FD/HS 6단계 전환용 SPECIAL 준비를 저장합니다.\n적용연월: ${ym.value}\n실행 시작: 1. 식품(FD) → 2. 생활용품(HS)\n\n현재월을 기준연월로 잡아 구조변경 직후 updated_at 때문에 대상이 빠지는 것을 방지합니다. 저장할까요?`))return;
+  await saveSpecialCategoryPlan();
+  const st=document.getElementById('specialCategoryPlanStatus');if(st)st.textContent=`FD/HS 6단계 SPECIAL 준비 완료 · ${ym.value} · FD → HS 우선`;
+}
+

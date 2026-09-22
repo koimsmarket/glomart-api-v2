@@ -1,14 +1,47 @@
 'use strict';
-// GM_PRODUCT_GLOMART_CODE_V012_CLEANUP_OPTION_KEY_FIX
+// GM_PRODUCT_GLOMART_CODE_V013_FD_HS_6DEPTH_REMATCH
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
 const {
-  MULTI_MAX, raw, loadMaps, loadHistory, classify, invalidateContext
+  MULTI_MAX, raw, splitCodes, loadMaps, loadHistory, classify, invalidateContext
 }=require('../../services/glomart_code');
 const {normalizeProductKeywords}=require('../../services/product_keyword_normalizer');
 
 const APPLY_BATCH=250;
+const FD_HS_6_CODE_RE=/^(FD|HS)-\d{2}-\d{3}-\d{4}-\d{4}-\d{4}$/i;
+function fdHsCode(v){return FD_HS_6_CODE_RE.test(raw(v));}
+function fdHsMaps(maps){
+  const keepRow=r=>r&&fdHsCode(r.gm_code);
+  const gm=new Map();
+  for(const [k,r] of maps.gm||[])if(keepRow(r))gm.set(k,r);
+  function filterMulti(src){
+    const out=new Map();
+    for(const [k,rows] of src||[]){const a=(rows||[]).filter(keepRow);if(a.length)out.set(k,a);}
+    return out;
+  }
+  return {gm,cp:filterMulti(maps.cp),full:filterMulti(maps.full),token:filterMulti(maps.token),category_count:gm.size};
+}
+async function loadFdHsProducts(db,limit){
+  const params=[];let lim='';if(limit){params.push(limit);lim=' LIMIT $1';}
+  const r=await db.query(`SELECT product_uid,glomart_code,cp_selected_code,cp_fix_code,category_code,category_keyword,keyword,product_name,mall_code,mall_category
+      FROM gm_product
+     WHERE COALESCE(glomart_code,'')<>''
+       AND COALESCE(glomart_code,'') ~ '(^|\\|)(FD|HS)-'
+     ORDER BY product_uid${lim}`,params);
+  return r.rows;
+}
+function fdHsRematchItem(p,c){
+  const codes=splitCodes(c&&c.gm_code);
+  const eligible=!!codes.length&&codes.every(fdHsCode);
+  const before=raw(p.glomart_code),after=eligible?raw(c.gm_code):'';
+  return {...p,...c,current_glomart_code:before,resolved_glomart_code:after,eligible,changed:eligible&&before!==after};
+}
+function fdHsRematchSummary(items){
+  const s={target:items.length,matched:0,changed:0,same:0,unmatched:0,outside_scope:0,by:{}};
+  for(const x of items){s.by[x.match_by]=(s.by[x.match_by]||0)+1;if(!x.gm_code){s.unmatched++;continue;}if(!x.eligible){s.outside_scope++;continue;}s.matched++;if(x.changed)s.changed++;else s.same++;}
+  return s;
+}
 function statNorm(v){return String(v==null?'':v).normalize('NFKC').trim().toLowerCase().replace(/\s+/g,'');}
 async function status(db){const r=await db.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE COALESCE(glomart_code,'')<>'')::int filled,COUNT(*) FILTER(WHERE COALESCE(glomart_code,'')='')::int empty,COUNT(*) FILTER(WHERE POSITION('|' IN COALESCE(glomart_code,''))>0)::int multi FROM gm_product`);return {...(r.rows[0]||{})};}
 async function loadProducts(db,limit){const params=[];let lim='';if(limit){params.push(limit);lim=' LIMIT $1';}const r=await db.query(`SELECT product_uid,glomart_code,cp_selected_code,cp_fix_code,category_code,category_keyword,keyword,product_name,mall_code,mall_category FROM gm_product WHERE COALESCE(glomart_code,'')='' ORDER BY product_uid${lim}`,params);return r.rows;}
@@ -78,6 +111,42 @@ function selectedFieldMaps(items){
 async function tableExists(db,name){const r=await db.query('SELECT to_regclass($1) AS t',[`public.${name}`]);return !!(r.rows[0]&&r.rows[0].t);}
 router.get('/api/gm/builder/product-gm-code/status',async(req,res)=>{const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');try{ok(res,{action:'product-gm-code.status',...(await status(db))});}catch(e){fail(res,500,'PRODUCT_GM_CODE_STATUS_FAILED',{detail:String(e&&e.message||e)});}});
 router.get('/api/gm/builder/product-gm-code/preview',async(req,res)=>{const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');try{const limit=Math.min(Math.max(Number(req.query.limit||300),1),2000);const maps=await loadMaps(db),history=await loadHistory(db,maps),products=await loadProducts(db,limit);const items=products.map(p=>({product_uid:p.product_uid,product_name:p.product_name,mall_code:p.mall_code,mall_category:p.mall_category,cp_selected_code:p.cp_selected_code,cp_fix_code:p.cp_fix_code,category_code:p.category_code,category_keyword:p.category_keyword,keyword:p.keyword,...classify(p,maps,history)}));ok(res,{action:'product-gm-code.preview',limit,category_count:maps.category_count,history:{learned:history.learned,skipped_multi:history.skippedMulti,skipped_unknown:history.skippedUnknown},summary:summarize(items),items});}catch(e){fail(res,500,'PRODUCT_GM_CODE_PREVIEW_FAILED',{detail:String(e&&e.message||e)});}});
+router.get('/api/gm/builder/product-gm-code/fd-hs-6depth/preview',async(req,res)=>{
+  const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');
+  try{
+    const limit=Math.min(Math.max(Number(req.query.limit||300),1),2000);
+    const maps=fdHsMaps(await loadMaps(db)),history=await loadHistory(db,maps),products=await loadFdHsProducts(db,limit);
+    const items=products.map(p=>fdHsRematchItem(p,classify(p,maps,history)));
+    ok(res,{action:'product-gm-code.fd-hs-6depth.preview',limit,category_count:maps.category_count,history:{learned:history.learned,skipped_multi:history.skippedMulti,skipped_unknown:history.skippedUnknown},summary:fdHsRematchSummary(items),items});
+  }catch(e){fail(res,500,'FD_HS_6DEPTH_PREVIEW_FAILED',{detail:String(e&&e.message||e)});}
+});
+router.post('/api/gm/builder/product-gm-code/fd-hs-6depth/apply',async(req,res)=>{
+  const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');
+  if(String(req.query.confirm||req.body&&req.body.confirm||'').toUpperCase()!=='FDHS_REMAP')return fail(res,400,'CONFIRM_REQUIRED',{hint:'confirm=FDHS_REMAP'});
+  let client=null,release=false;
+  try{
+    const normalization=await normalizeProductKeywords(db,{apply:true});invalidateContext(db);
+    const maps=fdHsMaps(await loadMaps(db)),history=await loadHistory(db,maps),products=await loadFdHsProducts(db,0);
+    const items=products.map(p=>fdHsRematchItem(p,classify(p,maps,history))),changed=items.filter(x=>x.changed);
+    client=typeof db.connect==='function'?await db.connect():db;release=client!==db&&typeof client.release==='function';
+    await client.query('BEGIN');let updated=0;
+    for(let i=0;i<changed.length;i+=APPLY_BATCH){
+      const batch=changed.slice(i,i+APPLY_BATCH),vals=[],rows=[];let n=1;
+      for(const x of batch){rows.push(`($${n++}::text,$${n++}::text)`);vals.push(x.product_uid,x.resolved_glomart_code);}
+      const q=await client.query(`UPDATE gm_product p SET glomart_code=v.gm_code,updated_at=NOW()
+        FROM (VALUES ${rows.join(',')}) AS v(product_uid,gm_code)
+        WHERE p.product_uid=v.product_uid
+          AND COALESCE(p.glomart_code,'')<>''
+          AND COALESCE(p.glomart_code,'') ~ '(^|\\|)(FD|HS)-'`,vals);
+      updated+=q.rowCount||0;
+    }
+    await client.query('COMMIT');invalidateContext(db);
+    const summary=fdHsRematchSummary(items);
+    console.log(`[GM_PRODUCT_GLOMART_CODE_V013] fd_hs_6depth_apply target=${items.length} matched=${summary.matched} changed=${summary.changed} same=${summary.same} unmatched=${summary.unmatched} outside_scope=${summary.outside_scope} updated=${updated}`);
+    ok(res,{action:'product-gm-code.fd-hs-6depth.apply',normalization,category_count:maps.category_count,history:{learned:history.learned},updated,summary});
+  }catch(e){try{if(client)await client.query('ROLLBACK');}catch(_){}fail(res,500,'FD_HS_6DEPTH_APPLY_FAILED',{detail:String(e&&e.message||e)});}finally{if(release)client.release();}
+});
+
 router.post('/api/gm/builder/product-gm-code/normalize-keywords',async(req,res)=>{const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');try{const normalization=await normalizeProductKeywords(db,{apply:true});invalidateContext(db);ok(res,{action:'product-gm-code.normalize-keywords',normalization});}catch(e){fail(res,500,'PRODUCT_KEYWORD_NORMALIZE_FAILED',{detail:String(e&&e.message||e)});}});
 router.get('/api/gm/builder/product-gm-code/analyze',async(req,res)=>{const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');try{const normalization=await normalizeProductKeywords(db,{apply:true});invalidateContext(db);const maps=await loadMaps(db),history=await loadHistory(db,maps),products=await loadProducts(db,0);const classified=products.map(p=>classify(p,maps,history));ok(res,{action:'product-gm-code.analyze',normalization,category_count:maps.category_count,history:{learned:history.learned,skipped_multi:history.skippedMulti,skipped_unknown:history.skippedUnknown},scanned:products.length,summary:summarize(classified),multi_max:MULTI_MAX});}catch(e){fail(res,500,'PRODUCT_GM_CODE_ANALYZE_FAILED',{detail:String(e&&e.message||e)});}});
 router.post('/api/gm/builder/product-gm-code/apply',async(req,res)=>{const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');if(String(req.query.confirm||req.body&&req.body.confirm||'').toUpperCase()!=='YES')return fail(res,400,'CONFIRM_REQUIRED',{hint:'confirm=YES'});let client=null,release=false;try{const normalization=await normalizeProductKeywords(db,{apply:true});invalidateContext(db);const maps=await loadMaps(db),history=await loadHistory(db,maps),products=await loadProducts(db,0);const matched=[],classified=[];for(const p of products){const c=classify(p,maps,history);classified.push(c);if(c.gm_code)matched.push({product_uid:p.product_uid,...c});}client=typeof db.connect==='function'?await db.connect():db;release=client!==db&&typeof client.release==='function';await client.query('BEGIN');let updated=0;for(let i=0;i<matched.length;i+=APPLY_BATCH){const batch=matched.slice(i,i+APPLY_BATCH),vals=[],rows=[];let n=1;for(const x of batch){rows.push(`($${n++}::text,$${n++}::text)`);vals.push(x.product_uid,x.gm_code);}const q=await client.query(`UPDATE gm_product p SET glomart_code=v.gm_code,updated_at=COALESCE(p.updated_at,NOW()) FROM (VALUES ${rows.join(',')}) AS v(product_uid,gm_code) WHERE p.product_uid=v.product_uid AND COALESCE(p.glomart_code,'')=''`,vals);updated+=q.rowCount||0;}await client.query('COMMIT');invalidateContext(db);const summary=summarize(classified);console.log(`[GM_PRODUCT_GLOMART_CODE_V010] apply scanned=${products.length} matched=${summary.matched} single=${summary.matched_single} multi=${summary.matched_multi} ambiguous=${summary.ambiguous} unmatched=${summary.unmatched} updated=${updated} by=${JSON.stringify(summary.by)}`);ok(res,{action:'product-gm-code.apply',normalization,category_count:maps.category_count,history:{learned:history.learned},scanned:products.length,updated,summary});}catch(e){try{if(client)await client.query('ROLLBACK');}catch(_){}fail(res,500,'PRODUCT_GM_CODE_APPLY_FAILED',{detail:String(e&&e.message||e)});}finally{if(release)client.release();}});

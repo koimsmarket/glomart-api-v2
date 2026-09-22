@@ -1,4 +1,4 @@
-// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V012_KEYWORD_KO_NORMALIZE
+// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V013_FD_HS_6DEPTH_REMATCH
 'use strict';
 async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);return j;}
 function gmCodeEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -37,3 +37,29 @@ async function deleteSelectedGmKeywords(){
   const btn=document.getElementById('gmKeywordCleanupDeleteBtn'),timer=startButtonTimer(btn,'상품 정리');
   try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/cleanup-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:sel,confirm:'DELETE UNCLASSIFIED PRODUCTS'})});document.getElementById('gmKeywordCleanupSummary').textContent=`정리 완료 · 후보상품 ${j.candidate_products||0} · 삭제 ${j.deleted_products||0} · 보호 ${j.protected_products||0}`;log(j);await loadGmKeywordCleanupCandidates();await loadProductGmCodeStatus();}catch(e){alert(String(e.message||e));log(String(e.message||e));}finally{stopButtonTimer(timer);}
 }
+
+function gmFdHs6Summary(j){const s=j&&j.summary||{};return `대상 ${s.target||0} · 매칭 ${s.matched||0} · 변경 ${s.changed||0} · 동일 ${s.same||0} · 미매칭 ${s.unmatched||0} · 범위외 ${s.outside_scope||0}`;}
+async function previewFdHs6DepthRematch(){
+  const btn=document.getElementById('gmFdHs6PreviewBtn'),body=document.getElementById('gmFdHs6Rows'),sum=document.getElementById('gmFdHs6Summary');
+  const timer=startButtonTimer(btn,'FD/HS 미리보기');
+  try{
+    const limit=Math.min(Math.max(Number(document.getElementById('gmCodePreviewLimit').value||300),1),2000);
+    const j=await gmCodeFetch(`/api/gm/builder/product-gm-code/fd-hs-6depth/preview?limit=${limit}&t=${Date.now()}`);
+    sum.textContent=gmFdHs6Summary(j)+` · 6단계 FD/HS 카테고리 ${j.category_count||0}개 · 이력학습 ${j.history&&j.history.learned||0}`;
+    body.innerHTML=(j.items||[]).map(x=>`<tr><td>${gmCodeEsc(x.product_uid)}</td><td>${gmCodeEsc(x.current_glomart_code)}</td><td><b>${gmCodeEsc(x.resolved_glomart_code||'')}</b></td><td>${x.changed?'<b>변경</b>':(x.eligible?'동일':'보류')}</td><td>${gmCodeEsc(x.match_by)}</td><td>${gmCodeEsc(x.source_field)}</td><td>${gmCodeEsc(x.source_value)}</td><td>${gmCodeEsc(x.keyword)}</td><td>${gmCodeEsc(x.category_keyword)}</td></tr>`).join('')||'<tr><td colspan="9">대상 없음</td></tr>';
+    log({action:j.action,summary:j.summary,history:j.history,category_count:j.category_count});
+  }catch(e){sum.textContent=String(e.message||e);log(String(e.message||e));}
+  finally{stopButtonTimer(timer);}
+}
+async function applyFdHs6DepthRematch(){
+  const typed=prompt('FD/HS 기존 glomart_code를 새 6단계 카테고리로 재매칭해 덮어씁니다.\n일반 상품과 다른 prefix는 수정하지 않습니다.\n\n실행하려면 FDHS APPLY 를 입력하세요.');
+  if(typed!=='FDHS APPLY')return;
+  const btn=document.getElementById('gmFdHs6ApplyBtn'),sum=document.getElementById('gmFdHs6Summary'),timer=startButtonTimer(btn,'FD/HS 적용');
+  try{
+    const j=await gmCodeFetch('/api/gm/builder/product-gm-code/fd-hs-6depth/apply?confirm=FDHS_REMAP',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:'FDHS_REMAP'})});
+    sum.textContent=`적용 완료 · ${gmFdHs6Summary(j)} · 실제 업데이트 ${j.updated||0}건 · ${gmKeywordNormSummary(j.normalization)}`;
+    log(j);await loadProductGmCodeStatus();
+  }catch(e){sum.textContent=String(e.message||e);log(String(e.message||e));alert(String(e.message||e));}
+  finally{stopButtonTimer(timer);}
+}
+
