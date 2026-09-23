@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_GLOMART_CODE_V016_FD_HS_CATEGORY_ID_ALLOC_FIX
+// GM_PRODUCT_GLOMART_CODE_V018_FD_HS_MASTER_PRESERVE_SAFE
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -357,11 +357,13 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
       await client.query(`INSERT INTO gm_category_fdhs_stage (${quoted}) VALUES ${groups.join(',')}`,params);
     }
 
+    // 기존행은 '카테고리 마스터가 소유하는 필드'만 갱신한다.
+    // cp_id / raw_json / unit_rule_* / 통계·이력값은 운영 중 학습·분석되는 값이므로 번역 CSV가 덮어쓰지 않는다.
     const editableBase=[
-      'gm_code','cp_code','gm_parent_code','cp_parent_code','cp_id','parent_name_ko','depth','leaf_yn','display_yn','sort_order',
+      'gm_code','cp_code','gm_parent_code','cp_parent_code','parent_name_ko','depth','leaf_yn','display_yn','sort_order',
       'name_ko','name_en','name_zh','name_vi','name_ja','name_tw','name_th','name_uz','name_ne','name_km','name_id','name_tl','name_mn','name_my',
       'name_kk','name_si','name_ru','name_bn','name_ur','name_lo','name_hi','name_tr','name_fa','name_es','name_fr',
-      'keyword_seed','raw_json','keyword','unit_rule_qty','unit_rule_unit'
+      'keyword_seed','keyword'
     ];
     const editable=editableBase.filter(c=>v.headers.includes(c)&&v.meta.has(c));
 
@@ -377,28 +379,24 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
     const insertCols=v.headers.filter(c=>c!=='category_id'&&c!=='created_at'&&c!=='updated_at'&&v.meta.has(c));
     const qcols=insertCols.map(c=>`"${c}"`).join(',');
 
-    // category_id sequence가 실제 MAX(category_id)보다 뒤처진 운영 DB도 안전하게 처리한다.
-    // transaction 동안 gm_category 쓰기를 잠그고, 신규 행은 MAX+ROW_NUMBER로 명시 발급한다.
+    // category_id는 BIGSERIAL 기본 발급을 그대로 사용한다.
+    // 운영 DB sequence가 MAX(category_id)보다 뒤처진 경우를 먼저 보정한 뒤 신규 행을 INSERT한다.
     await client.query('LOCK TABLE gm_category IN SHARE ROW EXCLUSIVE MODE');
-    const ins=await client.query(`WITH base AS (
-        SELECT COALESCE(MAX(category_id),0)::bigint AS max_id FROM gm_category
-      ), src AS (
-        SELECT s.*,ROW_NUMBER() OVER (ORDER BY s.gm_code)::bigint AS rn
-          FROM gm_category_fdhs_stage s
-         WHERE s.category_id IS NULL
-      )
-      INSERT INTO gm_category (category_id,${qcols})
-      SELECT (base.max_id+src.rn)::int,${qcols}
-        FROM src CROSS JOIN base`);
-
-    // 이후 일반 INSERT가 같은 PK를 다시 발급하지 않도록 실제 sequence도 최종 MAX에 동기화한다.
     const seqQ=await client.query(`SELECT pg_get_serial_sequence('gm_category','category_id') AS seq`);
     const seqName=seqQ.rows&&seqQ.rows[0]&&seqQ.rows[0].seq;
-    if(seqName){
-      const maxQ=await client.query(`SELECT COALESCE(MAX(category_id),0)::bigint AS max_id FROM gm_category`);
-      const maxId=Number(maxQ.rows&&maxQ.rows[0]&&maxQ.rows[0].max_id||0);
-      if(maxId>0)await client.query(`SELECT setval($1::regclass,$2::bigint,true)`,[seqName,maxId]);
+    if(!seqName)throw new Error('GM_CATEGORY_CATEGORY_ID_SEQUENCE_NOT_FOUND');
+    const beforeMaxQ=await client.query(`SELECT COALESCE(MAX(category_id),0)::bigint AS max_id FROM gm_category`);
+    const beforeMax=Number(beforeMaxQ.rows&&beforeMaxQ.rows[0]&&beforeMaxQ.rows[0].max_id||0);
+    // sequence를 절대 뒤로 낮추지 않는다. nextval로 현재 진행값을 1회 안전하게 확인하고,
+    // 테이블 MAX가 더 클 때만 MAX까지 올린다. 이후 신규행은 BIGSERIAL 기본 발급을 사용한다.
+    const seqProbeQ=await client.query(`SELECT nextval($1::regclass)::bigint AS seq_value`,[seqName]);
+    const seqProbe=Number(seqProbeQ.rows&&seqProbeQ.rows[0]&&seqProbeQ.rows[0].seq_value||0);
+    if(beforeMax>seqProbe){
+      await client.query(`SELECT setval($1::regclass,$2::bigint,true)`,[seqName,beforeMax]);
     }
+
+    const ins=await client.query(`INSERT INTO gm_category (${qcols})
+      SELECT ${qcols} FROM gm_category_fdhs_stage WHERE category_id IS NULL ORDER BY gm_code`);
 
     const verify=await client.query(`SELECT COUNT(*)::int AS n,
        COUNT(DISTINCT gm_code)::int AS u,
@@ -411,11 +409,11 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
     }
 
     await client.query('COMMIT');inTx=false;invalidateContext(db);
-    console.log(`[GM_PRODUCT_GLOMART_CODE_V016] category_replace prefix=${prefix} existing=${upd.rowCount||0} inserted=${ins.rowCount||0} total=${v.total_rows}`);
+    console.log(`[GM_PRODUCT_GLOMART_CODE_V018] category_replace prefix=${prefix} existing=${upd.rowCount||0} inserted=${ins.rowCount||0} total=${v.total_rows}`);
     ok(res,{action:'fd-hs-category.apply',prefix,updated_existing:upd.rowCount||0,inserted_new:ins.rowCount||0,total_rows:v.total_rows,post_verify:true});
   }catch(e){
     if(client&&inTx){try{await client.query('ROLLBACK');}catch(_){}}
-    console.error('[GM_PRODUCT_GLOMART_CODE_V016] category_replace_failed',String(e&&e.stack||e));
+    console.error('[GM_PRODUCT_GLOMART_CODE_V018] category_replace_failed',String(e&&e.stack||e));
     fail(res,500,'FD_HS_CATEGORY_APPLY_FAILED',{detail:String(e&&e.message||e)});
   }finally{
     if(release)client.release();

@@ -1,6 +1,6 @@
-// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V014_FD_HS_CATEGORY_REPLACE
+// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V015_FD_HS_ERROR_DETAIL
 'use strict';
-async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);return j;}
+async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok){const base=j.error||`HTTP ${r.status}`,detail=j.detail?` · ${j.detail}`:'';throw new Error(base+detail);}return j;}
 function gmCodeEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function gmCodeSummary(j){const s=j.summary||{};return `매칭 ${s.matched||0} (단일 ${s.matched_single||0} / 복수 ${s.matched_multi||0}) · 애매 ${s.ambiguous||0} · 미매칭 ${s.unmatched||0}`;}
 async function loadProductGmCodeStatus(){const el=document.getElementById('gmCodeStatus');if(!el)return;try{const j=await gmCodeFetch('/api/gm/builder/product-gm-code/status?t='+Date.now());el.innerHTML=`전체 <b>${j.total||0}</b> · glomart_code 있음 <b>${j.filled||0}</b> · 복수코드 <b>${j.multi||0}</b> · 미분류 <b>${j.empty||0}</b>`;}catch(e){el.textContent=String(e.message||e);}}
