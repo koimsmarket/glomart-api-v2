@@ -1,6 +1,7 @@
 'use strict';
-// GM_CATEGORY_V036_UNIT_PRICE_ENGINE
-// One category keyword = one comparison unit. Product and option use the same calculator.
+// GM_CATEGORY_V040_UNIT_PRICE_ENGINE
+// Unit-price command source: FIRST gm_product.glomart_code -> gm_category.gm_code.
+// category_keyword is NOT used to decide the unit-price rule.
 // No weight<->volume conversion. Count units are not cross-converted.
 
 const WEIGHT={mg:0.001,g:1,kg:1000};
@@ -16,22 +17,22 @@ function family(u){u=normUnit(u);if(WEIGHT[u]!=null)return'WEIGHT';if(VOLUME[u]!
 function baseQty(q,u){q=number(q);u=normUnit(u);if(q==null)return null;if(WEIGHT[u]!=null)return q*WEIGHT[u];if(VOLUME[u]!=null)return q*VOLUME[u];if(COUNT.has(u))return q;return null;}
 function compatible(a,b){a=normUnit(a);b=normUnit(b);const fa=family(a),fb=family(b);if(!fa||fa!==fb)return false;if(fa==='COUNT')return a===b;return true;}
 function canonicalBaseUnit(u){const f=family(u);return f==='WEIGHT'?'g':f==='VOLUME'?'ml':normUnit(u);}
+function firstGlomartCode(v){return clean(v).split('|').map(clean).filter(Boolean)[0]||'';}
 
 function parseExplicitUnitPrice(text){
-  const re=/(\d+(?:\.\d+)?)\s*(kg|킬로그램|g|그램|l|리터|ml|㎖|밀리리터|개입|개|매|롤|정|캡슐|포|병|캔|켤레|족|장|권)\s*당\s*([0-9,]+(?:\.\d+)?)\s*원?/ig;
+  const re=/(\d+(?:\.\d+)?)\s*(kg|킬로그램|g|그램|l|리터|ml|㎖|밀리리터|개입|개|매|롤|정|캡슐|포|병|캔|켤레|족|장)\s*당\s*([0-9,]+(?:\.\d+)?)\s*원?/ig;
   let m,last=null;
   while((m=re.exec(clean(text)))) last={qty:number(m[1]),unit:normUnit(m[2]),price:number(m[3]),raw:m[0]};
   return last;
 }
 function parseTotal(text,ruleUnit){
   text=clean(text); const ru=normUnit(ruleUnit); const hits=[]; let m;
-  const direct=/(\d+(?:\.\d+)?)\s*(kg|킬로그램|g|그램|l|리터|ml|㎖|밀리리터|개입|개|매|롤|정|캡슐|포|병|캔|켤레|족|장|권)\s*(?:[xX×*]\s*(\d+(?:\.\d+)?))?/ig;
+  const direct=/(\d+(?:\.\d+)?)\s*(kg|킬로그램|g|그램|l|리터|ml|㎖|밀리리터|개입|개|매|롤|정|캡슐|포|병|캔|켤레|족|장)\s*(?:[xX×*]\s*(\d+(?:\.\d+)?))?/ig;
   while((m=direct.exec(text))){const q=number(m[1]),u=normUnit(m[2]),mul=number(m[3])||1;if(q&&compatible(u,ru))hits.push({qty:q*mul,unit:u,raw:m[0],score:(m[3]?50:10)+(u===ru?5:0)});}
   const qtyPack=/(\d+(?:\.\d+)?)\s*(kg|g|l|ml|㎖)\s*[,/]?\s*(\d+(?:\.\d+)?)\s*(?:개|봉|팩|병|캔|포)/ig;
   while((m=qtyPack.exec(text))){const q=number(m[1]),u=normUnit(m[2]),mul=number(m[3]);if(q&&mul&&compatible(u,ru))hits.push({qty:q*mul,unit:u,raw:m[0],score:70});}
   const reverse=/(\d+(?:\.\d+)?)\s*(?:개|봉|팩|병|캔|포)\s*(?:[xX×*]\s*)?(\d+(?:\.\d+)?)\s*(kg|g|l|ml|㎖)/ig;
   while((m=reverse.exec(text))){const mul=number(m[1]),q=number(m[2]),u=normUnit(m[3]);if(q&&mul&&compatible(u,ru))hits.push({qty:q*mul,unit:u,raw:m[0],score:70});}
-  // 500g+500g / 1L+500ml style, only when all terms are same physical family as rule.
   const plus=/((?:\d+(?:\.\d+)?\s*(?:kg|g|l|ml|㎖)\s*\+\s*)+\d+(?:\.\d+)?\s*(?:kg|g|l|ml|㎖))/ig;
   while((m=plus.exec(text))){
     const raw=m[1], terms=[...raw.matchAll(/(\d+(?:\.\d+)?)\s*(kg|g|l|ml|㎖)/ig)];
@@ -54,26 +55,28 @@ function calculate({ruleQty,ruleUnit,price,unitPriceText='',texts=[]}){
     const sourceBase=baseQty(explicit.qty,explicit.unit);
     if(sourceBase>0){
       const totalBase=total?(total.alreadyBase?total.qty:baseQty(total.qty,total.unit)):null;
-      return {ok:true,unit_price_value:explicit.price*targetBase/sourceBase,unit_base_qty:rq,unit_base_unit:ru,total_unit_qty:totalBase,total_unit_unit:totalBase==null?null:canonicalBaseUnit(ru),unit_calc_basis:`UNIT_TEXT:${explicit.raw}${total?` | TOTAL:${total.raw}`:''}`};
+      return {ok:true,unit_price_value:explicit.price*targetBase/sourceBase,unit_base_qty:rq,unit_base_unit:ru,total_unit_qty:totalBase,total_unit_unit:totalBase==null?null:canonicalBaseUnit(ru),unit_calc_basis:`FIRST_GM_CODE | UNIT_TEXT:${explicit.raw}${total?` | TOTAL:${total.raw}`:''}`};
     }
   }
   if(total&&p>0){
     const totalBase=total.alreadyBase?total.qty:baseQty(total.qty,total.unit);
-    if(totalBase>0)return {ok:true,unit_price_value:p*targetBase/totalBase,unit_base_qty:rq,unit_base_unit:ru,total_unit_qty:totalBase,total_unit_unit:canonicalBaseUnit(ru),unit_calc_basis:`PARSE:${total.raw} => ${totalBase}${canonicalBaseUnit(ru)}`};
+    if(totalBase>0)return {ok:true,unit_price_value:p*targetBase/totalBase,unit_base_qty:rq,unit_base_unit:ru,total_unit_qty:totalBase,total_unit_unit:canonicalBaseUnit(ru),unit_calc_basis:`FIRST_GM_CODE | PARSE:${total.raw} => ${totalBase}${canonicalBaseUnit(ru)}`};
   }
   return {ok:false,reason:'UNIT_PARSE_FAILED'};
 }
-async function findRule(db,keyword){
-  const k=clean(keyword); if(!k)return null;
-  const r=await db.query(`SELECT gm_code,keyword,name_ko,unit_rule_qty,unit_rule_unit FROM gm_category WHERE COALESCE(unit_rule_qty,0)>0 AND COALESCE(unit_rule_unit,'')<>'' AND (keyword=$1 OR name_ko=$1) ORDER BY CASE WHEN keyword=$1 THEN 0 ELSE 1 END, depth DESC NULLS LAST LIMIT 1`,[k]);
+async function findRuleByGmCode(db,gmCode){
+  const code=clean(gmCode); if(!code)return null;
+  const r=await db.query(`SELECT gm_code,keyword,name_ko,unit_rule_qty,unit_rule_unit FROM gm_category WHERE gm_code=$1 AND COALESCE(unit_rule_qty,0)>0 AND COALESCE(unit_rule_unit,'')<>'' LIMIT 1`,[code]);
   return r.rows[0]||null;
 }
 function productPrice(p){return p.final_supply_price||p.mall_discount_price||p.discount_price||p.mall_sale_price||0;}
 async function recalcProductUnitByUid(db,uid){
   const pr=await db.query(`SELECT * FROM gm_product WHERE product_uid=$1 LIMIT 1`,[uid]);
   if(!pr.rows.length)return {ok:false,reason:'NO_PRODUCT'};
-  const p=pr.rows[0], rule=await findRule(db,p.category_keyword||p.keyword);
-  if(!rule)return {ok:false,reason:'NO_RULE'};
+  const p=pr.rows[0], first_code=firstGlomartCode(p.glomart_code);
+  if(!first_code)return {ok:false,reason:'NO_FIRST_GLOMART_CODE'};
+  const rule=await findRuleByGmCode(db,first_code);
+  if(!rule)return {ok:false,reason:'NO_RULE_FOR_FIRST_GLOMART_CODE',first_code};
   const x=calculate({ruleQty:rule.unit_rule_qty,ruleUnit:rule.unit_rule_unit,price:productPrice(p),unitPriceText:p.unit_price_text,texts:[p.product_name,p.mall_product_name,JSON.stringify(p.option_json||'')]});
   await db.query(`UPDATE gm_product SET unit_price_value=$2,unit_base_qty=$3,unit_base_unit=$4,total_unit_qty=$5,total_unit_unit=$6,unit_calc_basis=$7,updated_at=NOW() WHERE product_uid=$1`,[uid,x.ok?x.unit_price_value:null,rule.unit_rule_qty,normUnit(rule.unit_rule_unit),x.ok?x.total_unit_qty:null,x.ok?x.total_unit_unit:null,x.ok?x.unit_calc_basis:x.reason]);
   const or=await db.query(`SELECT * FROM gm_product_option WHERE mall_code=$1 AND product_id=$2`,[p.mall_code,p.product_id]);
@@ -84,25 +87,76 @@ async function recalcProductUnitByUid(db,uid){
     await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2`,[o.mall_code,o.pi_ii_vi,ox.ok?ox.unit_price_value:null,rule.unit_rule_qty,normUnit(rule.unit_rule_unit),ox.ok?ox.total_unit_qty:null,ox.ok?ox.total_unit_unit:null,ox.ok?ox.unit_calc_basis:ox.reason]);
     if(ox.ok)option_ok++;
   }
-  return {ok:x.ok,product:x.ok,options,option_ok,rule:{gm_code:rule.gm_code,qty:rule.unit_rule_qty,unit:normUnit(rule.unit_rule_unit)}};
+  return {ok:x.ok,product:x.ok,options,option_ok,first_code,rule:{gm_code:rule.gm_code,qty:rule.unit_rule_qty,unit:normUnit(rule.unit_rule_unit)}};
 }
 async function recalcCategory(db,{gmCode='',all=false,apply=false}){
-  let rr;
-  if(all) rr=await db.query(`SELECT gm_code,keyword,name_ko,unit_rule_qty,unit_rule_unit FROM gm_category WHERE COALESCE(unit_rule_qty,0)>0 AND COALESCE(unit_rule_unit,'')<>'' ORDER BY gm_code`);
-  else rr=await db.query(`SELECT gm_code,keyword,name_ko,unit_rule_qty,unit_rule_unit FROM gm_category WHERE gm_code=$1`,[gmCode]);
-  const out={rules:rr.rowCount,products:0,product_ok:0,options:0,option_ok:0,apply}; const seen=new Set();
-  for(const r of rr.rows){
-    const kw=clean(r.keyword)||clean(r.name_ko); if(!kw)continue;
-    const ps=await db.query(`SELECT product_uid,mall_code,product_id,product_name,mall_product_name,option_json,unit_price_text,final_supply_price,mall_discount_price,discount_price,mall_sale_price FROM gm_product WHERE category_keyword=$1`,[kw]);
-    for(const p of ps.rows){
-      if(seen.has(p.product_uid))continue; seen.add(p.product_uid); out.products++;
-      if(apply){const z=await recalcProductUnitByUid(db,p.product_uid);if(z.product)out.product_ok++;out.options+=z.options||0;out.option_ok+=z.option_ok||0;}
-      else{
-        const x=calculate({ruleQty:r.unit_rule_qty,ruleUnit:r.unit_rule_unit,price:productPrice(p),unitPriceText:p.unit_price_text,texts:[p.product_name,p.mall_product_name,JSON.stringify(p.option_json||'')]}); if(x.ok)out.product_ok++;
-        const oc=await db.query(`SELECT count(*)::int AS n FROM gm_product_option WHERE mall_code=$1 AND product_id=$2`,[p.mall_code,p.product_id]); out.options+=Number(oc.rows[0]&&oc.rows[0].n||0);
+  const filter=all?'':`AND split_part(COALESCE(p.glomart_code,''),'|',1)=$1`;
+  const params=all?[]:[clean(gmCode)];
+  const stat=await db.query(`SELECT
+      COUNT(*)::int AS products_total,
+      COUNT(*) FILTER (WHERE split_part(COALESCE(p.glomart_code,''),'|',1)<>'')::int AS first_code_present,
+      COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL)::int AS first_code_category_match,
+      COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL AND COALESCE(c.unit_rule_qty,0)>0 AND COALESCE(c.unit_rule_unit,'')<>'')::int AS first_code_rule_match
+    FROM gm_product p
+    LEFT JOIN gm_category c ON c.gm_code=split_part(COALESCE(p.glomart_code,''),'|',1)
+    WHERE 1=1 ${filter}`,params);
+  const s=stat.rows[0]||{};
+  const out={
+    rules:0,products:Number(s.products_total||0),product_ok:0,options:0,option_ok:0,apply,
+    first_code_present:Number(s.first_code_present||0),
+    first_code_missing:Number(s.products_total||0)-Number(s.first_code_present||0),
+    first_code_category_match:Number(s.first_code_category_match||0),
+    first_code_category_missing:Number(s.first_code_present||0)-Number(s.first_code_category_match||0),
+    first_code_rule_match:Number(s.first_code_rule_match||0),
+    first_code_rule_missing:Number(s.first_code_category_match||0)-Number(s.first_code_rule_match||0),
+    rule_source:'FIRST_GLOMART_CODE'
+  };
+  const rc=await db.query(`SELECT COUNT(*)::int AS n FROM gm_category WHERE COALESCE(unit_rule_qty,0)>0 AND COALESCE(unit_rule_unit,'')<>''${all?'':' AND gm_code=$1'}`,params);
+  out.rules=Number(rc.rows[0]&&rc.rows[0].n||0);
+
+  const pageSize=500; let lastUid='';
+  while(true){
+    const qparams=all?[lastUid,pageSize]:[clean(gmCode),lastUid,pageSize];
+    const rows=await db.query(`SELECT p.product_uid,p.mall_code,p.product_id,p.product_name,p.mall_product_name,p.option_json,p.unit_price_text,
+        p.final_supply_price,p.mall_discount_price,p.discount_price,p.mall_sale_price,p.glomart_code,
+        c.gm_code,c.unit_rule_qty,c.unit_rule_unit
+      FROM gm_product p
+      JOIN gm_category c ON c.gm_code=split_part(COALESCE(p.glomart_code,''),'|',1)
+      WHERE COALESCE(c.unit_rule_qty,0)>0 AND COALESCE(c.unit_rule_unit,'')<>''
+        ${all?'':`AND c.gm_code=$1`}
+        AND p.product_uid>${all?'$1':'$2'}
+      ORDER BY p.product_uid ASC
+      LIMIT ${all?'$2':'$3'}`,qparams);
+    if(!rows.rows.length)break;
+
+    const products=rows.rows;
+    const keys=products.filter(p=>p.mall_code!=null&&p.product_id!=null);
+    const optionMap=new Map();
+    if(keys.length){
+      const vals=[];const tuples=[];let n=1;
+      for(const p of keys){tuples.push(`($${n++}::text,$${n++}::text)`);vals.push(String(p.mall_code),String(p.product_id));}
+      const oq=await db.query(`WITH k(mall_code,product_id) AS (VALUES ${tuples.join(',')})
+        SELECT o.* FROM gm_product_option o JOIN k ON o.mall_code::text=k.mall_code AND o.product_id::text=k.product_id`,vals);
+      for(const o of oq.rows){const k=String(o.mall_code)+'\u0001'+String(o.product_id);if(!optionMap.has(k))optionMap.set(k,[]);optionMap.get(k).push(o);}
+    }
+
+    for(const p of products){
+      const x=calculate({ruleQty:p.unit_rule_qty,ruleUnit:p.unit_rule_unit,price:productPrice(p),unitPriceText:p.unit_price_text,texts:[p.product_name,p.mall_product_name,JSON.stringify(p.option_json||'')]});
+      if(x.ok)out.product_ok++;
+      if(apply){
+        await db.query(`UPDATE gm_product SET unit_price_value=$2,unit_base_qty=$3,unit_base_unit=$4,total_unit_qty=$5,total_unit_unit=$6,unit_calc_basis=$7,updated_at=NOW() WHERE product_uid=$1`,[p.product_uid,x.ok?x.unit_price_value:null,p.unit_rule_qty,normUnit(p.unit_rule_unit),x.ok?x.total_unit_qty:null,x.ok?x.total_unit_unit:null,x.ok?x.unit_calc_basis:x.reason]);
+      }
+      const options=optionMap.get(String(p.mall_code)+'\u0001'+String(p.product_id))||[];
+      for(const o of options){
+        out.options++;
+        const ox=calculate({ruleQty:p.unit_rule_qty,ruleUnit:p.unit_rule_unit,price:productPrice(o),texts:[o.option_name,p.product_name,p.mall_product_name]});
+        if(ox.ok)out.option_ok++;
+        if(apply)await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2`,[o.mall_code,o.pi_ii_vi,ox.ok?ox.unit_price_value:null,p.unit_rule_qty,normUnit(p.unit_rule_unit),ox.ok?ox.total_unit_qty:null,ox.ok?ox.total_unit_unit:null,ox.ok?ox.unit_calc_basis:ox.reason]);
       }
     }
+    lastUid=String(products[products.length-1].product_uid||'');
+    if(products.length<pageSize)break;
   }
   return out;
 }
-module.exports={calculate,recalcProductUnitByUid,recalcCategory,normUnit};
+module.exports={calculate,recalcProductUnitByUid,recalcCategory,normUnit,firstGlomartCode,findRuleByGmCode};
