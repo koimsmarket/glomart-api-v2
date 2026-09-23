@@ -129,6 +129,48 @@ router.get('/api/gm/builder/category-unit/ai-results.csv',async(req,res)=>{try{
   res.send('\ufeff'+lines.join('\r\n'));
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 
+
+// GM_BUILDER_V028: admin manual category repair for the very small set of true unknown gm_codes.
+// Search only existing gm_category rows; never creates a new category.
+router.get('/api/gm/builder/category-unit/category-search',async(req,res)=>{try{
+  const q=S(req.query&&req.query.q);
+  if(!q)return res.json({ok:true,items:[]});
+  const like='%'+q.replace(/[\\%_]/g,m=>'\\'+m)+'%';
+  const r=await db(req).query(`SELECT gm_code,name_ko,keyword,gm_parent_code,parent_name_ko,depth,leaf_yn,unit_rule_qty,unit_rule_unit
+    FROM gm_category
+    WHERE gm_code ILIKE $1 ESCAPE '\\' OR COALESCE(name_ko,'') ILIKE $1 ESCAPE '\\' OR COALESCE(keyword,'') ILIKE $1 ESCAPE '\\'
+    ORDER BY CASE WHEN COALESCE(name_ko,'')=$2 OR COALESCE(keyword,'')=$2 THEN 0 WHEN COALESCE(name_ko,'') ILIKE $3 OR COALESCE(keyword,'') ILIKE $3 THEN 1 ELSE 2 END,
+      depth DESC,sort_order,gm_code
+    LIMIT 30`,[like,q,q+'%']);
+  res.json({ok:true,items:r.rows||[]});
+}catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
+
+router.post('/api/gm/builder/category-unit/manual-map',express.json({limit:'32kb'}),async(req,res)=>{try{
+  const oldCode=S(req.body&&req.body.old_gm_code);
+  const newCode=S(req.body&&req.body.new_gm_code);
+  if(!oldCode||!newCode)return res.status(400).json({ok:false,error:'old_gm_code와 new_gm_code가 필요합니다.'});
+  if(oldCode===newCode)return res.status(400).json({ok:false,error:'기존 코드와 선택 코드가 같습니다.'});
+  const target=await db(req).query(`SELECT gm_code,name_ko,keyword,depth,leaf_yn,unit_rule_qty,unit_rule_unit FROM gm_category WHERE gm_code=$1 LIMIT 1`,[newCode]);
+  if(!target.rowCount)return res.status(404).json({ok:false,error:'선택한 gm_category를 찾을 수 없습니다: '+newCode});
+  const client=await db(req).connect();
+  let updated=0;
+  try{
+    await client.query('BEGIN');
+    const r=await client.query(`UPDATE gm_product
+      SET glomart_code = CASE
+        WHEN position('|' in COALESCE(glomart_code,''))>0 THEN $2 || substring(glomart_code from position('|' in glomart_code))
+        ELSE $2
+      END,
+      updated_at=NOW()
+      WHERE split_part(COALESCE(glomart_code,''),'|',1)=$1
+      RETURNING product_uid`,[oldCode,newCode]);
+    updated=r.rowCount||0;
+    if(!updated)throw new Error('해당 첫 glomart_code 상품을 찾지 못했습니다: '+oldCode);
+    await client.query('COMMIT');
+  }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
+  res.json({ok:true,old_gm_code:oldCode,new_gm_code:newCode,updated_products:updated,target:target.rows[0]});
+}catch(e){res.status(400).json({ok:false,error:String(e.message||e)});}});
+
 router.post('/api/gm/builder/category-unit/analyze',express.json({limit:'1mb'}),async(req,res)=>{try{
   // V013: legacy multilingual product keywords are normalized to Korean first.
   // Search logs are never updated here; only gm_product.keyword/category_keyword are cleaned.
