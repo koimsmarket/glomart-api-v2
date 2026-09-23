@@ -2,6 +2,7 @@
 // GM_AI_CATEGORY_CONNECT_V013 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
 // No CSV upload/master table. Analyze gm_category + gm_product for representative units. Options are used only by recalc.
 const express=require('express');
+const crypto=require('crypto');
 const router=express.Router();
 const {recalcCategory}=require('../../services/unit_price');
 const {analyzeCategoryUnitRules,applyCategoryUnitRules}=require('../../services/category_unit_analyzer');
@@ -148,27 +149,45 @@ router.get('/api/gm/builder/category-unit/category-search',async(req,res)=>{try{
 router.post('/api/gm/builder/category-unit/manual-map',express.json({limit:'32kb'}),async(req,res)=>{try{
   const oldCode=S(req.body&&req.body.old_gm_code);
   const newCode=S(req.body&&req.body.new_gm_code);
-  if(!oldCode||!newCode)return res.status(400).json({ok:false,error:'old_gm_code와 new_gm_code가 필요합니다.'});
-  if(oldCode===newCode)return res.status(400).json({ok:false,error:'기존 코드와 선택 코드가 같습니다.'});
+  const keyword=S(req.body&&req.body.category_keyword);
+  if(!oldCode||!newCode||!keyword)return res.status(400).json({ok:false,error:'old_gm_code, new_gm_code, category_keyword가 필요합니다.'});
   const target=await db(req).query(`SELECT gm_code,name_ko,keyword,depth,leaf_yn,unit_rule_qty,unit_rule_unit FROM gm_category WHERE gm_code=$1 LIMIT 1`,[newCode]);
   if(!target.rowCount)return res.status(404).json({ok:false,error:'선택한 gm_category를 찾을 수 없습니다: '+newCode});
-  const client=await db(req).connect();
-  let updated=0;
-  try{
-    await client.query('BEGIN');
-    const r=await client.query(`UPDATE gm_product
-      SET glomart_code = CASE
-        WHEN position('|' in COALESCE(glomart_code,''))>0 THEN $2 || substring(glomart_code from position('|' in glomart_code))
-        ELSE $2
-      END,
+  const t=target.rows[0];
+  const addKeyword=S(t.keyword||t.name_ko||'');
+  if(!addKeyword)return res.status(400).json({ok:false,error:'선택 카테고리에 추가할 keyword/name_ko가 없습니다.'});
+
+  // Preserve the original classification. Add the selected valid gm_code and keyword as extra tokens.
+  // Only products whose CURRENT FIRST token is the unresolved oldCode are touched.
+  const upd=await db(req).query(`UPDATE gm_product p SET
+      glomart_code = CASE
+        WHEN $2 = ANY(string_to_array(COALESCE(p.glomart_code,''),'|')) THEN p.glomart_code
+        WHEN COALESCE(NULLIF(trim(p.glomart_code),''),'')='' THEN $2
+        ELSE trim(BOTH '|' FROM p.glomart_code)||'|'||$2 END,
+      category_keyword = CASE
+        WHEN $3 = ANY(string_to_array(COALESCE(p.category_keyword,''),'|')) THEN p.category_keyword
+        WHEN COALESCE(NULLIF(trim(p.category_keyword),''),'')='' THEN $3
+        ELSE trim(BOTH '|' FROM p.category_keyword)||'|'||$3 END,
       updated_at=NOW()
-      WHERE split_part(COALESCE(glomart_code,''),'|',1)=$1
-      RETURNING product_uid`,[oldCode,newCode]);
-    updated=r.rowCount||0;
-    if(!updated)throw new Error('해당 첫 glomart_code 상품을 찾지 못했습니다: '+oldCode);
-    await client.query('COMMIT');
-  }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
-  res.json({ok:true,old_gm_code:oldCode,new_gm_code:newCode,updated_products:updated,target:target.rows[0]});
+    WHERE split_part(COALESCE(p.glomart_code,''),'|',1)=$1
+    RETURNING product_uid`,[oldCode,newCode,addKeyword]);
+
+  // Keep an audit row only. This is not used as a unit-price fallback.
+  const keywordNormalized=normalizeKeyword(keyword);
+  const contextHash=crypto.createHash('sha256').update('ADMIN_CATEGORY_AUGMENT:'+keywordNormalized+':'+newCode).digest('hex');
+  const note=`기존 분류 보존 + gm_code/keyword 추가. old=${oldCode}, add=${newCode}, keyword=${addKeyword}, products=${upd.rowCount}`;
+  let mapping=null;
+  try{
+    const q=await db(req).query(`INSERT INTO gm_category_keyword_map (
+        mall_code,category_keyword,keyword_normalized,context_hash,final_gm_code,selection_type,classification_source,status,is_current,reviewed_by,review_note,reviewed_at,updated_at
+      ) VALUES ('CPKR',$1,$2,$3,$4,'CATEGORY_AUGMENT','ADMIN','ADMIN_CATEGORY_AUGMENTED','Y','BUILDER',$5,now(),now())
+      ON CONFLICT (mall_code,keyword_normalized,context_hash) WHERE is_current='Y'
+      DO UPDATE SET final_gm_code=EXCLUDED.final_gm_code,selection_type='CATEGORY_AUGMENT',classification_source='ADMIN',status='ADMIN_CATEGORY_AUGMENTED',reviewed_by='BUILDER',review_note=EXCLUDED.review_note,reviewed_at=now(),updated_at=now()
+      RETURNING id,category_keyword,final_gm_code,status,updated_at`,[keyword,keywordNormalized,contextHash,newCode,note]);
+    mapping=q.rows[0]||null;
+  }catch(e){console.warn('[GM_BUILDER_V031 CATEGORY_AUGMENT_AUDIT_FAIL]',String(e&&e.message||e));}
+
+  res.json({ok:true,old_gm_code:oldCode,added_gm_code:newCode,added_keyword:addKeyword,updated_products:upd.rowCount,product_data_changed:true,target:t,mapping});
 }catch(e){res.status(400).json({ok:false,error:String(e.message||e)});}});
 
 router.post('/api/gm/builder/category-unit/analyze',express.json({limit:'1mb'}),async(req,res)=>{try{

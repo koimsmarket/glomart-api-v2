@@ -5,6 +5,7 @@
 
 const clean=v=>String(v==null?'':v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim();
 const norm=v=>clean(v).toLowerCase().replace(/[\s\-_/·.,()[\]{}]+/g,'').replace(/[^0-9a-z가-힣]/gi,'');
+const mapNorm=v=>clean(v).normalize('NFKC').toLowerCase().replace(/\s+/g,' ').trim();
 
 const UNIT_RX={
   kg:/(?:^|[^A-Za-z0-9])\d+(?:[.,]\d+)?\s*(?:kg|킬로그램)(?![A-Za-z])/i,
@@ -63,30 +64,34 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
     for(const key of [clean(c.keyword),clean(c.name_ko)]){if(!key)continue;const nk=norm(key);if(!nk)continue;if(!normalizedCategoryMap.has(nk))normalizedCategoryMap.set(nk,[]);const a=normalizedCategoryMap.get(nk);if(!a.some(x=>x.gm_code===c.gm_code))a.push(c);}
   }
 
+  // A product may retain an old/stale code as its first token.
+  // Use the first token that actually exists in gm_category; preserve original token order.
+
   const matched=new Map(),unknownCodes=new Map(),examples=new Map();
   const fresh=()=>({coupang_products:0,kg_products:0,g_products:0,l_products:0,ml_products:0,count_products:0,sheet_products:0,roll_products:0,tablet_products:0,capsule_products:0,pouch_products:0,bottle_products:0,can_products:0,pair_products:0,piece_products:0,total_products:0});
   const E=(map,key)=>{if(!map.has(key))map.set(key,fresh());return map.get(key);};
   function addExample(key,name){if(!name)return;if(!examples.has(key))examples.set(key,[]);const a=examples.get(key);if(a.length<8&&!a.includes(name))a.push(name);}
-  let allProducts=0,coupangProducts=0,firstCodePresent=0,firstCodeCategoryMatch=0,firstCodeMissing=0,firstCodeUnknown=0;
+  let allProducts=0,coupangProducts=0,firstCodePresent=0,firstCodeCategoryMatch=0,firstCodeMissing=0,firstCodeUnknown=0,firstCodeUnknownRaw=0;
 
   await pagedQuery(db,`SELECT product_uid,mall_code,product_id,glomart_code,category_keyword,keyword,product_name,mall_product_name FROM gm_product ORDER BY product_uid`,[],async rows=>{
     for(const p of rows){
       allProducts++;
-      const firstCode=clean(String(p.glomart_code||'').split('|')[0]);
+      const codes=String(p.glomart_code||'').split('|').map(clean).filter(Boolean);
+      const firstCode=codes[0]||'';
+      const validCode=codes.find(code=>byCode.has(code))||'';
       const kw=clean(p.category_keyword||p.keyword);
       const isCp=clean(p.mall_code).toUpperCase()==='CPKR';
       const name=clean(p.product_name||p.mall_product_name);
-      if(firstCode){
+      if(codes.length){
         firstCodePresent++;
-        const cat=byCode.get(firstCode);
-        if(cat){
+        if(validCode){
           firstCodeCategoryMatch++;
-          const x=E(matched,firstCode);x.total_products++;
-          if(isCp){coupangProducts++;x.coupang_products++;const flags=unitFlags(`${p.product_name||''} ${p.mall_product_name||''}`);for(const k of Object.keys(flags))if(flags[k])x[`${k}_products`]++;addExample(`C:${firstCode}`,name);}
+          const x=E(matched,validCode);x.total_products++;
+          if(isCp){coupangProducts++;x.coupang_products++;const flags=unitFlags(`${p.product_name||''} ${p.mall_product_name||''}`);for(const k of Object.keys(flags))if(flags[k])x[`${k}_products`]++;addExample(`C:${validCode}`,name);}
           continue;
         }
-        firstCodeUnknown++;
-        const key=`UNKNOWN:${firstCode}`;const x=E(unknownCodes,key);x.total_products++;x.first_code=firstCode;x.category_keyword=kw||firstCode;x.unmatched_reason='FIRST_GLOMART_CODE_NOT_IN_GM_CATEGORY';
+        firstCodeUnknownRaw++;firstCodeUnknown++;
+        const key=`UNKNOWN:${firstCode}`;const x=E(unknownCodes,key);x.total_products++;x.first_code=firstCode;x.category_keyword=kw||firstCode;x.unmatched_reason='NO_GLOMART_CODE_EXISTS_IN_GM_CATEGORY';
         if(isCp){coupangProducts++;x.coupang_products++;const flags=unitFlags(`${p.product_name||''} ${p.mall_product_name||''}`);for(const k of Object.keys(flags))if(flags[k])x[`${k}_products`]++;addExample(key,name);}
         continue;
       }
@@ -102,6 +107,7 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
     matched_keywords:0,no_category_keywords:0,normalized_candidate_keywords:0,auto_weight:0,auto_volume:0,auto_count_special:0,default_count:0,
     mixed:0,mixed_majority_weight:0,mixed_majority_volume:0,mixed_tie:0,no_coupang:0,target_category_rows:0,
     first_code_present:firstCodePresent,first_code_category_match:firstCodeCategoryMatch,first_code_missing:firstCodeMissing,first_code_unknown:firstCodeUnknown,
+    first_code_unknown_raw:firstCodeUnknownRaw,
     analyzed_categories:matched.size,unmatched_groups:unknownCodes.size,unknown_code_groups:unknownCodes.size
   };
 
@@ -117,7 +123,7 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
     const rule=chooseRule(x,{categoryMatchCount:0});
     summary.keywords++;summary.no_category_keywords++;if(candidates.length)summary.normalized_candidate_keywords++;
     if(rule.status==='NO_CPKR')summary.no_coupang++;else summary.default_count++;
-    items.push({category_keyword:kw,category_name:'',first_gm_code:clean(x.first_code||''),total_products:x.total_products,coupang_products:x.coupang_products,category_match_count:0,gm_codes:[],candidate_gm_codes:candidates.map(m=>m.gm_code),candidate_names:candidates.map(m=>m.name_ko||m.keyword||''),unit_family:rule.family,unit_rule_qty:rule.qty,unit_rule_unit:rule.unit,status:'NO_CATEGORY',confidence:'LOW',score:Number(rule.score.toFixed(3)),reason:`첫 glomart_code ${clean(x.first_code)} 가 gm_category에 없음`,kg_products:x.kg_products,g_products:x.g_products,l_products:x.l_products,ml_products:x.ml_products,count_products:x.count_products,sheet_products:x.sheet_products,roll_products:x.roll_products,tablet_products:x.tablet_products,capsule_products:x.capsule_products,pouch_products:x.pouch_products,bottle_products:x.bottle_products,can_products:x.can_products,pair_products:x.pair_products,piece_products:x.piece_products,examples:examples.get(key)||[]});
+    items.push({category_keyword:kw,category_name:'',first_gm_code:clean(x.first_code||''),total_products:x.total_products,coupang_products:x.coupang_products,category_match_count:0,gm_codes:[],candidate_gm_codes:candidates.map(m=>m.gm_code),candidate_names:candidates.map(m=>m.name_ko||m.keyword||''),unit_family:rule.family,unit_rule_qty:rule.qty,unit_rule_unit:rule.unit,status:'NO_CATEGORY',confidence:'LOW',score:Number(rule.score.toFixed(3)),reason:`glomart_code 목록 중 gm_category에 존재하는 코드 없음 (첫값 ${clean(x.first_code)})`,kg_products:x.kg_products,g_products:x.g_products,l_products:x.l_products,ml_products:x.ml_products,count_products:x.count_products,sheet_products:x.sheet_products,roll_products:x.roll_products,tablet_products:x.tablet_products,capsule_products:x.capsule_products,pouch_products:x.pouch_products,bottle_products:x.bottle_products,can_products:x.can_products,pair_products:x.pair_products,piece_products:x.piece_products,examples:examples.get(key)||[]});
   }
 
   const reviewItems=items.filter(x=>x.status==='NO_CATEGORY');
