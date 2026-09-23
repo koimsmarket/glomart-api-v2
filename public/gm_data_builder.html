@@ -16,7 +16,7 @@
 <button class="builder-tab-btn" data-tab="vector" onclick="openBuilderTab('vector')">IMAGE VECTOR</button>
 <button class="builder-tab-btn" data-tab="lang" onclick="openBuilderTab('lang')">언어 / 국가</button>
 <span class="tab-spacer"></span>
-<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V075</span>
+<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V076</span>
 </div>
 <div class="head" data-builder-tab="status"><div><h1>GM Data Builder</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div></div></div>
 <div class="warning" data-builder-tab="status"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
@@ -108,7 +108,7 @@
 
   <hr style="margin:18px 0;border:0;border-top:1px solid #ddd">
   <h3>FD / HS 6세그먼트 카테고리 교체 업로드</h3>
-  <div class="small">번역까지 완료된 <b>최종 FD/HS CSV</b>를 사용합니다. 기존 행은 <b>category_id를 유지</b>한 채 6세그먼트 코드·부모·다국어명을 갱신하고, 신규 행만 INSERT합니다. 현재 FD/HS 기존 category_id가 CSV에 하나라도 빠지면 적용을 거부합니다. <b>일반 Safe Update 대신 이 기능을 사용합니다.</b></div>
+  <div class="small">번역까지 완료된 <b>최종 FD/HS CSV</b>를 사용합니다. 정식 쿠팡 카테고리는 <b>cp_code</b>, cp_code 없는 기존 가상/분할 카테고리는 <b>category_id</b>, 둘 다 없는 신규 비표준 행은 <b>gm_code</b>로 확인합니다. 기존 category_id와 운영 데이터는 유지합니다.</div>
   <p>
     <select id="gmFdHsCategoryPrefix"><option value="FD">FD 식품</option><option value="HS">HS 생활용품</option></select>
     <input type="file" id="gmFdHsCategoryFile" accept=".csv,text/csv">
@@ -165,7 +165,7 @@
 <script src="/builder/GM_BUILDER_DEVICE_LANG.js?v=gm_builder_v065"></script>
 <script src="/builder/GM_BUILDER_IMAGE_VECTOR.js?v=gm_builder_v071"></script>
 <script src="/builder/GM_BUILDER_PRODUCT_QUEUE.js?v=gm_builder_v001"></script>
-<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v015"></script>
+<script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v016"></script>
 <script src="/builder/GM_BUILDER_AI_USAGE.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_TABS.js?v=gm_builder_v002"></script>
 </body></html>

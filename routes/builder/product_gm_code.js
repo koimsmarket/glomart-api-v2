@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_GLOMART_CODE_V018_FD_HS_MASTER_PRESERVE_SAFE
+// GM_PRODUCT_GLOMART_CODE_V019_CATEGORY_6SEG_IDENTITY_MATCH
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -263,7 +263,7 @@ function categoryReplacePrefix(req){
 }
 async function validateFdHsCategoryMaster(db,prefix,csvText){
   const {headers,rows}=parseBuilderCsv(csvText);
-  for(const h of ['category_id','gm_code','gm_parent_code','name_ko']){
+  for(const h of ['category_id','gm_code','cp_code','gm_parent_code','name_ko']){
     if(!headers.includes(h))throw new Error(`CSV_REQUIRED_COLUMN_MISSING:${h}`);
   }
   const meta=await categoryColumnMeta(db);
@@ -280,7 +280,7 @@ async function validateFdHsCategoryMaster(db,prefix,csvText){
   }
 
   const codeRe=new RegExp(`^${prefix}-\\d{2}-\\d{3}-\\d{4}-\\d{4}-\\d{4}$`,'i');
-  const codes=new Set(),cpCodes=new Set(),ids=new Set();let newRows=0;
+  const codes=new Set(),cpCodes=new Set(),ids=new Set();
   for(const r of rows){
     const code=raw(r.gm_code),id=raw(r.category_id),cp=raw(r.cp_code);
     if(!codeRe.test(code))throw new Error(`ROW_${r.__row}_INVALID_${prefix}_6SEG_CODE:${code}`);
@@ -294,7 +294,7 @@ async function validateFdHsCategoryMaster(db,prefix,csvText){
       if(!/^\d+$/.test(id))throw new Error(`ROW_${r.__row}_INVALID_CATEGORY_ID:${id}`);
       if(ids.has(id))throw new Error(`ROW_${r.__row}_DUP_CATEGORY_ID:${id}`);
       ids.add(id);
-    }else newRows++;
+    }
   }
   for(const r of rows){
     const p=raw(r.gm_parent_code);
@@ -302,16 +302,68 @@ async function validateFdHsCategoryMaster(db,prefix,csvText){
   }
 
   const cur=await db.query(
-    `SELECT category_id::text AS category_id,gm_code FROM gm_category WHERE gm_code LIKE $1 ORDER BY category_id`,
+    `SELECT category_id::text AS category_id,gm_code,cp_code FROM gm_category WHERE gm_code LIKE $1 ORDER BY category_id`,
     [prefix+'-%']
   );
-  const currentIds=new Set(cur.rows.map(x=>String(x.category_id)));
-  const missing=[...currentIds].filter(x=>!ids.has(x));
-  const foreign=[...ids].filter(x=>!currentIds.has(x));
-  if(missing.length)throw new Error(`CURRENT_${prefix}_ROWS_MISSING_FROM_FILE:${missing.slice(0,20).join('|')}${missing.length>20?'...':''}`);
-  if(foreign.length)throw new Error(`FILE_CATEGORY_ID_NOT_CURRENT_${prefix}:${foreign.slice(0,20).join('|')}${foreign.length>20?'...':''}`);
-  if(ids.size!==currentIds.size)throw new Error(`CURRENT_ID_COUNT_MISMATCH:file=${ids.size},db=${currentIds.size}`);
-  return {prefix,headers,rows,meta,existing:ids.size,new_rows:newRows,current_rows:cur.rows.length,total_rows:rows.length};
+  const byCp=new Map(),byId=new Map(),byGm=new Map();
+  for(const x of cur.rows){
+    const cp=raw(x.cp_code),id=String(x.category_id),gm=raw(x.gm_code);
+    if(cp){
+      if(byCp.has(cp))throw new Error(`DB_DUP_CP_CODE:${cp}`);
+      byCp.set(cp,x);
+    }
+    byId.set(id,x);
+    if(gm){
+      if(byGm.has(gm))throw new Error(`DB_DUP_GM_CODE:${gm}`);
+      byGm.set(gm,x);
+    }
+  }
+
+  const matchedIds=new Set();
+  let cpExisting=0,cpNew=0,idExisting=0,gmExisting=0,gmNew=0;
+  const plans=[];
+  for(const r of rows){
+    const cp=raw(r.cp_code),id=raw(r.category_id),gm=raw(r.gm_code);
+    let current=null,match_by='';
+    if(cp){
+      current=byCp.get(cp)||null;
+      match_by=current?'cp_code':'new_cp_code';
+      if(current&&id&&String(current.category_id)!==id){
+        throw new Error(`ROW_${r.__row}_CP_CATEGORY_ID_CONFLICT:cp=${cp}:file_id=${id}:db_id=${current.category_id}`);
+      }
+      if(!current&&id){
+        const byFileId=byId.get(id)||null;
+        if(byFileId)throw new Error(`ROW_${r.__row}_CP_NOT_FOUND_BUT_CATEGORY_ID_EXISTS:cp=${cp}:id=${id}`);
+      }
+      current?cpExisting++:cpNew++;
+    }else if(id){
+      current=byId.get(id)||null;
+      if(!current)throw new Error(`ROW_${r.__row}_CATEGORY_ID_NOT_FOUND:${id}`);
+      if(raw(current.cp_code))throw new Error(`ROW_${r.__row}_CATEGORY_ID_HAS_CP_CODE:id=${id}:cp=${raw(current.cp_code)}`);
+      match_by='category_id';idExisting++;
+    }else{
+      current=byGm.get(gm)||null;
+      match_by=current?'gm_code':'new_gm_code';
+      current?gmExisting++:gmNew++;
+    }
+    if(current){
+      const cid=String(current.category_id);
+      if(matchedIds.has(cid))throw new Error(`ROW_${r.__row}_DB_ROW_MATCHED_TWICE:${cid}`);
+      matchedIds.add(cid);
+    }
+    plans.push({row:r,target_category_id:current?String(current.category_id):'',match_by});
+  }
+
+  const unmatched=cur.rows.filter(x=>!matchedIds.has(String(x.category_id)));
+  if(unmatched.length){
+    throw new Error(`CURRENT_${prefix}_ROWS_NOT_MATCHED_BY_FILE:${unmatched.slice(0,20).map(x=>x.category_id).join('|')}${unmatched.length>20?'...':''}`);
+  }
+
+  return {
+    prefix,headers,rows,plans,meta,current_rows:cur.rows.length,total_rows:rows.length,
+    existing_rows:matchedIds.size,new_rows:rows.length-matchedIds.size,
+    cp_existing:cpExisting,cp_new:cpNew,id_existing:idExisting,gm_existing:gmExisting,gm_new:gmNew
+  };
 }
 
 const categoryCsvText=express.text({type:['text/csv','text/plain','application/csv','application/vnd.ms-excel'],limit:'40mb'});
@@ -321,7 +373,7 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/preview',categoryCsv
   const prefix=categoryReplacePrefix(req);if(!prefix)return fail(res,400,'PREFIX_REQUIRED',{hint:'prefix=FD or HS'});
   try{
     const v=await validateFdHsCategoryMaster(db,prefix,req.body);
-    ok(res,{action:'fd-hs-category.preview',prefix,current_rows:v.current_rows,file_rows:v.total_rows,existing_rows:v.existing,new_rows:v.new_rows,all_current_ids_present:true,gm_code_unique:true,parent_check:true});
+    ok(res,{action:'fd-hs-category.preview',prefix,current_rows:v.current_rows,file_rows:v.total_rows,existing_rows:v.existing_rows,new_rows:v.new_rows,cp_existing:v.cp_existing,cp_new:v.cp_new,id_existing:v.id_existing,gm_existing:v.gm_existing,gm_new:v.gm_new,identity_match:true,gm_code_unique:true,parent_check:true});
   }catch(e){
     fail(res,400,'FD_HS_CATEGORY_PREVIEW_FAILED',{detail:String(e&&e.message||e)});
   }
@@ -331,7 +383,7 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
   const db=dbFrom(req);if(!db)return fail(res,500,'DB_NOT_READY');
   const prefix=categoryReplacePrefix(req);if(!prefix)return fail(res,400,'PREFIX_REQUIRED',{hint:'prefix=FD or HS'});
   const confirm=String(req.query.confirm||'').toUpperCase();
-  if(confirm!==`${prefix}_CATEGORY_REPLACE`)return fail(res,400,'CONFIRM_REQUIRED',{hint:`confirm=${prefix}_CATEGORY_REPLACE`});
+  if(confirm!=='APPLY')return fail(res,400,'CONFIRM_REQUIRED',{hint:'confirm=APPLY'});
   let client=null,release=false,inTx=false;
   try{
     client=typeof db.connect==='function'?await db.connect():db;
@@ -339,21 +391,24 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
     await client.query('BEGIN');inTx=true;
 
     const v=await validateFdHsCategoryMaster(client,prefix,req.body);
-    await client.query('CREATE TEMP TABLE gm_category_fdhs_stage ON COMMIT DROP AS SELECT * FROM gm_category WITH NO DATA');
+    await client.query(`CREATE TEMP TABLE gm_category_fdhs_stage ON COMMIT DROP AS
+      SELECT g.*,NULL::bigint AS target_category_id FROM gm_category g WITH NO DATA`);
 
     const stageCols=v.headers.filter(h=>h!=='updated_at');
     const batchSize=80;
-    for(let start=0;start<v.rows.length;start+=batchSize){
-      const batch=v.rows.slice(start,start+batchSize),params=[],groups=[];
-      for(const row of batch){
-        const ph=[];
+    for(let start=0;start<v.plans.length;start+=batchSize){
+      const batch=v.plans.slice(start,start+batchSize),params=[],groups=[];
+      for(const plan of batch){
+        const row=plan.row,ph=[];
         for(const c of stageCols){
           params.push(categoryDbValue(row[c],v.meta.get(c)));
           ph.push(`$${params.length}`);
         }
+        params.push(plan.target_category_id||null);
+        ph.push(`$${params.length}::bigint`);
         groups.push('('+ph.join(',')+')');
       }
-      const quoted=stageCols.map(c=>`"${c.replace(/"/g,'""')}"`).join(',');
+      const quoted=stageCols.map(c=>`"${c.replace(/"/g,'""')}"`).join(',')+',target_category_id';
       await client.query(`INSERT INTO gm_category_fdhs_stage (${quoted}) VALUES ${groups.join(',')}`,params);
     }
 
@@ -374,7 +429,7 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
     const upd=await client.query(`UPDATE gm_category g
        SET ${setSql}${v.meta.has('updated_at')?',updated_at=NOW()':''}
       FROM gm_category_fdhs_stage s
-     WHERE s.category_id IS NOT NULL AND g.category_id=s.category_id`);
+     WHERE s.target_category_id IS NOT NULL AND g.category_id=s.target_category_id`);
 
     const insertCols=v.headers.filter(c=>c!=='category_id'&&c!=='created_at'&&c!=='updated_at'&&v.meta.has(c));
     const qcols=insertCols.map(c=>`"${c}"`).join(',');
@@ -396,7 +451,7 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
     }
 
     const ins=await client.query(`INSERT INTO gm_category (${qcols})
-      SELECT ${qcols} FROM gm_category_fdhs_stage WHERE category_id IS NULL ORDER BY gm_code`);
+      SELECT ${qcols} FROM gm_category_fdhs_stage WHERE target_category_id IS NULL ORDER BY gm_code`);
 
     const verify=await client.query(`SELECT COUNT(*)::int AS n,
        COUNT(DISTINCT gm_code)::int AS u,
@@ -409,11 +464,11 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
     }
 
     await client.query('COMMIT');inTx=false;invalidateContext(db);
-    console.log(`[GM_PRODUCT_GLOMART_CODE_V018] category_replace prefix=${prefix} existing=${upd.rowCount||0} inserted=${ins.rowCount||0} total=${v.total_rows}`);
-    ok(res,{action:'fd-hs-category.apply',prefix,updated_existing:upd.rowCount||0,inserted_new:ins.rowCount||0,total_rows:v.total_rows,post_verify:true});
+    console.log(`[GM_PRODUCT_GLOMART_CODE_V019] category_replace prefix=${prefix} existing=${upd.rowCount||0} inserted=${ins.rowCount||0} total=${v.total_rows}`);
+    ok(res,{action:'fd-hs-category.apply',prefix,updated_existing:upd.rowCount||0,inserted_new:ins.rowCount||0,total_rows:v.total_rows,cp_existing:v.cp_existing,cp_new:v.cp_new,id_existing:v.id_existing,gm_existing:v.gm_existing,gm_new:v.gm_new,post_verify:true});
   }catch(e){
     if(client&&inTx){try{await client.query('ROLLBACK');}catch(_){}}
-    console.error('[GM_PRODUCT_GLOMART_CODE_V018] category_replace_failed',String(e&&e.stack||e));
+    console.error('[GM_PRODUCT_GLOMART_CODE_V019] category_replace_failed',String(e&&e.stack||e));
     fail(res,500,'FD_HS_CATEGORY_APPLY_FAILED',{detail:String(e&&e.message||e)});
   }finally{
     if(release)client.release();

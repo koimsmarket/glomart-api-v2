@@ -1,4 +1,4 @@
-// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V015_FD_HS_ERROR_DETAIL
+// GM_BUILDER_PRODUCT_GLOMART_CODE_UI_V016_CATEGORY_6SEG_IDENTITY_MATCH
 'use strict';
 async function gmCodeFetch(path,opt){const r=await fetch(`${API}${path}`,opt);const j=await r.json().catch(()=>({ok:false,error:`HTTP_${r.status}`}));if(!r.ok||!j.ok){const base=j.error||`HTTP ${r.status}`,detail=j.detail?` · ${j.detail}`:'';throw new Error(base+detail);}return j;}
 function gmCodeEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -46,7 +46,7 @@ async function gmFdHsCategoryFileText(){
   return {file:f,text:await f.text(),prefix:String(document.getElementById('gmFdHsCategoryPrefix').value||'').toUpperCase()};
 }
 function gmFdHsCategorySummary(j){
-  return `${j.prefix||''} · 현재 ${j.current_rows||0}행 · 파일 ${j.file_rows||0}행 · 기존 갱신 ${j.existing_rows||0}행 · 신규 ${j.new_rows||0}행 · 기존 ID 전체포함 ${j.all_current_ids_present?'Y':'N'} · 부모검증 ${j.parent_check?'Y':'N'}`;
+  return `${j.prefix||''} · 현재 ${j.current_rows||0}행 · 파일 ${j.file_rows||0}행 · 기존 ${j.existing_rows||0}행 · 신규 ${j.new_rows||0}행 · cp기존 ${j.cp_existing||0} · cp신규 ${j.cp_new||0} · 가상ID ${j.id_existing||0} · 비표준기존 ${j.gm_existing||0} · 비표준신규 ${j.gm_new||0} · 부모검증 ${j.parent_check?'Y':'N'}`;
 }
 async function previewFdHsCategoryReplace(){
   const btn=document.getElementById('gmFdHsCategoryPreviewBtn'),sum=document.getElementById('gmFdHsCategorySummary'),timer=startButtonTimer(btn,'카테고리 검증');
@@ -62,12 +62,11 @@ async function previewFdHsCategoryReplace(){
 }
 async function applyFdHsCategoryReplace(){
   let x;try{x=await gmFdHsCategoryFileText();}catch(e){alert(String(e.message||e));return;}
-  const token=`${x.prefix} CATEGORY APPLY`;
-  const typed=prompt(`${x.prefix} 최종 6세그먼트 카테고리 CSV로 현재 ${x.prefix} 영역을 교체합니다.\n기존 category_id는 유지하고 신규 행만 추가합니다.\n현재 ${x.prefix} 기존 행이 파일에 하나라도 빠져 있으면 서버가 적용을 거부합니다.\n\n실행하려면 ${token} 를 입력하세요.`);
-  if(typed!==token)return;
+  const typed=prompt(`${x.prefix} 최종 6세그먼트 카테고리를 적용합니다.\n\n실행하려면 APPLY 를 입력하세요.`);
+  if(typed!=='APPLY')return;
   const btn=document.getElementById('gmFdHsCategoryApplyBtn'),sum=document.getElementById('gmFdHsCategorySummary'),timer=startButtonTimer(btn,'카테고리 적용');
   try{
-    const confirmCode=`${x.prefix}_CATEGORY_REPLACE`;
+    const confirmCode='APPLY';
     const j=await gmCodeFetch(`/api/gm/builder/product-gm-code/fd-hs-category/apply?prefix=${encodeURIComponent(x.prefix)}&confirm=${encodeURIComponent(confirmCode)}`,{
       method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:x.text
     });
@@ -92,8 +91,8 @@ async function previewFdHs6DepthRematch(){
   finally{stopButtonTimer(timer);}
 }
 async function applyFdHs6DepthRematch(){
-  const typed=prompt('FD/HS 기존 glomart_code를 새 6단계 카테고리로 재매칭해 덮어씁니다.\n일반 상품과 다른 prefix는 수정하지 않습니다.\n\n실행하려면 FDHS APPLY 를 입력하세요.');
-  if(typed!=='FDHS APPLY')return;
+  const typed=prompt('FD/HS 기존 glomart_code를 새 6단계 카테고리로 재매칭합니다.\n\n실행하려면 APPLY 를 입력하세요.');
+  if(typed!=='APPLY')return;
   const btn=document.getElementById('gmFdHs6ApplyBtn'),sum=document.getElementById('gmFdHs6Summary'),timer=startButtonTimer(btn,'FD/HS 적용');
   try{
     const j=await gmCodeFetch('/api/gm/builder/product-gm-code/fd-hs-6depth/apply?confirm=FDHS_REMAP',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:'FDHS_REMAP'})});
