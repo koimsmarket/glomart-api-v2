@@ -25,7 +25,7 @@ const UNIT_RX={
 function emptyFlags(){return {kg:false,g:false,l:false,ml:false,count:false,sheet:false,roll:false,tablet:false,capsule:false,pouch:false,bottle:false,can:false,pair:false,piece:false};}
 function unitFlags(text){const s=clean(text),out=emptyFlags();for(const [k,re] of Object.entries(UNIT_RX))out[k]=re.test(s);return out;}
 function pct(n,d){return d>0?n/d:0;}
-function confidence(n,score,status){if(status==='NO_CPKR'||status==='NO_CATEGORY'||status==='MIXED_TIE')return 'LOW';if(n>=20&&score>=0.65)return 'HIGH';if(n>=5)return 'MEDIUM';return 'LOW';}
+function confidence(n,score,status){if(status==='NO_CPKR'||status==='NO_CATEGORY')return 'LOW';if(n>=20&&score>=0.65)return 'HIGH';if(n>=5)return 'MEDIUM';return 'LOW';}
 
 function chooseRule(e,{categoryMatchCount=0}={}){
   const n=Number(e.coupang_products||0);
@@ -41,11 +41,12 @@ function chooseRule(e,{categoryMatchCount=0}={}){
   const volumeRaw=Number(e.l_products||0)+Number(e.ml_products||0);
   const wr=pct(weightRaw,n),vr=pct(volumeRaw,n);
 
-  // Mixed weight/volume: choose the family with more products. Only an exact tie remains exceptional.
+  // Mixed weight/volume is a valid category state. Do NOT force one family.
+  // Products keep their original physical family; unit_price.js normalizes weight to 100g
+  // and volume to 100ml for sorting while preserving Coupang's unit_price_text for display.
   if(wr>=0.30&&vr>=0.30){
-    if(weightRaw===volumeRaw){return {family:'COUNT',qty:1,unit:'개',status:'MIXED_TIE',score:wr,confidence:'LOW',reason:`중량 ${weightRaw}건 / 용량 ${volumeRaw}건 동률 → 확인 필요`};}
-    if(weightRaw>volumeRaw){const kg=Number(e.kg_products||0),g=Number(e.g_products||0),useKg=kg>=g;return {family:'WEIGHT',qty:useKg?1:100,unit:useKg?'kg':'g',status:'MIXED_MAJORITY_WEIGHT',score:wr,confidence:confidence(n,wr,'AUTO'),reason:`중량 ${weightRaw}건 > 용량 ${volumeRaw}건 → 중량 자동선택 (kg ${kg}, g ${g})`};}
-    const l=Number(e.l_products||0),ml=Number(e.ml_products||0),useL=l>=ml;return {family:'VOLUME',qty:useL?1:100,unit:useL?'l':'ml',status:'MIXED_MAJORITY_VOLUME',score:vr,confidence:confidence(n,vr,'AUTO'),reason:`용량 ${volumeRaw}건 > 중량 ${weightRaw}건 → 용량 자동선택 (L ${l}, ml ${ml})`};
+    const score=Math.max(wr,vr);
+    return {family:'MIXED',qty:1,unit:'mixed',status:'MIXED',score,confidence:confidence(n,score,'MIXED'),reason:`중량 ${weightRaw}건 / 용량 ${volumeRaw}건 혼재 → 상품 원본 단위계열 유지`};
   }
   if(wr>=0.35){const kg=Number(e.kg_products||0),g=Number(e.g_products||0),useKg=kg>=g;return {family:'WEIGHT',qty:useKg?1:100,unit:useKg?'kg':'g',status:'AUTO',score:wr,confidence:confidence(n,wr,'AUTO'),reason:`쿠팡 중량표기 ${Math.round(Math.min(1,wr)*100)}% (kg ${kg}, g ${g})`};}
   if(vr>=0.35){const l=Number(e.l_products||0),ml=Number(e.ml_products||0),useL=l>=ml;return {family:'VOLUME',qty:useL?1:100,unit:useL?'l':'ml',status:'AUTO',score:vr,confidence:confidence(n,vr,'AUTO'),reason:`쿠팡 용량표기 ${Math.round(Math.min(1,vr)*100)}% (L ${l}, ml ${ml})`};}
@@ -99,7 +100,7 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
   const summary={
     keywords:0,category_rows:cats.rowCount||cats.rows.length,all_products:allProducts,coupang_products:coupangProducts,
     matched_keywords:0,no_category_keywords:0,normalized_candidate_keywords:0,auto_weight:0,auto_volume:0,auto_count_special:0,default_count:0,
-    mixed_majority_weight:0,mixed_majority_volume:0,mixed_tie:0,no_coupang:0,target_category_rows:0,
+    mixed:0,mixed_majority_weight:0,mixed_majority_volume:0,mixed_tie:0,no_coupang:0,target_category_rows:0,
     first_code_present:firstCodePresent,first_code_category_match:firstCodeCategoryMatch,first_code_missing:firstCodeMissing,first_code_unknown:firstCodeUnknown,
     analyzed_categories:matched.size,unmatched_groups:unknownCodes.size,unknown_code_groups:unknownCodes.size
   };
@@ -107,7 +108,7 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
   for(const [code,x] of [...matched.entries()].sort((a,b)=>a[0].localeCompare(b[0]))){
     const cat=byCode.get(code);const rule=chooseRule(x,{categoryMatchCount:1});
     summary.keywords++;summary.matched_keywords++;summary.target_category_rows++;
-    if(rule.status==='NO_CPKR')summary.no_coupang++;else if(rule.status==='MIXED_TIE')summary.mixed_tie++;else if(rule.status==='MIXED_MAJORITY_WEIGHT')summary.mixed_majority_weight++;else if(rule.status==='MIXED_MAJORITY_VOLUME')summary.mixed_majority_volume++;else if(rule.family==='WEIGHT')summary.auto_weight++;else if(rule.family==='VOLUME')summary.auto_volume++;else if(rule.status==='AUTO')summary.auto_count_special++;else summary.default_count++;
+    if(rule.status==='NO_CPKR')summary.no_coupang++;else if(rule.status==='MIXED')summary.mixed++;else if(rule.family==='WEIGHT')summary.auto_weight++;else if(rule.family==='VOLUME')summary.auto_volume++;else if(rule.status==='AUTO')summary.auto_count_special++;else summary.default_count++;
     items.push({category_keyword:clean(cat.keyword||cat.name_ko||code),category_name:clean(cat.name_ko||cat.keyword||''),first_gm_code:code,total_products:x.total_products,coupang_products:x.coupang_products,category_match_count:1,gm_codes:[code],candidate_gm_codes:[],candidate_names:[],unit_family:rule.family,unit_rule_qty:rule.qty,unit_rule_unit:rule.unit,status:rule.status,confidence:rule.confidence,score:Number(rule.score.toFixed(3)),reason:rule.reason,kg_products:x.kg_products,g_products:x.g_products,l_products:x.l_products,ml_products:x.ml_products,count_products:x.count_products,sheet_products:x.sheet_products,roll_products:x.roll_products,tablet_products:x.tablet_products,capsule_products:x.capsule_products,pouch_products:x.pouch_products,bottle_products:x.bottle_products,can_products:x.can_products,pair_products:x.pair_products,piece_products:x.piece_products,examples:examples.get(`C:${code}`)||[]});
   }
 
@@ -119,13 +120,13 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
     items.push({category_keyword:kw,category_name:'',first_gm_code:clean(x.first_code||''),total_products:x.total_products,coupang_products:x.coupang_products,category_match_count:0,gm_codes:[],candidate_gm_codes:candidates.map(m=>m.gm_code),candidate_names:candidates.map(m=>m.name_ko||m.keyword||''),unit_family:rule.family,unit_rule_qty:rule.qty,unit_rule_unit:rule.unit,status:'NO_CATEGORY',confidence:'LOW',score:Number(rule.score.toFixed(3)),reason:`첫 glomart_code ${clean(x.first_code)} 가 gm_category에 없음`,kg_products:x.kg_products,g_products:x.g_products,l_products:x.l_products,ml_products:x.ml_products,count_products:x.count_products,sheet_products:x.sheet_products,roll_products:x.roll_products,tablet_products:x.tablet_products,capsule_products:x.capsule_products,pouch_products:x.pouch_products,bottle_products:x.bottle_products,can_products:x.can_products,pair_products:x.pair_products,piece_products:x.piece_products,examples:examples.get(key)||[]});
   }
 
-  const reviewItems=items.filter(x=>x.status==='NO_CATEGORY'||x.status==='MIXED_TIE');
+  const reviewItems=items.filter(x=>x.status==='NO_CATEGORY');
   return {summary,items:includeItems?items.slice(0,Math.max(0,Number(sampleLimit)||0)):[],reviewItems:reviewItems.slice(0,Math.max(0,Number(sampleLimit)||0)),allItems:items};
 }
 
 async function applyCategoryUnitRules(db,{sampleLimit=500}={}){
-  const analyzed=await analyzeCategoryUnitRules(db,{sampleLimit,includeItems:true});const client=await db.connect();let changed=0,unchanged=0,skippedNoCategory=0,skippedTie=0;
-  try{await client.query('BEGIN');for(const item of analyzed.allItems){if(!item.gm_codes.length){skippedNoCategory++;continue;}if(item.status==='MIXED_TIE'){skippedTie++;continue;}for(const code of item.gm_codes){const r=await client.query(`UPDATE gm_category SET unit_rule_qty=$2,unit_rule_unit=$3,updated_at=NOW() WHERE gm_code=$1 AND (COALESCE(unit_rule_qty,0)<>$2 OR COALESCE(unit_rule_unit,'')<>$3) RETURNING gm_code`,[code,item.unit_rule_qty,item.unit_rule_unit]);if(r.rowCount)changed++;else unchanged++;}}await client.query('COMMIT');}catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
-  return {summary:analyzed.summary,items:analyzed.items,reviewItems:analyzed.reviewItems,changed,unchanged,skipped_no_category:skippedNoCategory,skipped_mixed_tie:skippedTie};
+  const analyzed=await analyzeCategoryUnitRules(db,{sampleLimit,includeItems:true});const client=await db.connect();let changed=0,unchanged=0,skippedNoCategory=0;
+  try{await client.query('BEGIN');for(const item of analyzed.allItems){if(!item.gm_codes.length){skippedNoCategory++;continue;}for(const code of item.gm_codes){const r=await client.query(`UPDATE gm_category SET unit_rule_qty=$2,unit_rule_unit=$3,updated_at=NOW() WHERE gm_code=$1 AND (COALESCE(unit_rule_qty,0)<>$2 OR COALESCE(unit_rule_unit,'')<>$3) RETURNING gm_code`,[code,item.unit_rule_qty,item.unit_rule_unit]);if(r.rowCount)changed++;else unchanged++;}}await client.query('COMMIT');}catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
+  return {summary:analyzed.summary,items:analyzed.items,reviewItems:analyzed.reviewItems,changed,unchanged,skipped_no_category:skippedNoCategory};
 }
 module.exports={unitFlags,chooseRule,analyzeCategoryUnitRules,applyCategoryUnitRules};

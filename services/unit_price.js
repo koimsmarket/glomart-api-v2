@@ -7,13 +7,14 @@
 const WEIGHT={mg:0.001,g:1,kg:1000};
 const VOLUME={ml:1,l:1000};
 const COUNT=new Set(['개','매','롤','정','캡슐','포','병','캔','켤레','장']);
+const MIXED_UNIT='mixed';
 const clean=v=>String(v==null?'':v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim();
 const number=v=>{const n=Number(String(v==null?'':v).replace(/,/g,''));return Number.isFinite(n)?n:null;};
 function normUnit(u){
   u=clean(u).toLowerCase().replace(/㎖/g,'ml');
   return ({킬로그램:'kg',그램:'g',리터:'l',밀리리터:'ml',개입:'개',입:'개',족:'켤레',권:'장'})[u]||u;
 }
-function family(u){u=normUnit(u);if(WEIGHT[u]!=null)return'WEIGHT';if(VOLUME[u]!=null)return'VOLUME';if(COUNT.has(u))return'COUNT';return'';}
+function family(u){u=normUnit(u);if(u===MIXED_UNIT)return'MIXED';if(WEIGHT[u]!=null)return'WEIGHT';if(VOLUME[u]!=null)return'VOLUME';if(COUNT.has(u))return'COUNT';return'';}
 function baseQty(q,u){q=number(q);u=normUnit(u);if(q==null)return null;if(WEIGHT[u]!=null)return q*WEIGHT[u];if(VOLUME[u]!=null)return q*VOLUME[u];if(COUNT.has(u))return q;return null;}
 function compatible(a,b){a=normUnit(a);b=normUnit(b);const fa=family(a),fb=family(b);if(!fa||fa!==fb)return false;if(fa==='COUNT')return a===b;return true;}
 function canonicalBaseUnit(u){const f=family(u);return f==='WEIGHT'?'g':f==='VOLUME'?'ml':normUnit(u);}
@@ -24,6 +25,36 @@ function parseExplicitUnitPrice(text){
   let m,last=null;
   while((m=re.exec(clean(text)))) last={qty:number(m[1]),unit:normUnit(m[2]),price:number(m[3]),raw:m[0]};
   return last;
+}
+
+function detectPhysicalFamilies(text){
+  const s=clean(text);
+  const weight=/(?:^|[^A-Za-z0-9])\d+(?:[.,]\d+)?\s*(?:kg|킬로그램|g|그램)(?![A-Za-z])/i.test(s);
+  const volume=/(?:^|[^A-Za-z0-9])\d+(?:[.,]\d+)?\s*(?:l|리터|ml|㎖|밀리리터)(?![A-Za-z])/i.test(s);
+  return {weight,volume};
+}
+function calculateMixed({price,unitPriceText='',texts=[]}){
+  const p=number(price), joined=(texts||[]).filter(Boolean).join(' ');
+  const explicit=parseExplicitUnitPrice(unitPriceText);
+  if(explicit){
+    const ef=family(explicit.unit);
+    if(ef==='WEIGHT'||ef==='VOLUME'){
+      const rq=100,ru=ef==='WEIGHT'?'g':'ml';
+      const sourceBase=baseQty(explicit.qty,explicit.unit),targetBase=baseQty(rq,ru);
+      const total=parseTotal(joined,ru);
+      const totalBase=total?(total.alreadyBase?total.qty:baseQty(total.qty,total.unit)):null;
+      return {ok:true,unit_price_value:explicit.price*targetBase/sourceBase,unit_base_qty:rq,unit_base_unit:ru,total_unit_qty:totalBase,total_unit_unit:totalBase==null?null:ru,unit_calc_basis:`FIRST_GM_CODE | MIXED | UNIT_TEXT:${explicit.raw}${total?` | TOTAL:${total.raw}`:''}`,mixed_family:ef};
+    }
+  }
+  const f=detectPhysicalFamilies(joined);
+  if(f.weight&&f.volume)return {ok:false,reason:'MIXED_PRODUCT_AMBIGUOUS'};
+  if(!f.weight&&!f.volume)return {ok:false,reason:'MIXED_UNIT_NOT_FOUND'};
+  const ru=f.weight?'g':'ml',rq=100,total=parseTotal(joined,ru);
+  if(total&&p>0){
+    const totalBase=total.alreadyBase?total.qty:baseQty(total.qty,total.unit);
+    if(totalBase>0)return {ok:true,unit_price_value:p*baseQty(rq,ru)/totalBase,unit_base_qty:rq,unit_base_unit:ru,total_unit_qty:totalBase,total_unit_unit:ru,unit_calc_basis:`FIRST_GM_CODE | MIXED | PARSE:${total.raw} => ${totalBase}${ru}`,mixed_family:f.weight?'WEIGHT':'VOLUME'};
+  }
+  return {ok:false,reason:'MIXED_UNIT_PARSE_FAILED'};
 }
 function parseTotal(text,ruleUnit){
   text=clean(text); const ru=normUnit(ruleUnit); const hits=[]; let m;
@@ -47,6 +78,7 @@ function parseTotal(text,ruleUnit){
 }
 function calculate({ruleQty,ruleUnit,price,unitPriceText='',texts=[]}){
   const rq=number(ruleQty), ru=normUnit(ruleUnit), p=number(price);
+  if(ru===MIXED_UNIT)return calculateMixed({price:p,unitPriceText,texts});
   if(!rq||!ru)return {ok:false,reason:'NO_RULE'};
   const targetBase=baseQty(rq,ru); if(!targetBase)return {ok:false,reason:'BAD_RULE'};
   const explicit=parseExplicitUnitPrice(unitPriceText);
@@ -78,16 +110,16 @@ async function recalcProductUnitByUid(db,uid){
   const rule=await findRuleByGmCode(db,first_code);
   if(!rule)return {ok:false,reason:'NO_RULE_FOR_FIRST_GLOMART_CODE',first_code};
   const x=calculate({ruleQty:rule.unit_rule_qty,ruleUnit:rule.unit_rule_unit,price:productPrice(p),unitPriceText:p.unit_price_text,texts:[p.product_name,p.mall_product_name,JSON.stringify(p.option_json||'')]});
-  await db.query(`UPDATE gm_product SET unit_price_value=$2,unit_base_qty=$3,unit_base_unit=$4,total_unit_qty=$5,total_unit_unit=$6,unit_calc_basis=$7,updated_at=NOW() WHERE product_uid=$1`,[uid,x.ok?x.unit_price_value:null,rule.unit_rule_qty,normUnit(rule.unit_rule_unit),x.ok?x.total_unit_qty:null,x.ok?x.total_unit_unit:null,x.ok?x.unit_calc_basis:x.reason]);
+  await db.query(`UPDATE gm_product SET unit_price_value=$2,unit_base_qty=$3,unit_base_unit=$4,total_unit_qty=$5,total_unit_unit=$6,unit_calc_basis=$7,updated_at=NOW() WHERE product_uid=$1`,[uid,x.ok?x.unit_price_value:null,x.ok?x.unit_base_qty:rule.unit_rule_qty,x.ok?x.unit_base_unit:normUnit(rule.unit_rule_unit),x.ok?x.total_unit_qty:null,x.ok?x.total_unit_unit:null,x.ok?x.unit_calc_basis:x.reason]);
   const or=await db.query(`SELECT * FROM gm_product_option WHERE mall_code=$1 AND product_id=$2`,[p.mall_code,p.product_id]);
   let options=0,option_ok=0;
   for(const o of or.rows){
     options++;
     const ox=calculate({ruleQty:rule.unit_rule_qty,ruleUnit:rule.unit_rule_unit,price:productPrice(o),texts:[o.option_name,p.product_name,p.mall_product_name]});
-    await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2`,[o.mall_code,o.pi_ii_vi,ox.ok?ox.unit_price_value:null,rule.unit_rule_qty,normUnit(rule.unit_rule_unit),ox.ok?ox.total_unit_qty:null,ox.ok?ox.total_unit_unit:null,ox.ok?ox.unit_calc_basis:ox.reason]);
+    await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2`,[o.mall_code,o.pi_ii_vi,ox.ok?ox.unit_price_value:null,ox.ok?ox.unit_base_qty:rule.unit_rule_qty,ox.ok?ox.unit_base_unit:normUnit(rule.unit_rule_unit),ox.ok?ox.total_unit_qty:null,ox.ok?ox.total_unit_unit:null,ox.ok?ox.unit_calc_basis:ox.reason]);
     if(ox.ok)option_ok++;
   }
-  return {ok:x.ok,product:x.ok,options,option_ok,first_code,rule:{gm_code:rule.gm_code,qty:rule.unit_rule_qty,unit:normUnit(rule.unit_rule_unit)}};
+  return {ok:x.ok,product:x.ok,options,option_ok,first_code,rule:{gm_code:rule.gm_code,qty:rule.unit_rule_qty,unit:normUnit(rule.unit_rule_unit)},resolved_unit:x.ok?{qty:x.unit_base_qty,unit:x.unit_base_unit}:null};
 }
 async function recalcCategory(db,{gmCode='',all=false,apply=false}){
   const filter=all?'':`AND split_part(COALESCE(p.glomart_code,''),'|',1)=$1`;
@@ -144,14 +176,14 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false}){
       const x=calculate({ruleQty:p.unit_rule_qty,ruleUnit:p.unit_rule_unit,price:productPrice(p),unitPriceText:p.unit_price_text,texts:[p.product_name,p.mall_product_name,JSON.stringify(p.option_json||'')]});
       if(x.ok)out.product_ok++;
       if(apply){
-        await db.query(`UPDATE gm_product SET unit_price_value=$2,unit_base_qty=$3,unit_base_unit=$4,total_unit_qty=$5,total_unit_unit=$6,unit_calc_basis=$7,updated_at=NOW() WHERE product_uid=$1`,[p.product_uid,x.ok?x.unit_price_value:null,p.unit_rule_qty,normUnit(p.unit_rule_unit),x.ok?x.total_unit_qty:null,x.ok?x.total_unit_unit:null,x.ok?x.unit_calc_basis:x.reason]);
+        await db.query(`UPDATE gm_product SET unit_price_value=$2,unit_base_qty=$3,unit_base_unit=$4,total_unit_qty=$5,total_unit_unit=$6,unit_calc_basis=$7,updated_at=NOW() WHERE product_uid=$1`,[p.product_uid,x.ok?x.unit_price_value:null,x.ok?x.unit_base_qty:p.unit_rule_qty,x.ok?x.unit_base_unit:normUnit(p.unit_rule_unit),x.ok?x.total_unit_qty:null,x.ok?x.total_unit_unit:null,x.ok?x.unit_calc_basis:x.reason]);
       }
       const options=optionMap.get(String(p.mall_code)+'\u0001'+String(p.product_id))||[];
       for(const o of options){
         out.options++;
         const ox=calculate({ruleQty:p.unit_rule_qty,ruleUnit:p.unit_rule_unit,price:productPrice(o),texts:[o.option_name,p.product_name,p.mall_product_name]});
         if(ox.ok)out.option_ok++;
-        if(apply)await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2`,[o.mall_code,o.pi_ii_vi,ox.ok?ox.unit_price_value:null,p.unit_rule_qty,normUnit(p.unit_rule_unit),ox.ok?ox.total_unit_qty:null,ox.ok?ox.total_unit_unit:null,ox.ok?ox.unit_calc_basis:ox.reason]);
+        if(apply)await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2`,[o.mall_code,o.pi_ii_vi,ox.ok?ox.unit_price_value:null,ox.ok?ox.unit_base_qty:p.unit_rule_qty,ox.ok?ox.unit_base_unit:normUnit(p.unit_rule_unit),ox.ok?ox.total_unit_qty:null,ox.ok?ox.total_unit_unit:null,ox.ok?ox.unit_calc_basis:ox.reason]);
       }
     }
     lastUid=String(products[products.length-1].product_uid||'');
@@ -159,4 +191,4 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false}){
   }
   return out;
 }
-module.exports={calculate,recalcProductUnitByUid,recalcCategory,normUnit,firstGlomartCode,findRuleByGmCode};
+module.exports={calculate,calculateMixed,recalcProductUnitByUid,recalcCategory,normUnit,firstGlomartCode,findRuleByGmCode};
