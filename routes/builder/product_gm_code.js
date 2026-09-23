@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_GLOMART_CODE_V015_FD_HS_CATEGORY_JSON_NULL_FIX
+// GM_PRODUCT_GLOMART_CODE_V016_FD_HS_CATEGORY_ID_ALLOC_FIX
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -376,8 +376,29 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
 
     const insertCols=v.headers.filter(c=>c!=='category_id'&&c!=='created_at'&&c!=='updated_at'&&v.meta.has(c));
     const qcols=insertCols.map(c=>`"${c}"`).join(',');
-    const ins=await client.query(`INSERT INTO gm_category (${qcols})
-      SELECT ${qcols} FROM gm_category_fdhs_stage WHERE category_id IS NULL`);
+
+    // category_id sequence가 실제 MAX(category_id)보다 뒤처진 운영 DB도 안전하게 처리한다.
+    // transaction 동안 gm_category 쓰기를 잠그고, 신규 행은 MAX+ROW_NUMBER로 명시 발급한다.
+    await client.query('LOCK TABLE gm_category IN SHARE ROW EXCLUSIVE MODE');
+    const ins=await client.query(`WITH base AS (
+        SELECT COALESCE(MAX(category_id),0)::bigint AS max_id FROM gm_category
+      ), src AS (
+        SELECT s.*,ROW_NUMBER() OVER (ORDER BY s.gm_code)::bigint AS rn
+          FROM gm_category_fdhs_stage s
+         WHERE s.category_id IS NULL
+      )
+      INSERT INTO gm_category (category_id,${qcols})
+      SELECT (base.max_id+src.rn)::int,${qcols}
+        FROM src CROSS JOIN base`);
+
+    // 이후 일반 INSERT가 같은 PK를 다시 발급하지 않도록 실제 sequence도 최종 MAX에 동기화한다.
+    const seqQ=await client.query(`SELECT pg_get_serial_sequence('gm_category','category_id') AS seq`);
+    const seqName=seqQ.rows&&seqQ.rows[0]&&seqQ.rows[0].seq;
+    if(seqName){
+      const maxQ=await client.query(`SELECT COALESCE(MAX(category_id),0)::bigint AS max_id FROM gm_category`);
+      const maxId=Number(maxQ.rows&&maxQ.rows[0]&&maxQ.rows[0].max_id||0);
+      if(maxId>0)await client.query(`SELECT setval($1::regclass,$2::bigint,true)`,[seqName,maxId]);
+    }
 
     const verify=await client.query(`SELECT COUNT(*)::int AS n,
        COUNT(DISTINCT gm_code)::int AS u,
@@ -390,11 +411,11 @@ router.post('/api/gm/builder/product-gm-code/fd-hs-category/apply',categoryCsvTe
     }
 
     await client.query('COMMIT');inTx=false;invalidateContext(db);
-    console.log(`[GM_PRODUCT_GLOMART_CODE_V014] category_replace prefix=${prefix} existing=${upd.rowCount||0} inserted=${ins.rowCount||0} total=${v.total_rows}`);
+    console.log(`[GM_PRODUCT_GLOMART_CODE_V016] category_replace prefix=${prefix} existing=${upd.rowCount||0} inserted=${ins.rowCount||0} total=${v.total_rows}`);
     ok(res,{action:'fd-hs-category.apply',prefix,updated_existing:upd.rowCount||0,inserted_new:ins.rowCount||0,total_rows:v.total_rows,post_verify:true});
   }catch(e){
     if(client&&inTx){try{await client.query('ROLLBACK');}catch(_){}}
-    console.error('[GM_PRODUCT_GLOMART_CODE_V014] category_replace_failed',String(e&&e.stack||e));
+    console.error('[GM_PRODUCT_GLOMART_CODE_V016] category_replace_failed',String(e&&e.stack||e));
     fail(res,500,'FD_HS_CATEGORY_APPLY_FAILED',{detail:String(e&&e.message||e)});
   }finally{
     if(release)client.release();
