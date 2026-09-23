@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_GLOMART_CODE_V014_FD_HS_CATEGORY_REPLACE
+// GM_PRODUCT_GLOMART_CODE_V015_FD_HS_CATEGORY_JSON_NULL_FIX
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -249,7 +249,9 @@ function categoryDbValue(v,meta){
   const x=String(v==null?'':v);
   const t=String(meta&&meta.data_type||'').toLowerCase();
   if(x===''){
-    if(t.includes('character')||t==='text'||t==='json'||t==='jsonb')return '';
+    // PostgreSQL json/jsonb cannot accept an empty string. Blank CSV JSON cells mean NULL.
+    if(t==='json'||t==='jsonb')return null;
+    if(t.includes('character')||t==='text')return '';
     return null;
   }
   if(t==='boolean')return /^(1|y|yes|true|on)$/i.test(x);
@@ -268,6 +270,14 @@ async function validateFdHsCategoryMaster(db,prefix,csvText){
   if(!meta.size)throw new Error('GM_CATEGORY_SCHEMA_NOT_FOUND');
   const unknown=headers.filter(h=>!meta.has(h));
   if(unknown.length)throw new Error(`CSV_UNKNOWN_COLUMNS:${unknown.join('|')}`);
+  const jsonCols=headers.filter(h=>{const t=String(meta.get(h)&&meta.get(h).data_type||'').toLowerCase();return t==='json'||t==='jsonb';});
+  for(const r of rows){
+    for(const c of jsonCols){
+      const x=String(r[c]==null?'':r[c]).trim();
+      if(!x)continue;
+      try{JSON.parse(x);}catch(_){throw new Error(`ROW_${r.__row}_INVALID_JSON:${c}`);}
+    }
+  }
 
   const codeRe=new RegExp(`^${prefix}-\\d{2}-\\d{3}-\\d{4}-\\d{4}-\\d{4}$`,'i');
   const codes=new Set(),cpCodes=new Set(),ids=new Set();let newRows=0;
