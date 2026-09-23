@@ -8,19 +8,31 @@ async function uploadSafe(tableKey,file,apply,leafOnly=false){
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/csv; charset=utf-8'},body:text});
   if(!r.ok){ const t=await r.text(); throw new Error(`HTTP ${r.status}: ${t.slice(0,500)}`); }
   const csv=await r.text();
-  const counts={UPDATED:0,INSERTED:0,FAIL:0,SKIP:0,VALID:0,OTHER:0};
+  const counts={UPDATED:0,VALID_UPDATE:0,INSERTED:0,VALID_INSERT:0,FAIL:0,SKIP:0,SKIP_CELL:0,STOPPED:0,OTHER:0};
   const parsed=(window.XLSX?XLSX.utils.sheet_to_json(XLSX.read(csv,{type:'string',raw:true}).Sheets.Sheet1,{defval:''}):[]);
   for(const row of parsed){ const k=String(row.result||''); if(Object.prototype.hasOwnProperty.call(counts,k)) counts[k]++; else counts.OTHER++; }
-  const summary={table:tableKey,mode:leafOnly?'LEAF_ONLY_APPLY':(apply?'APPLY':'DRY_RUN'),server_version:r.headers.get('X-GM-Builder-Version')||'',processed:r.headers.get('X-GM-Category-Processed')||'',applied:r.headers.get('X-GM-Category-Applied')||'',result_counts:counts};
+  const ts=Date.now();
+  const reportName=(leafOnly?'leaf_apply':(apply?'apply':'dryrun'))+'_result_'+tableKey+'_'+ts+'.csv';
+  const summary={
+    table:tableKey,
+    mode:leafOnly?'LEAF_ONLY_APPLY':(apply?'APPLY':'DRY_RUN'),
+    run_id:r.headers.get('X-GM-Safe-Update-Run-Id')||'',
+    processed:Number(r.headers.get('X-GM-Safe-Update-Processed')||parsed.length||0),
+    updated:Number(r.headers.get('X-GM-Safe-Update-Updated')||0),
+    skipped:Number(r.headers.get('X-GM-Safe-Update-Skipped')||0),
+    invalid:Number(r.headers.get('X-GM-Safe-Update-Invalid')||0),
+    result_counts:counts,
+    report_file:reportName
+  };
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(leafOnly?'leaf_apply':(apply?'apply':'dryrun'))+'_result_'+tableKey+'_'+Date.now()+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=reportName; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
   return summary;
 }
 async function send(apply,button){
   const f=document.getElementById('file').files[0]; if(!f){alert('Excel 또는 CSV 파일을 선택하세요.');return;}
   if(apply && prompt('실제 업데이트 하려면 APPLY 라고 입력하세요.')!=='APPLY') return;
   const table=document.getElementById('upTable').value; const timed=startButtonTimer(button,apply?'업데이트 중':'검증 중');
-  try{ await uploadSafe(table,f,apply); log({table,file:f.name,mode:apply?'APPLY':'DRY_RUN',result:'DONE'}); }catch(e){log(String(e&&e.message||e));}finally{stopButtonTimer(timed);}
+  try{ const summary=await uploadSafe(table,f,apply); log({file:f.name,result:'DONE',...summary}); }catch(e){log(String(e&&e.message||e));}finally{stopButtonTimer(timed);}
 }
 async function sendAll(apply,button){
   const files=[...document.getElementById('multiFiles').files]; if(!files.length){alert('파일들을 선택하세요.');return;}

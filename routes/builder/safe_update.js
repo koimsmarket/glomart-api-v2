@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-// GM_BUILDER_SAFE_UPDATE_V022_BATCH_UPDATE
+// GM_BUILDER_SAFE_UPDATE_V023_PRODUCT_UID_REPORT
 // Generic table safe-update only.
 // IMPORTANT: domain-specific jobs (image vector, device language, etc.) must NOT be added here.
 // This file owns generic CSV validation/update behavior only.
@@ -14,6 +14,11 @@ const { LIMITS, tableSpec, dbFrom, fail, parseCsv, getColumns, getColumnMeta, pi
 // For ALKR blank IID is still compared to DB NULL/blank, never ignored.
 function cleanProductKey(v){ return String(v == null ? '' : v).trim(); }
 function pickProductSafeKey(row){
+  // V023: Builder download/edit identity is product_uid. If a CSV carries product_uid,
+  // use it first so targeted fixes (e.g. glomart_code) update the exact exported row.
+  // Legacy mall/product/item/vendor composite remains as fallback for older CSVs.
+  const uid=cleanProductKey(row.product_uid);
+  if(uid) return {keys:['product_uid'], values:[uid], label:uid, blankComparable:new Set()};
   const mall=cleanProductKey(row.mall_code).toUpperCase();
   const pid=cleanProductKey(row.product_id);
   const iid=cleanProductKey(row.item_id);
@@ -244,6 +249,9 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
     return fail(res, 400, 'too many rows', { input_rows: rows.length, limit: LIMITS.MAX_ROWS });
   }
 
+  const safeRunId = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+  console.log(`[GM_BUILDER_SAFE_UPDATE_V023] start run=${safeRunId} table=${spec.table} apply=${apply?'Y':'N'} rows=${rows.length} file_mode=${exactFileMode?'EXACT':'KEEP_OLD'}`);
+
   // Cafe24 회원명부를 일반 gm_member safe-update에 넣어도 자동으로 전용 import로 처리한다.
   // 일반 safe-update는 member_id 컬럼을 찾기 때문에 Cafe24 원본 CSV(아이디/이름/휴대폰번호...)를 그대로 넣으면 MISSING_KEY가 난다.
   if (spec.table === 'gm_member' && rows.some(r => Object.prototype.hasOwnProperty.call(r, '아이디'))) {
@@ -321,6 +329,12 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
       res.setHeader('X-GM-Safe-Update-Batch-Size',String(batch.batchSize));
       res.setHeader('X-GM-Safe-Update-Select-Batches',String(batch.selectBatches));
       res.setHeader('X-GM-Safe-Update-Update-Batches',String(batch.updateBatches));
+      res.setHeader('X-GM-Safe-Update-Run-Id',safeRunId);
+      res.setHeader('X-GM-Safe-Update-Processed',String(batch.processed));
+      res.setHeader('X-GM-Safe-Update-Updated',String(batch.updated));
+      res.setHeader('X-GM-Safe-Update-Skipped',String(batch.skipped));
+      res.setHeader('X-GM-Safe-Update-Invalid',String(batch.invalid));
+      console.log(`[GM_BUILDER_SAFE_UPDATE_V023] done run=${safeRunId} table=${spec.table} apply=${apply?'Y':'N'} mode=BATCH processed=${batch.processed} updated=${batch.updated} skipped=${batch.skipped} invalid=${batch.invalid} select_batches=${batch.selectBatches} update_batches=${batch.updateBatches}`);
       return res.end(csv);
     }
 
@@ -462,9 +476,16 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="gm_safe_update_result_${Date.now()}.csv"`);
+    res.setHeader('X-GM-Safe-Update-Run-Id',safeRunId);
+    res.setHeader('X-GM-Safe-Update-Processed',String(processed));
+    res.setHeader('X-GM-Safe-Update-Updated',String(updated));
+    res.setHeader('X-GM-Safe-Update-Skipped',String(skipped));
+    res.setHeader('X-GM-Safe-Update-Invalid',String(invalid));
+    console.log(`[GM_BUILDER_SAFE_UPDATE_V023] done run=${safeRunId} table=${spec.table} apply=${apply?'Y':'N'} mode=ROW processed=${processed} updated=${updated} skipped=${skipped} invalid=${invalid}`);
     res.end(csv);
   } catch(e) {
-    fail(res, 500, 'safe update failed', { detail:String(e && e.message || e) });
+    console.error(`[GM_BUILDER_SAFE_UPDATE_V023] fail run=${safeRunId} table=${spec.table} apply=${apply?'Y':'N'} error=${String(e&&e.message||e)}`);
+    fail(res, 500, 'safe update failed', { detail:String(e && e.message || e), run_id:safeRunId });
   }
 });
 
