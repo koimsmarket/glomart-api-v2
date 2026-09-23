@@ -62,7 +62,7 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
     for(const key of [clean(c.keyword),clean(c.name_ko)]){if(!key)continue;const nk=norm(key);if(!nk)continue;if(!normalizedCategoryMap.has(nk))normalizedCategoryMap.set(nk,[]);const a=normalizedCategoryMap.get(nk);if(!a.some(x=>x.gm_code===c.gm_code))a.push(c);}
   }
 
-  const matched=new Map(),unmatched=new Map(),examples=new Map();
+  const matched=new Map(),unknownCodes=new Map(),examples=new Map();
   const fresh=()=>({coupang_products:0,kg_products:0,g_products:0,l_products:0,ml_products:0,count_products:0,sheet_products:0,roll_products:0,tablet_products:0,capsule_products:0,pouch_products:0,bottle_products:0,can_products:0,pair_products:0,piece_products:0,total_products:0});
   const E=(map,key)=>{if(!map.has(key))map.set(key,fresh());return map.get(key);};
   function addExample(key,name){if(!name)return;if(!examples.has(key))examples.set(key,[]);const a=examples.get(key);if(a.length<8&&!a.includes(name))a.push(name);}
@@ -85,13 +85,13 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
           continue;
         }
         firstCodeUnknown++;
-        const key=`UNKNOWN:${firstCode}`;const x=E(unmatched,key);x.total_products++;x.first_code=firstCode;x.category_keyword=kw||firstCode;x.unmatched_reason='FIRST_GLOMART_CODE_NOT_IN_GM_CATEGORY';
+        const key=`UNKNOWN:${firstCode}`;const x=E(unknownCodes,key);x.total_products++;x.first_code=firstCode;x.category_keyword=kw||firstCode;x.unmatched_reason='FIRST_GLOMART_CODE_NOT_IN_GM_CATEGORY';
         if(isCp){coupangProducts++;x.coupang_products++;const flags=unitFlags(`${p.product_name||''} ${p.mall_product_name||''}`);for(const k of Object.keys(flags))if(flags[k])x[`${k}_products`]++;addExample(key,name);}
         continue;
       }
+      // glomart_code 미부여 상품은 '카테고리 미매칭'이 아니다.
+      // 아직 카테고리 코드가 부여되지 않은 상품이므로 대표단위 카테고리 분석에서는 제외하고 통계만 남긴다.
       firstCodeMissing++;
-      const key=`MISSING:${kw||'(EMPTY)'}`;const x=E(unmatched,key);x.total_products++;x.first_code='';x.category_keyword=kw||'(EMPTY)';x.unmatched_reason='FIRST_GLOMART_CODE_MISSING';
-      if(isCp){coupangProducts++;x.coupang_products++;const flags=unitFlags(`${p.product_name||''} ${p.mall_product_name||''}`);for(const k of Object.keys(flags))if(flags[k])x[`${k}_products`]++;addExample(key,name);}
     }
   });
 
@@ -101,7 +101,7 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
     matched_keywords:0,no_category_keywords:0,normalized_candidate_keywords:0,auto_weight:0,auto_volume:0,auto_count_special:0,default_count:0,
     mixed_majority_weight:0,mixed_majority_volume:0,mixed_tie:0,no_coupang:0,target_category_rows:0,
     first_code_present:firstCodePresent,first_code_category_match:firstCodeCategoryMatch,first_code_missing:firstCodeMissing,first_code_unknown:firstCodeUnknown,
-    analyzed_categories:matched.size,unmatched_groups:unmatched.size
+    analyzed_categories:matched.size,unmatched_groups:unknownCodes.size,unknown_code_groups:unknownCodes.size
   };
 
   for(const [code,x] of [...matched.entries()].sort((a,b)=>a[0].localeCompare(b[0]))){
@@ -111,12 +111,12 @@ async function analyzeCategoryUnitRules(db,{sampleLimit=500,includeItems=true}={
     items.push({category_keyword:clean(cat.keyword||cat.name_ko||code),category_name:clean(cat.name_ko||cat.keyword||''),first_gm_code:code,total_products:x.total_products,coupang_products:x.coupang_products,category_match_count:1,gm_codes:[code],candidate_gm_codes:[],candidate_names:[],unit_family:rule.family,unit_rule_qty:rule.qty,unit_rule_unit:rule.unit,status:rule.status,confidence:rule.confidence,score:Number(rule.score.toFixed(3)),reason:rule.reason,kg_products:x.kg_products,g_products:x.g_products,l_products:x.l_products,ml_products:x.ml_products,count_products:x.count_products,sheet_products:x.sheet_products,roll_products:x.roll_products,tablet_products:x.tablet_products,capsule_products:x.capsule_products,pouch_products:x.pouch_products,bottle_products:x.bottle_products,can_products:x.can_products,pair_products:x.pair_products,piece_products:x.piece_products,examples:examples.get(`C:${code}`)||[]});
   }
 
-  for(const [key,x] of [...unmatched.entries()].sort((a,b)=>a[0].localeCompare(b[0]))){
+  for(const [key,x] of [...unknownCodes.entries()].sort((a,b)=>a[0].localeCompare(b[0]))){
     const kw=clean(x.category_keyword||'(EMPTY)'),candidates=normalizedCategoryMap.get(norm(kw))||[];
     const rule=chooseRule(x,{categoryMatchCount:0});
     summary.keywords++;summary.no_category_keywords++;if(candidates.length)summary.normalized_candidate_keywords++;
     if(rule.status==='NO_CPKR')summary.no_coupang++;else summary.default_count++;
-    items.push({category_keyword:kw,category_name:'',first_gm_code:clean(x.first_code||''),total_products:x.total_products,coupang_products:x.coupang_products,category_match_count:0,gm_codes:[],candidate_gm_codes:candidates.map(m=>m.gm_code),candidate_names:candidates.map(m=>m.name_ko||m.keyword||''),unit_family:rule.family,unit_rule_qty:rule.qty,unit_rule_unit:rule.unit,status:'NO_CATEGORY',confidence:'LOW',score:Number(rule.score.toFixed(3)),reason:x.unmatched_reason==='FIRST_GLOMART_CODE_NOT_IN_GM_CATEGORY'?`첫 glomart_code ${clean(x.first_code)} 가 gm_category에 없음`:'첫 glomart_code 없음',kg_products:x.kg_products,g_products:x.g_products,l_products:x.l_products,ml_products:x.ml_products,count_products:x.count_products,sheet_products:x.sheet_products,roll_products:x.roll_products,tablet_products:x.tablet_products,capsule_products:x.capsule_products,pouch_products:x.pouch_products,bottle_products:x.bottle_products,can_products:x.can_products,pair_products:x.pair_products,piece_products:x.piece_products,examples:examples.get(key)||[]});
+    items.push({category_keyword:kw,category_name:'',first_gm_code:clean(x.first_code||''),total_products:x.total_products,coupang_products:x.coupang_products,category_match_count:0,gm_codes:[],candidate_gm_codes:candidates.map(m=>m.gm_code),candidate_names:candidates.map(m=>m.name_ko||m.keyword||''),unit_family:rule.family,unit_rule_qty:rule.qty,unit_rule_unit:rule.unit,status:'NO_CATEGORY',confidence:'LOW',score:Number(rule.score.toFixed(3)),reason:`첫 glomart_code ${clean(x.first_code)} 가 gm_category에 없음`,kg_products:x.kg_products,g_products:x.g_products,l_products:x.l_products,ml_products:x.ml_products,count_products:x.count_products,sheet_products:x.sheet_products,roll_products:x.roll_products,tablet_products:x.tablet_products,capsule_products:x.capsule_products,pouch_products:x.pouch_products,bottle_products:x.bottle_products,can_products:x.can_products,pair_products:x.pair_products,piece_products:x.piece_products,examples:examples.get(key)||[]});
   }
 
   const reviewItems=items.filter(x=>x.status==='NO_CATEGORY'||x.status==='MIXED_TIE');
