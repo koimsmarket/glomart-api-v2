@@ -212,7 +212,13 @@ router.post('/api/gm/builder/category-unit/apply-auto',express.json({limit:'1mb'
 
 router.post('/api/gm/builder/category-unit/recalc',express.json({limit:'1mb'}),async(req,res)=>{try{
   const b=req.body||{};
-  const out=await recalcCategory(db(req),{gmCode:String(b.gm_code||'').trim(),all:!!b.all,apply:!!b.apply});
+  const out=await recalcCategory(db(req),{
+    gmCode:String(b.gm_code||'').trim(),
+    all:!!b.all,
+    apply:!!b.apply,
+    afterUid:String(b.after_uid||'').trim(),
+    maxProducts:Number(b.max_products||0)
+  });
   res.json({ok:true,...out});
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 

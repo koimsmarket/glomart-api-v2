@@ -74,7 +74,36 @@ function failureLabel(r){return ({
 })[r]||r;}
 function failureTable(title,obj,kind){const rows=Object.entries(obj||{}).sort((a,b)=>Number(b[1]?.count||0)-Number(a[1]?.count||0));if(!rows.length)return `<details><summary>${esc(title)}: 0건</summary><div class="failBody">실패 없음</div></details>`;const total=rows.reduce((n,[,v])=>n+Number(v?.count||0),0);let h=`<details open><summary>${esc(title)}: ${total.toLocaleString()}건 / ${rows.length}유형</summary><div class="failBody"><div class="failHint">각 원인별 대표 샘플은 최대 5건입니다. 검증 단계에서는 DB 단위가격을 수정하지 않습니다.</div><table class="failTbl"><thead><tr><th>원인</th><th>건수</th><th>룰</th><th>가격</th><th>${kind==='option'?'옵션 / 상품':'상품'}</th><th>기존 단위가격</th></tr></thead><tbody>`;for(const [reason,v] of rows){const samples=v.samples||[];if(!samples.length){h+=`<tr><td><b>${esc(failureLabel(reason))}</b><br><span class="failReason">${esc(reason)}</span></td><td>${Number(v.count||0).toLocaleString()}</td><td colspan="4">샘플 없음</td></tr>`;continue;}samples.forEach((x,i)=>{h+='<tr>';if(i===0)h+=`<td rowspan="${samples.length}"><b>${esc(failureLabel(reason))}</b><br><span class="failReason">${esc(reason)}</span></td><td rowspan="${samples.length}">${Number(v.count||0).toLocaleString()}</td>`;h+=`<td>${esc(x.gm_code||'-')}<br>${esc(x.rule_qty||'')} ${esc(x.rule_unit||'')}</td><td>${Number(x.price||0).toLocaleString()}</td><td class="sampleName">${kind==='option'?'<b>'+esc(x.option_name||'-')+'</b><br>':''}${esc(x.product_name||'-')}</td><td>${esc(x.unit_price_text||'-')}</td></tr>`;});}return h+'</tbody></table></div></details>';}
 function renderRecalc(j){recalcSummary.innerHTML=box('카테고리룰',j.rules||0)+box('전체상품',j.products||0)+box('상품 계산가능',j.product_ok||0)+box('상품 계산불가',j.product_failed??Math.max(0,(j.products||0)-(j.product_ok||0)),(j.product_failed||0)?'warn':'ok')+box('옵션',j.options||0)+box('옵션 계산가능',j.option_ok||0)+box('옵션 계산불가',j.option_failed??Math.max(0,(j.options||0)-(j.option_ok||0)),(j.option_failed||0)?'warn':'ok')+box('첫코드 있음',j.first_code_present||0)+box('해결된 룰매칭',j.first_code_rule_match||0)+box('첫코드 없음',j.first_code_missing||0,(j.first_code_missing||0)?'warn':'ok')+box('미해결 카테고리 없음',j.unresolved_first_code_category_missing||0,(j.unresolved_first_code_category_missing||0)?'warn':'ok')+box('원시 카테고리 없음',j.first_code_category_missing||0,(j.first_code_category_missing||0)?'warn':'ok')+box('룰 없음',j.first_code_rule_missing||0,(j.first_code_rule_missing||0)?'warn':'ok');recalcFailures.innerHTML=failureTable('상품 계산 실패 원인',j.product_failures,'product')+failureTable('옵션 계산 실패 원인',j.option_failures,'option');recalcLog.textContent=JSON.stringify(j,null,2);}
-async function recalc(apply){if(apply&&!confirm('전체 상품 + 옵션의 단위가격을 다시 계산합니다. 계속할까요?'))return;recalcLog.textContent=apply?'전체 재계산 중...':'전체 검증 중...';recalcFailures.innerHTML='';try{const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply})});const j=await r.json();renderRecalc(j);if(!r.ok)alert(j.error||'처리 실패');}catch(e){recalcLog.textContent=String(e);}}
+async function readJsonResponse(r){const t=await r.text();try{return JSON.parse(t);}catch(e){throw new Error('서버가 JSON 대신 다른 응답을 반환했습니다. HTTP '+r.status+' / '+t.slice(0,120));}}
+async function recalc(apply){
+  if(apply&&!confirm('전체 상품 + 옵션의 단위가격을 다시 계산합니다. 500상품씩 나누어 저장합니다. 계속할까요?'))return;
+  recalcFailures.innerHTML='';
+  if(!apply){
+    recalcLog.textContent='전체 검증 중...';
+    try{const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:false})});const j=await readJsonResponse(r);renderRecalc(j);if(!r.ok)alert(j.error||'처리 실패');}catch(e){recalcLog.textContent=String(e);}return;
+  }
+  let cursor='',batch=0,processed=0,total=0,productOk=0,optionOk=0,options=0;
+  recalcSummary.innerHTML='';
+  recalcLog.textContent='전체 재계산 시작...';
+  try{
+    while(true){
+      batch++;
+      const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:true,after_uid:cursor,max_products:500})});
+      const j=await readJsonResponse(r);
+      if(!r.ok||!j.ok)throw new Error(j.error||('배치 '+batch+' 처리 실패'));
+      if(!total)total=Number(j.products||0);
+      const n=Number(j.processed_products||0); processed+=n; productOk+=Number(j.product_ok||0); optionOk+=Number(j.option_ok||0); options+=Number(j.options||0);
+      cursor=String(j.next_cursor||cursor);
+      recalcSummary.innerHTML=box('전체상품',total)+box('처리완료',processed)+box('상품 계산성공',productOk)+box('옵션 처리',options)+box('옵션 계산성공',optionOk)+box('배치',batch);
+      recalcLog.textContent='재계산 진행 중...\n배치 '+batch+' / 처리 '+processed+' / '+total+'\n마지막 product_uid: '+cursor;
+      if(j.done||n===0)break;
+    }
+    recalcLog.textContent='재계산 저장 완료. 최종 검증을 다시 실행합니다...';
+    const vr=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:false})});
+    const vj=await readJsonResponse(vr);renderRecalc(vj);
+    if(!vr.ok)alert(vj.error||'최종 검증 실패'); else alert('전체 재계산 저장 완료. 최종 검증까지 완료했습니다.');
+  }catch(e){recalcLog.textContent=String(e)+'\n중간까지 저장된 배치는 그대로 유지됩니다. 같은 버튼을 다시 누르면 처음부터 재확인하며 안전하게 덮어씁니다.';}
+}
 
 
 async function loadAiStatus(){aiLog.textContent='환경변수 확인 중...';try{const r=await fetch('/api/gm/builder/category-unit/ai-status');const j=await r.json();if(!r.ok)throw new Error(j.error||'상태 확인 실패');aiStatus.innerHTML=box('API 키',j.configured?'설정됨':'미설정',j.configured?'ok':'danger')+box('기본 모델',j.model||'-')+box('재검토 모델',j.review_model||'-');aiLog.textContent=j.configured?'OPENAI_API_KEY가 설정되어 있습니다. 아직 실제 호출은 하지 않았습니다.':'OPENAI_API_KEY가 없습니다. Cloudtype 환경변수에 추가 후 재배포/재시작하세요.';}catch(e){aiLog.textContent=String(e);}}
