@@ -4,7 +4,7 @@
 const express=require('express');
 const crypto=require('crypto');
 const router=express.Router();
-const {recalcCategory}=require('../../services/unit_price');
+const {recalcCategory,recalcMissingCountBatch}=require('../../services/unit_price');
 const {analyzeCategoryUnitRules,applyCategoryUnitRules}=require('../../services/category_unit_analyzer');
 const OpenAIClient=require('../../services/openai_client');
 const AiGuard=require('../../services/ai_guard');
@@ -208,6 +208,16 @@ router.post('/api/gm/builder/category-unit/apply-auto',express.json({limit:'1mb'
   const out=await applyCategoryUnitRules(db(req),{sampleLimit:Number(req.body&&req.body.sample_limit||200)});
   await attachAiStatus(db(req),out);
   res.json({ok:true,mode:'APPLY_AUTO',...out});
+}catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
+
+router.post('/api/gm/builder/category-unit/recalc-missing-count',express.json({limit:'1mb'}),async(req,res)=>{try{
+  const b=req.body||{};
+  const out=await recalcMissingCountBatch(db(req),{
+    afterUid:String(b.after_uid||'').trim(),
+    maxProducts:Number(b.max_products||100),
+    apply:b.apply!==false
+  });
+  res.json({ok:true,...out});
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
 
 router.post('/api/gm/builder/category-unit/recalc',express.json({limit:'1mb'}),async(req,res)=>{try{

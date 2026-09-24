@@ -6,7 +6,7 @@
 
 const WEIGHT={mg:0.001,g:1,kg:1000};
 const VOLUME={ml:1,l:1000};
-const COUNT=new Set(['개','매','롤','정','캡슐','포','병','캔','켤레','장']);
+const COUNT=new Set(['개','매','롤','정','캡슐','포','병','캔','켤레','장','팩','봉','세트','박스','상자','묶음']);
 const MIXED_UNIT='mixed';
 const clean=v=>String(v==null?'':v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim();
 const number=v=>{const n=Number(String(v==null?'':v).replace(/,/g,''));return Number.isFinite(n)?n:null;};
@@ -116,6 +116,95 @@ function inheritParentCalculation({ruleQty,ruleUnit,price,parentCalc}){
   if(!rq||!ru||rf!==pf)return null;
   const targetBase=baseQty(rq,ru);if(!targetBase)return null;
   return {ok:true,unit_price_value:p*targetBase/parentCalc.total_unit_qty,unit_base_qty:rq,unit_base_unit:ru,total_unit_qty:parentCalc.total_unit_qty,total_unit_unit:canonicalBaseUnit(ru),unit_calc_basis:'FIRST_GM_CODE | OPTION_INHERIT_PARENT_TOTAL'};
+}
+
+
+
+// GM_BUILDER_V038: fallback for rows that still have no unit price after normal calculation.
+// Only explicit count expressions are accepted. Ambiguous alternatives such as 2/4Pcs are left untouched.
+const COUNT_FALLBACK_ALIASES={
+  '개':'개','개입':'개','ea':'개','pcs':'개','pc':'개','piece':'개','pieces':'개',
+  '매':'매','장':'장','팩':'팩','pack':'팩','packs':'팩','봉':'봉','세트':'세트','set':'세트','sets':'세트',
+  '롤':'롤','roll':'롤','rolls':'롤','켤레':'켤레','pair':'켤레','pairs':'켤레','정':'정','캡슐':'캡슐','포':'포',
+  '병':'병','캔':'캔','박스':'박스','box':'박스','boxes':'박스','상자':'상자','묶음':'묶음'
+};
+function normCountFallbackUnit(u){return COUNT_FALLBACK_ALIASES[clean(u).toLowerCase()]||'';}
+function parseCountFallback(texts=[]){
+  const text=clean((texts||[]).filter(Boolean).join(' '));
+  if(!text)return {ok:false,reason:'COUNT_FALLBACK_NOT_FOUND'};
+  // Explicit alternative quantities are intentionally ambiguous: 2/4Pcs, 300/100PCS, 2~4개, 2-4개.
+  if(/\b\d+(?:\.\d+)?\s*(?:\/|~|～|-)\s*\d+(?:\.\d+)?\s*(?:pcs?|pieces?|ea|개입?|매|장|팩|packs?|봉|세트|sets?|롤|rolls?|켤레|pairs?|정|캡슐|포|병|캔|박스|boxes?|상자|묶음)\b/i.test(text))return {ok:false,reason:'COUNT_FALLBACK_AMBIGUOUS'};
+  const re=/([0-9][0-9,]*(?:\.\d+)?)\s*(개입|개|ea|pcs|pc|pieces|piece|매|장|팩|packs|pack|봉|세트|sets|set|롤|rolls|roll|켤레|pairs|pair|정|캡슐|포|병|캔|박스|boxes|box|상자|묶음)(?![A-Za-z가-힣])/ig;
+  const hits=[]; let m;
+  while((m=re.exec(text))){
+    const qty=number(m[1]),unit=normCountFallbackUnit(m[2]);
+    if(!(qty>0)||!unit)continue;
+    hits.push({qty,unit,raw:m[0]});
+  }
+  if(!hits.length)return {ok:false,reason:'COUNT_FALLBACK_NOT_FOUND'};
+  const uniq=[];
+  for(const h of hits){if(!uniq.some(x=>x.qty===h.qty&&x.unit===h.unit))uniq.push(h);}
+  if(uniq.length!==1)return {ok:false,reason:'COUNT_FALLBACK_AMBIGUOUS',candidates:uniq};
+  return {ok:true,...uniq[0]};
+}
+function calculateCountFallback({price,texts=[]}){
+  const p=number(price); if(!(p>0))return {ok:false,reason:'PRICE_MISSING_OR_ZERO'};
+  const c=parseCountFallback(texts); if(!c.ok)return c;
+  return {ok:true,unit_price_value:p/c.qty,unit_base_qty:1,unit_base_unit:c.unit,total_unit_qty:c.qty,total_unit_unit:c.unit,unit_calc_basis:`COUNT_FALLBACK_EXPLICIT:${c.raw}`};
+}
+function inheritCountFallback({price,parentCalc}){
+  const p=number(price); if(!(p>0)||!parentCalc||!parentCalc.ok||!(parentCalc.total_unit_qty>0)||family(parentCalc.unit_base_unit)!=='COUNT')return null;
+  return {ok:true,unit_price_value:p/parentCalc.total_unit_qty,unit_base_qty:1,unit_base_unit:parentCalc.unit_base_unit,total_unit_qty:parentCalc.total_unit_qty,total_unit_unit:parentCalc.total_unit_unit,unit_calc_basis:'COUNT_FALLBACK_OPTION_INHERIT_PARENT'};
+}
+
+async function recalcMissingCountBatch(db,{afterUid='',maxProducts=100,apply=true}={}){
+  const pageSize=Math.max(1,Math.min(500,Number(maxProducts||100)));
+  const lastUid=clean(afterUid);
+  const firstBatch=!lastUid;
+  const out={ok:true,mode:'MISSING_COUNT_ONLY',apply:!!apply,target_products:0,processed_products:0,product_ok:0,product_ambiguous:0,product_not_found:0,options:0,option_ok:0,option_ambiguous:0,option_not_found:0,next_cursor:lastUid,done:false};
+  if(firstBatch){
+    const t=await db.query(`SELECT COUNT(*)::int AS n FROM gm_product WHERE unit_price_value IS NULL`);
+    out.target_products=Number(t.rows[0]&&t.rows[0].n||0);
+  }
+  const rows=await db.query(`SELECT p.product_uid,p.mall_code,p.product_id,p.product_name,p.mall_product_name,p.option_json,p.unit_price_text,
+      p.final_supply_price,p.mall_discount_price,p.discount_price,p.mall_sale_price
+    FROM gm_product p
+    WHERE p.unit_price_value IS NULL AND p.product_uid>$1
+    ORDER BY p.product_uid ASC LIMIT $2`,[lastUid,pageSize]);
+  if(!rows.rows.length){out.done=true;return out;}
+  const products=rows.rows;
+  const keys=products.filter(p=>p.mall_code!=null&&p.product_id!=null);
+  const optionMap=new Map();
+  if(keys.length){
+    const vals=[],tuples=[];let n=1;
+    for(const p of keys){tuples.push(`($${n++}::text,$${n++}::text)`);vals.push(String(p.mall_code),String(p.product_id));}
+    const oq=await db.query(`WITH k(mall_code,product_id) AS (VALUES ${tuples.join(',')})
+      SELECT o.* FROM gm_product_option o JOIN k ON o.mall_code::text=k.mall_code AND o.product_id::text=k.product_id
+      WHERE o.unit_price_value IS NULL`,vals);
+    for(const o of oq.rows){const k=String(o.mall_code)+'\u0001'+String(o.product_id);if(!optionMap.has(k))optionMap.set(k,[]);optionMap.get(k).push(o);}
+  }
+  for(const p of products){
+    const pTexts=[p.product_name,p.mall_product_name];
+    const x=calculateCountFallback({price:productPrice(p),texts:pTexts});
+    if(x.ok){
+      out.product_ok++;
+      if(apply)await db.query(`UPDATE gm_product SET unit_price_value=$2,unit_base_qty=$3,unit_base_unit=$4,total_unit_qty=$5,total_unit_unit=$6,unit_calc_basis=$7,updated_at=NOW() WHERE product_uid=$1 AND unit_price_value IS NULL`,[p.product_uid,x.unit_price_value,x.unit_base_qty,x.unit_base_unit,x.total_unit_qty,x.total_unit_unit,x.unit_calc_basis]);
+    }else if(x.reason==='COUNT_FALLBACK_AMBIGUOUS')out.product_ambiguous++; else out.product_not_found++;
+    const options=optionMap.get(String(p.mall_code)+'\u0001'+String(p.product_id))||[];
+    for(const o of options){
+      out.options++;
+      let ox=calculateCountFallback({price:productPrice(o),texts:[o.option_name,p.product_name,p.mall_product_name]});
+      if(!ox.ok&&x.ok){const inherited=inheritCountFallback({price:productPrice(o),parentCalc:x});if(inherited)ox=inherited;}
+      if(ox.ok){
+        out.option_ok++;
+        if(apply)await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2 AND unit_price_value IS NULL`,[o.mall_code,o.pi_ii_vi,ox.unit_price_value,ox.unit_base_qty,ox.unit_base_unit,ox.total_unit_qty,ox.total_unit_unit,ox.unit_calc_basis]);
+      }else if(ox.reason==='COUNT_FALLBACK_AMBIGUOUS')out.option_ambiguous++; else out.option_not_found++;
+    }
+  }
+  out.processed_products=products.length;
+  out.next_cursor=String(products[products.length-1].product_uid||'');
+  out.done=products.length<pageSize;
+  return out;
 }
 
 async function findRuleByGmCode(db,gmCode){
@@ -309,4 +398,4 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false,afterUid='',ma
   return out;
 }
 
-module.exports={calculate,calculateMixed,inheritParentCalculation,recalcProductUnitByUid,recalcCategory,normUnit,glomartCodes,firstGlomartCode,findRuleByGmCode,findFirstValidRule};
+module.exports={calculate,calculateMixed,calculateCountFallback,parseCountFallback,inheritParentCalculation,recalcProductUnitByUid,recalcCategory,recalcMissingCountBatch,normUnit,glomartCodes,firstGlomartCode,findRuleByGmCode,findFirstValidRule};
