@@ -223,6 +223,11 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false,afterUid='',ma
   const rc=await db.query(`SELECT COUNT(*)::int AS n FROM gm_category WHERE COALESCE(unit_rule_qty,0)>0 AND COALESCE(unit_rule_unit,'')<>''${all?'':' AND gm_code=$1'}`,params);
   out.rules=Number(rc.rows[0]&&rc.rows[0].n||0);
 
+  const pageSize=Math.max(1,Math.min(500,Number(maxProducts||500)));
+  let lastUid=clean(afterUid);
+  let processedProducts=0;
+  const batchMode=!!(all&&apply&&Number(maxProducts||0)>0);
+
   if(all&&(!batchMode||!clean(afterUid))&&out.first_code_missing>0){
     const miss=await db.query(`SELECT product_uid,product_name,mall_product_name,glomart_code,category_keyword,unit_price_text,final_supply_price,mall_discount_price,discount_price,mall_sale_price
       FROM gm_product WHERE COALESCE(NULLIF(trim(glomart_code),''),'')='' ORDER BY product_uid LIMIT 5`);
@@ -231,7 +236,6 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false,afterUid='',ma
   if(all&&(!batchMode||!clean(afterUid))&&out.unresolved_first_code_category_missing>0)addFailureCount(out,'product','NO_VALID_GM_CATEGORY',out.unresolved_first_code_category_missing,[]);
   if(all&&(!batchMode||!clean(afterUid))&&out.first_code_rule_missing>0)addFailureCount(out,'product','NO_CATEGORY_UNIT_RULE',out.first_code_rule_missing,[]);
 
-  const pageSize=Math.max(1,Math.min(500,Number(maxProducts||500))); let lastUid=clean(afterUid); let processedProducts=0; const batchMode=!!(all&&apply&&Number(maxProducts||0)>0);
   while(true){
     const qparams=all?[lastUid,pageSize]:[clean(gmCode),lastUid,pageSize];
     const rows=await db.query(`SELECT p.product_uid,p.mall_code,p.product_id,p.product_name,p.mall_product_name,p.option_json,p.unit_price_text,
