@@ -88,12 +88,14 @@ async function recalc(apply){
   try{
     while(true){
       batch++;
-      const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:true,after_uid:cursor,max_products:500})});
+      const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:true,after_uid:cursor,max_products:100})});
       const j=await readJsonResponse(r);
       if(!r.ok||!j.ok)throw new Error(j.error||('배치 '+batch+' 처리 실패'));
       if(!total)total=Number(j.products||0);
       const n=Number(j.processed_products||0); processed+=n; productOk+=Number(j.product_ok||0); optionOk+=Number(j.option_ok||0); options+=Number(j.options||0);
+      const prevCursor=cursor;
       cursor=String(j.next_cursor||cursor);
+      if(!j.done && (n<=0 || !cursor || cursor===prevCursor)) throw new Error('재계산 진행 커서가 갱신되지 않았습니다. 안전을 위해 중단합니다.');
       recalcSummary.innerHTML=box('전체상품',total)+box('처리완료',processed)+box('상품 계산성공',productOk)+box('옵션 처리',options)+box('옵션 계산성공',optionOk)+box('배치',batch);
       recalcLog.textContent='재계산 진행 중...\n배치 '+batch+' / 처리 '+processed+' / '+total+'\n마지막 product_uid: '+cursor;
       if(j.done||n===0)break;
