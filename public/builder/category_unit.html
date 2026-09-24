@@ -76,13 +76,13 @@ function failureTable(title,obj,kind){const rows=Object.entries(obj||{}).sort((a
 function renderRecalc(j){recalcSummary.innerHTML=box('카테고리룰',j.rules||0)+box('전체상품',j.products||0)+box('상품 계산가능',j.product_ok||0)+box('상품 계산불가',j.product_failed??Math.max(0,(j.products||0)-(j.product_ok||0)),(j.product_failed||0)?'warn':'ok')+box('옵션',j.options||0)+box('옵션 계산가능',j.option_ok||0)+box('옵션 계산불가',j.option_failed??Math.max(0,(j.options||0)-(j.option_ok||0)),(j.option_failed||0)?'warn':'ok')+box('첫코드 있음',j.first_code_present||0)+box('해결된 룰매칭',j.first_code_rule_match||0)+box('첫코드 없음',j.first_code_missing||0,(j.first_code_missing||0)?'warn':'ok')+box('미해결 카테고리 없음',j.unresolved_first_code_category_missing||0,(j.unresolved_first_code_category_missing||0)?'warn':'ok')+box('원시 카테고리 없음',j.first_code_category_missing||0,(j.first_code_category_missing||0)?'warn':'ok')+box('룰 없음',j.first_code_rule_missing||0,(j.first_code_rule_missing||0)?'warn':'ok');recalcFailures.innerHTML=failureTable('상품 계산 실패 원인',j.product_failures,'product')+failureTable('옵션 계산 실패 원인',j.option_failures,'option');recalcLog.textContent=JSON.stringify(j,null,2);}
 async function readJsonResponse(r){const t=await r.text();try{return JSON.parse(t);}catch(e){throw new Error('서버가 JSON 대신 다른 응답을 반환했습니다. HTTP '+r.status+' / '+t.slice(0,120));}}
 async function recalc(apply){
-  if(apply&&!confirm('전체 상품 + 옵션의 단위가격을 다시 계산합니다. 500상품씩 나누어 저장합니다. 계속할까요?'))return;
+  if(apply&&!confirm('전체 상품 + 옵션의 단위가격을 다시 계산합니다. 100상품씩 나누어 저장합니다. 계산 불가 상품은 단위가격을 비워 둡니다. 계속할까요?'))return;
   recalcFailures.innerHTML='';
   if(!apply){
     recalcLog.textContent='전체 검증 중...';
     try{const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:false})});const j=await readJsonResponse(r);renderRecalc(j);if(!r.ok)alert(j.error||'처리 실패');}catch(e){recalcLog.textContent=String(e);}return;
   }
-  let cursor='',batch=0,processed=0,total=0,productOk=0,optionOk=0,options=0;
+  let cursor='',batch=0,processed=0,total=0,target=0,productOk=0,optionOk=0,options=0;
   recalcSummary.innerHTML='';
   recalcLog.textContent='전체 재계산 시작...';
   try{
@@ -91,13 +91,13 @@ async function recalc(apply){
       const r=await fetch('/api/gm/builder/category-unit/recalc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({all:true,apply:true,after_uid:cursor,max_products:100})});
       const j=await readJsonResponse(r);
       if(!r.ok||!j.ok)throw new Error(j.error||('배치 '+batch+' 처리 실패'));
-      if(!total)total=Number(j.products||0);
+      if(!total)total=Number(j.products||0); if(!target)target=Number(j.first_code_rule_match||j.products||0);
       const n=Number(j.processed_products||0); processed+=n; productOk+=Number(j.product_ok||0); optionOk+=Number(j.option_ok||0); options+=Number(j.options||0);
       const prevCursor=cursor;
       cursor=String(j.next_cursor||cursor);
       if(!j.done && (n<=0 || !cursor || cursor===prevCursor)) throw new Error('재계산 진행 커서가 갱신되지 않았습니다. 안전을 위해 중단합니다.');
-      recalcSummary.innerHTML=box('전체상품',total)+box('처리완료',processed)+box('상품 계산성공',productOk)+box('옵션 처리',options)+box('옵션 계산성공',optionOk)+box('배치',batch);
-      recalcLog.textContent='재계산 진행 중...\n배치 '+batch+' / 처리 '+processed+' / '+total+'\n마지막 product_uid: '+cursor;
+      recalcSummary.innerHTML=box('전체상품',total)+box('재계산 대상',target)+box('처리완료',processed)+box('상품 계산성공',productOk)+box('옵션 처리',options)+box('옵션 계산성공',optionOk)+box('배치',batch);
+      recalcLog.textContent='재계산 진행 중...\n배치 '+batch+' / 처리 '+processed+' / 대상 '+target+' (전체 '+total+')\n마지막 product_uid: '+cursor;
       if(j.done||n===0)break;
     }
     recalcLog.textContent='재계산 저장 완료. 최종 검증을 다시 실행합니다...';

@@ -196,16 +196,24 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false,afterUid='',ma
     ) c ON true`;
   const filter=all?'':`AND c.gm_code=$1`;
   const params=all?[]:[clean(gmCode)];
-  const stat=await db.query(`SELECT
-      COUNT(*)::int AS products_total,
-      COUNT(*) FILTER (WHERE split_part(COALESCE(p.glomart_code,''),'|',1)<>'')::int AS first_code_present,
-      COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL)::int AS first_code_category_match,
-      0::int AS admin_unit_reference_match,
-      COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL)::int AS resolved_category_match,
-      COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL AND COALESCE(c.unit_rule_qty,0)>0 AND COALESCE(c.unit_rule_unit,'')<>'')::int AS resolved_rule_match
-    FROM gm_product p ${joins}
-    WHERE 1=1 ${filter}`,params);
-  const s=stat.rows[0]||{};
+  const pageSize=Math.max(1,Math.min(500,Number(maxProducts||500)));
+  let lastUid=clean(afterUid);
+  let processedProducts=0;
+  const batchMode=!!(all&&apply&&Number(maxProducts||0)>0);
+  const continuationBatch=!!(batchMode&&lastUid);
+  let s={};
+  if(!continuationBatch){
+    const stat=await db.query(`SELECT
+        COUNT(*)::int AS products_total,
+        COUNT(*) FILTER (WHERE split_part(COALESCE(p.glomart_code,''),'|',1)<>'')::int AS first_code_present,
+        COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL)::int AS first_code_category_match,
+        0::int AS admin_unit_reference_match,
+        COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL)::int AS resolved_category_match,
+        COUNT(*) FILTER (WHERE c.gm_code IS NOT NULL AND COALESCE(c.unit_rule_qty,0)>0 AND COALESCE(c.unit_rule_unit,'')<>'')::int AS resolved_rule_match
+      FROM gm_product p ${joins}
+      WHERE 1=1 ${filter}`,params);
+    s=stat.rows[0]||{};
+  }
   const out={
     rules:0,products:Number(s.products_total||0),product_ok:0,options:0,option_ok:0,apply,
     first_code_present:Number(s.first_code_present||0),
@@ -220,13 +228,10 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false,afterUid='',ma
     rule_source:'FIRST_VALID_GM_CODE',
     product_failures:{},option_failures:{}
   };
-  const rc=await db.query(`SELECT COUNT(*)::int AS n FROM gm_category WHERE COALESCE(unit_rule_qty,0)>0 AND COALESCE(unit_rule_unit,'')<>''${all?'':' AND gm_code=$1'}`,params);
-  out.rules=Number(rc.rows[0]&&rc.rows[0].n||0);
-
-  const pageSize=Math.max(1,Math.min(500,Number(maxProducts||500)));
-  let lastUid=clean(afterUid);
-  let processedProducts=0;
-  const batchMode=!!(all&&apply&&Number(maxProducts||0)>0);
+  if(!continuationBatch){
+    const rc=await db.query(`SELECT COUNT(*)::int AS n FROM gm_category WHERE COALESCE(unit_rule_qty,0)>0 AND COALESCE(unit_rule_unit,'')<>''${all?'':' AND gm_code=$1'}`,params);
+    out.rules=Number(rc.rows[0]&&rc.rows[0].n||0);
+  }
 
   if(all&&(!batchMode||!clean(afterUid))&&out.first_code_missing>0){
     const miss=await db.query(`SELECT product_uid,product_name,mall_product_name,glomart_code,category_keyword,unit_price_text,final_supply_price,mall_discount_price,discount_price,mall_sale_price
