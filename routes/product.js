@@ -11,6 +11,75 @@ function toInt(v, def=0){
   return Number.isFinite(n) ? Math.round(n) : def;
 }
 
+function pickUnitPriceText(obj){
+  obj = obj || {};
+  const direct = firstNonEmpty(obj, [
+    'unit_price_text','unitPriceText','unit_price_display','unitPriceDisplay',
+    'price_per_unit_text','pricePerUnitText','per_unit_price_text','perUnitPriceText',
+    'unit_price_label','unitPriceLabel','unit_price_desc','unitPriceDesc'
+  ]);
+  if(direct) return direct;
+  const loose = firstNonEmpty(obj,['unit_price','unitPrice']);
+  if(loose && (/[당]/.test(loose) || /[₩￦]?\s*[0-9][0-9,]*(?:\.[0-9]+)?\s*원?\s*\/\s*[0-9]/i.test(loose))) return loose;
+  const qty = firstNonEmpty(obj,['unit_price_qty','unitPriceQty','per_unit_qty','perUnitQty']);
+  const unit = firstNonEmpty(obj,['unit_price_unit','unitPriceUnit','per_unit_unit','perUnitUnit']);
+  const value = firstNonEmpty(obj,['unit_price_value_text','unitPriceValueText','per_unit_price','perUnitPrice']);
+  if(qty && unit && value) return cleanText(`${qty}${unit}당 ${value}원`);
+  return '';
+}
+
+const UNIT_PRICE_DIRECT_FIELDS = [
+  'unit_price_text','unitPriceText','unit_price_display','unitPriceDisplay',
+  'price_per_unit_text','pricePerUnitText','per_unit_price_text','perUnitPriceText',
+  'unit_price_label','unitPriceLabel','unit_price_desc','unitPriceDesc'
+];
+const UNIT_PRICE_STRUCTURED_FIELDS = [
+  'unit_price_qty','unitPriceQty','per_unit_qty','perUnitQty',
+  'unit_price_unit','unitPriceUnit','per_unit_unit','perUnitUnit',
+  'unit_price_value_text','unitPriceValueText','per_unit_price','perUnitPrice'
+];
+function hasOwnAny(obj,names){
+  obj=obj||{};
+  return names.some(name=>Object.prototype.hasOwnProperty.call(obj,name));
+}
+function hasUnitPriceSignal(obj){
+  obj=obj||{};
+  if(hasOwnAny(obj,UNIT_PRICE_DIRECT_FIELDS))return true;
+  const hasQty=hasOwnAny(obj,['unit_price_qty','unitPriceQty','per_unit_qty','perUnitQty']);
+  const hasUnit=hasOwnAny(obj,['unit_price_unit','unitPriceUnit','per_unit_unit','perUnitUnit']);
+  const hasValue=hasOwnAny(obj,['unit_price_value_text','unitPriceValueText','per_unit_price','perUnitPrice']);
+  // Structured payload is authoritative only when all three components are represented.
+  // A partial structured field in a partial response must not clear a previously valid source unit price.
+  if(hasQty&&hasUnit&&hasValue)return true;
+  for(const name of ['unit_price','unitPrice']){
+    if(!Object.prototype.hasOwnProperty.call(obj,name))continue;
+    const loose=cleanText(obj[name]);
+    // Explicit blank means the source field was present and the old source unit-price text must be cleared.
+    if(!loose)return true;
+    // Non-empty loose values are trusted only when they actually look like a unit-price expression.
+    if(/[당]/.test(loose)||/[₩￦]?\s*[0-9][0-9,]*(?:\.[0-9]+)?\s*원?\s*\/\s*[0-9]/i.test(loose))return true;
+  }
+  return false;
+}
+
+// GM_SEARCH_UNIT_V010: unit-price source fields must preserve explicit blanks from the product payload.
+// Generic payload flattening treats blank strings as missing and may fill them from parent metadata,
+// which is correct for ordinary fields but wrong for stale unit-price clearing.
+function resolveUnitPriceSource(raw,parent={}){
+  const scan=(src,maxDepth)=>{
+    src=parseIncomingPayloadBody(src||{});
+    const containers=collectPayloadContainers(src,maxDepth);
+    for(const obj of containers){
+      if(!hasUnitPriceSignal(obj)) continue;
+      return {seen:true,text:pickUnitPriceText(obj)}; // text may intentionally be blank
+    }
+    return {seen:false,text:''};
+  };
+  const own=scan(raw,4);
+  if(own.seen)return own; // raw product response always wins, including explicit blank
+  return scan(parent,2);
+}
+
 function firstNonEmpty(obj, names){
   obj = obj || {};
   for(const name of names){
@@ -1673,8 +1742,11 @@ function pickReturnShippingFee(p, mallSalePrice){
 }
 
 async function upsertProduct(pool, raw, parent={}){
+  const sourceUnitPrice = resolveUnitPriceSource(raw,parent);
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
+  const sourceUnitPriceText = sourceUnitPrice.text;
+  const sourceUnitPriceSeen = sourceUnitPrice.seen;
   const missing = [];
   if(!id.uid) missing.push('product_uid');
   if(!id.pi) missing.push('pi_ii_vi');
@@ -1787,11 +1859,19 @@ async function upsertProduct(pool, raw, parent={}){
         WHEN NULLIF(EXCLUDED.glomart_code,'') IS NULL THEN gm_product.glomart_code
         WHEN NULLIF(gm_product.glomart_code,'') IS NULL THEN EXCLUDED.glomart_code
         ELSE (
-          SELECT string_agg(code,'|' ORDER BY code)
+          SELECT string_agg(code,'|' ORDER BY first_ord)
             FROM (
-              SELECT DISTINCT btrim(x) AS code
-                FROM unnest(string_to_array(gm_product.glomart_code || '|' || EXCLUDED.glomart_code,'|')) AS t(x)
-               WHERE btrim(x)<>''
+              SELECT code, MIN(ord) AS first_ord
+                FROM (
+                  SELECT btrim(x) AS code, ord::bigint AS ord
+                    FROM unnest(string_to_array(gm_product.glomart_code,'|')) WITH ORDINALITY AS t(x,ord)
+                   WHERE btrim(x)<>''
+                  UNION ALL
+                  SELECT btrim(x) AS code, (1000000 + ord)::bigint AS ord
+                    FROM unnest(string_to_array(EXCLUDED.glomart_code,'|')) WITH ORDINALITY AS t(x,ord)
+                   WHERE btrim(x)<>''
+                ) merged
+               GROUP BY code
             ) q
         )
       END,
@@ -1917,6 +1997,15 @@ async function upsertProduct(pool, raw, parent={}){
     throw e;
   }
   try{ console.log('[GM_PRODUCT_UPSERT_TRACE_OUT]', { uid:id.uid, row:(r.rows&&r.rows[0])||null }); }catch(_trace){}
+  if(sourceUnitPriceSeen){
+    try{
+      // A source field was actually present in this response. Non-empty refreshes it; explicit blank clears stale source text.
+      await pool.query(`UPDATE gm_product SET unit_price_text=$2, updated_at=NOW() WHERE product_uid=$1`,[id.uid,sourceUnitPriceText||null]);
+      try{ console.log('[GM_PRODUCT_UNIT_SOURCE_TEXT]', {uid:id.uid, action:sourceUnitPriceText?'refresh':'clear', unit_price_text:sourceUnitPriceText||''}); }catch(_log){}
+    }catch(e){
+      try{ console.warn('[GM_PRODUCT_UNIT_SOURCE_TEXT_WARN]', Object.assign({uid:id.uid, action:sourceUnitPriceText?'refresh':'clear', unit_price_text:sourceUnitPriceText||''}, compactError(e))); }catch(_log){}
+    }
+  }
   let cp_learning = null;
   try{
     cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
