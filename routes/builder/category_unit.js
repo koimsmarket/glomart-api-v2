@@ -1,10 +1,10 @@
 'use strict';
-// GM_AI_CATEGORY_CONNECT_V013 + GM_CATEGORY_V039_BUILDER_CATEGORY_UNIT_AUTO
+// GM_AI_CATEGORY_CONNECT_V013 + GM_CATEGORY_V039_COUNT_AMBIGUOUS_GUARD
 // No CSV upload/master table. Analyze gm_category + gm_product for representative units. Options are used only by recalc.
 const express=require('express');
 const crypto=require('crypto');
 const router=express.Router();
-const {recalcCategory,recalcMissingCountBatch}=require('../../services/unit_price');
+const {recalcCategory,recalcMissingCountBatch,cleanupAmbiguousCountFallback}=require('../../services/unit_price');
 const {analyzeCategoryUnitRules,applyCategoryUnitRules}=require('../../services/category_unit_analyzer');
 const OpenAIClient=require('../../services/openai_client');
 const AiGuard=require('../../services/ai_guard');
@@ -209,6 +209,11 @@ router.post('/api/gm/builder/category-unit/apply-auto',express.json({limit:'1mb'
   await attachAiStatus(db(req),out);
   res.json({ok:true,mode:'APPLY_AUTO',...out});
 }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}});
+
+router.post('/api/gm/builder/category-unit/cleanup-ambiguous-count',express.json({limit:'1mb'}),async(req,res)=>{try{
+  const out=await cleanupAmbiguousCountFallback(db(req),{apply:req.body?.apply!==false});
+  res.json({ok:true,...out});
+}catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}});
 
 router.post('/api/gm/builder/category-unit/recalc-missing-count',express.json({limit:'1mb'}),async(req,res)=>{try{
   const b=req.body||{};

@@ -129,11 +129,24 @@ const COUNT_FALLBACK_ALIASES={
   '병':'병','캔':'캔','박스':'박스','box':'박스','boxes':'박스','상자':'상자','묶음':'묶음'
 };
 function normCountFallbackUnit(u){return COUNT_FALLBACK_ALIASES[clean(u).toLowerCase()]||'';}
+const COUNT_FALLBACK_UNIT_SRC='(?:개입|개|ea|pcs?|pieces?|매|장|팩|packs?|봉|세트|sets?|롤|rolls?|켤레|pairs?|정|캡슐|포|병|캔|박스|boxes?|상자|묶음)';
+function hasAmbiguousCountExpression(text){
+  const t=clean(text); if(!t)return false;
+  const sep='(?:\\/|&|＆|~|～|-|\\bor\\b|또는)';
+  // 1/4/6세트, 20&50&100pcs, 2~4개처럼 하나의 단위에 여러 후보 수량이 연결된 경우.
+  const chained=new RegExp('(?:\\d+(?:\\.\\d+)?\\s*'+sep+'\\s*)+\\d+(?:\\.\\d+)?\\s*'+COUNT_FALLBACK_UNIT_SRC,'i');
+  if(chained.test(t))return true;
+  // 5개/10개, 20pcs & 50pcs처럼 단위가 각각 반복된 선택형.
+  const repeated=new RegExp('\\d+(?:\\.\\d+)?\\s*'+COUNT_FALLBACK_UNIT_SRC+'\\s*'+sep+'\\s*\\d+(?:\\.\\d+)?\\s*'+COUNT_FALLBACK_UNIT_SRC,'i');
+  if(repeated.test(t))return true;
+  // 20pcs, 50pcs, 100pcs처럼 쉼표로 나열된 선택형. 천단위 1,000ml과는 구분된다.
+  const commaList=new RegExp('\\d+(?:\\.\\d+)?\\s*'+COUNT_FALLBACK_UNIT_SRC+'\\s*,\\s*\\d+(?:\\.\\d+)?\\s*'+COUNT_FALLBACK_UNIT_SRC,'i');
+  return commaList.test(t);
+}
 function parseCountFallback(texts=[]){
   const text=clean((texts||[]).filter(Boolean).join(' '));
   if(!text)return {ok:false,reason:'COUNT_FALLBACK_NOT_FOUND'};
-  // Explicit alternative quantities are intentionally ambiguous: 2/4Pcs, 300/100PCS, 2~4개, 2-4개.
-  if(/\b\d+(?:\.\d+)?\s*(?:\/|~|～|-)\s*\d+(?:\.\d+)?\s*(?:pcs?|pieces?|ea|개입?|매|장|팩|packs?|봉|세트|sets?|롤|rolls?|켤레|pairs?|정|캡슐|포|병|캔|박스|boxes?|상자|묶음)\b/i.test(text))return {ok:false,reason:'COUNT_FALLBACK_AMBIGUOUS'};
+  if(hasAmbiguousCountExpression(text))return {ok:false,reason:'COUNT_FALLBACK_AMBIGUOUS'};
   const re=/([0-9][0-9,]*(?:\.\d+)?)\s*(개입|개|ea|pcs|pc|pieces|piece|매|장|팩|packs|pack|봉|세트|sets|set|롤|rolls|roll|켤레|pairs|pair|정|캡슐|포|병|캔|박스|boxes|box|상자|묶음)(?![A-Za-z가-힣])/ig;
   const hits=[]; let m;
   while((m=re.exec(text))){
@@ -157,12 +170,40 @@ function inheritCountFallback({price,parentCalc}){
   return {ok:true,unit_price_value:p/parentCalc.total_unit_qty,unit_base_qty:1,unit_base_unit:parentCalc.unit_base_unit,total_unit_qty:parentCalc.total_unit_qty,total_unit_unit:parentCalc.total_unit_unit,unit_calc_basis:'COUNT_FALLBACK_OPTION_INHERIT_PARENT'};
 }
 
+async function cleanupAmbiguousCountFallback(db,{apply=true}={}){
+  const out={cleaned_products:0,cleaned_options:0};
+  const pr=await db.query(`SELECT product_uid,product_name,mall_product_name,unit_calc_basis
+    FROM gm_product WHERE unit_calc_basis LIKE 'COUNT_FALLBACK_%'`);
+  for(const p of pr.rows||[]){
+    if(!hasAmbiguousCountExpression([p.product_name,p.mall_product_name].filter(Boolean).join(' ')))continue;
+    out.cleaned_products++;
+    if(apply)await db.query(`UPDATE gm_product SET unit_price_value=NULL,unit_base_qty=NULL,unit_base_unit=NULL,total_unit_qty=NULL,total_unit_unit=NULL,unit_calc_basis=NULL,updated_at=NOW()
+      WHERE product_uid=$1 AND unit_calc_basis LIKE 'COUNT_FALLBACK_%'`,[p.product_uid]);
+  }
+  const orows=await db.query(`SELECT o.mall_code,o.pi_ii_vi,o.option_name,o.unit_calc_basis,p.product_name,p.mall_product_name,p.unit_price_value AS parent_unit_price,p.unit_calc_basis AS parent_basis
+    FROM gm_product_option o
+    LEFT JOIN gm_product p ON p.mall_code::text=o.mall_code::text AND p.product_id::text=o.product_id::text
+    WHERE o.unit_calc_basis LIKE 'COUNT_FALLBACK_%'`);
+  for(const o of orows.rows||[]){
+    const combined=[o.option_name,o.product_name,o.mall_product_name].filter(Boolean).join(' ');
+    const explicitAmbiguous=hasAmbiguousCountExpression(combined);
+    const inheritedInvalid=String(o.unit_calc_basis||'')==='COUNT_FALLBACK_OPTION_INHERIT_PARENT' && (!(Number(o.parent_unit_price)>0)||!String(o.parent_basis||'').startsWith('COUNT_FALLBACK_'));
+    if(!explicitAmbiguous&&!inheritedInvalid)continue;
+    out.cleaned_options++;
+    if(apply)await db.query(`UPDATE gm_product_option SET unit_price_value=NULL,unit_base_qty=NULL,unit_base_unit=NULL,total_unit_qty=NULL,total_unit_unit=NULL,unit_calc_basis=NULL,updated_at=NOW()
+      WHERE mall_code=$1 AND pi_ii_vi=$2 AND unit_calc_basis LIKE 'COUNT_FALLBACK_%'`,[o.mall_code,o.pi_ii_vi]);
+  }
+  return out;
+}
+
 async function recalcMissingCountBatch(db,{afterUid='',maxProducts=100,apply=true}={}){
   const pageSize=Math.max(1,Math.min(500,Number(maxProducts||100)));
   const lastUid=clean(afterUid);
   const firstBatch=!lastUid;
-  const out={ok:true,mode:'MISSING_COUNT_ONLY',apply:!!apply,target_products:0,processed_products:0,product_ok:0,product_ambiguous:0,product_not_found:0,options:0,option_ok:0,option_ambiguous:0,option_not_found:0,next_cursor:lastUid,done:false};
+  const out={ok:true,mode:'MISSING_COUNT_ONLY',apply:!!apply,target_products:0,processed_products:0,product_ok:0,product_ambiguous:0,product_not_found:0,options:0,option_ok:0,option_ambiguous:0,option_not_found:0,cleaned_products:0,cleaned_options:0,next_cursor:lastUid,done:false};
   if(firstBatch){
+    const cleaned=await cleanupAmbiguousCountFallback(db,{apply:!!apply});
+    out.cleaned_products=cleaned.cleaned_products; out.cleaned_options=cleaned.cleaned_options;
     const t=await db.query(`SELECT COUNT(*)::int AS n FROM gm_product WHERE unit_price_value IS NULL`);
     out.target_products=Number(t.rows[0]&&t.rows[0].n||0);
   }
@@ -194,7 +235,7 @@ async function recalcMissingCountBatch(db,{afterUid='',maxProducts=100,apply=tru
     for(const o of options){
       out.options++;
       let ox=calculateCountFallback({price:productPrice(o),texts:[o.option_name,p.product_name,p.mall_product_name]});
-      if(!ox.ok&&x.ok){const inherited=inheritCountFallback({price:productPrice(o),parentCalc:x});if(inherited)ox=inherited;}
+      if(!ox.ok&&ox.reason==='COUNT_FALLBACK_NOT_FOUND'&&x.ok){const inherited=inheritCountFallback({price:productPrice(o),parentCalc:x});if(inherited)ox=inherited;}
       if(ox.ok){
         out.option_ok++;
         if(apply)await db.query(`UPDATE gm_product_option SET unit_price_value=$3,unit_base_qty=$4,unit_base_unit=$5,total_unit_qty=$6,total_unit_unit=$7,unit_calc_basis=$8,updated_at=NOW() WHERE mall_code=$1 AND pi_ii_vi=$2 AND unit_price_value IS NULL`,[o.mall_code,o.pi_ii_vi,ox.unit_price_value,ox.unit_base_qty,ox.unit_base_unit,ox.total_unit_qty,ox.total_unit_unit,ox.unit_calc_basis]);
@@ -398,4 +439,4 @@ async function recalcCategory(db,{gmCode='',all=false,apply=false,afterUid='',ma
   return out;
 }
 
-module.exports={calculate,calculateMixed,calculateCountFallback,parseCountFallback,inheritParentCalculation,recalcProductUnitByUid,recalcCategory,recalcMissingCountBatch,normUnit,glomartCodes,firstGlomartCode,findRuleByGmCode,findFirstValidRule};
+module.exports={calculate,calculateMixed,calculateCountFallback,parseCountFallback,hasAmbiguousCountExpression,cleanupAmbiguousCountFallback,inheritParentCalculation,recalcProductUnitByUid,recalcCategory,recalcMissingCountBatch,normUnit,glomartCodes,firstGlomartCode,findRuleByGmCode,findFirstValidRule};
