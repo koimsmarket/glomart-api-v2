@@ -1,7 +1,7 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_SEARCH_LOCAL_V003_CATEGORY_CODE';
+const VERSION = 'GM_SEARCH_LOCAL_V004_PRIORITY_EXACT';
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):d; }
@@ -56,7 +56,7 @@ async function categoryStage(pool,categoryCode,virtualKeyword,limit){
   if(!scopeCodes.includes(categoryCode)) scopeCodes.unshift(categoryCode);
   const params=[scopeCodes,limit];
   let virtualSql='';
-  if(virtualKeyword){params.push(virtualKeyword);virtualSql=` AND (keyword=$3 OR category_keyword=$3 OR COALESCE(product_name,'') ILIKE '%' || $3 || '%' OR COALESCE(mall_product_name,'') ILIKE '%' || $3 || '%')`;}
+  if(virtualKeyword){params.push(virtualKeyword);virtualSql=` AND (keyword=$3 OR category_keyword=$3)`;}
   const q=await pool.query(`
     WITH ranked AS (
       SELECT ${PRODUCT_COLS},
@@ -71,30 +71,6 @@ async function categoryStage(pool,categoryCode,virtualKeyword,limit){
   return {rows:q.rows||[],scope_codes:scopeCodes};
 }
 
-async function fallbackStage(pool,keyword,limit,malls){
-  if(!malls.length) return {rows:[]};
-  return pool.query(`
-    WITH ranked AS (
-      SELECT ${PRODUCT_COLS},
-             ROW_NUMBER() OVER (
-               PARTITION BY mall_code
-               ORDER BY
-                 CASE WHEN COALESCE(product_name,'') ILIKE $1 || '%' THEN 0 ELSE 1 END,
-                 COALESCE(hit_count,0) DESC,
-                 COALESCE(updated_at,last_seen_at) DESC NULLS LAST
-             ) AS rn
-      FROM gm_product
-      WHERE ${ACTIVE_WHERE}
-        AND mall_code = ANY($3::text[])
-        AND (
-          COALESCE(product_name,'') ILIKE '%' || $1 || '%' OR
-          COALESCE(mall_product_name,'') ILIKE '%' || $1 || '%'
-        )
-    )
-    SELECT * FROM ranked WHERE rn <= $2
-    ORDER BY mall_code, rn
-  `,[keyword,limit,malls]);
-}
 
 router.get('/api/gm/search/local', async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,version:VERSION,error:'DB pool is not attached'});
@@ -143,27 +119,16 @@ router.get('/api/gm/search/local', async (req,res)=>{
       return res.json({ok:true,version:VERSION,keyword,category_search:true,category_code:categoryCode,category_keyword:categoryVirtualKeyword||'',scope_count:categoryResult.scope_codes.length,count:items.length,groups,items});
     }
 
-    let t=Date.now();
-    const exactKeyword=await exactStage(pool,'keyword',keyword,limit);
+    // PRIORITY EXACT: 두 인덱스 조회는 서로 독립이므로 병렬 실행한다.
+    // 결과 병합 순서는 keyword -> category_keyword로 유지해 기존 우선순위를 보존한다.
+    const exactStarted=Date.now();
+    const [exactKeyword,exactCategory]=await Promise.all([
+      exactStage(pool,'keyword',keyword,limit),
+      exactStage(pool,'category_keyword',keyword,limit)
+    ]);
+    const exactParallelMs=ms(exactStarted);
     merge(exactKeyword.rows);
-    const keywordMs=ms(t);
-
-    let categoryMs=0;
-    if(needMalls().length){
-      t=Date.now();
-      const exactCategory=await exactStage(pool,'category_keyword',keyword,limit);
-      merge(exactCategory.rows);
-      categoryMs=ms(t);
-    }
-
-    let fallbackMs=0;
-    const fallbackMalls=needMalls();
-    if(fallbackMalls.length){
-      t=Date.now();
-      const fallback=await fallbackStage(pool,keyword,limit,fallbackMalls);
-      merge(fallback.rows);
-      fallbackMs=ms(t);
-    }
+    merge(exactCategory.rows);
 
     const rows=[...byMall.CPKR,...byMall.ALKR];
     const items=rows.map(x=>({
@@ -182,8 +147,8 @@ router.get('/api/gm/search/local', async (req,res)=>{
     const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
     console.log('[GM_SEARCH_LOCAL]',{
       version:VERSION,keyword,count:items.length,groups,
-      timing_ms:{exact_keyword:keywordMs,exact_category:categoryMs,fallback_ilike:fallbackMs,total:ms(totalStarted)},
-      fallback_malls:fallbackMalls
+      timing_ms:{exact_parallel:exactParallelMs,total:ms(totalStarted)},
+      exact_only:true,need_malls:needMalls()
     });
     res.json({ok:true,version:VERSION,keyword,count:items.length,groups,items});
   }catch(e){
