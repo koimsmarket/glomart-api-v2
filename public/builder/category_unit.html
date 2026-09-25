@@ -23,6 +23,35 @@
 <div class="card step"><div class="num">3</div><div><h2 style="margin-top:0">분석 결과 자동 적용</h2><p class="muted">현재 DB를 다시 분석하여 기존 <b>gm_category.unit_rule_qty / unit_rule_unit</b>에 바로 적용합니다. 별도 CSV/단위룰 DB는 만들지 않습니다.</p><p class="note">실제 미매칭 코드는 적용할 gm_category 행이 없어 건너뜁니다. 중량/용량 혼재 카테고리는 <b>MIXED</b>로 적용하며, 상품 단계에서 중량은 중량대로·용량은 용량대로 계산합니다.</p><button class="green" onclick="applyUnits()">자동분석 결과 일괄 적용</button><div id="applySummary" class="summary"></div><pre id="applyLog"></pre></div></div>
 <div class="card step"><div class="num">4</div><div><h2 style="margin-top:0">상품 + 옵션 단위가격</h2><p class="muted">대표단위 확정 후 실행합니다. 상품의 glomart_code가 여러 개면 왼쪽부터 확인하여 <b>gm_category에 실제 존재하는 첫 번째 코드</b>를 사용합니다. 앞에 남아 있는 과거/고아 코드는 보존하되 계산에서는 건너뜁니다. 일반 카테고리는 unit_rule_qty / unit_rule_unit을 그대로 사용하고, MIXED 카테고리는 쿠팡 unit_price_text의 원래 단위계열을 우선 사용하여 중량은 100g 기준, 용량은 100ml 기준으로 정규화해 정렬값을 만듭니다. 원래 unit_price_text는 표시용으로 그대로 보존합니다. category_keyword는 단위 기준 선택에 사용하지 않습니다. 소비단위는 명시 수량이 없으면 1개로 계산하고, 1,000ml 같은 천단위 콤마를 인식하며, 옵션에 단위가 없을 때는 부모 상품의 계산된 총량을 상속합니다.</p><div class="row"><button onclick="recalc(false)">상품+옵션 전체 검증</button><button class="green" onclick="cleanupAmbiguousCount()">복수선택형 수량단가 정리</button><button class="green" onclick="recalcMissingCount()">미수행만 수량단가 추가</button><button class="green" onclick="recalc(true)">상품+옵션 전체 재계산</button></div><div id="recalcSummary" class="summary"></div><div id="recalcFailures" class="failWrap"></div><pre id="recalcLog"></pre></div></div>
 </div><script>
+// V042: do not rely on browser-created window globals for element ids.
+const aiStatus=document.getElementById('aiStatus');
+const aiLog=document.getElementById('aiLog');
+const guardSummary=document.getElementById('guardSummary');
+const guardLog=document.getElementById('guardLog');
+const analyzeSummary=document.getElementById('analyzeSummary');
+const analyzeLog=document.getElementById('analyzeLog');
+const exceptionSummary=document.getElementById('exceptionSummary');
+const exceptionBody=document.getElementById('exceptionBody');
+const exceptionSelectAll=document.getElementById('exceptionSelectAll');
+const selectedExceptionCount=document.getElementById('selectedExceptionCount');
+const applySummary=document.getElementById('applySummary');
+const applyLog=document.getElementById('applyLog');
+const recalcSummary=document.getElementById('recalcSummary');
+const recalcFailures=document.getElementById('recalcFailures');
+const recalcLog=document.getElementById('recalcLog');
+const gEnabled=document.getElementById('gEnabled');
+const gStop=document.getElementById('gStop');
+const gMonthBudget=document.getElementById('gMonthBudget');
+const gDayBudget=document.getElementById('gDayBudget');
+const gHourReq=document.getElementById('gHourReq');
+const gDayReq=document.getElementById('gDayReq');
+const gMaxOut=document.getElementById('gMaxOut');
+const gRetry=document.getElementById('gRetry');
+const gDupSec=document.getElementById('gDupSec');
+const gLunaIn=document.getElementById('gLunaIn');
+const gLunaOut=document.getElementById('gLunaOut');
+const gSolIn=document.getElementById('gSolIn');
+const gSolOut=document.getElementById('gSolOut');
 let lastAnalysis=null;function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}function box(label,value,kind){return `<div class="box ${kind||'ok'}"><b>${esc(label)}</b><div style="font-size:24px;font-weight:700;margin-top:4px">${esc(value)}</div></div>`;}
 function updateSelectedExceptionCount(){const c=[...document.querySelectorAll('.exceptionRowCheck')];const n=c.filter(x=>x.checked).length;if(window.selectedExceptionCount)selectedExceptionCount.textContent='선택 '+n+'건';if(window.exceptionSelectAll){exceptionSelectAll.checked=c.length>0&&n===c.length;exceptionSelectAll.indeterminate=n>0&&n<c.length;}}
 function selectAllExceptions(checked){document.querySelectorAll('.exceptionRowCheck').forEach(x=>x.checked=!!checked);updateSelectedExceptionCount();}
@@ -48,7 +77,7 @@ async function classifySelectedExceptions(){
   const keywords=getSelectedExceptions();
   if(!keywords.length){alert('AI 분류할 예외를 선택하세요.');return;}
   if(!confirm('선택한 '+keywords.length+'건을 순서대로 AI 분류하고 결과를 gm_category_keyword_map에 저장합니다. 계속할까요?'))return;
-  const btn=event&&event.currentTarget; if(btn)btn.disabled=true;
+  const btn=null;
   try{
     const r=await fetch('/api/gm/builder/category-unit/ai-classify-selected',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({keywords})});
     const j=await r.json(); if(!r.ok||!j.ok)throw new Error(j.error||'AI 분류 실패');
@@ -83,8 +112,7 @@ async function cleanupAmbiguousCount(){
     const r=await fetch('/api/gm/builder/category-unit/cleanup-ambiguous-count',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({apply:true})});
     const j=await r.json(); if(!r.ok||!j.ok)throw new Error(j.error||('HTTP '+r.status));
     recalcSummary.innerHTML=box('원복 상품',j.cleaned_products||0,(j.cleaned_products||0)?'warn':'ok')+box('원복 옵션',j.cleaned_options||0,(j.cleaned_options||0)?'warn':'ok');
-    recalcLog.textContent='복수선택형 정리 완료
-'+JSON.stringify(j,null,2);
+    recalcLog.textContent='복수선택형 정리 완료\n'+JSON.stringify(j,null,2);
     alert('복수선택형 수량단가 정리 완료: 상품 '+Number(j.cleaned_products||0).toLocaleString()+'건 / 옵션 '+Number(j.cleaned_options||0).toLocaleString()+'건');
   }catch(e){recalcLog.textContent='Error: '+e.message; alert('정리 실패: '+e.message);}
 }
@@ -92,7 +120,7 @@ async function cleanupAmbiguousCount(){
 async function recalcMissingCount(){
   if(!confirm('기존 COUNT_FALLBACK 값 중 2/4Pcs, 20&50&100Pcs처럼 복수선택형으로 잘못 저장된 값은 먼저 NULL로 원복합니다. 이후 unit_price_value가 비어 있는 상품 중 명확한 단일 수량표현만 수량단가를 추가합니다. 계속할까요?'))return;
   recalcFailures.innerHTML='';
-  let cursor='',batch=0,processed=0,total=0,productOk=0,optionOk=0,options=0,ambiguous=0,notFound=0;
+  let cursor='',batch=0,processed=0,total=0,productOk=0,optionOk=0,options=0,ambiguous=0,notFound=0,cleanedProducts=0,cleanedOptions=0;
   recalcSummary.innerHTML='';
   recalcLog.textContent='미수행 수량단가 보완 시작...';
   try{
@@ -101,7 +129,7 @@ async function recalcMissingCount(){
       const r=await fetch('/api/gm/builder/category-unit/recalc-missing-count',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({apply:true,after_uid:cursor,max_products:100})});
       const j=await readJsonResponse(r);
       if(!r.ok||!j.ok)throw new Error(j.error||('배치 '+batch+' 처리 실패'));
-      if(!total)total=Number(j.target_products||0);
+      if(!total)total=Number(j.target_products||0); cleanedProducts+=Number(j.cleaned_products||0); cleanedOptions+=Number(j.cleaned_options||0);
       const n=Number(j.processed_products||0); processed+=n; productOk+=Number(j.product_ok||0); optionOk+=Number(j.option_ok||0); options+=Number(j.options||0); ambiguous+=Number(j.product_ambiguous||0)+Number(j.option_ambiguous||0); notFound+=Number(j.product_not_found||0)+Number(j.option_not_found||0);
       const prevCursor=cursor; cursor=String(j.next_cursor||cursor);
       if(!j.done && (n<=0 || !cursor || cursor===prevCursor))throw new Error('수량단가 보완 커서가 갱신되지 않았습니다. 안전을 위해 중단합니다.');
