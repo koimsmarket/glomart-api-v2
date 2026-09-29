@@ -591,6 +591,8 @@ app.locals.pool = pool;
 try {
   app.use(require('./routes/member'));
   console.log('[GM_MEMBER_ROUTE_V024] routes/member registered early');
+  app.use(require('./routes/gpay_member_profile'));
+  console.log('[GM_GPAY_MEMBER_PROFILE_V001] route registered');
 } catch (e) {
   console.error('[GM_MEMBER_ROUTE_V024] routes/member register failed:', String(e && e.message || e));
 }
