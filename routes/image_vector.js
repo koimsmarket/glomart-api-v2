@@ -8,7 +8,7 @@ const https=require('https');
 const http=require('http');
 const router=express.Router();
 const representativeSearch=require('../services/image_representative_search');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V025_MEMORY_MODE_NO_MIGRATION';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V026_CATEGORY_5_6_SCOPE';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
@@ -135,7 +135,7 @@ router.post('/api/gm/image-vector/search',async(req,res)=>{
   const pool=req.app.locals.pool,v=vectorFromBase64(req.body&&req.body.vector_base64),limit=Math.max(1,Math.min(30,Number(req.body&&req.body.limit||30)||30)),searchMode=C(req.body&&req.body.search_mode).toLowerCase()==='precise'?'precise':'fast',categoryCode=C(req.body&&req.body.category_code).toUpperCase();
   if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
   if(!v)return res.status(400).json({ok:false,error:'vector_base64(1024-byte Float16) required'});
-  if(categoryCode&&!/^[A-Z0-9]{2}-\d{2}-\d{3}-\d{4}-\d{4}$/.test(categoryCode))return res.status(400).json({ok:false,error:'invalid category_code'});
+  if(categoryCode&&!/^[A-Z0-9]{2}-\d{2}-\d{3}-\d{4}-\d{4}(?:-\d{4})?$/.test(categoryCode))return res.status(400).json({ok:false,error:'invalid category_code'});
   const started=Date.now();
   try{
     const columnType=await vectorColumnType(pool);

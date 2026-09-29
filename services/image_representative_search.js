@@ -1,6 +1,6 @@
 'use strict';
 
-// GM_IMAGE_REPRESENTATIVE_SEARCH_V003_MEMORY_MODE
+// GM_IMAGE_REPRESENTATIVE_SEARCH_V004_CATEGORY_5_6_SCOPE
 // Two explicit search modes:
 //   UNLOADING = do not keep representative HNSW in process memory; scan representative vectors in DB per image search.
 //   LOADING   = use an ACTIVE in-memory HNSW only after Builder explicitly builds it.
@@ -77,15 +77,15 @@ function topRepresentativeMatches(queryNorm,rows,limit){
 }
 async function categoryScopeCodes(pool,categoryCode){
   const code=C(categoryCode).toUpperCase();if(!code)return [];
-  const parts=code.split('-');if(parts.length!==5)return [];
+  const parts=code.split('-');if(parts.length!==5&&parts.length!==6)return [];
   let last=0;for(let i=1;i<parts.length;i++){if(!/^0+$/.test(parts[i]))last=i;}
   const stem=parts.slice(0,last+1).join('-');
   const like=stem+'-%';
   const q=await pool.query(`SELECT gm_code FROM gm_category
      WHERE COALESCE(display_yn,'Y')='Y'
-       AND array_length(string_to_array(gm_code,'-'),1)=5
+       AND array_length(string_to_array(gm_code,'-'),1)=$3
        AND (gm_code=$1 OR gm_code LIKE $2)
-     ORDER BY depth,sort_order,category_id`,[code,like]);
+     ORDER BY depth,sort_order,category_id`,[code,like,parts.length]);
   const out=[...new Set((q.rows||[]).map(r=>C(r.gm_code).toUpperCase()).filter(Boolean))];
   if(!out.includes(code))out.unshift(code);return out;
 }
