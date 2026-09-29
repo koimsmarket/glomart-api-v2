@@ -1,6 +1,6 @@
 'use strict';
 
-/* GM_CATEGORY_MENU_V029_SEGMENT_FAMILY_INDEX_DIAG
+/* GM_CATEGORY_MENU_V030_TWO_LEVEL_BATCH_FAST
  * Glomart hamburger category API with on-demand language self-heal.
  * - Never uses Cafe24 category_no/category parent relationships.
  * - Never uses gm_parent_code.
@@ -107,6 +107,18 @@ function stemForDepth(code,depth){
   return a.slice(0,Math.max(1,depth+1)).join('-');
 }
 
+function zeroLike(seg){ return '0'.repeat(Math.max(1,String(seg||'').length)); }
+function parentCodeFor(code,depth){
+  const a=C(code).toUpperCase().split('-');
+  if(depth<=0||!a.length) return '';
+  for(let i=depth;i<a.length;i++) a[i]=zeroLike(a[i]);
+  return a.join('-');
+}
+function clampInt(v,min,max,def){
+  const n=Number(v);
+  return Number.isFinite(n)?Math.max(min,Math.min(max,Math.trunc(n))):def;
+}
+
 router.get('/api/gm/category/menu',async(req,res)=>{
   const startedAt=Date.now();
   const pool=req.app.locals.pool;
@@ -117,6 +129,9 @@ router.get('/api/gm/category/menu',async(req,res)=>{
   const translateRequired=!LANG_COLUMN[rawLang];
   try{
     let depth=0,rows=[];
+    const levels=clampInt(req.query&&req.query.levels,1,2,1);
+    const fromOffset=clampInt(req.query&&req.query.from_offset,0,5,parent?1:0);
+    const fast=C(req.query&&req.query.fast)==='1';
     const baseSelect=`SELECT gm_code,depth,leaf_yn,display_yn,sort_order,name_ko,${col} AS display_name,
                              COALESCE(NULLIF(BTRIM(keyword),''),NULLIF(BTRIM(keyword_seed),''),name_ko) AS keyword
                         FROM gm_category
@@ -124,30 +139,34 @@ router.get('/api/gm/category/menu',async(req,res)=>{
     if(parent){
       if(!CODE_RE.test(parent))return res.status(400).json({ok:false,error:'invalid parent_code'});
       const pd=depthFromCode(parent),parts=parent.split('-');
-      if(pd<0||pd>=parts.length-1)return res.json({ok:true,parent_code:parent,depth:pd+1,lang:rawLang,translate_required:translateRequired,items:[]});
-      depth=pd+1;
+      const startDepth=pd+Math.max(1,fromOffset);
+      const endDepth=Math.min(parts.length-1,startDepth+levels-1);
+      if(pd<0||startDepth>parts.length-1)return res.json({ok:true,parent_code:parent,depth:startDepth,levels,from_offset:fromOffset,lang:rawLang,translate_required:translateRequired,items:[]});
+      depth=startDepth;
       const stem=stemForDepth(parent,pd);
       const queryStartedAt=Date.now();
-      const q=await pool.query(baseSelect+` AND depth=$1 AND gm_code LIKE $2 ORDER BY COALESCE(sort_order,2147483647),category_id`,[depth,stem+'-%']);
+      const q=await pool.query(baseSelect+` AND depth BETWEEN $1 AND $2 AND gm_code LIKE $3 ORDER BY depth,COALESCE(sort_order,2147483647),category_id`,[startDepth,endDepth,stem+'-%']);
       const queryMs=Date.now()-queryStartedAt;
       rows=q.rows||[];
-      // V029: keep the published segment family of the selected parent.
-      // Five-segment parents keep five-segment children, while legitimate six-segment
-      // families such as BP (Beauty) keep six-segment children. This still prevents
-      // six-segment dynamic/detail-auto rows from leaking into five-segment families.
       const parentSegmentCount=parts.length;
       rows=rows.filter(r=>C(r.gm_code).split('-').length===parentSegmentCount);
       req.__gmCategoryMenuQueryMs=queryMs;
       req.__gmCategoryMenuSegmentCount=parentSegmentCount;
     }else{
-      const q=await pool.query(baseSelect+` AND depth=0 ORDER BY COALESCE(sort_order,2147483647),category_id`);
+      const startDepth=Math.max(0,fromOffset);
+      const endDepth=startDepth+levels-1;
+      depth=startDepth;
+      const queryStartedAt=Date.now();
+      const q=await pool.query(baseSelect+` AND depth BETWEEN $1 AND $2 ORDER BY depth,COALESCE(sort_order,2147483647),category_id`,[startDepth,endDepth]);
       rows=q.rows||[];
+      req.__gmCategoryMenuQueryMs=Date.now()-queryStartedAt;
     }
     const healStartedAt=Date.now();
-    rows=await healDisplayNames(pool,rows,rawLang,col);
+    if(!fast) rows=await healDisplayNames(pool,rows,rawLang,col);
     const healMs=Date.now()-healStartedAt;
     const items=rows.map(r=>({
       gm_code:C(r.gm_code).toUpperCase(),
+      parent_code:parentCodeFor(r.gm_code,Number(r.depth||0)),
       depth:Number(r.depth||0),
       leaf_yn:C(r.leaf_yn).toUpperCase(),
       has_children:C(r.leaf_yn).toUpperCase()!=='Y',
@@ -157,15 +176,15 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       keyword:C(r.keyword)||C(r.name_ko),
       translate_required:translateRequired || (rawLang!=='ko' && rawLang!=='kr' && !C(r.display_name))
     }));
-    try{console.log('[GM_CATEGORY_MENU_V029]',{
-      parent_code:parent||'', depth, lang:rawLang, count:items.length,
+    try{console.log('[GM_CATEGORY_MENU_V030]',{
+      parent_code:parent||'', depth, levels, from_offset:fromOffset, fast, lang:rawLang, count:items.length,
       segment_count:req.__gmCategoryMenuSegmentCount||0,
       query_ms:Number(req.__gmCategoryMenuQueryMs||0), heal_ms:healMs,
       total_ms:Date.now()-startedAt
     });}catch(_log){}
-    return res.json({ok:true,parent_code:parent,depth,lang:rawLang,translate_required:translateRequired,count:items.length,items});
+    return res.json({ok:true,parent_code:parent,depth,levels,from_offset:fromOffset,fast,lang:rawLang,translate_required:translateRequired,count:items.length,items});
   }catch(e){
-    console.error('[GM_CATEGORY_MENU_V029]',String(e&&e.stack||e));
+    console.error('[GM_CATEGORY_MENU_V030]',String(e&&e.stack||e));
     return res.status(500).json({ok:false,error:C(e&&e.message||e)});
   }
 });
