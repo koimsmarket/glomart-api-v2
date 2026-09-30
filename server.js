@@ -1925,13 +1925,14 @@ app.use(require('./routes/address_map'));
 console.log('[GM_ORDER_MAP_ADDRESS_ROUTE_V001] routes/address_map registered');
 app.use(require('./routes/smartfit_vector'));
 console.log('[GM_SMARTFIT_VECTOR_ROUTE_V001] routes/smartfit_vector registered');
+app.use(require('./routes/product_detail_fast')); // GM_DETAIL_FAST_SERVER_V003_SPLIT
+console.log('[GM_DETAIL_FAST_SERVER_V003_SPLIT] routes/product_detail_fast registered');
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
 app.use(require('./routes/account'));
 app.use(require('./routes/deposit')); // Glomart deposit read API
-app.use(require('./routes/point')); // Glomart reward point API (cash deposit remains separate)
 app.use(require('./routes/order'));
 app.use(require('./routes/order_history')); // GM 주문조회 전용 라우트(서버는 평면 구조 유지)
 app.use(require('./routes/order_cs')); // GM 주문 취소/교환/반품/구매확정 전용 라우트
