@@ -25,6 +25,7 @@ router.use(require('./product_queue')); // product queue adaptive-concurrency mo
 router.use(require('./product_gm_code')); // gm_category.gm_code -> gm_product.glomart_code reconciliation
 router.use(require('./category_unit')); // category unit rule + product/option recalculation
 router.use(require('./ai_usage'));      // monthly AI/API token + cost monitor (read-only)
+router.use(require('./purchase_confirm')); // purchase confirm -> point grant + G-PAY agent incentive
 
 // ---- Domain Builder modules --------------------------------------------------
 router.use(require('./image_vector'));  // vector production / sync only

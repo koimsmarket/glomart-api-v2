@@ -591,8 +591,6 @@ app.locals.pool = pool;
 try {
   app.use(require('./routes/member'));
   console.log('[GM_MEMBER_ROUTE_V024] routes/member registered early');
-  app.use(require('./routes/gpay_member_profile'));
-  console.log('[GM_GPAY_MEMBER_PROFILE_V001] route registered');
 } catch (e) {
   console.error('[GM_MEMBER_ROUTE_V024] routes/member register failed:', String(e && e.message || e));
 }
@@ -1933,6 +1931,7 @@ app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
 app.use(require('./routes/account'));
 app.use(require('./routes/deposit')); // Glomart deposit read API
+app.use(require('./routes/point')); // Glomart reward point API (cash deposit remains separate)
 app.use(require('./routes/order'));
 app.use(require('./routes/order_history')); // GM 주문조회 전용 라우트(서버는 평면 구조 유지)
 app.use(require('./routes/order_cs')); // GM 주문 취소/교환/반품/구매확정 전용 라우트

@@ -15,8 +15,16 @@
 <button class="builder-tab-btn" data-tab="gmcode" onclick="openBuilderTab('gmcode')">GLOMART_CODE</button>
 <button class="builder-tab-btn" data-tab="vector" onclick="openBuilderTab('vector')">IMAGE VECTOR</button>
 <button class="builder-tab-btn" data-tab="lang" onclick="openBuilderTab('lang')">언어 / 국가</button>
+<button class="builder-tab-btn" data-tab="purchase" onclick="openBuilderTab('purchase')">구매확정</button>
 <span class="tab-spacer"></span>
-<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V076</span>
+<button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V077</span>
+</div>
+<div class="card" id="purchaseConfirmCard" data-builder-tab="purchase">
+  <h2>구매확정 / 적립금 / G-PAY 인센티브</h2>
+  <div class="small">배송완료 주문만 대상으로 합니다. 구매확정 시 고객 적립금은 <b>순상품 실결제금액의 3%</b>를 10원 미만 절사하여 생성하고, 배송비는 제외합니다. 동시에 G-PAY 사용이력에 발행 시 고정된 D0~D5 계보로 대리점 인센티브를 확정합니다. 같은 주문은 중복 확정되지 않습니다.</div>
+  <p><button class="green" onclick="loadPurchaseConfirmCandidates()">구매확정 대상 조회</button> <button class="gray" onclick="purchaseConfirmSelectAll(true)">전체 선택</button> <button class="gray" onclick="purchaseConfirmSelectAll(false)">선택 해제</button> <button onclick="confirmSelectedPurchases()">선택 구매확정</button></p>
+  <div id="purchaseConfirmStatus" class="status">조회 전</div>
+  <div style="overflow:auto;max-height:620px;margin-top:10px"><table><thead><tr><th>선택</th><th>주문번호</th><th>회원</th><th>순상품가</th><th>적립금 사용</th><th>순상품 실결제</th><th>3% 적립</th><th>배송비(제외)</th><th>결제상태</th><th>배송상태</th><th>배송완료일</th></tr></thead><tbody id="purchaseConfirmRows"><tr><td colspan="11">조회 전</td></tr></tbody></table></div>
 </div>
 <div class="head" data-builder-tab="status"><div><h1>GM Data Builder</h1><div class="small">기능별 완전 분리형 관리 화면 · IMAGE VECTOR 독립 모듈</div></div></div>
 <div class="warning" data-builder-tab="status"><b>구조 변경 원칙</b><br>다운로드·안전 업데이트·개발 복원·회원 작업을 서로 다른 화면/서버 모듈로 분리했습니다. DB 구조와 기존 API URL은 변경하지 않습니다.</div>
@@ -167,5 +175,6 @@
 <script src="/builder/GM_BUILDER_PRODUCT_QUEUE.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v016"></script>
 <script src="/builder/GM_BUILDER_AI_USAGE.js?v=gm_builder_v001"></script>
+<script src="/builder/GM_BUILDER_PURCHASE_CONFIRM.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_TABS.js?v=gm_builder_v002"></script>
 </body></html>
