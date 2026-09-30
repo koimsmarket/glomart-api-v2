@@ -1,7 +1,7 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_SEARCH_LOCAL_V004_PRIORITY_EXACT';
+const VERSION = 'GM_SEARCH_LOCAL_V006_PRICE_UNIT_RESPONSE';
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):d; }
@@ -12,6 +12,7 @@ const PRODUCT_COLS=`
   product_uid,mall_code,product_id,item_id,vendor_item_id,pi_ii_vi,glomart_code,
   product_name,mall_product_name,keyword,category_keyword,
   mall_sale_price,final_supply_price,normal_price,discount_price,
+  unit_price_text,unit_price_value,unit_base_qty,unit_base_unit,
   delivery_fee,delivery_eta_text,delivery_type,review_count,mall_sales_count,
   product_grade,product_url,thumb_origin_url,soldout_yn,sale_status,
   hit_count,last_seen_at,updated_at
@@ -110,6 +111,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
         productId:x.product_id,itemId:x.item_id,vendorItemId:x.vendor_item_id,pi_ii_vi:x.pi_ii_vi,
         productName:x.product_name,title:x.product_name,mall_product_name:x.mall_product_name,keyword:x.keyword,category_keyword:x.category_keyword,
         mall_sale_price:x.mall_sale_price,final_supply_price:x.final_supply_price,normal_price:x.normal_price,discount_price:x.discount_price,
+        unit_price_text:x.unit_price_text,unitPriceText:x.unit_price_text,unit_price_value:x.unit_price_value,unit_base_qty:x.unit_base_qty,unit_base_unit:x.unit_base_unit,
         priceText:won(x.normal_price||x.final_supply_price||x.discount_price||x.mall_sale_price),delivery_fee:x.delivery_fee,shippingFeeText:(Number(x.delivery_fee||0)>0?won(x.delivery_fee):'무료배송'),
         deliveryEtaText:x.delivery_eta_text,deliveryType:x.delivery_type,reviewCount:x.review_count,mall_sales_count:x.mall_sales_count,rating:x.product_grade,
         product_url:x.product_url||'',image:x.thumb_origin_url||'',thumb_origin_url:x.thumb_origin_url||'',__gm_server_local:1,__gm_category_code_search:1
@@ -137,6 +139,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
       productName:x.product_name,title:x.product_name,mall_product_name:x.mall_product_name,
       keyword:x.keyword,category_keyword:x.category_keyword,
       mall_sale_price:x.mall_sale_price,final_supply_price:x.final_supply_price,normal_price:x.normal_price,discount_price:x.discount_price,
+      unit_price_text:x.unit_price_text,unitPriceText:x.unit_price_text,unit_price_value:x.unit_price_value,unit_base_qty:x.unit_base_qty,unit_base_unit:x.unit_base_unit,
       priceText:won(x.normal_price||x.final_supply_price||x.discount_price||x.mall_sale_price),
       delivery_fee:x.delivery_fee,shippingFeeText:(Number(x.delivery_fee||0)>0?won(x.delivery_fee):'무료배송'),
       deliveryEtaText:x.delivery_eta_text,deliveryType:x.delivery_type,
