@@ -120,6 +120,8 @@ function clampInt(v,min,max,def){
 }
 
 router.get('/api/gm/category/menu',async(req,res)=>{
+  const gmSource=String((req.query&&req.query.gm_source)||'UNKNOWN').trim().slice(0,80)||'UNKNOWN';
+  const gmReason=String((req.query&&req.query.gm_reason)||'').trim().slice(0,120);
   const startedAt=Date.now();
   const pool=req.app.locals.pool;
   if(!pool)return res.status(503).json({ok:false,error:'db unavailable'});
@@ -128,7 +130,7 @@ router.get('/api/gm/category/menu',async(req,res)=>{
   const col=LANG_COLUMN[rawLang]||'name_ko';
   const translateRequired=!LANG_COLUMN[rawLang];
   const timingScope=parent?'branch':'root';
-  try{console.log('[GM_CATEGORY_MENU_TIMING] phase=START scope='+timingScope+' parent='+(parent||'')+' ts_ms='+startedAt);}catch(_log){}
+  try{console.log('[GM_CATEGORY_MENU_TIMING] phase=START source='+gmSource+' reason='+(gmReason||'-')+' scope='+timingScope+' parent='+(parent||'')+' ts_ms='+startedAt);}catch(_log){}
   try{
     let depth=0,rows=[];
     const levels=clampInt(req.query&&req.query.levels,1,2,1);
@@ -182,7 +184,7 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       const endedAt=Date.now();
       const totalMs=endedAt-startedAt;
       const queryMs=Number(req.__gmCategoryMenuQueryMs||0);
-      console.log('[GM_CATEGORY_MENU_TIMING] phase=END scope='+timingScope+' parent='+(parent||'')+' count='+items.length+' query_ms='+queryMs+' heal_ms='+healMs+' total_ms='+totalMs+' ts_ms='+endedAt);
+      console.log('[GM_CATEGORY_MENU_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' scope='+timingScope+' parent='+(parent||'')+' count='+items.length+' query_ms='+queryMs+' heal_ms='+healMs+' total_ms='+totalMs+' ts_ms='+endedAt);
       if(totalMs>=500 || queryMs>=500){
         console.warn('[GM_CATEGORY_MENU_SLOW] parent='+(parent||'')+' count='+items.length+' query_ms='+queryMs+' total_ms='+totalMs);
       }

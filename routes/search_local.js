@@ -75,6 +75,8 @@ async function categoryStage(pool,categoryCode,virtualKeyword,limit){
 
 
 router.get('/api/gm/search/local', async (req,res)=>{
+  const gmSource=String((req.query&&req.query.gm_source)||'UNKNOWN').trim().slice(0,80)||'UNKNOWN';
+  const gmReason=String((req.query&&req.query.gm_reason)||'').trim().slice(0,120);
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,version:VERSION,error:'DB pool is not attached'});
   const keyword=C(req.query.keyword||req.query.q||'');
   const categoryCode=C(req.query.category_code||req.query.gm_category_code||'').toUpperCase();
@@ -84,7 +86,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
   if(!keyword&&!categorySearch) return res.json({ok:true,version:VERSION,keyword:'',count:0,items:[],groups:{CPKR:0,ALKR:0}});
 
   const totalStarted=Date.now();
-  try{console.log('[GM_SEARCH_LOCAL_TIMING] phase=START keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search='+(categorySearch?'Y':'N')+' ts_ms='+totalStarted);}catch(_log){}
+  try{console.log('[GM_SEARCH_LOCAL_TIMING] phase=START source='+gmSource+' reason='+(gmReason||'-')+' keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search='+(categorySearch?'Y':'N')+' ts_ms='+totalStarted);}catch(_log){}
   const byMall={CPKR:[],ALKR:[]};
   const seen=new Set();
   function merge(rows){
@@ -120,7 +122,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
       const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
       const endedAt=Date.now();
       console.log('[GM_SEARCH_LOAD] keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' count='+items.length);
-      console.log('[GM_SEARCH_LOCAL_TIMING] phase=END keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search=Y count='+items.length+' category_ms='+categoryCodeMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
+      console.log('[GM_SEARCH_LOCAL_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search=Y count='+items.length+' category_ms='+categoryCodeMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
       return res.json({ok:true,version:VERSION,keyword,category_search:true,category_code:categoryCode,category_keyword:categoryVirtualKeyword||'',scope_count:categoryResult.scope_codes.length,count:items.length,groups,items});
     }
 
@@ -155,7 +157,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
     const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
     const endedAt=Date.now();
     console.log('[GM_SEARCH_LOAD] keyword='+keyword+' count='+items.length);
-    console.log('[GM_SEARCH_LOCAL_TIMING] phase=END keyword='+keyword+' category_search=N count='+items.length+' keyword_ms='+exactKeywordTimed.elapsed_ms+' category_keyword_ms='+exactCategoryTimed.elapsed_ms+' parallel_ms='+exactParallelMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
+    console.log('[GM_SEARCH_LOCAL_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' keyword='+keyword+' category_search=N count='+items.length+' keyword_ms='+exactKeywordTimed.elapsed_ms+' category_keyword_ms='+exactCategoryTimed.elapsed_ms+' parallel_ms='+exactParallelMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
     res.json({ok:true,version:VERSION,keyword,count:items.length,groups,items});
   }catch(e){
     console.error('[GM_SEARCH_LOAD_ERROR] keyword='+keyword+' ms='+ms(totalStarted)+' error='+String(e&&e.message||e));
