@@ -39,7 +39,6 @@ router.post('/api/gm/product/queue',async(req,res)=>{
     }
     const beforeResponseMs=Date.now()-t0;
     req.__gmApiDiag={route_ms:Date.now()-routeT0,acquire_ms:acquireMs,sql_ms:sqlMs};
-    console.log('[GM_QUEUE_TIMING] keyword='+keyword+' mall='+mallCode+' items='+items.length+' acquire_ms='+acquireMs+' sql_ms='+sqlMs+' route_ms='+(Date.now()-routeT0));
     ok(res,{action:'product.queue',queued:true,queue:r.rows[0],queue_id:r.rows[0]&&r.rows[0].queue_id,request_id:r.rows[0]&&r.rows[0].request_id,item_count:r.rows[0]&&r.rows[0].item_count,received:items.length,inline_upsert:false,inline_status:'queued',chunk_index:chunkIndex,chunk_total:chunkTotal});
     saveRelationAfterResponse(pool,p,mallCode,keyword);
   }catch(e){req.__gmApiDiag={route_ms:Date.now()-routeT0,acquire_ms:acquireMs,sql_ms:sqlMs};console.error('[GM_QUEUE_ERROR] keyword='+keyword+' mall='+mallCode+' acquire_ms='+acquireMs+' sql_ms='+sqlMs+' error='+String(e&&e.message||e));return fail(res,500,'product queue failed',{detail:String(e&&e.message||e)});}

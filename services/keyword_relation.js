@@ -182,13 +182,9 @@ async function saveKeywordTranslate(pool,payload){
   const tr=pickTranslations(p); tr.ko=tr.ko||main; if(lang!=='ko'&&input) tr[lang]=tr[lang]||input;
   const translatedCount=LANGS.filter(l=>!!tr[l]).length;
   const missingLangs=LANGS.filter(l=>!tr[l]);
-  console.log('[GM_KEYWORD_TRANSLATE_PAYLOAD]', {
-    input_keyword:input,
-    main_keyword_ko:main,
-    translated_count:translatedCount,
-    missing_langs:missingLangs,
-    device_lang:deviceLang
-  });
+  if(missingLangs.length){
+    console.warn('[GM_KEYWORD_TRANSLATE_WARN] keyword='+main+' translated='+translatedCount+' missing='+missingLangs.join(','));
+  }
   // 횡렬 구조에서는 keyword_ko도 LANGS의 ko 항목에서 한 번만 생성한다.
   // 별도 keyword_ko 선언과 LANGS 반복을 함께 사용하면 INSERT 컬럼이 중복된다.
   const cols=['lang','input_keyword','main_keyword_ko','device_lang','hit_count','updated_at','created_at','translate_complete']

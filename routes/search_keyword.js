@@ -372,7 +372,7 @@ async function handler(req,res){
       externalSearchDbCount: ctl.db_count,
       externalSearchLastSuccessAt: ctl.last_success_at
     });
-    try{ console.log('[GM_SEARCH_KEYWORD_NORMALIZE_V003]', { input:out.input_keyword, lang:out.lang, keyword_ko:out.keyword_ko, source:out.source, fallback:out.fallback, external_search_required:ctl.external_search_required, external_search_reason:ctl.reason, db_count:ctl.db_count, interval_hours:ctl.interval_hours }); }catch(_log){}
+    try{ if(out.fallback || !String(out.keyword_ko||'').trim()) console.warn('[GM_SEARCH_NORMALIZE_WARN] keyword='+String(out.input_keyword||'').trim()+' source='+String(out.source||'')+' fallback='+(out.fallback?'Y':'N')+' reason='+String(ctl.reason||'')); }catch(_log){}
     return res.json(out);
   }catch(e){
     console.error('[GM_SEARCH_KEYWORD_NORMALIZE_ERROR_V002]', String(e && e.message || e));

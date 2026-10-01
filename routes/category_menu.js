@@ -176,15 +176,16 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       keyword:C(r.keyword)||C(r.name_ko),
       translate_required:translateRequired || (rawLang!=='ko' && rawLang!=='kr' && !C(r.display_name))
     }));
-    try{console.log('[GM_CATEGORY_MENU_V030]',{
-      parent_code:parent||'', depth, levels, from_offset:fromOffset, fast, lang:rawLang, count:items.length,
-      segment_count:req.__gmCategoryMenuSegmentCount||0,
-      query_ms:Number(req.__gmCategoryMenuQueryMs||0), heal_ms:healMs,
-      total_ms:Date.now()-startedAt
-    });}catch(_log){}
+    try{
+      const totalMs=Date.now()-startedAt;
+      const queryMs=Number(req.__gmCategoryMenuQueryMs||0);
+      if(totalMs>=500 || queryMs>=500){
+        console.warn('[GM_CATEGORY_MENU_SLOW] parent='+(parent||'')+' count='+items.length+' query_ms='+queryMs+' total_ms='+totalMs);
+      }
+    }catch(_log){}
     return res.json({ok:true,parent_code:parent,depth,levels,from_offset:fromOffset,fast,lang:rawLang,translate_required:translateRequired,count:items.length,items});
   }catch(e){
-    console.error('[GM_CATEGORY_MENU_V030]',String(e&&e.stack||e));
+    console.error('[GM_CATEGORY_MENU_ERROR]',String(e&&e.stack||e));
     return res.status(500).json({ok:false,error:C(e&&e.message||e)});
   }
 });

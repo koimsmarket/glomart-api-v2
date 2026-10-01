@@ -111,9 +111,10 @@ async function allowedConcurrency(pool, active){
   };
   lastConcurrencyStatus=status;
   const now=Date.now();
-  if(lastConcurrencyLog.value!==allowed || now-lastConcurrencyLog.at>=15000){
+  const pressure=(poolWaiting>0 || dbBusyRatio>=0.75 || cpuRatio>=0.80 || memUsedRatio>=0.82);
+  if(pressure && (lastConcurrencyLog.value!==allowed || now-lastConcurrencyLog.at>=15000)){
     lastConcurrencyLog={value:allowed,at:now};
-    console.log('[GM_QUEUE_CONCURRENCY] allowed='+allowed+' active='+activeNow+' pending='+pending+' cpu='+Number(cpuRatio.toFixed(3))+' mem='+Number(memUsedRatio.toFixed(3))+' db_idle='+poolIdle+' db_waiting='+poolWaiting);
+    console.warn('[GM_QUEUE_CONCURRENCY_WARN] allowed='+allowed+' active='+activeNow+' pending='+pending+' cpu='+Number(cpuRatio.toFixed(3))+' mem='+Number(memUsedRatio.toFixed(3))+' db_idle='+poolIdle+' db_waiting='+poolWaiting+' db_busy='+Number(dbBusyRatio.toFixed(3)));
   }
   return allowed;
 }

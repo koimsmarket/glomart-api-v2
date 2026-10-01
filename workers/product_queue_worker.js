@@ -10,6 +10,28 @@ let scheduling = false;
 let active = 0;
 let timer = null;
 
+// GM_PRODUCT_LOG_SUMMARY_V009
+// Aggregate per search request + mall so normal operation emits one save summary, not one line per chunk.
+const gmSearchSaveSummary = new Map();
+function gmSaveSummaryKey(row){
+  const rid=String(row&&row.request_id||'').trim().replace(/_C\d+$/i,'');
+  return rid+'|'+String(row&&row.mall_code||'').trim()+'|'+String(row&&row.keyword||'').trim();
+}
+function queueSearchSaveSummary(row, received, inserted, updated, skipped){
+  const key=gmSaveSummaryKey(row);
+  let e=gmSearchSaveSummary.get(key);
+  if(!e){ e={keyword:String(row.keyword||'').trim(),mall:String(row.mall_code||'').trim(),received:0,inserted:0,updated:0,skipped:0,timer:null}; gmSearchSaveSummary.set(key,e); }
+  e.received+=Number(received||0); e.inserted+=Number(inserted||0); e.updated+=Number(updated||0); e.skipped+=Number(skipped||0);
+  if(e.timer) clearTimeout(e.timer);
+  e.timer=setTimeout(()=>{
+    const cur=gmSearchSaveSummary.get(key);
+    if(!cur) return;
+    gmSearchSaveSummary.delete(key);
+    console.log('[GM_SEARCH_SAVE] keyword='+cur.keyword+' mall='+cur.mall+' received='+cur.received+' new='+cur.inserted+' updated='+cur.updated+' skipped='+cur.skipped);
+  },1200);
+  if(e.timer && typeof e.timer.unref==='function') e.timer.unref();
+}
+
 function toInt(v, def){
   const n = Number(v);
   return Number.isFinite(n) ? Math.max(1, Math.round(n)) : def;
@@ -196,7 +218,7 @@ async function processRow(pool, row){
     option_balance_ok
   };
   const result = { received: items.length, saved, inserted, updated, skipped, audit, category_keyword_batch, skip_reason_count, samples, errors: errors.slice(0, 5) };
-  console.log('[GM_SEARCH_SAVE] keyword='+String(row.keyword||'').trim()+' mall='+String(row.mall_code||'').trim()+' received='+items.length+' new='+inserted+' updated='+updated+' skipped='+skipped);
+  queueSearchSaveSummary(row, items.length, inserted, updated, skipped);
   if(errors.length){ console.warn('[GM_SEARCH_SAVE_ERROR] keyword='+String(row.keyword||'').trim()+' errors='+errors.length+' first='+String(errors[0]||'')); }
   if(items.length && saved === 0){
     // V017: worker가 0건 저장일 때 route/DB 상태 확인을 위해 failed 재시도 루프만 만들지 않고

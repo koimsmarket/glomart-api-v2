@@ -986,21 +986,19 @@ async function findCpSelectedCodeForKeyword(pool, keyword){
   }
   if(selected){
     const code=cleanText(selected.cp_code) || cleanText(selected.gm_code);
-    try{ console.log('[GM_CP_SELECTED_MATCH]', { version:'V057', keyword:kw, reason, selected_type:classifySelectedCode(code), cp_selected_code:code, selected:{cp_code:selected.cp_code,gm_code:selected.gm_code,name_ko:selected.name_ko,parent_name_ko:selected.parent_name_ko,depth:selected.depth,match_type:selected.match_type} }); }catch(_l){}
     return code;
   }
   if(reason && reason.endsWith('_AMBIGUOUS')){
-    try{ console.log('[GM_CP_SELECTED_MATCH]', { version:'V057', keyword:kw, reason, cp_selected_code:'', candidate_count:cand.length }); }catch(_l){}
+    try{ console.warn('[GM_CP_SELECTED_WARN] keyword='+kw+' reason='+reason+' candidates='+cand.length); }catch(_l){}
     return '';
   }
   const slash=cand.filter(r=>cleanText(r.match_type)==='SLASH_EXACT' && cleanText(r.gm_code));
   if(slash.length===1){
     const result=await ensureProvisionalCategoryFromSlashParent(pool, kw, slash[0]);
     const code=cleanText(result.selected_code);
-    try{ console.log('[GM_CP_SELECTED_MATCH]', { version:'V057', keyword:kw, reason:result.reason, selected_type:result.selected_type, cp_selected_code:code, slash_parent:{cp_code:slash[0].cp_code,gm_code:slash[0].gm_code,name_ko:slash[0].name_ko,depth:slash[0].depth} }); }catch(_l){}
     return code;
   }
-  try{ console.log('[GM_CP_SELECTED_MATCH]', { version:'V057', keyword:kw, reason:slash.length>1?'SLASH_AMBIGUOUS':'NO_MATCH', cp_selected_code:'', candidate_count:cand.length }); }catch(_l){}
+  try{ console.warn('[GM_CP_SELECTED_WARN] keyword='+kw+' reason='+(slash.length>1?'SLASH_AMBIGUOUS':'NO_MATCH')+' candidates='+cand.length); }catch(_l){}
   return '';
 }
 async function findCpSelectedCodeForKeywordAndTree(pool, keyword, tree){
