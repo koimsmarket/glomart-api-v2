@@ -1,13 +1,43 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_SEARCH_LOCAL_V007_NORMAL_PRICE_ONLY';
+const VERSION = 'GM_SEARCH_LOCAL_V008_POOL_DIAG';
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):d; }
 function won(v){ const n=Number(v||0); return n>0 ? Math.round(n).toLocaleString('ko-KR')+'원' : ''; }
 function ms(t){ return Date.now()-t; }
 function publicUnitPriceText(value,qty,unit){ const v=Number(value||0),q=Number(qty||0),u=C(unit); if(!(v>0)||!(q>0)||!u)return ''; return (Number.isInteger(q)?String(q):String(q))+u+'당 '+won(v); }
+
+function poolState(pool){
+  return {
+    total:Number(pool&&pool.totalCount||0),
+    idle:Number(pool&&pool.idleCount||0),
+    waiting:Number(pool&&pool.waitingCount||0)
+  };
+}
+async function timedPoolQuery(pool,sql,params,label){
+  const started=Date.now();
+  let client=null;
+  let acquireMs=0, sqlMs=0;
+  if(pool&&typeof pool.connect==='function'){
+    const acquireStarted=Date.now();
+    client=await pool.connect();
+    acquireMs=Date.now()-acquireStarted;
+    try{
+      const sqlStarted=Date.now();
+      const result=await client.query(sql,params);
+      sqlMs=Date.now()-sqlStarted;
+      return {result,acquire_ms:acquireMs,sql_ms:sqlMs,total_ms:Date.now()-started,label:label||''};
+    }finally{
+      try{client.release();}catch(_release){}
+    }
+  }
+  const sqlStarted=Date.now();
+  const result=await pool.query(sql,params);
+  sqlMs=Date.now()-sqlStarted;
+  return {result,acquire_ms:0,sql_ms:sqlMs,total_ms:Date.now()-started,label:label||''};
+}
 
 const PRODUCT_COLS=`
   product_uid,mall_code,product_id,item_id,vendor_item_id,pi_ii_vi,glomart_code,
@@ -25,7 +55,7 @@ const ACTIVE_WHERE=`
 `;
 
 async function exactStage(pool,column,keyword,limit){
-  return pool.query(`
+  return timedPoolQuery(pool,`
     WITH ranked AS (
       SELECT ${PRODUCT_COLS},
              ROW_NUMBER() OVER (
@@ -39,7 +69,7 @@ async function exactStage(pool,column,keyword,limit){
     )
     SELECT * FROM ranked WHERE rn <= $2
     ORDER BY mall_code, rn
-  `,[keyword,limit]);
+  `,[keyword,limit],column);
 }
 
 function categoryScopePrefix(code){
@@ -53,13 +83,14 @@ async function categoryStage(pool,categoryCode,virtualKeyword,limit){
   categoryCode=C(categoryCode).toUpperCase(); virtualKeyword=C(virtualKeyword);
   const prefix=categoryScopePrefix(categoryCode);
   if(!categoryCode||!prefix) return {rows:[],scope_codes:[]};
-  const cq=await pool.query(`SELECT gm_code FROM gm_category WHERE COALESCE(display_yn,'Y')='Y' AND (gm_code=$1 OR gm_code LIKE $2) ORDER BY depth,gm_code`,[categoryCode,prefix+'-%']);
+  const cqTimed=await timedPoolQuery(pool,`SELECT gm_code FROM gm_category WHERE COALESCE(display_yn,'Y')='Y' AND (gm_code=$1 OR gm_code LIKE $2) ORDER BY depth,gm_code`,[categoryCode,prefix+'-%'],'category_scope');
+  const cq=cqTimed.result;
   const scopeCodes=(cq.rows||[]).map(r=>C(r.gm_code).toUpperCase()).filter(Boolean);
   if(!scopeCodes.includes(categoryCode)) scopeCodes.unshift(categoryCode);
   const params=[scopeCodes,limit];
   let virtualSql='';
   if(virtualKeyword){params.push(virtualKeyword);virtualSql=` AND (keyword=$3 OR category_keyword=$3)`;}
-  const q=await pool.query(`
+  const qTimed=await timedPoolQuery(pool,`
     WITH ranked AS (
       SELECT ${PRODUCT_COLS},
              ROW_NUMBER() OVER (PARTITION BY mall_code ORDER BY COALESCE(hit_count,0) DESC,COALESCE(updated_at,last_seen_at) DESC NULLS LAST) AS rn
@@ -69,8 +100,9 @@ async function categoryStage(pool,categoryCode,virtualKeyword,limit){
         ${virtualSql}
     )
     SELECT * FROM ranked WHERE rn <= $2 ORDER BY mall_code,rn
-  `,params);
-  return {rows:q.rows||[],scope_codes:scopeCodes};
+  `,params,'category_product');
+  const q=qTimed.result;
+  return {rows:q.rows||[],scope_codes:scopeCodes,scope_timing:cqTimed,product_timing:qTimed};
 }
 
 
@@ -86,7 +118,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
   if(!keyword&&!categorySearch) return res.json({ok:true,version:VERSION,keyword:'',count:0,items:[],groups:{CPKR:0,ALKR:0}});
 
   const totalStarted=Date.now();
-  try{console.log('[GM_SEARCH_LOCAL_TIMING] phase=START source='+gmSource+' reason='+(gmReason||'-')+' keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search='+(categorySearch?'Y':'N')+' ts_ms='+totalStarted);}catch(_log){}
+  try{const ps=poolState(pool);console.log('[GM_SEARCH_LOCAL_TIMING] phase=START source='+gmSource+' reason='+(gmReason||'-')+' keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search='+(categorySearch?'Y':'N')+' pool_total='+ps.total+' pool_idle='+ps.idle+' pool_waiting='+ps.waiting+' ts_ms='+totalStarted);}catch(_log){}
   const byMall={CPKR:[],ALKR:[]};
   const seen=new Set();
   function merge(rows){
@@ -122,17 +154,16 @@ router.get('/api/gm/search/local', async (req,res)=>{
       const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
       const endedAt=Date.now();
       console.log('[GM_SEARCH_LOAD] keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' count='+items.length);
-      console.log('[GM_SEARCH_LOCAL_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search=Y count='+items.length+' category_ms='+categoryCodeMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
+      const ps=poolState(pool);
+      console.log('[GM_SEARCH_LOCAL_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search=Y count='+items.length+' category_ms='+categoryCodeMs+' scope_acquire_ms='+(categoryResult.scope_timing&&categoryResult.scope_timing.acquire_ms||0)+' scope_sql_ms='+(categoryResult.scope_timing&&categoryResult.scope_timing.sql_ms||0)+' product_acquire_ms='+(categoryResult.product_timing&&categoryResult.product_timing.acquire_ms||0)+' product_sql_ms='+(categoryResult.product_timing&&categoryResult.product_timing.sql_ms||0)+' pool_total='+ps.total+' pool_idle='+ps.idle+' pool_waiting='+ps.waiting+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
       return res.json({ok:true,version:VERSION,keyword,category_search:true,category_code:categoryCode,category_keyword:categoryVirtualKeyword||'',scope_count:categoryResult.scope_codes.length,count:items.length,groups,items});
     }
 
     // PRIORITY EXACT: 두 인덱스 조회는 서로 독립이므로 병렬 실행한다.
     // 결과 병합 순서는 keyword -> category_keyword로 유지해 기존 우선순위를 보존한다.
     const exactStarted=Date.now();
-    const keywordStarted=Date.now();
-    const keywordPromise=exactStage(pool,'keyword',keyword,limit).then(result=>({result,elapsed_ms:ms(keywordStarted)}));
-    const categoryKeywordStarted=Date.now();
-    const categoryKeywordPromise=exactStage(pool,'category_keyword',keyword,limit).then(result=>({result,elapsed_ms:ms(categoryKeywordStarted)}));
+    const keywordPromise=exactStage(pool,'keyword',keyword,limit);
+    const categoryKeywordPromise=exactStage(pool,'category_keyword',keyword,limit);
     const [exactKeywordTimed,exactCategoryTimed]=await Promise.all([keywordPromise,categoryKeywordPromise]);
     const exactParallelMs=ms(exactStarted);
     const exactKeyword=exactKeywordTimed.result;
@@ -157,7 +188,8 @@ router.get('/api/gm/search/local', async (req,res)=>{
     const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
     const endedAt=Date.now();
     console.log('[GM_SEARCH_LOAD] keyword='+keyword+' count='+items.length);
-    console.log('[GM_SEARCH_LOCAL_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' keyword='+keyword+' category_search=N count='+items.length+' keyword_ms='+exactKeywordTimed.elapsed_ms+' category_keyword_ms='+exactCategoryTimed.elapsed_ms+' parallel_ms='+exactParallelMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
+    const ps=poolState(pool);
+    console.log('[GM_SEARCH_LOCAL_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' keyword='+keyword+' category_search=N count='+items.length+' keyword_ms='+exactKeywordTimed.total_ms+' keyword_acquire_ms='+exactKeywordTimed.acquire_ms+' keyword_sql_ms='+exactKeywordTimed.sql_ms+' category_keyword_ms='+exactCategoryTimed.total_ms+' category_keyword_acquire_ms='+exactCategoryTimed.acquire_ms+' category_keyword_sql_ms='+exactCategoryTimed.sql_ms+' parallel_ms='+exactParallelMs+' pool_total='+ps.total+' pool_idle='+ps.idle+' pool_waiting='+ps.waiting+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
     res.json({ok:true,version:VERSION,keyword,count:items.length,groups,items});
   }catch(e){
     console.error('[GM_SEARCH_LOAD_ERROR] keyword='+keyword+' ms='+ms(totalStarted)+' error='+String(e&&e.message||e));
