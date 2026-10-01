@@ -129,13 +129,6 @@ function pickLang(p){
   return cleanText(p.lang || p.gm_lang || p.ui_lang_code || p.lang_code || p.country_lang || (p.searchKeywordMeta && (p.searchKeywordMeta.lang || p.searchKeywordMeta.gm_lang)) || 'ko').toLowerCase() || 'ko';
 }
 
-function boolToTF(v){
-  if(v === true) return 'T';
-  if(v === false) return 'F';
-  const s = cleanText(v).toUpperCase();
-  if(['T','TRUE','Y','YES','1','사용','CACHE'].includes(s)) return 'T';
-  return 'F';
-}
 async function ensureSearchLogSchema(pool){
   // 검색로그는 분석용 최소 데이터만 저장한다. raw_json은 운영/백업 부담이 커서 제거한다.
   try{ await pool.query(`ALTER TABLE gm_search_log DROP COLUMN IF EXISTS raw_json`); }
@@ -155,58 +148,6 @@ async function lookupCategoryNameByCode(pool, cpCode){
     if(r.rows && r.rows[0] && cleanText(r.rows[0].name_ko)) return cleanText(r.rows[0].name_ko);
   }catch(_e){}
   return '';
-}
-function pickSearchLogCategoryNo(p, meta){
-  return cleanText(
-    p.category_no || p.categoryNo || p.cp_selected_code || p.cpSelectedCode ||
-    p.selected_code || p.selectedCode || p.matched_category_keyword ||
-    (meta && (meta.selectedCode || meta.cp_selected_code || meta.matched_category_keyword)) ||
-    p.keyword_normalized || p.keyword_canonical || p.main_keyword || p.mainKeyword || p.keyword || p.input_keyword || ''
-  );
-}
-async function saveSearchLogPayload(pool, payload){
-  const p = parseIncomingPayloadBody(payload || {});
-  await ensureSearchLogSchema(pool);
-  const meta = pickKeywordMeta(p);
-  const keywordOriginal = cleanText(p.keyword_original || p.keywordOriginal || meta.originalKeyword || meta.inputKeyword || p.keyword || p.q || '');
-  const keywordNormalized = cleanText(p.keyword_normalized || p.keywordNormalized || p.keyword_canonical || p.keywordCanonical || meta.mainKeyword || meta.correctedKeyword || keywordOriginal);
-  const categoryCode = cleanText(p.category_code || p.categoryCode || p.cp_fix_code || p.cpFixCode || '');
-  const categoryName = cleanText(p.category_name || p.categoryName || (categoryCode ? await lookupCategoryNameByCode(pool, categoryCode) : ''));
-  const categoryNo = pickSearchLogCategoryNo(p, meta.raw || {});
-  const vals = [
-    keywordOriginal,
-    keywordNormalized,
-    cleanText(p.lang_code || p.langCode || p.ui_lang_code || p.uiLangCode || p.lang || 'kr'),
-    cleanText(p.country_code || p.countryCode || 'KR'),
-    cleanText(p.member_country_code || p.memberCountryCode || p.country_code || p.countryCode || 'KR'),
-    categoryCode || null,
-    categoryNo || null,
-    categoryName || null,
-    cleanText(p.mall_code || p.mallCode || p.mall || '').toUpperCase(),
-    toInt(p.result_count || p.resultCount, 0),
-    toInt(p.db_insert_count || p.dbInsertCount, 0),
-    toInt(p.queue_send_count || p.queueSendCount, 0),
-    boolToTF(p.cache_used !== undefined ? p.cache_used : p.cacheUsed),
-    cleanText(p.cache_key || p.cacheKey || ''),
-    cleanText(p.search_source || p.searchSource || p.source_page || p.sourcePage || 'search'),
-    cleanText(p.member_id || p.memberId || ''),
-    cleanText(p.guest_key || p.guestKey || ''),
-    cleanText(p.device_type || p.deviceType || 'app'),
-    cleanText(p.request_id || p.requestId || (meta.raw && meta.raw.requestId) || ''),
-    cleanText(p.keyword_canonical || p.keywordCanonical || keywordNormalized),
-    cleanText(p.ui_lang_code || p.uiLangCode || p.lang_code || p.langCode || 'kr'),
-    cleanText(p.keyword_lang_code || p.keywordLangCode || 'ko')
-  ];
-  const sql = `INSERT INTO gm_search_log (
-    search_at, keyword_original, keyword_normalized, lang_code, country_code, member_country_code,
-    category_code, category_no, category_name, mall_code, result_count, db_insert_count, queue_send_count,
-    cache_used, cache_key, search_source, member_id, guest_key, device_type, request_id,
-    created_at, keyword_canonical, ui_lang_code, keyword_lang_code
-  ) VALUES (now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now(), $20,$21,$22)
-  RETURNING search_id, keyword_original, keyword_normalized, category_code, category_no, category_name, mall_code, cache_used`;
-  const r = await pool.query(sql, vals);
-  try{ console.log('[GM_SEARCH_LOG_SAVE]', { row:r.rows && r.rows[0], raw_json_saved:false }); }catch(_l){}
-  return r.rows && r.rows[0] || null;
 }
 async function updateSearchLogCategoryByKeyword(pool, args){
   args=args||{};
@@ -445,4 +386,4 @@ async function saveKeywordTranslatePayload(pool, payload){
 
 
 
-module.exports={normalizeKeywordValue,firstKeywordText,pickSearchKeyword,pickCategoryKeyword,pickRelatedKeywords,uniqClean,pickKeywordMeta,ensureKeywordTranslateTable,saveSearchLogPayload,updateSearchLogCategoryByKeyword,saveKeywordTranslatePayload,ensureKeywordRelationSchema,saveKeywordRelationRow,saveKeywordRelationStats,saveKeywordMetaPayload,saveProductKeywordMeta};
+module.exports={normalizeKeywordValue,firstKeywordText,pickSearchKeyword,pickCategoryKeyword,pickRelatedKeywords,uniqClean,pickKeywordMeta,ensureKeywordTranslateTable,updateSearchLogCategoryByKeyword,saveKeywordTranslatePayload,ensureKeywordRelationSchema,saveKeywordRelationRow,saveKeywordRelationStats,saveKeywordMetaPayload,saveProductKeywordMeta};

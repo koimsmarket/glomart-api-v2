@@ -262,16 +262,30 @@ module.exports = function installSearchLogService(deps){
         saved=await dbQuery(`UPDATE gm_search_log SET keyword_original=$2,keyword_normalized=$3,keyword_canonical=$4,lang_code=$5,ui_lang_code=$5,keyword_lang_code=$6,country_code=$7,member_country_code=$8,category_code=$9,category_no=$10,category_name=$11,gmkr_result_count=$12,cpkr_result_count=$13,alkr_result_count=$14,smartfit_result_count=$15,db_insert_count=$16,queue_send_count=$17,cache_used=$18,member_id=$19,guest_key=$20,device_type=$21,device_lang=COALESCE(NULLIF($22,''),device_lang),id_search_count=$23,id_keyword_count=$24,guest_search_count=$25,guest_keyword_count=$26,merged_search_count=$27,merged_keyword_count=$28,merged_detail_count=$29,updated_at=now() WHERE search_event_id=$1 RETURNING *`,[eventId,original,normalized,canonical,uiLang,keywordLang,row.country_code,row.member_country_code,categoryCode,categoryNo,categoryName,counts.gmkr,counts.cpkr,counts.alkr,counts.smartfit,dbInsert,queueSend,row.cache_used,memberId,guestKey,dev,deviceLang,lateIdSearch,lateIdKeyword,lateGuestSearch,lateGuestKeyword,lateMergedSearch,lateMergedKeyword,lateMergedDetail]);
       }
       const nowRow=saved.rows[0];
+      if(!nowRow) throw new Error('gm_search_log save returned no row');
       const oldTotal=old?Number(old.gmkr_result_count||0)+Number(old.cpkr_result_count||0)+Number(old.alkr_result_count||0)+Number(old.smartfit_result_count||0):0;
-      await updateLegacyStats(nowRow,old,{result:totalResult(nowRow)-oldTotal,db:0,queue:toInt(p.queue_send_count||p.queueSendCount,0)});
+      const postprocessWarnings=[];
+      try{
+        await updateLegacyStats(nowRow,old,{result:totalResult(nowRow)-oldTotal,db:0,queue:toInt(p.queue_send_count||p.queueSendCount,0)});
+      }catch(e){
+        const message=String(e&&e.message||e);
+        postprocessWarnings.push({stage:'legacy_stats',message});
+        console.warn('[GM_SEARCH_LOG_POSTPROCESS_WARN]',{stage:'legacy_stats',search_event_id:eventId,message});
+      }
       if(eventService && typeof eventService.applySearch==='function'){
-        const alreadyCounted=old && String(old.category_counted_yn||'N').toUpperCase()==='Y';
-        await eventService.applySearch(nowRow,alreadyCounted?old:null);
-        await dbQuery(`UPDATE gm_search_log SET category_counted_yn='Y',updated_at=now() WHERE search_event_id=$1`,[eventId]);
+        try{
+          const alreadyCounted=old && String(old.category_counted_yn||'N').toUpperCase()==='Y';
+          await eventService.applySearch(nowRow,alreadyCounted?old:null);
+          await dbQuery(`UPDATE gm_search_log SET category_counted_yn='Y',updated_at=now() WHERE search_event_id=$1`,[eventId]);
+        }catch(e){
+          const message=String(e&&e.message||e);
+          postprocessWarnings.push({stage:'event_search',message});
+          console.warn('[GM_SEARCH_LOG_POSTPROCESS_WARN]',{stage:'event_search',search_event_id:eventId,message});
+        }
       }
       let relationResult=null;
       try{ relationResult=await keywordRelationService.saveRelations(pool,{gm_lang:keywordLang||uiLang||'ko',keyword_ko:cleanText(p.keyword_ko||p.keywordKo||canonical||normalized||original),relatedKeywords:p.related_keywords||p.relatedKeywords||[]}); }catch(e){ console.error('[GM_KEYWORD_RELATION_SAVE_ERROR]',String(e&&e.message||e)); }
-      ok(res,{action:'search.log',inserted:!old,updated:!!old,search_id:nowRow.search_id,search_event_id:eventId,keyword_relation:relationResult,category_keyword_learning:categoryKeywordLearning});
+      ok(res,{action:'search.log',inserted:!old,updated:!!old,search_id:nowRow.search_id,search_event_id:eventId,keyword_relation:relationResult,category_keyword_learning:categoryKeywordLearning,postprocess_warnings:postprocessWarnings});
     }catch(e){ fail(res,500,'search log failed',{detail:String(e&&e.message||e)}); }
   };
 

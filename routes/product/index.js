@@ -33,12 +33,6 @@ router.post('/api/gm/keyword/translate', async (req,res)=>{
   catch(e){return fail(res,500,'keyword translate save failed',{detail:String(e&&e.message||e)});}
 });
 
-router.post(['/api/gm/search/log','/api/gm/search_log','/api/gm/search/log/save'], async (req,res)=>{
-  const pool=db(req), p=parseIncomingPayloadBody(req.body||{}); if(!pool) return fail(res,500,'DB pool is not attached');
-  try{return ok(res,{action:'search.log',item:await keyword.saveSearchLogPayload(pool,p)});}
-  catch(e){return fail(res,500,'search log save failed',{detail:String(e&&e.message||e),error_detail:compactError(e)});}
-});
-
 router.get('/api/gm/keyword/lookup', async (req,res)=>{
   const pool=db(req); if(!pool) return fail(res,500,'DB pool is not attached');
   try{
