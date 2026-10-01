@@ -1,7 +1,8 @@
 'use strict';
 // GM_PRODUCT_QUEUE_WORKER_V019_UNCLASSIFIED_CATEGORY_KEYWORD_BATCH
 
-const productRouter = require('../routes/product');
+const productService = require('../services/product/upsert');
+const searchCategory = require('../services/product/search_category');
 const searchController = require('../services/search_controller');
 
 let started = false;
@@ -115,8 +116,16 @@ async function applyUnclassifiedCategoryKeywordBatch(pool, productUids, incoming
 
 async function processRow(pool, row){
   const raw = row.items_json;
-  const items = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : []);
-  const parent = { mall_code: row.mall_code, keyword: row.keyword, requestId: row.request_id };
+  const sourceItems = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : []);
+  let queueCpSelectedCode='';
+  const categoryT0=Date.now();
+  try{
+    const categoryOnce=await searchCategory.resolveQueueSearchCategory(pool,row.keyword,row.request_id);
+    queueCpSelectedCode=String(categoryOnce.value||row.keyword||'').trim();
+    console.log('[GM_PRODUCT_QUEUE_WORKER_CATEGORY_ONCE]',{queue_id:row.queue_id,request_id:row.request_id,keyword:row.keyword,cp_selected_code:queueCpSelectedCode,cache_hit:categoryOnce.cache_hit,ms:Date.now()-categoryT0});
+  }catch(e){queueCpSelectedCode=String(row.keyword||'').trim();console.warn('[GM_PRODUCT_QUEUE_WORKER_CATEGORY_ONCE_WARN]',{queue_id:row.queue_id,request_id:row.request_id,keyword:row.keyword,ms:Date.now()-categoryT0,error:String(e&&e.message||e)});}
+  const items=sourceItems.map(item=>Object.assign({},item||{},{cp_selected_code:queueCpSelectedCode,cpSelectedCode:queueCpSelectedCode}));
+  const parent={mall_code:row.mall_code,keyword:row.keyword,requestId:row.request_id,cp_selected_code:queueCpSelectedCode};
   let saved = 0;
   let inserted = 0;
   let updated = 0;
@@ -133,7 +142,7 @@ async function processRow(pool, row){
   const savedProductUids = [];
   for(const item of items){
     try{
-      const r = await productRouter.upsertProduct(pool, item, parent);
+      const r = await productService.upsertProduct(pool, item, parent);
       if(r && r.ok){
         saved += 1;
         if(r.item && r.item.product_uid) savedProductUids.push(r.item.product_uid);
