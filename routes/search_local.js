@@ -1,13 +1,30 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_SEARCH_LOCAL_V008_POOL_DIAG';
+const VERSION = 'GM_SEARCH_LOCAL_V009_PRIORITY_TEST_DIAG';
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):d; }
 function won(v){ const n=Number(v||0); return n>0 ? Math.round(n).toLocaleString('ko-KR')+'원' : ''; }
 function ms(t){ return Date.now()-t; }
 function publicUnitPriceText(value,qty,unit){ const v=Number(value||0),q=Number(qty||0),u=C(unit); if(!(v>0)||!(q>0)||!u)return ''; return (Number.isInteger(q)?String(q):String(q))+u+'당 '+won(v); }
+
+// GM_SEARCH_PRIORITY_TEST_V001
+// Search is the highest-priority DB workload. Queue routes/workers observe
+// these in-memory flags and must yield before taking new DB work.
+function priorityEnter(pool){
+  if(!pool) return;
+  pool.__gmSearchPriorityActive=Math.max(0,Number(pool.__gmSearchPriorityActive||0))+1;
+  pool.__gmSearchPriorityQuietUntil=0;
+  console.log('[GM_SEARCH_PRIORITY] state=ENTER active='+pool.__gmSearchPriorityActive+' pool_total='+Number(pool.totalCount||0)+' pool_idle='+Number(pool.idleCount||0)+' pool_waiting='+Number(pool.waitingCount||0));
+}
+function priorityLeave(pool){
+  if(!pool) return;
+  pool.__gmSearchPriorityActive=Math.max(0,Number(pool.__gmSearchPriorityActive||0)-1);
+  const quietMs=Math.max(0,Number(process.env.GM_SEARCH_PRIORITY_QUIET_MS||750));
+  if(pool.__gmSearchPriorityActive===0) pool.__gmSearchPriorityQuietUntil=Date.now()+quietMs;
+  console.log('[GM_SEARCH_PRIORITY] state=LEAVE active='+pool.__gmSearchPriorityActive+' quiet_ms='+(pool.__gmSearchPriorityActive===0?quietMs:0)+' pool_total='+Number(pool.totalCount||0)+' pool_idle='+Number(pool.idleCount||0)+' pool_waiting='+Number(pool.waitingCount||0));
+}
 
 function poolState(pool){
   return {
@@ -117,6 +134,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
   const limit=Math.max(1,Math.min(200,toInt(req.query.limit,150)||150));
   if(!keyword&&!categorySearch) return res.json({ok:true,version:VERSION,keyword:'',count:0,items:[],groups:{CPKR:0,ALKR:0}});
 
+  priorityEnter(pool);
   const totalStarted=Date.now();
   try{const ps=poolState(pool);console.log('[GM_SEARCH_LOCAL_TIMING] phase=START source='+gmSource+' reason='+(gmReason||'-')+' keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search='+(categorySearch?'Y':'N')+' pool_total='+ps.total+' pool_idle='+ps.idle+' pool_waiting='+ps.waiting+' ts_ms='+totalStarted);}catch(_log){}
   const byMall={CPKR:[],ALKR:[]};
@@ -194,6 +212,8 @@ router.get('/api/gm/search/local', async (req,res)=>{
   }catch(e){
     console.error('[GM_SEARCH_LOAD_ERROR] keyword='+keyword+' ms='+ms(totalStarted)+' error='+String(e&&e.message||e));
     res.status(500).json({ok:false,version:VERSION,error:'local search failed'});
+  }finally{
+    priorityLeave(pool);
   }
 });
 module.exports=router;

@@ -1,5 +1,5 @@
 'use strict';
-// GM_PRODUCT_QUEUE_WORKER_V019_UNCLASSIFIED_CATEGORY_KEYWORD_BATCH
+// GM_PRODUCT_QUEUE_WORKER_V020_SEARCH_PRIORITY_TEST
 
 const productService = require('../services/product/upsert');
 const searchCategory = require('../services/product/search_category');
@@ -9,6 +9,38 @@ let started = false;
 let scheduling = false;
 let active = 0;
 let timer = null;
+
+
+// GM_SEARCH_PRIORITY_TEST_V001
+// Do not start/continue new queue DB work while customer search is active.
+// Active SQL is never cancelled. Workers yield between products and before
+// queue status writes, so existing work drains naturally and search gets DB first.
+let priorityPausedLog = false;
+function sleep(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
+function priorityBlocked(pool){
+  return !!pool && (Number(pool.__gmSearchPriorityActive||0)>0 || Date.now()<Number(pool.__gmSearchPriorityQuietUntil||0));
+}
+async function waitForSearchPriority(pool, stage){
+  if(!priorityBlocked(pool)){
+    if(priorityPausedLog){
+      priorityPausedLog=false;
+      console.log('[GM_QUEUE_PRIORITY] state=RESUME stage='+stage+' pool_idle='+Number(pool.idleCount||0)+' pool_waiting='+Number(pool.waitingCount||0));
+    }
+    return 0;
+  }
+  const started=Date.now();
+  if(!priorityPausedLog){
+    priorityPausedLog=true;
+    console.log('[GM_QUEUE_PRIORITY] state=PAUSE stage='+stage+' search_active='+Number(pool.__gmSearchPriorityActive||0)+' pool_idle='+Number(pool.idleCount||0)+' pool_waiting='+Number(pool.waitingCount||0));
+  }
+  while(priorityBlocked(pool)) await sleep(25);
+  const waited=Date.now()-started;
+  if(priorityPausedLog){
+    priorityPausedLog=false;
+    console.log('[GM_QUEUE_PRIORITY] state=RESUME stage='+stage+' waited_ms='+waited+' pool_idle='+Number(pool.idleCount||0)+' pool_waiting='+Number(pool.waitingCount||0));
+  }
+  return waited;
+}
 
 // GM_PRODUCT_LOG_SUMMARY_V009
 // Aggregate per search request + mall so normal operation emits one save summary, not one line per chunk.
@@ -163,6 +195,7 @@ async function processRow(pool, row){
   const errors = [];
   const savedProductUids = [];
   for(const item of items){
+    await waitForSearchPriority(pool,'product-item');
     try{
       const r = await productService.upsertProduct(pool, item, parent);
       if(r && r.ok){
@@ -199,6 +232,7 @@ async function processRow(pool, row){
   option_balance_ok = option_balance_ok && option_received === (option_inserted + option_updated + option_skipped);
   let category_keyword_batch = { applied:false, reason:'not_run', updated:0 };
   try{
+    await waitForSearchPriority(pool,'category-keyword-batch');
     category_keyword_batch = await applyUnclassifiedCategoryKeywordBatch(pool, savedProductUids, row.keyword);
   }catch(e){
     category_keyword_batch = { applied:false, reason:'error', updated:0, error:String(e && e.message || e) };
@@ -233,8 +267,10 @@ async function runClaimed(pool, row, opts){
   active += 1;
   try{
     const result = await processRow(pool, row);
+    await waitForSearchPriority(pool,'mark-done');
     await markDone(pool, row, result);
   }catch(e){
+    await waitForSearchPriority(pool,'mark-failed');
     await markFailed(pool, row, e, opts.maxRetry);
   }finally{
     active = Math.max(0, active - 1);
@@ -246,8 +282,23 @@ async function tick(pool, opts){
   if(scheduling) return;
   scheduling = true;
   try{
+    if(priorityBlocked(pool)){
+      if(!priorityPausedLog){
+        priorityPausedLog=true;
+        console.log('[GM_QUEUE_PRIORITY] state=PAUSE stage=tick search_active='+Number(pool.__gmSearchPriorityActive||0)+' pool_idle='+Number(pool.idleCount||0)+' pool_waiting='+Number(pool.waitingCount||0));
+      }
+      return;
+    }
+    if(priorityPausedLog){
+      priorityPausedLog=false;
+      console.log('[GM_QUEUE_PRIORITY] state=RESUME stage=tick pool_idle='+Number(pool.idleCount||0)+' pool_waiting='+Number(pool.waitingCount||0));
+    }
     const allowedConcurrency = await searchController.allowedConcurrency(pool, active);
-    const available = Math.max(0, allowedConcurrency - active);
+    // Reserve DB capacity for customer search even while queue is allowed to run.
+    // Default 3 prevents the queue worker from occupying the old 6~8 slots seen in logs.
+    const priorityMaxActive = toInt(process.env.GM_PRODUCT_QUEUE_PRIORITY_MAX_ACTIVE, 3);
+    const effectiveConcurrency = Math.min(allowedConcurrency, priorityMaxActive);
+    const available = Math.max(0, effectiveConcurrency - active);
     if(available <= 0) return;
     const rows = await fetchQueueRows(pool, Math.min(opts.batchRows, available));
     for(const row of rows){
