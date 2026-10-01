@@ -84,6 +84,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
   if(!keyword&&!categorySearch) return res.json({ok:true,version:VERSION,keyword:'',count:0,items:[],groups:{CPKR:0,ALKR:0}});
 
   const totalStarted=Date.now();
+  try{console.log('[GM_SEARCH_LOCAL_TIMING] phase=START keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search='+(categorySearch?'Y':'N')+' ts_ms='+totalStarted);}catch(_log){}
   const byMall={CPKR:[],ALKR:[]};
   const seen=new Set();
   function merge(rows){
@@ -117,18 +118,23 @@ router.get('/api/gm/search/local', async (req,res)=>{
         product_url:x.product_url||'',image:x.thumb_origin_url||'',thumb_origin_url:x.thumb_origin_url||'',__gm_server_local:1,__gm_category_code_search:1
       }));
       const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
+      const endedAt=Date.now();
       console.log('[GM_SEARCH_LOAD] keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' count='+items.length);
+      console.log('[GM_SEARCH_LOCAL_TIMING] phase=END keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' category_search=Y count='+items.length+' category_ms='+categoryCodeMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
       return res.json({ok:true,version:VERSION,keyword,category_search:true,category_code:categoryCode,category_keyword:categoryVirtualKeyword||'',scope_count:categoryResult.scope_codes.length,count:items.length,groups,items});
     }
 
     // PRIORITY EXACT: 두 인덱스 조회는 서로 독립이므로 병렬 실행한다.
     // 결과 병합 순서는 keyword -> category_keyword로 유지해 기존 우선순위를 보존한다.
     const exactStarted=Date.now();
-    const [exactKeyword,exactCategory]=await Promise.all([
-      exactStage(pool,'keyword',keyword,limit),
-      exactStage(pool,'category_keyword',keyword,limit)
-    ]);
+    const keywordStarted=Date.now();
+    const keywordPromise=exactStage(pool,'keyword',keyword,limit).then(result=>({result,elapsed_ms:ms(keywordStarted)}));
+    const categoryKeywordStarted=Date.now();
+    const categoryKeywordPromise=exactStage(pool,'category_keyword',keyword,limit).then(result=>({result,elapsed_ms:ms(categoryKeywordStarted)}));
+    const [exactKeywordTimed,exactCategoryTimed]=await Promise.all([keywordPromise,categoryKeywordPromise]);
     const exactParallelMs=ms(exactStarted);
+    const exactKeyword=exactKeywordTimed.result;
+    const exactCategory=exactCategoryTimed.result;
     merge(exactKeyword.rows);
     merge(exactCategory.rows);
 
@@ -147,7 +153,9 @@ router.get('/api/gm/search/local', async (req,res)=>{
       __gm_server_local:1
     }));
     const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
+    const endedAt=Date.now();
     console.log('[GM_SEARCH_LOAD] keyword='+keyword+' count='+items.length);
+    console.log('[GM_SEARCH_LOCAL_TIMING] phase=END keyword='+keyword+' category_search=N count='+items.length+' keyword_ms='+exactKeywordTimed.elapsed_ms+' category_keyword_ms='+exactCategoryTimed.elapsed_ms+' parallel_ms='+exactParallelMs+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
     res.json({ok:true,version:VERSION,keyword,count:items.length,groups,items});
   }catch(e){
     console.error('[GM_SEARCH_LOAD_ERROR] keyword='+keyword+' ms='+ms(totalStarted)+' error='+String(e&&e.message||e));

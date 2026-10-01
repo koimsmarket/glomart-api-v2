@@ -127,6 +127,8 @@ router.get('/api/gm/category/menu',async(req,res)=>{
   const rawLang=normLang(req.query&&req.query.lang)||'ko';
   const col=LANG_COLUMN[rawLang]||'name_ko';
   const translateRequired=!LANG_COLUMN[rawLang];
+  const timingScope=parent?'branch':'root';
+  try{console.log('[GM_CATEGORY_MENU_TIMING] phase=START scope='+timingScope+' parent='+(parent||'')+' ts_ms='+startedAt);}catch(_log){}
   try{
     let depth=0,rows=[];
     const levels=clampInt(req.query&&req.query.levels,1,2,1);
@@ -177,8 +179,10 @@ router.get('/api/gm/category/menu',async(req,res)=>{
       translate_required:translateRequired || (rawLang!=='ko' && rawLang!=='kr' && !C(r.display_name))
     }));
     try{
-      const totalMs=Date.now()-startedAt;
+      const endedAt=Date.now();
+      const totalMs=endedAt-startedAt;
       const queryMs=Number(req.__gmCategoryMenuQueryMs||0);
+      console.log('[GM_CATEGORY_MENU_TIMING] phase=END scope='+timingScope+' parent='+(parent||'')+' count='+items.length+' query_ms='+queryMs+' heal_ms='+healMs+' total_ms='+totalMs+' ts_ms='+endedAt);
       if(totalMs>=500 || queryMs>=500){
         console.warn('[GM_CATEGORY_MENU_SLOW] parent='+(parent||'')+' count='+items.length+' query_ms='+queryMs+' total_ms='+totalMs);
       }
