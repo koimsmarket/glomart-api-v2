@@ -48,6 +48,8 @@ function pickMallCategoryLeaf(p, mallCategoryJson){
   return direct;
 }
 
+const __gmSearchCategoryOnce = new Map();
+
 function searchCategoryRequestToken(p){
   return cleanText(p.request_id || p.requestId || p.search_request_id || p.searchRequestId || p.search_run_id || p.searchRunId || p.base_request_id || p.baseRequestId || '');
 }
@@ -64,8 +66,6 @@ async function resolveSearchCategoryOnce(pool, keyword, p){
   return { value:cleanText(await promise), cache_hit:false };
 }
 
-
-let __gmLightJsonColumnsEnsured = false;
 
 function baseRequestToken(v){return cleanText(v).replace(/_(?:CPKR|ALKR|ALI|COUPANG)_C\d{1,4}$/i,'').replace(/_C\d{1,4}$/i,'');}
 async function resolveQueueSearchCategory(pool,keyword,requestId){return resolveSearchCategoryOnce(pool,keyword,{requestId:baseRequestToken(requestId)});}

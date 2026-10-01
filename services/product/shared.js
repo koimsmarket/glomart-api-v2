@@ -693,6 +693,7 @@ function pickTaxType(p){
   if(/영세/.test(blob)) return 'ZERO';
   return '';
 }
+let __gmLightJsonColumnsEnsured = false;
 async function ensureProductLightJsonColumns(pool){
   if(__gmLightJsonColumnsEnsured) return;
   __gmLightJsonColumnsEnsured = true;
