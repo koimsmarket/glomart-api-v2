@@ -113,7 +113,7 @@ async function allowedConcurrency(pool, active){
   const now=Date.now();
   if(lastConcurrencyLog.value!==allowed || now-lastConcurrencyLog.at>=15000){
     lastConcurrencyLog={value:allowed,at:now};
-    console.log('[GM_PRODUCT_QUEUE_CONCURRENCY]',status);
+    console.log('[GM_QUEUE_CONCURRENCY] allowed='+allowed+' active='+activeNow+' pending='+pending+' cpu='+Number(cpuRatio.toFixed(3))+' mem='+Number(memUsedRatio.toFixed(3))+' db_idle='+poolIdle+' db_waiting='+poolWaiting);
   }
   return allowed;
 }

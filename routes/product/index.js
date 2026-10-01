@@ -49,10 +49,6 @@ router.get('/api/gm/keyword/lookup', async (req,res)=>{
 
 router.post(['/api/gm/product/upsert','/api/product/upsert'], async (req,res)=>{
   const pool=db(req), p=parseIncomingPayloadBody(req.body||{}); if(!pool) return fail(res,500,'DB pool is not attached');
-  try{
-    const id0=ids(p), oj0=parseMaybeJsonObject(p.option_json||p.optionJson);
-    console.log('[GM_PRODUCT_UPSERT_ROUTE_IN]',{mall_code:cleanText(p.mall_code||p.mallCode||id0.mallCode),product_id:cleanText(p.product_id||p.productId||id0.productId),pi_ii_vi:cleanText(p.pi_ii_vi||p.piIiVi||id0.pi),optionRows:Array.isArray(p.optionRows)?p.optionRows.length:0,optionCombos:Array.isArray(p.optionCombos)?p.optionCombos.length:0,option_json_rows:oj0&&Array.isArray(oj0.rows)?oj0.rows.length:0,keys:Object.keys(p).slice(0,60)});
-  }catch(_){ }
   const items=Array.isArray(p.items)?p.items:(Array.isArray(p.products)?p.products:(p.payload&&Array.isArray(p.payload.items)?p.payload.items:(p.payload&&Array.isArray(p.payload.products)?p.payload.products:null)));
   try{
     if(items){

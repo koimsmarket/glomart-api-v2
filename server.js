@@ -77,9 +77,44 @@ app.use((req, res, next) => {
   next();
 });
 
+// GM_API_FIRST_HOP_TIMING_V008
+// Search-related API first-hop timing. Keep output one-line so important logs are not buried.
+app.use((req, res, next) => {
+  const pathOnly = String(req.originalUrl || req.url || '').split('?')[0];
+  if (pathOnly === '/api/gm/product/queue' || pathOnly === '/api/gm/search/log' || pathOnly === '/api/gm/search/local') {
+    req.__gmApiTiming = { path:pathOnly, ingress:process.hrtime.bigint() };
+  }
+  next();
+});
+
 app.use(cors({ origin: true, credentials: false }));
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+
+app.use((req, res, next) => {
+  const t = req.__gmApiTiming;
+  if (!t) return next();
+  t.bodyDone = process.hrtime.bigint();
+  res.on('finish', () => {
+    try {
+      const end = process.hrtime.bigint();
+      const ms = (a,b) => Number(b-a)/1e6;
+      const bodyMs = ms(t.ingress,t.bodyDone);
+      const totalMs = ms(t.ingress,end);
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const q = req.query && typeof req.query === 'object' ? req.query : {};
+      const keyword = String(body.keyword || body.q || body.search_keyword || body.searchKeyword || q.keyword || q.q || '').replace(/\s+/g,' ').trim();
+      const d = req.__gmApiDiag || {};
+      let line = '[GM_API_TIMING] path='+t.path+' keyword='+keyword+' status='+res.statusCode+' body_ms='+bodyMs.toFixed(1);
+      if (d.route_ms != null) line += ' route_ms='+Number(d.route_ms).toFixed(1);
+      if (d.acquire_ms != null) line += ' acquire_ms='+Number(d.acquire_ms).toFixed(1);
+      if (d.sql_ms != null) line += ' sql_ms='+Number(d.sql_ms).toFixed(1);
+      line += ' total_ms='+totalMs.toFixed(1);
+      console.log(line);
+    } catch (_) {}
+  });
+  next();
+});
 
 /* GM_ANDROID_APK_DOWNLOAD_V001
  * Cloudtype의 실행 작업 디렉터리가 프로젝트 루트와 다르더라도

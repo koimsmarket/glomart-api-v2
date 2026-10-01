@@ -44,7 +44,6 @@ async function upsertProduct(pool, raw, parent={}){
   const categoryTreeForSave = (Array.isArray(categoryTreeForMatch) && categoryTreeForMatch.length) ? categoryTreeForMatch : mallCategoryJson;
   let cpSelectedCode = pickCpSelectedCode(p);
   const cpFixCode = pickCpFixCode(p);
-  try{ console.log('[GM_CATEGORY_TREE_SOURCE_PROBE]', { uid:id.uid, keyword:searchKeyword, cp_fix_code:cpFixCode, mall_category_leaf:mallCategoryLeaf, mall_category_json_count:Array.isArray(mallCategoryJson)?mallCategoryJson.length:0, category_tree_count:Array.isArray(categoryTreeForMatch)?categoryTreeForMatch.length:0, save_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, raw_alias_counts:{ categoryTree:Array.isArray(p.categoryTree)?p.categoryTree.length:0, category_tree:Array.isArray(p.category_tree)?p.category_tree.length:0, categoryTreeJson:Array.isArray(p.categoryTreeJson)?p.categoryTreeJson.length:(cleanText(p.categoryTreeJson)?'text':0), cpCategoryTree:Array.isArray(p.cpCategoryTree)?p.cpCategoryTree.length:0, mall_category_json:Array.isArray(p.mall_category_json)?p.mall_category_json.length:(cleanText(p.mall_category_json)?'text':0) }, categoryInfo_keys:p.categoryInfo && typeof p.categoryInfo==='object'?Object.keys(p.categoryInfo).slice(0,20):[], sample:(Array.isArray(categoryTreeForSave)?categoryTreeForSave:[]).slice(0,10).map(x=>({depth:x.depth, cp_code:x.cp_code, name_ko:x.name_ko})) }); }catch(_probe){}
 
   // CATEGORY_TREE 기반 신규 카테고리는 selected 매칭보다 먼저 처리한다.
   // 그래야 path에 새로 들어온 cp_code도 즉시 gm_category 후보가 되어 selected/fix 비교가 가능하다.
@@ -76,7 +75,6 @@ async function upsertProduct(pool, raw, parent={}){
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
 
   const mallCategoryStored = /^\d+$/.test(cleanText(cpSelectedCode)) ? cleanText(cpSelectedCode) : '';
-  try{ console.log('[GM_PRODUCT_CATEGORY_DECIDE]', { uid:id.uid, keyword:searchKeyword, mall_category_leaf:mallCategoryLeaf, mall_category_stored:mallCategoryStored, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, category_tree_count:Array.isArray(categoryTreeForSave)?categoryTreeForSave.length:0, category_dynamic }); }catch(_l){}
 
   let serverGlomartMatch={gm_code:'',match_by:'NO_MATCH'};
   try{
@@ -256,8 +254,6 @@ async function upsertProduct(pool, raw, parent={}){
     p.return_period_days == null && p.returnPeriodDays == null ? null : toInt(p.return_period_days || p.returnPeriodDays, 0),
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
-
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_IN]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, item_id:id.itemId, vendor_item_id:id.vendorItemId, product_url_saved:false, option_iid_vid:(productOptionLinkJson||{}).iid_vid||'', detail_image_count:detailJsonRaw.image_count||0, detail_block_count:detailJsonRaw.block_count||0, detail_text_count:detailJsonRaw.text_count||0, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, glomart_code:resolvedGlomartCode, glomart_match_by:serverGlomartMatch.match_by }); }catch(_trace){}
   let r;
   try{
     r = await pool.query(sql, vals);
@@ -265,12 +261,10 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_UPSERT_SQL_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, pi:id.pi, product_name:productName, vals_len:vals.length, columns:productColumns.length }, compactError(e)));
     throw e;
   }
-  try{ console.log('[GM_PRODUCT_UPSERT_TRACE_OUT]', { uid:id.uid, row:(r.rows&&r.rows[0])||null }); }catch(_trace){}
   if(sourceUnitPriceSeen){
     try{
       // A source field was actually present in this response. Non-empty refreshes it; explicit blank clears stale source text.
       await pool.query(`UPDATE gm_product SET unit_price_text=$2, updated_at=NOW() WHERE product_uid=$1`,[id.uid,sourceUnitPriceText||null]);
-      try{ console.log('[GM_PRODUCT_UNIT_SOURCE_TEXT]', {uid:id.uid, action:sourceUnitPriceText?'refresh':'clear', unit_price_text:sourceUnitPriceText||''}); }catch(_log){}
     }catch(e){
       try{ console.warn('[GM_PRODUCT_UNIT_SOURCE_TEXT_WARN]', Object.assign({uid:id.uid, action:sourceUnitPriceText?'refresh':'clear', unit_price_text:sourceUnitPriceText||''}, compactError(e))); }catch(_log){}
     }
@@ -278,7 +272,6 @@ async function upsertProduct(pool, raw, parent={}){
   let cp_learning = null;
   try{
     cp_learning = await applyCpFixLearning(pool, { mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, product_uid:id.uid });
-    try{ console.log('[GM_CP_FIX_LEARNING_RESULT]', { uid:id.uid, mall_code:id.mallCode, keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode, cp_match:cpMatch, result:cp_learning }); }catch(_log){}
     if(cpFixCode && searchKeyword){
       try{ await updateSearchLogCategoryByKeyword(pool, { keyword:searchKeyword, cp_selected_code:cpSelectedCode, cp_fix_code:cpFixCode }); }
       catch(_sl){ try{ console.warn('[GM_SEARCH_LOG_CATEGORY_UPDATE_FAIL]', Object.assign({ keyword:searchKeyword, cp_fix_code:cpFixCode }, compactError(_sl))); }catch(_l){} }
@@ -287,7 +280,6 @@ async function upsertProduct(pool, raw, parent={}){
   let option_result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
   try{
     option_result = await upsertProductOptions(pool, id, optionJson, p, parent);
-    try{ console.log('[GM_PRODUCT_OPTION_UPSERT_RESULT]', { uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionJson && optionJson.option_count, result:option_result }); }catch(_log){}
   }catch(e){
     option_result = { received:optionCount, inserted:0, updated:0, skipped:optionCount, nonactive:0, balance_ok:false, error:compactError(e) };
     console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
@@ -306,7 +298,6 @@ async function upsertProduct(pool, raw, parent={}){
     // V036: product + all options share the category comparison-unit rule.
     // Unit calculation is post-upsert only; it must never block the existing product/option save flow.
     unit_result = await recalcProductUnitByUid(pool, id.uid);
-    try{ console.log('[GM_PRODUCT_UNIT_V036]', { uid:id.uid, category_keyword:categoryKeyword, result:unit_result }); }catch(_log){}
   }catch(e){
     unit_result = { ok:false, error:compactError(e) };
     try{ console.warn('[GM_PRODUCT_UNIT_V036_WARN]', Object.assign({ uid:id.uid, category_keyword:categoryKeyword }, compactError(e))); }catch(_log){}

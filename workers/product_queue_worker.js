@@ -122,7 +122,7 @@ async function processRow(pool, row){
   try{
     const categoryOnce=await searchCategory.resolveQueueSearchCategory(pool,row.keyword,row.request_id);
     queueCpSelectedCode=String(categoryOnce.value||row.keyword||'').trim();
-    console.log('[GM_PRODUCT_QUEUE_WORKER_CATEGORY_ONCE]',{queue_id:row.queue_id,request_id:row.request_id,keyword:row.keyword,cp_selected_code:queueCpSelectedCode,cache_hit:categoryOnce.cache_hit,ms:Date.now()-categoryT0});
+    // V008: normal category resolution is intentionally silent; failures remain logged.
   }catch(e){queueCpSelectedCode=String(row.keyword||'').trim();console.warn('[GM_PRODUCT_QUEUE_WORKER_CATEGORY_ONCE_WARN]',{queue_id:row.queue_id,request_id:row.request_id,keyword:row.keyword,ms:Date.now()-categoryT0,error:String(e&&e.message||e)});}
   const items=sourceItems.map(item=>Object.assign({},item||{},{cp_selected_code:queueCpSelectedCode,cpSelectedCode:queueCpSelectedCode}));
   const parent={mall_code:row.mall_code,keyword:row.keyword,requestId:row.request_id,cp_selected_code:queueCpSelectedCode};
@@ -196,8 +196,8 @@ async function processRow(pool, row){
     option_balance_ok
   };
   const result = { received: items.length, saved, inserted, updated, skipped, audit, category_keyword_batch, skip_reason_count, samples, errors: errors.slice(0, 5) };
-  console.log('[GM_PRODUCT_QUEUE_WORKER_SAVE_AUDIT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...audit });
-  console.log('[GM_PRODUCT_QUEUE_WORKER_RESULT]', { queue_id:row.queue_id, request_id:row.request_id, mall_code:row.mall_code, keyword:row.keyword, ...result });
+  console.log('[GM_SEARCH_SAVE] keyword='+String(row.keyword||'').trim()+' mall='+String(row.mall_code||'').trim()+' received='+items.length+' new='+inserted+' updated='+updated+' skipped='+skipped);
+  if(errors.length){ console.warn('[GM_SEARCH_SAVE_ERROR] keyword='+String(row.keyword||'').trim()+' errors='+errors.length+' first='+String(errors[0]||'')); }
   if(items.length && saved === 0){
     // V017: worker가 0건 저장일 때 route/DB 상태 확인을 위해 failed 재시도 루프만 만들지 않고
     // done_with_zero로 남긴다. 실제 원인은 result_json.skip_reason_count / samples에서 확인한다.

@@ -13,9 +13,10 @@ function saveRelationAfterResponse(pool,p,mallCode,keyword){
   if(mallCode!=='CPKR'||(idx!==0&&idx!==1))return;
   const meta=keywordService.pickKeywordMeta(p);
   if(!meta.relatedKeywords.length)return;
-  setImmediate(async()=>{let saved=0,skipped=0;for(const relatedKo of meta.relatedKeywords){try{const x=await keywordService.saveKeywordRelationRow(pool,meta.mainKeyword||keyword,relatedKo,{categoryMainKeywordKo:meta.categoryMainKeywordKo});if(x)saved++;else skipped++;}catch(e){skipped++;}}console.log('[GM_KEYWORD_RELATION_QUEUE_ASYNC_V003]',{keyword_ko:meta.mainKeyword||keyword,related_count:meta.relatedKeywords.length,saved,skipped});});
+  setImmediate(async()=>{let saved=0,skipped=0;for(const relatedKo of meta.relatedKeywords){try{const x=await keywordService.saveKeywordRelationRow(pool,meta.mainKeyword||keyword,relatedKo,{categoryMainKeywordKo:meta.categoryMainKeywordKo});if(x)saved++;else skipped++;}catch(e){skipped++;}}console.log('[GM_KEYWORD_RELATION_SAVE] keyword='+(meta.mainKeyword||keyword)+' received='+meta.relatedKeywords.length+' saved='+saved+' skipped='+skipped);});
 }
 router.post('/api/gm/product/queue',async(req,res)=>{
+  const routeT0=Date.now();
   const pool=db(req),p=parseIncomingPayloadBody(req.body||{});if(!pool)return fail(res,500,'DB pool is not attached');
   const items=normalizeQueueItems(p);if(!items.length)return fail(res,400,'items required');
   const maxItems=Number(process.env.GM_PRODUCT_QUEUE_MAX_ITEMS||300);if(items.length>maxItems)return fail(res,413,'too many items',{received:items.length,max:maxItems});
@@ -37,12 +38,11 @@ router.post('/api/gm/product/queue',async(req,res)=>{
       acquireMs=0;const tq=Date.now();r=await pool.query(sql,values);sqlMs=Date.now()-tq;
     }
     const beforeResponseMs=Date.now()-t0;
-    console.log('[GM_PRODUCT_QUEUE_TIMING_V006]',{queue_id:r.rows[0]&&r.rows[0].queue_id,request_id:r.rows[0]&&r.rows[0].request_id,mall_code:mallCode,keyword,item_count:items.length,payload_bytes:Buffer.byteLength(payloadJson,'utf8'),acquire_ms:acquireMs,sql_ms:sqlMs,loop_lag_ms:loopLagMs,before_response_ms:beforeResponseMs,chunk_index:chunkIndex,chunk_total:chunkTotal});
-    console.log('[GM_PRODUCT_QUEUE_SPLIT_ACCEPT]',{queue_id:r.rows[0]&&r.rows[0].queue_id,request_id:r.rows[0]&&r.rows[0].request_id,mall_code:mallCode,keyword,item_count:items.length,ms:beforeResponseMs,chunk_index:chunkIndex,chunk_total:chunkTotal});
+    req.__gmApiDiag={route_ms:Date.now()-routeT0,acquire_ms:acquireMs,sql_ms:sqlMs};
+    console.log('[GM_QUEUE_TIMING] keyword='+keyword+' mall='+mallCode+' items='+items.length+' acquire_ms='+acquireMs+' sql_ms='+sqlMs+' route_ms='+(Date.now()-routeT0));
     ok(res,{action:'product.queue',queued:true,queue:r.rows[0],queue_id:r.rows[0]&&r.rows[0].queue_id,request_id:r.rows[0]&&r.rows[0].request_id,item_count:r.rows[0]&&r.rows[0].item_count,received:items.length,inline_upsert:false,inline_status:'queued',chunk_index:chunkIndex,chunk_total:chunkTotal});
-    console.log('[GM_PRODUCT_QUEUE_RESPONSE_V006]',{request_id:r.rows[0]&&r.rows[0].request_id,total_ms:Date.now()-t0,chunk_index:chunkIndex,chunk_total:chunkTotal});
     saveRelationAfterResponse(pool,p,mallCode,keyword);
-  }catch(e){console.error('[GM_PRODUCT_QUEUE_TIMING_ERROR_V006]',{request_id:requestId,mall_code:mallCode,keyword,acquire_ms:acquireMs,sql_ms:sqlMs,loop_lag_ms:loopLagMs,total_ms:Date.now()-t0,error:String(e&&e.message||e)});return fail(res,500,'product queue failed',{detail:String(e&&e.message||e)});}
+  }catch(e){req.__gmApiDiag={route_ms:Date.now()-routeT0,acquire_ms:acquireMs,sql_ms:sqlMs};console.error('[GM_QUEUE_ERROR] keyword='+keyword+' mall='+mallCode+' acquire_ms='+acquireMs+' sql_ms='+sqlMs+' error='+String(e&&e.message||e));return fail(res,500,'product queue failed',{detail:String(e&&e.message||e)});}
   finally{if(client&&typeof client.release==='function'){try{client.release();}catch(_){}}}
 });
 router.get('/api/gm/product/queue/status',async(req,res)=>{const pool=db(req);if(!pool)return fail(res,500,'DB pool is not attached');try{const r=await pool.query(`SELECT status,COUNT(*)::int AS count FROM gm_product_upsert_queue GROUP BY status ORDER BY status`);return ok(res,{action:'product.queue.status',rows:r.rows});}catch(e){return fail(res,500,'product queue status failed',{detail:String(e&&e.message||e)});}});

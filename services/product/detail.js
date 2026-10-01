@@ -186,7 +186,6 @@ function normalizeDetailJson(p){
     }
   });
   const out={ images, blocks, texts, image_count:images.length, block_count:blocks.length, text_count:texts.length, updated_at:new Date().toISOString() };
-  try{ console.log('[GM_DETAIL_JSON_NORMALIZE]', { image_count:out.image_count, block_count:out.block_count, text_count:out.text_count, keys:Object.keys(p||{}).slice(0,80) }); }catch(_e){}
   return out;
 }
 

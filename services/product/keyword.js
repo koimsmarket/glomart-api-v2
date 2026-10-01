@@ -166,7 +166,6 @@ async function updateSearchLogCategoryByKeyword(pool, args){
     WHERE (keyword_normalized=$1 OR keyword_original=$1 OR keyword_canonical=$1)
       AND (category_code IS NULL OR category_code::text='' OR category_code::text=$2)
   `, [keyword, fix, name, selected]);
-  try{ console.log('[GM_SEARCH_LOG_CATEGORY_UPDATE]', { keyword, cp_fix_code:fix, category_name:name, category_no:selected, updated:r.rowCount||0 }); }catch(_l){}
   return { applied:true, updated:r.rowCount||0, category_name:name };
 }
 async function upsertKeywordTranslate(pool, lang, inputKeyword, mainKeywordKo, inc=1){
@@ -254,7 +253,6 @@ async function saveKeywordRelationRow(pool, keywordKo, relatedKo, options={}){
         ELSE EXCLUDED.category_main_keyword_ko
       END`,
     [categoryMainKeywordKo,keywordKo,relatedKo]);
-  try{ console.log('[GM_KEYWORD_RELATION_SAVE_THREE_COL]', { keyword_ko:keywordKo, related_keyword_ko:relatedKo }); }catch(_log){}
   return true;
 }
 async function saveKeywordRelationStats(pool, keywordKo, relatedKo, categoryMainKeywordKo){

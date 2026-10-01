@@ -117,7 +117,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
         product_url:x.product_url||'',image:x.thumb_origin_url||'',thumb_origin_url:x.thumb_origin_url||'',__gm_server_local:1,__gm_category_code_search:1
       }));
       const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
-      console.log('[GM_SEARCH_LOCAL_CATEGORY_CODE]',{version:VERSION,category_code:categoryCode,virtual_keyword:categoryVirtualKeyword||'',scope_count:categoryResult.scope_codes.length,count:items.length,groups,timing_ms:{category_code:categoryCodeMs,total:ms(totalStarted)}});
+      console.log('[GM_SEARCH_LOAD] keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' count='+items.length);
       return res.json({ok:true,version:VERSION,keyword,category_search:true,category_code:categoryCode,category_keyword:categoryVirtualKeyword||'',scope_count:categoryResult.scope_codes.length,count:items.length,groups,items});
     }
 
@@ -147,14 +147,10 @@ router.get('/api/gm/search/local', async (req,res)=>{
       __gm_server_local:1
     }));
     const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
-    console.log('[GM_SEARCH_LOCAL]',{
-      version:VERSION,keyword,count:items.length,groups,
-      timing_ms:{exact_parallel:exactParallelMs,total:ms(totalStarted)},
-      exact_only:true,need_malls:needMalls()
-    });
+    console.log('[GM_SEARCH_LOAD] keyword='+keyword+' count='+items.length);
     res.json({ok:true,version:VERSION,keyword,count:items.length,groups,items});
   }catch(e){
-    console.error('[GM_SEARCH_LOCAL_ERROR]',{version:VERSION,keyword,elapsed_ms:ms(totalStarted),error:String(e&&e.stack||e)});
+    console.error('[GM_SEARCH_LOAD_ERROR] keyword='+keyword+' ms='+ms(totalStarted)+' error='+String(e&&e.message||e));
     res.status(500).json({ok:false,version:VERSION,error:'local search failed'});
   }
 });
