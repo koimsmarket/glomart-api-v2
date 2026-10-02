@@ -672,6 +672,34 @@ async function markCategoryParentNonLeaf(client, parentGm, parentCp){
 }
 
 
+async function recordCategoryPackPending(client,row,changeKind){
+  row=row||{};
+  const gm=cleanText(row.gm_code);
+  if(!gm) return;
+  try{
+    await client.query(`INSERT INTO gm_category_pack_pending
+      (gm_code,change_kind,source_mall,cp_code,parent_gm_code,parent_cp_code,name_ko,depth,payload_json,status,first_seen_at,last_seen_at,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,'PENDING',now(),now(),now())
+      ON CONFLICT(gm_code) DO UPDATE SET
+        change_kind=EXCLUDED.change_kind,
+        source_mall=EXCLUDED.source_mall,
+        cp_code=EXCLUDED.cp_code,
+        parent_gm_code=EXCLUDED.parent_gm_code,
+        parent_cp_code=EXCLUDED.parent_cp_code,
+        name_ko=EXCLUDED.name_ko,
+        depth=EXCLUDED.depth,
+        payload_json=EXCLUDED.payload_json,
+        status='PENDING',published_at=NULL,last_seen_at=now(),updated_at=now()`,[
+      gm,cleanText(changeKind||'NEW'),cleanText(row.mall_code||row.source_mall||'CPKR'),cleanText(row.cp_code),
+      cleanText(row.gm_parent_code),cleanText(row.cp_parent_code),cleanText(row.name_ko),toInt(row.depth,0),
+      JSON.stringify({gm_code:gm,cp_code:cleanText(row.cp_code),gm_parent_code:cleanText(row.gm_parent_code),cp_parent_code:cleanText(row.cp_parent_code),name_ko:cleanText(row.name_ko),depth:toInt(row.depth,0),source:cleanText(row.source)})
+    ]);
+  }catch(e){
+    // Category creation itself must never fail only because migration has not reached this table yet.
+    if(!(e&&e.code==='42P01')) try{console.warn('[GM_CATEGORY_PACK_PENDING_WARN]',{gm_code:gm,error:String(e&&e.message||e)});}catch(_l){}
+  }
+}
+
 async function createOrReuseCategoryNode(pool, row){
   row=row||{};
   const cp=cleanText(row.cp_code);
@@ -725,6 +753,7 @@ async function createOrReuseCategoryNode(pool, row){
                 updated_at=now()
             WHERE gm_code=$4 RETURNING *`, params);
           await markCategoryParentNonLeaf(client, parentGm, parentCp);
+          await recordCategoryPackPending(client,r.rows[0],'CHANGED');
           await client.query('COMMIT');
           return { row:r.rows[0], created:false, reused:true, confirmed:true, provisional_gm_code:cleanText(provisional.gm_code) };
         }
@@ -742,6 +771,7 @@ async function createOrReuseCategoryNode(pool, row){
         translations: newTranslations
       }));
       await markCategoryParentNonLeaf(client, parentGm, parentCp);
+      await recordCategoryPackPending(client,inserted,'NEW');
       await client.query('COMMIT');
       return { row:inserted, created:true, reused:false, confirmed:false };
     }catch(e){

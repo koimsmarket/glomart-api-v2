@@ -92,7 +92,7 @@
 
 <div class="card" id="assetPackCard" data-builder-tab="asset">
   <h2>카테고리 / UI 사전 배포</h2>
-  <div class="small">DB 스키마는 변경하지 않습니다. Builder에서 버전만 올리면 야간 작업기가 25개 언어 카테고리 JSON과 한국어 UI 사전 배포본을 생성합니다. 사용자는 DB가 아니라 정적 JSON + IndexedDB를 사용합니다.</div>
+  <div class="small">카테고리 배포는 기준본 시작일시와 최종 업데이트일시(YYMMDD_HHMM)로 관리합니다. 사용자는 이 두 값만 비교하고 정적 JSON + IndexedDB를 사용합니다.</div>
   <div id="assetPackStatus" class="status" style="margin-top:10px">조회 전</div>
   <div class="grid" style="margin-top:12px"><div>
     <label>작업모드</label><select id="assetPackMode"><option>AUTO</option><option>OFF</option><option>ON</option></select>
@@ -102,7 +102,7 @@
   </div><div><table><tbody id="assetPackVersions"><tr><td>조회 전</td></tr></tbody></table></div></div>
   <hr style="margin:16px 0;border:0;border-top:1px solid #ddd">
   <p><button class="green" onclick="nextAssetPackVersion('base')">기준본 버전 +1</button> <button id="assetPackNewBaseBtn" style="background:#7c3aed;color:#fff" onclick="publishNewBaseNow()">신규 기준본 즉시 생성</button> <button class="green" onclick="nextAssetPackVersion('delta')">누적본 버전 +1</button> <button class="green" onclick="nextAssetPackVersion('ui')">UI 사전 버전 +1</button> <button id="assetPackPublishBtn" onclick="publishAssetPackNow()">대기분 지금 생성</button></p>
-  <div class="small">기준본 변경 시 기존 사용자는 새 기준본을 받고, 기준본이 같으면 누적본만 받습니다. 25개 공식 언어 외 사용자는 한국어 카테고리팩을 받고 클라이언트 번역을 사용합니다.</div>
+  <div class="small">기준본 시작일시가 다르면 BASE 전체를 받고, 같고 최종 업데이트일시만 다르면 BASE 이후 누적 DELTA 1개만 받습니다. 25개 공식 언어 외 사용자는 한국어 카테고리팩을 받고 클라이언트 번역을 사용합니다.</div><h3 style="margin-top:18px">신규/변경 카테고리 대기</h3><div id="assetPackPendingSummary" class="status">조회 전</div><div style="overflow:auto;max-height:360px;margin-top:8px"><table><thead><tr><th>상태</th><th>구분</th><th>GM CODE</th><th>CP CODE</th><th>카테고리</th><th>부모</th><th>발견</th></tr></thead><tbody id="assetPackPendingRows"><tr><td colspan="7">조회 전</td></tr></tbody></table></div>
 </div>
 
 <div class="card" id="deviceLangCard" data-builder-tab="lang">
