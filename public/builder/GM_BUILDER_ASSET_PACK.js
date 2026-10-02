@@ -1,4 +1,4 @@
-// GM_BUILDER_ASSET_PACK_UI_V003_CATEGORY_BASE_DELTA_25LANG
+// GM_BUILDER_ASSET_PACK_UI_V004_YYYYMMDD_CATEGORY_BASE_DELTA_25LANG
 function apEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function loadAssetPack(){
   const box=document.getElementById('assetPackStatus');if(!box)return;
@@ -32,7 +32,7 @@ async function nextAssetPackVersion(kind){
   const r=await fetch(`${API}/api/gm/builder/asset-pack/version/${kind}/next`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}await loadAssetPack();
 }
 async function generateCategoryBaseNow(){
-  if(!confirm('현재 gm_category 전체로 원본(BASE) 25개국 JSON을 새로 생성할까요?\n성공한 시각이 새 원본 버전(YYMMDD_HHMM)이 되며 기존 클라이언트는 BASE를 다시 받습니다.'))return;
+  if(!confirm('현재 gm_category 전체로 원본(BASE) 25개국 JSON을 새로 생성할까요?\n성공한 시각이 새 원본 버전(YYYYMMDD_HHMM)이 되며 기존 클라이언트는 BASE를 다시 받습니다.'))return;
   const b=document.getElementById('assetPackBaseGenerateBtn');if(b)b.disabled=true;
   try{
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/base/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||j.detail||`HTTP ${r.status}`);

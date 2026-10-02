@@ -1,8 +1,8 @@
 'use strict';
-/* GM_ASSET_PACK_MANAGER_V004_BASE_DELTA_25LANG
+/* GM_ASSET_PACK_MANAGER_V005_YYYYMMDD_BASE_DELTA_25LANG
  * Category client sync contract:
- *   base_started_at : YYMMDD_HHMM of current base
- *   last_updated_at : YYMMDD_HHMM of latest published cumulative delta
+ *   base_started_at : YYYYMMDD_HHMM of current base
+ *   last_updated_at : YYYYMMDD_HHMM of latest published cumulative delta
  */
 const fs=require('fs');
 const path=require('path');
@@ -20,7 +20,7 @@ function n(v,d=0){const x=Number(v);return Number.isFinite(x)?Math.trunc(x):d;}
 function mkdirp(p){fs.mkdirSync(p,{recursive:true});}
 function writeJson(file,obj){mkdirp(path.dirname(file));const tmp=file+'.tmp';fs.writeFileSync(tmp,JSON.stringify(obj),'utf8');fs.renameSync(tmp,file);}
 function readJson(file,fallback){try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch(_e){return fallback;}}
-function kstParts(){const d=new Date(Date.now()+9*60*60*1000);const yy=String(d.getUTCFullYear()).slice(-2),mo=String(d.getUTCMonth()+1).padStart(2,'0'),da=String(d.getUTCDate()).padStart(2,'0'),hh=String(d.getUTCHours()).padStart(2,'0'),mi=String(d.getUTCMinutes()).padStart(2,'0');return {token:yy+mo+da+'_'+hh+mi,hhmm:hh+':'+mi,iso:new Date().toISOString()};}
+function kstParts(){const d=new Date(Date.now()+9*60*60*1000);const yy=String(d.getUTCFullYear()),mo=String(d.getUTCMonth()+1).padStart(2,'0'),da=String(d.getUTCDate()).padStart(2,'0'),hh=String(d.getUTCHours()).padStart(2,'0'),mi=String(d.getUTCMinutes()).padStart(2,'0');return {token:yy+mo+da+'_'+hh+mi,hhmm:hh+':'+mi,iso:new Date().toISOString()};}
 function inWindow(now,start,end){if(start===end)return true;if(start<end)return now>=start&&now<end;return now>=start||now<end;}
 async function ensureDefaults(db){
   const rows=[
@@ -31,8 +31,8 @@ async function ensureDefaults(db){
     ['category_pack_base_published','0','VERSION','ASSET','카테고리 기준본 배포 내부 순번(legacy 호환)'],
     ['category_pack_delta_target','0','VERSION','ASSET','카테고리 누적본 내부 순번(legacy 호환)'],
     ['category_pack_delta_published','0','VERSION','ASSET','카테고리 누적본 배포 내부 순번(legacy 호환)'],
-    ['category_pack_base_started_at','','STRING','ASSET','FIXED','카테고리 기준본 시작시각 YYMMDD_HHMM'],
-    ['category_pack_last_updated_at','','STRING','ASSET','FIXED','카테고리 최종 업데이트시각 YYMMDD_HHMM'],
+    ['category_pack_base_started_at','','STRING','ASSET','FIXED','카테고리 기준본 시작시각 YYYYMMDD_HHMM'],
+    ['category_pack_last_updated_at','','STRING','ASSET','FIXED','카테고리 최종 업데이트시각 YYYYMMDD_HHMM'],
     ['ui_dictionary_target','1','VERSION','ASSET','관리자가 요청한 UI 사전 배포 버전'],
     ['ui_dictionary_published','0','VERSION','ASSET','실제 생성 완료된 UI 사전 배포 버전']
   ];
