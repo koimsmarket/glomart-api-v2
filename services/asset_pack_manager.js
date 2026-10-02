@@ -1,5 +1,5 @@
 'use strict';
-/* GM_ASSET_PACK_MANAGER_V005_YYYYMMDD_BASE_DELTA_25LANG
+/* GM_ASSET_PACK_MANAGER_V006_RUNTIME_CONFIG_BIND_FIX
  * Category client sync contract:
  *   base_started_at : YYYYMMDD_HHMM of current base
  *   last_updated_at : YYYYMMDD_HHMM of latest published cumulative delta
@@ -28,13 +28,13 @@ async function ensureDefaults(db){
     ['asset_pack_auto_start','00:00','STRING','ASSET','AUTO','카테고리/UI 사전 자동 생성 시작시간 KST'],
     ['asset_pack_auto_end','08:00','STRING','ASSET','AUTO','카테고리/UI 사전 자동 생성 종료시간 KST'],
     ['category_pack_base_target','1','VERSION','ASSET','FIXED','카테고리 기준본 내부 순번(legacy 호환)'],
-    ['category_pack_base_published','0','VERSION','ASSET','카테고리 기준본 배포 내부 순번(legacy 호환)'],
-    ['category_pack_delta_target','0','VERSION','ASSET','카테고리 누적본 내부 순번(legacy 호환)'],
-    ['category_pack_delta_published','0','VERSION','ASSET','카테고리 누적본 배포 내부 순번(legacy 호환)'],
+    ['category_pack_base_published','0','VERSION','ASSET','FIXED','카테고리 기준본 배포 내부 순번(legacy 호환)'],
+    ['category_pack_delta_target','0','VERSION','ASSET','FIXED','카테고리 누적본 내부 순번(legacy 호환)'],
+    ['category_pack_delta_published','0','VERSION','ASSET','FIXED','카테고리 누적본 배포 내부 순번(legacy 호환)'],
     ['category_pack_base_started_at','','STRING','ASSET','FIXED','카테고리 기준본 시작시각 YYYYMMDD_HHMM'],
     ['category_pack_last_updated_at','','STRING','ASSET','FIXED','카테고리 최종 업데이트시각 YYYYMMDD_HHMM'],
-    ['ui_dictionary_target','1','VERSION','ASSET','관리자가 요청한 UI 사전 배포 버전'],
-    ['ui_dictionary_published','0','VERSION','ASSET','실제 생성 완료된 UI 사전 배포 버전']
+    ['ui_dictionary_target','1','VERSION','ASSET','FIXED','관리자가 요청한 UI 사전 배포 버전'],
+    ['ui_dictionary_published','0','VERSION','ASSET','FIXED','실제 생성 완료된 UI 사전 배포 버전']
   ];
   for(const x of rows){await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at) VALUES($1,$2,$3,$4,$5,TRUE,$6,now()) ON CONFLICT(config_key) DO NOTHING`,x);}
 }
