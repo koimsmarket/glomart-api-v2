@@ -1934,6 +1934,9 @@ app.use(require('./routes/event'));
 console.log('[EVENT_ROUTE_V009] routes/event registered');
 app.use(require('./routes/category_menu'));
 console.log('[GM_CATEGORY_MENU_V001] routes/category_menu registered');
+app.use(require('./routes/category_pack'));
+console.log('[GM_CATEGORY_PACK_USER_V001] routes/category_pack registered');
+try{ require('./services/asset_pack_manager').ensureStarted(pool); }catch(e){ console.warn('[GM_ASSET_PACK_MANAGER] start skipped:',String(e&&e.message||e)); }
 app.use(require('./routes/search_keyword'));
 console.log('[GM_SEARCH_KEYWORD_ROUTE_V002] routes/search_keyword registered');
 app.use(require('./routes/search_local'));

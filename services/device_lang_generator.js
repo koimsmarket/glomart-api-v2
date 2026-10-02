@@ -41,7 +41,7 @@ async function translateOne(text,target){
   }finally{clearTimeout(to);}
 }
 async function cfg(){
-  const r=await poolRef.query(`SELECT config_key,config_value FROM gm_runtime_config WHERE enabled=TRUE AND config_key LIKE 'device_lang_%'`);
+  const r=await poolRef.query(`SELECT config_key,config_value FROM gm_runtime_config WHERE enabled=TRUE AND (config_key LIKE 'device_lang_%' OR config_key LIKE 'asset_pack_%')`);
   const m={};for(const x of r.rows)m[x.config_key]=String(x.config_value||'');return m;
 }
 async function generate(lang){
@@ -74,12 +74,12 @@ async function pump(){
   pumping=true;
   try{
     const c=await cfg();
-    const mode=String(c.device_lang_background_mode||'AUTO').toUpperCase();
+    const mode=String(c.asset_pack_background_mode||c.device_lang_background_mode||'AUTO').toUpperCase();
     const mem=memorySnapshot();
     lastState.mode=mode;lastState.memory_percent=mem.percent;
     if(mode==='OFF'){lastState.state='OFF';return;}
     if(mode==='AUTO'){
-      const now=kstHHMM(),start=String(c.device_lang_auto_start||'00:00'),end=String(c.device_lang_auto_end||'08:00');
+      const now=kstHHMM(),start=String(c.asset_pack_auto_start||c.device_lang_auto_start||'00:00'),end=String(c.asset_pack_auto_end||c.device_lang_auto_end||'08:00');
       if(!inWindow(now,start,end)){lastState.state='AUTO_TIME_WAIT';return;}
       const startPct=Math.max(1,Number(c.device_lang_memory_start_pct||70))/100;
       if(mem.ratio>startPct){lastState.state='AUTO_MEMORY_WAIT';return;}
