@@ -4,7 +4,7 @@ const express=require('express');
 const fs=require('fs');
 const path=require('path');
 const router=express.Router();
-const {dbFrom}=require('./core/helpers');
+const {dbFrom}=require('./core');
 function s(v){return String(v==null?'':v).replace(/\s+/g,' ').trim();}
 function hasKo(v){return /[가-힣]/.test(String(v||''));}
 function pageNameFromFile(f){return String(f||'').replace(/\\/g,'/').replace(/^.*?public\//,'').replace(/\.[^.]+$/,'').slice(0,240);}
