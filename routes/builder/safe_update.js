@@ -245,21 +245,40 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
 
   let rows = parseCsv(req.body);
 
-  // GM_UI_DICTIONARY_V001
-  // The maintained UI workbook uses Page / Code / kr / en ... headers.
-  // Normalize only this table at the Builder boundary; DB stays canonical gm_code/page_name.
+  // GM_UI_DICTIONARY_V002
+  // Maintained workbook layout:
+  //   row 1: Page | Code | 한국어\nkr | 영어\nen | ... | 대만어\nzh-TW | ...
+  //   row 2: Page | Code | kr | en | ... | tw | ...   (display/helper header, not data)
+  // Builder CSV conversion uses row 1 as the CSV header, so normalize those labels here and
+  // discard only the exact helper-header row. DB columns remain canonical gm_code/page_name/25 languages.
   if (spec.table === 'gm_ui_dictionary') {
+    const uiLangCodes = new Set(['kr','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr']);
+    const normalizeUiDictHeader = (name) => {
+      const raw = String(name == null ? '' : name).replace(/\r/g,'').trim();
+      if (!raw) return raw;
+      if (/^(page|page_name)$/i.test(raw)) return 'page_name';
+      if (/^(code|gm_code)$/i.test(raw)) return 'gm_code';
+      const parts = raw.split(/\n+/).map(x=>String(x||'').trim()).filter(Boolean);
+      let code = String(parts.length ? parts[parts.length-1] : raw).toLowerCase().replace(/_/g,'-');
+      if (code === 'zh-tw' || code === 'zh-hant') code = 'tw';
+      if (code === 'ko') code = 'kr';
+      return uiLangCodes.has(code) ? code : raw;
+    };
     rows = rows.map(row => {
-      const out = Object.assign({}, row);
-      if (!Object.prototype.hasOwnProperty.call(out, 'gm_code')) {
-        out.gm_code = out.Code ?? out.code ?? out.CODE ?? '';
+      const out = { __row_no: row.__row_no };
+      for (const [col, value] of Object.entries(row || {})) {
+        if (col === '__row_no') continue;
+        const target = normalizeUiDictHeader(col);
+        // A canonical column, if duplicated, wins over a display-label alias.
+        if (!Object.prototype.hasOwnProperty.call(out, target) || String(out[target] == null ? '' : out[target]).trim() === '') {
+          out[target] = value;
+        }
       }
-      if (!Object.prototype.hasOwnProperty.call(out, 'page_name')) {
-        out.page_name = out.Page ?? out.page ?? out.PAGE ?? '';
-      }
-      delete out.Code; delete out.code; delete out.CODE;
-      delete out.Page; delete out.page; delete out.PAGE;
       return out;
+    }).filter(row => {
+      const code = String(row.gm_code == null ? '' : row.gm_code).trim();
+      const page = String(row.page_name == null ? '' : row.page_name).trim();
+      return !(code.toLowerCase() === 'code' && page.toLowerCase() === 'page');
     });
   }
   // Never truncate silently. A partial APPLY is more dangerous than a visible error.
