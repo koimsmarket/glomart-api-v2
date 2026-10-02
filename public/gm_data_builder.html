@@ -91,7 +91,7 @@
 
 
 <div class="card" id="assetPackCard" data-builder-tab="asset">
-  <h2>카테고리 / UI 사전 배포</h2>
+  <h2>카테고리 JSON 배포 / UI 사전</h2>
   <div class="small">카테고리 배포는 기준본 시작일시와 최종 업데이트일시(YYMMDD_HHMM)로 관리합니다. 사용자는 이 두 값만 비교하고 정적 JSON + IndexedDB를 사용합니다.</div>
   <div id="assetPackStatus" class="status" style="margin-top:10px">조회 전</div>
   <div class="grid" style="margin-top:12px"><div>
@@ -101,7 +101,11 @@
     <p><button class="green" onclick="saveAssetPackSchedule()">시간 저장</button> <button onclick="loadAssetPack()">새로고침</button></p>
   </div><div><table><tbody id="assetPackVersions"><tr><td>조회 전</td></tr></tbody></table></div></div>
   <hr style="margin:16px 0;border:0;border-top:1px solid #ddd">
-  <p><button class="green" onclick="nextAssetPackVersion('base')">기준본 버전 +1</button> <button id="assetPackNewBaseBtn" style="background:#7c3aed;color:#fff" onclick="publishNewBaseNow()">신규 기준본 즉시 생성</button> <button class="green" onclick="nextAssetPackVersion('delta')">누적본 버전 +1</button> <button class="green" onclick="nextAssetPackVersion('ui')">UI 사전 버전 +1</button> <button id="assetPackPublishBtn" onclick="publishAssetPackNow()">대기분 지금 생성</button></p>
+  <h3>카테고리 JSON 생성</h3>
+  <p><button id="assetPackBaseGenerateBtn" style="background:#7c3aed;color:#fff" onclick="generateCategoryBaseNow()">원본(BASE) 25개국 JSON 생성</button> <button id="assetPackDeltaGenerateBtn" class="green" onclick="generateCategoryDeltaNow()">추가본(DELTA) 25개국 JSON 생성</button></p>
+  <div class="small">원본은 현재 gm_category 전체를 25개 언어로 생성합니다. 추가본은 현재 원본 이후의 추가/변경/삭제분을 25개 언어 누적본으로 생성합니다. 25개 파일 생성 검증이 모두 끝난 뒤에만 버전 시간이 갱신됩니다.</div>
+  <h3 style="margin-top:16px">UI 사전 / 자동 배포</h3>
+  <p><button class="green" onclick="nextAssetPackVersion('ui')">UI 사전 버전 +1</button> <button id="assetPackPublishBtn" onclick="publishAssetPackNow()">AUTO 대기 배포 지금 실행</button></p>
   <div class="small">기준본 시작일시가 다르면 BASE 전체를 받고, 같고 최종 업데이트일시만 다르면 BASE 이후 누적 DELTA 1개만 받습니다. 25개 공식 언어 외 사용자는 한국어 카테고리팩을 받고 클라이언트 번역을 사용합니다.</div><h3 style="margin-top:18px">신규/변경 카테고리 대기</h3><div id="assetPackPendingSummary" class="status">조회 전</div><div style="overflow:auto;max-height:360px;margin-top:8px"><table><thead><tr><th>상태</th><th>구분</th><th>GM CODE</th><th>CP CODE</th><th>카테고리</th><th>부모</th><th>발견</th></tr></thead><tbody id="assetPackPendingRows"><tr><td colspan="7">조회 전</td></tr></tbody></table></div>
 </div>
 
