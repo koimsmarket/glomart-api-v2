@@ -27,6 +27,7 @@ const tables = {
   category_sales_yearly:'카테고리 연간 판매 gm_category_sales_yearly',
   category_country_sales_monthly:'카테고리 국가별 월별 판매 gm_category_country_sales_monthly',
   category_country_sales_yearly:'카테고리 국가별 연간 판매 gm_category_country_sales_yearly',
+  ui_dictionary_source:'UI 사전 원본 gm_ui_dictionary_source',
   keyword_relation:'연관검색어 gm_keyword_relation', keyword_translate:'외국어검색어 gm_keyword_translate',
   smartfit_space:'SmartFit 공간 gm_smartfit_space',
   smartfit_template:'SmartFit Template gm_smartfit_template',
@@ -67,7 +68,7 @@ const tables = {
 const tableNameMap = {
   gm_image_vector_pending:'image_vector_pending',
   gm_product_image_vector:'product_image_vector', gm_product_option:'product_options', gm_product:'products', gm_product_archive:'product_archive',
-  gm_category:'category', gm_category_keyword:'category_keyword',
+  gm_category:'category', gm_category_keyword:'category_keyword', gm_ui_dictionary_source:'ui_dictionary_source',
   gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',
   gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
   gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_keyword_relation:'keyword_relation', gm_keyword_translate:'keyword_translate',
@@ -92,20 +93,45 @@ async function loadBuilderTableSpecs(){
   }
   return builderTableSpecPromise;
 }
+const builderTableGroups = [
+  {key:'CATEGORY',label:'카테고리',items:['category','category_dynamic','category_keyword']},
+  {key:'LANGUAGE',label:'UI / 언어',items:['ui_dictionary_source','keyword_translate','keyword_relation']},
+  {key:'PRODUCT',label:'상품',items:['products','product_options','product_archive','product_image_vector','image_vector_pending','supplier','product_interest','product_upsert_queue']},
+  {key:'ORDER',label:'주문 / 회원 / CS',items:['cart','orders','order_items','member','member_address','member_ledger','member_payment_info','member_device','member_relation_count','guest_member_link','cs','cs_messages','order_message']},
+  {key:'STATS',label:'검색 / 판매 / 통계',items:['search_keyword_stat','category_search_stat','category_search_monthly','category_search_yearly','product_sales_monthly','product_sales_yearly','product_country_sales_monthly','product_country_sales_yearly','category_sales_monthly','category_sales_yearly','category_country_sales_monthly','category_country_sales_yearly','search_log','sales_aggregate_event','dashboard_snapshot']},
+  {key:'MESSAGE',label:'메시지 / 네트워크',items:['network_incentive_rate','network_payment_snapshot','message_policy','message_personal','message_broadcast','message_broadcast_receive','message_share','message_share_receiver','message_counter_daily','message_broadcast_job','event_queue']},
+  {key:'SMARTFIT',label:'SmartFit',items:['smartfit_space','smartfit_template','smartfit_template_vector','smartfit_space_vector','smartfit_item','smartfit_collection','smartfit_category','smartfit_internal_sale','smartfit_collection_item_delta','smartfit_space_subscriber','smartfit_subscribe','smartfit_message_receiver']}
+];
+function builderGroupForKey(key){
+  for(const g of builderTableGroups){ if(g.items.includes(key)) return g; }
+  return {key:'OTHER',label:'기타',items:[]};
+}
+function groupedBuilderSpecs(specs){
+  const known=new Map(builderTableGroups.map(g=>[g.key,{...g,specs:[]}]))
+  const other={key:'OTHER',label:'기타',items:[],specs:[]};
+  for(const spec of specs){
+    const g=builderGroupForKey(spec.key);
+    const bucket=known.get(g.key)||other;
+    bucket.specs.push(spec);
+  }
+  return [...known.values(),other].filter(g=>g.specs.length);
+}
 async function fillSelect(id){
   const el=document.getElementById(id); if(!el)return;
   try{
     const specs=await loadBuilderTableSpecs();
-    el.innerHTML=specs.map(x=>`<option value="${x.key}">${tables[x.key]||x.table}</option>`).join('');
+    el.innerHTML=groupedBuilderSpecs(specs).map(g=>`<optgroup label="${g.label}">${g.specs.map(x=>`<option value="${x.key}">${tables[x.key]||x.table}</option>`).join('')}</optgroup>`).join('');
   }catch(e){ el.innerHTML='<option value="">테이블 목록 조회 실패</option>'; log(String(e&&e.message||e)); }
 }
 async function fillChecks(id){
   const el=document.getElementById(id); if(!el)return;
   try{
     const specs=await loadBuilderTableSpecs();
-    el.innerHTML=specs.map(x=>`<label class="check"><input type="checkbox" class="exportTableCheck" value="${x.key}" checked><span>${tables[x.key]||x.table}</span></label>`).join('');
+    el.innerHTML=groupedBuilderSpecs(specs).map(g=>`<details class="builderTableGroup" open><summary><b>${g.label}</b> <span class="small">${g.specs.length}개</span></summary><div class="checks">${g.specs.map(x=>`<label class="check"><input type="checkbox" class="exportTableCheck" data-group="${g.key}" value="${x.key}" checked><span>${tables[x.key]||x.table}</span></label>`).join('')}</div></details>`).join('');
   }catch(e){ el.innerHTML='<div class="small">테이블 목록 조회 실패</div>'; log(String(e&&e.message||e)); }
 }
+function setExportGroupChecks(groupKey,checked){ document.querySelectorAll(`.exportTableCheck[data-group="${groupKey}"]`).forEach(x=>x.checked=!!checked); }
+
 function startButtonTimer(button,label){ if(!button)return null; const s={button,original:button.textContent,seconds:0,label,timer:null}; button.disabled=true; button.textContent=`${label} · 0초`; s.timer=setInterval(()=>{s.seconds++;button.textContent=`${s.label} · ${s.seconds}초`;},1000); return s; }
 function setButtonTimerLabel(s,label){ if(!s)return; s.label=label; s.button.textContent=`${label} · ${s.seconds}초`; }
 function stopButtonTimer(s){ if(!s)return; clearInterval(s.timer); s.button.disabled=false; s.button.textContent=s.original; }

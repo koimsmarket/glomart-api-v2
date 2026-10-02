@@ -194,6 +194,14 @@ async function saveBlobAsFile(blob,filename,directoryHandle){
   a.remove();
   return {verified:false,size:blob.size};
 }
+async function groupedDownloadDirectory(rootHandle,table){
+  if(!rootHandle || typeof rootHandle.getDirectoryHandle!=='function') return rootHandle;
+  const g=builderGroupForKey(table);
+  const folderNames={CATEGORY:'01_CATEGORY',LANGUAGE:'02_UI_LANGUAGE',PRODUCT:'03_PRODUCT',ORDER:'04_ORDER_MEMBER_CS',STATS:'05_STATS',MESSAGE:'06_MESSAGE_NETWORK',SMARTFIT:'07_SMARTFIT',OTHER:'99_OTHER'};
+  const folder=folderNames[g.key]||folderNames.OTHER;
+  return await rootHandle.getDirectoryHandle(folder,{create:true});
+}
+
 async function runExportGroup(group,gi,totalGroups,format,timed,shared,directoryHandle){
   const groupResult=[];
   for(let i=0;i<group.length;i++){
@@ -202,7 +210,8 @@ async function runExportGroup(group,gi,totalGroups,format,timed,shared,directory
     setButtonTimerLabel(timed,`${gi+1}/${totalGroups}조 ${ordinal}/${shared.total} ${table}`);
     try{
       // gm_product는 단독 실행하며 Excel 선택 상태에서도 CSV 스트림으로 디스크에 직접 기록합니다.
-      const saved=await exportTableToFile(table,format,directoryHandle);
+      const targetDirectory=await groupedDownloadDirectory(directoryHandle,table);
+      const saved=await exportTableToFile(table,format,targetDirectory);
       shared.completed++;
       const actualFormat=saved.actual_format;
       const row={group:gi+1,table,ok:true,bytes:saved.bytes,file:saved.filename,requested_format:format,actual_format:actualFormat,verified:saved.verified,streamed:saved.streamed};
@@ -237,7 +246,7 @@ async function downloadAll(button){
   try{
     directoryHandle=await chooseDownloadDirectory();
     if(directoryHandle){
-      log(`저장 폴더가 선택되었습니다. 각 파일은 디스크 기록과 크기 확인이 끝난 뒤 다음 파일을 시작합니다.`);
+      log(`저장 폴더가 선택되었습니다. 종류별 하위폴더를 자동 생성하고, 각 파일은 디스크 기록과 크기 확인이 끝난 뒤 다음 파일을 시작합니다.`);
     }else{
       log(`이 브라우저는 폴더 직접 저장을 지원하지 않습니다. 브라우저의 '여러 파일 다운로드 허용'이 필요합니다.`);
     }

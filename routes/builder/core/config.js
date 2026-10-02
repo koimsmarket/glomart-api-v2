@@ -270,6 +270,18 @@ const TABLES = {
   category_country_sales_yearly: { table:'gm_category_country_sales_yearly', key:['yyyy','category_no','country_code'], order:'yyyy DESC, sales_amount DESC', critical:['yyyy','category_no','country_code'], numeric:['sales_id','sales_qty','sales_amount','purchase_amount'], defaults:{sales_qty:'0',sales_amount:'0',purchase_amount:'0'}, enums:{}, blocked:['sales_id','created_at'] },
 
 
+  ui_dictionary_source: {
+    table: 'gm_ui_dictionary_source',
+    key: ['dict_key'],
+    order: 'dict_key ASC',
+    critical: ['dict_key','source_text','source_value'],
+    numeric: [],
+    defaults: {},
+    enums: {},
+    blocked: ['updated_at'],
+    allowInsert: true
+  },
+
   keyword_translate: {
     table: 'gm_keyword_translate',
     key: ['lang','input_keyword'],
