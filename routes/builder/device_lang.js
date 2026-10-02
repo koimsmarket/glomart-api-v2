@@ -78,7 +78,7 @@ router.get('/api/gm/builder/device-lang',async(req,res)=>{
     generator.ensureStarted(db);
     const client=await db.connect();
     try{await client.query('BEGIN');await rollover(client);await client.query('COMMIT');}catch(e){try{await client.query('ROLLBACK');}catch(_e){}throw e;}finally{client.release();}
-    const src=(await db.query(`SELECT COUNT(*)::bigint AS n FROM gm_ui_dictionary_source`)).rows[0];
+    const src=(await db.query(`SELECT COUNT(*)::bigint AS n FROM gm_ui_dictionary`)).rows[0];
     const r=await db.query(`SELECT lang_code,status,pack_version,pack_url,download_count,
       visit_day_count,visit_yesterday_count,visit_month_count,visit_last_month_count,
       visit_year_count,visit_last_year_count,visit_total_count,first_seen_at,updated_at,
@@ -139,7 +139,7 @@ router.post('/api/gm/builder/device-lang/:lang/import',upload.single('file'),asy
   if(!req.file||!req.file.buffer)return fail(res,400,'CSV file required');
   try{
     const rows=parseCsv(req.file.buffer.toString('utf8'));
-    const source=(await db.query(`SELECT dict_key,source_text FROM gm_ui_dictionary_source ORDER BY dict_key`)).rows;
+    const source=(await db.query(`SELECT gm_code AS dict_key, kr AS source_text FROM gm_ui_dictionary ORDER BY gm_code`)).rows;
     const byKey=new Map(rows.map(x=>[String(x.dict_key||'').trim(),x]));
     const data=[];const issues=[];
     for(const s of source){
@@ -162,7 +162,7 @@ router.post('/api/gm/builder/device-lang/:lang/approve',async(req,res)=>{
   const db=dbFrom(req),lang=normLang(req.params.lang);
   if(!lang||BUILTIN.has(lang))return fail(res,400,'extension language only');
   try{
-    const sourceCount=Number((await db.query(`SELECT COUNT(*)::bigint AS n FROM gm_ui_dictionary_source`)).rows[0].n||0);
+    const sourceCount=Number((await db.query(`SELECT COUNT(*)::bigint AS n FROM gm_ui_dictionary`)).rows[0].n||0);
     const r0=await db.query(`SELECT status,pack_data FROM gm_device_language WHERE lang_code=$1`,[lang]);
     if(!r0.rows.length)return fail(res,404,'language not found');
     const data=Array.isArray(r0.rows[0].pack_data)?r0.rows[0].pack_data:[];

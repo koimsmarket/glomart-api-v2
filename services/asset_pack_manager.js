@@ -64,7 +64,7 @@ async function publishDelta(db,version){
   await setConfig(db,'category_pack_delta_published',v);return {kind:'category_delta',version:v,count:changes.length};
 }
 async function publishUi(db,version){
-  const q=await db.query(`SELECT dict_key,source_text,source_value FROM gm_ui_dictionary_source ORDER BY dict_key`);const items=(q.rows||[]).map(x=>({dict_key:s(x.dict_key),source_text:s(x.source_text),value:s(x.source_value)}));const v=n(version);
+  const q=await db.query(`SELECT gm_code AS dict_key, kr AS source_text, kr AS source_value FROM gm_ui_dictionary ORDER BY gm_code`);const items=(q.rows||[]).map(x=>({dict_key:s(x.dict_key),source_text:s(x.source_text),value:s(x.source_value)}));const v=n(version);
   writeJson(path.join(UI_ROOT,'ko','v'+v+'.json'),{type:'ui_dictionary',lang:'ko',version:v,count:items.length,items});writeJson(path.join(UI_ROOT,'meta.json'),{version:v,updated_at:new Date().toISOString(),lang:'ko',count:items.length});await setConfig(db,'ui_dictionary_published',v);return {kind:'ui_dictionary',version:v,count:items.length};
 }
 async function runPending(db,force=false){

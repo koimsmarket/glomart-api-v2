@@ -244,6 +244,24 @@ router.post('/api/gm/builder/safe-update', express.text({ type:['text/*','applic
   const db = dbFrom(req);
 
   let rows = parseCsv(req.body);
+
+  // GM_UI_DICTIONARY_V001
+  // The maintained UI workbook uses Page / Code / kr / en ... headers.
+  // Normalize only this table at the Builder boundary; DB stays canonical gm_code/page_name.
+  if (spec.table === 'gm_ui_dictionary') {
+    rows = rows.map(row => {
+      const out = Object.assign({}, row);
+      if (!Object.prototype.hasOwnProperty.call(out, 'gm_code')) {
+        out.gm_code = out.Code ?? out.code ?? out.CODE ?? '';
+      }
+      if (!Object.prototype.hasOwnProperty.call(out, 'page_name')) {
+        out.page_name = out.Page ?? out.page ?? out.PAGE ?? '';
+      }
+      delete out.Code; delete out.code; delete out.CODE;
+      delete out.Page; delete out.page; delete out.PAGE;
+      return out;
+    });
+  }
   // Never truncate silently. A partial APPLY is more dangerous than a visible error.
   if (rows.length > LIMITS.MAX_ROWS) {
     return fail(res, 400, 'too many rows', { input_rows: rows.length, limit: LIMITS.MAX_ROWS });

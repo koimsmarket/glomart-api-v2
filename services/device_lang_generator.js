@@ -45,7 +45,7 @@ async function cfg(){
   const m={};for(const x of r.rows)m[x.config_key]=String(x.config_value||'');return m;
 }
 async function generate(lang){
-  const source=await poolRef.query(`SELECT dict_key,source_text,source_value FROM gm_ui_dictionary_source ORDER BY dict_key`);
+  const source=await poolRef.query(`SELECT gm_code AS dict_key, kr AS source_text, kr AS source_value FROM gm_ui_dictionary ORDER BY gm_code`);
   if(!source.rows.length) throw new Error('UI_SOURCE_EMPTY');
   const data=[];
   let failCount=0;

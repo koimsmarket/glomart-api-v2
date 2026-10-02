@@ -9,6 +9,36 @@ function pickOptPrice(row, names){
   return 0;
 }
 
+function nullableQty(v){
+  if(v === undefined || v === null || cleanText(v) === '') return null;
+  const n = toInt(v, -1);
+  return n >= 0 ? n : null;
+}
+function optionBuyableQty(row){
+  row=row||{};
+  const direct = nullableQty(row.buyable_qty !== undefined ? row.buyable_qty : (row.buyableQty !== undefined ? row.buyableQty : (row.stock_qty !== undefined ? row.stock_qty : row.stockQty)));
+  if(direct !== null) return direct;
+  const text = cleanText(row.stockText || row.stock_text || row.soldoutText || row.statusText || row.rawText || '');
+  let m = text.match(/(\d[\d,]*)\s*개\s*(?:남음|남았|재고)/);
+  if(!m) m = text.match(/(?:재고|수량)\s*[:：]?\s*(\d[\d,]*)/);
+  return m ? nullableQty(String(m[1]).replace(/,/g,'')) : null;
+}
+function isDetailOptionPayload(p,parent){
+  const src = cleanText((p&& (p.source || p.collector_source || p.collectorSource || p.context || p.from || p.origin)) || (parent&& (parent.source || parent.context || parent.from)) || '').toLowerCase();
+  if(src.indexOf('detail') >= 0 || src.indexOf('collector') >= 0) return true;
+  return !!(p && (p.detail_json || p.detailJson || p.detailBlocks || p.detailImages || p.__gmStrictOptionSource));
+}
+function optionPi(o){return [cleanText(o&&o.product_id),cleanText(o&&o.item_id),cleanText(o&&o.vendor_item_id)].filter(Boolean).join('_');}
+function optionIsRepresentativeCandidate(o){
+  if(!o) return false;
+  if(cleanText(o.active_yn).toUpperCase()==='N') return false;
+  if(cleanText(o.soldout_yn).toUpperCase()==='Y') return false;
+  const sale=cleanText(o.sale_status).toLowerCase();
+  if(sale==='inactive'||sale==='soldout') return false;
+  if(o.buyable_qty !== null && o.buyable_qty !== undefined && Number(o.buyable_qty) <= 0) return false;
+  return true;
+}
+
 function parseMaybeJsonObject(v){
   if(!v) return null;
   if(typeof v === 'object') return v;
@@ -53,7 +83,7 @@ function normalizeOptionJson(p, id){
     addJsonRows(o.option_json); addJsonRows(o.optionJson); addJsonRows(o.detail_json); addJsonRows(o.detailJson);
   });
 
-  const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source'];
+  const headers=['uid','product_id','item_id','vendor_item_id','option_name','mall_price','normal_price','delivery_badge','delivery_fee','delivery_eta_text','option_image_url','soldout_yn','source','buyable_qty'];
   const rows=[]; const seen=new Set();
   const pushRow = (row)=>{
     const sig = cleanText(row[0]) || (cleanText(row[4]) + '|' + cleanText(row[3]) + '|' + cleanText(row[2]));
@@ -70,7 +100,7 @@ function normalizeOptionJson(p, id){
       const uid=uid0 || (id.mallCode && pi0 ? id.mallCode + '_' + pi0 : pi0);
       const name0=cleanText(r[4] || r[5] || p.optionName || p.product_name || p.productName || '기본옵션');
       if(!uid && !name0) return;
-      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||'')]);
+      pushRow([uid,productId0,itemId0,vendorItemId0,name0,parseMoney(r[5],0),parseMoney(r[6],0),cleanText(r[7]||''),parseMoney(r[8],0),cleanText(r[9]||''),normalizeUrl(r[10]||''),!!r[11],cleanText(r[12]||''),nullableQty(r[13])]);
       return;
     }
     if(!r || typeof r !== 'object') return;
@@ -88,7 +118,7 @@ function normalizeOptionJson(p, id){
     const badgeText = cleanText(r.delivery_badge_text || r.deliveryBadgeText || r.optionShippingBadge || r.shippingBadge || r.deliveryBadge || r.deliveryType || r.delivery_type || r.shipType || p.shippingLabel || p.deliveryType || p.delivery_type || '');
     const img = normalizeUrl(r.option_image_url || r.optionImageUrl || r.optionImage || r.colorImage || r.image || r.thumbnail || r.thumb || '');
     const sold = !!(r.soldout_yn === true || r.soldoutYn === true || r.soldout === true || /품절|sold\s*out/i.test(cleanText(r.soldout_yn || r.soldoutYn || r.status || r.sale_status || '')));
-    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || p.deliveryDateText || p.arrivalText || ''),img,sold,cleanText(r.source || '')]);
+    pushRow([uid,productId,itemId,vendorItemId,name,mallPrice,normalPrice,badgeText,fee,cleanText(r.delivery_eta_text || r.deliveryEtaText || r.deliveryDateText || r.arrivalText || r.etaText || p.deliveryDateText || p.arrivalText || ''),img,sold,cleanText(r.source || ''),optionBuyableQty(r)]);
   }));
 
   // 검색결과 payload에는 옵션배열이 없지만 현재 리스트 행 자체가 대표 판매옵션이다.
@@ -101,7 +131,7 @@ function normalizeOptionJson(p, id){
       pickPrice(p), pickNormalPrice(p) || 0, pickDeliveryType(p), pickDeliveryFee(p), pickDeliveryText(p),
       normalizeUrl(p.option_image_url || p.optionImageUrl || p.thumb_origin_url || p.thumbOriginUrl || p.thumbnail || p.image || ''),
       /품절|sold\s*out/i.test(cleanText(p.soldout_yn || p.soldoutYn || p.soldout || p.sale_status || '')),
-      'search-row'
+      'search-row', pickBuyableQty(p)
     ]);
   }
 
@@ -175,7 +205,7 @@ function optionRowsFromOptionJson(optionJson, id, p){
       soldout_yn: soldoutYn,
       sale_status: soldoutYn === 'Y' ? 'soldout' : 'active',
       active_yn: 'Y',
-      buyable_qty: pickBuyableQty(p),
+      buyable_qty: nullableQty(r[13]) !== null ? nullableQty(r[13]) : pickBuyableQty(p),
       min_order_qty: pickMinOrderQty(p),
       max_order_qty: pickMaxOrderQty(p)
     });
@@ -183,8 +213,63 @@ function optionRowsFromOptionJson(optionJson, id, p){
   return out;
 }
 
+async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
+  const result={applied:false,changed:false,representative_pi:'',removed_duplicate:0,reason:''};
+  const mall=cleanText(id&&id.mallCode).toUpperCase();
+  if(mall!=='CPKR'){result.reason='not_coupang';return result;}
+  if(!isDetailOptionPayload(p,parent)){result.reason='not_detail_payload';return result;}
+  const rows=(Array.isArray(optionRows)?optionRows:[]).filter(o=>cleanText(o&&o.product_id)===cleanText(id&&id.productId));
+  if(!rows.length){result.reason='no_option_rows';return result;}
+  const qr=await pool.query(`SELECT product_uid,product_id,item_id,vendor_item_id FROM gm_product WHERE product_uid=$1 AND mall_code='CPKR' LIMIT 1`,[cleanText(id.uid)]);
+  const current=qr.rows&&qr.rows[0];
+  if(!current){result.reason='product_row_missing';return result;}
+  const currentPi=[cleanText(current.product_id),cleanText(current.item_id),cleanText(current.vendor_item_id)].filter(Boolean).join('_');
+  const openedPi=[cleanText(id.productId),cleanText(id.itemId),cleanText(id.vendorItemId)].filter(Boolean).join('_');
+  const candidates=rows.filter(optionIsRepresentativeCandidate);
+  let representative=candidates.find(o=>optionPi(o)===currentPi)||null;
+  if(!representative){
+    representative=candidates.find(o=>optionPi(o)===openedPi)||null;
+    if(!representative){
+      representative=candidates.slice().sort((a,b)=>{
+        const aq=(a.buyable_qty===null||a.buyable_qty===undefined)?Number.POSITIVE_INFINITY:Number(a.buyable_qty);
+        const bq=(b.buyable_qty===null||b.buyable_qty===undefined)?Number.POSITIVE_INFINITY:Number(b.buyable_qty);
+        if(aq!==bq)return aq-bq;
+        return Number(a.option_sort_no||0)-Number(b.option_sort_no||0);
+      })[0]||null;
+    }
+  }
+  if(!representative){result.reason='no_buyable_candidate';return result;}
+  const repPi=optionPi(representative);
+  const changed=repPi!==currentPi;
+  await pool.query(`
+    UPDATE gm_product SET
+      product_id=$2,item_id=$3,vendor_item_id=$4,
+      mall_sale_price=$5,
+      final_supply_price=COALESCE($6,final_supply_price),
+      normal_price=COALESCE($7,normal_price),
+      discount_price=$8,
+      delivery_fee=$9,
+      delivery_eta_text=$10,
+      delivery_type=$11,
+      soldout_yn='N',sale_status='active',
+      buyable_qty=COALESCE($12,buyable_qty),
+      thumb_origin_url=COALESCE(NULLIF($13,''),thumb_origin_url),
+      updated_at=now()
+    WHERE product_uid=$1 AND mall_code='CPKR' AND product_id=$2
+  `,[cleanText(id.uid),cleanText(representative.product_id),cleanText(representative.item_id),cleanText(representative.vendor_item_id),
+      representative.mall_sale_price,representative.final_supply_price,representative.normal_price,representative.discount_price,
+      representative.delivery_fee,cleanText(representative.delivery_eta_text),cleanText(representative.delivery_type),
+      representative.buyable_qty,cleanText(representative.option_image_url)]);
+  const dr=await pool.query(`DELETE FROM gm_product_option WHERE mall_code='CPKR' AND product_id=$1 AND pi_ii_vi=$2`,[cleanText(representative.product_id),repPi]);
+  result.applied=true;result.changed=changed;result.representative_pi=repPi;result.removed_duplicate=dr.rowCount||0;
+  result.reason=changed?'representative_replaced':'representative_kept';
+  try{console.log('[GM_CPKR_REPRESENTATIVE_SYNC]',{product_uid:id.uid,old_pi:currentPi,new_pi:repPi,changed,removed_duplicate:result.removed_duplicate,buyable_qty:representative.buyable_qty});}catch(_e){}
+  return result;
+}
+
 async function upsertProductOptions(pool, id, optionJson, p, parent){
-  const result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[] };
+  const result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[], representative:null };
+  const detailPayload=isDetailOptionPayload(p,parent);
   const optionRows = optionRowsFromOptionJson(optionJson, id, p);
   result.received = optionRows.length;
   if(!optionRows.length) return result;
@@ -258,7 +343,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
   }
   // 수집 payload가 2개 이상 옵션을 갖고 있을 때만 전체 옵션리스트로 보고 누락 옵션을 NonActive 처리한다.
   // 검색결과의 대표 옵션 1개 저장이 기존 옵션 전체를 죽이는 것을 방지한다.
-  if(seen.size > 1){
+  if(seen.size > 1 || (detailPayload && seen.size >= 1)){
     try{
       const livePi = Array.from(seen).map(x=>x.split('|').slice(1).join('|'));
       const nr = await pool.query(`
@@ -269,9 +354,13 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       result.nonactive = nr.rowCount || 0;
     }catch(e){ result.errors.push(compactError(e)); }
   }
+  if(detailPayload && optionRows.length){
+    try{result.representative=await syncCoupangRepresentative(pool,id,optionRows,p,parent);}
+    catch(e){result.representative={applied:false,error:compactError(e)};result.errors.push(compactError(e));}
+  }
   result.balance_ok = result.received === (result.inserted + result.updated + result.skipped);
   return result;
 }
 
 
-module.exports={parseMaybeJsonObject,normalizeOptionJson,makeEmptyOptionJson,makeProductOptionLinkJson,normalizeSoldoutYn,optionRowsFromOptionJson,upsertProductOptions};
+module.exports={parseMaybeJsonObject,normalizeOptionJson,makeEmptyOptionJson,makeProductOptionLinkJson,normalizeSoldoutYn,optionRowsFromOptionJson,syncCoupangRepresentative,upsertProductOptions};

@@ -27,7 +27,7 @@ const tables = {
   category_sales_yearly:'카테고리 연간 판매 gm_category_sales_yearly',
   category_country_sales_monthly:'카테고리 국가별 월별 판매 gm_category_country_sales_monthly',
   category_country_sales_yearly:'카테고리 국가별 연간 판매 gm_category_country_sales_yearly',
-  ui_dictionary_source:'UI 사전 원본 gm_ui_dictionary_source',
+  ui_dictionary:'UI 사전 gm_ui_dictionary',
   keyword_relation:'연관검색어 gm_keyword_relation', keyword_translate:'외국어검색어 gm_keyword_translate',
   smartfit_space:'SmartFit 공간 gm_smartfit_space',
   smartfit_template:'SmartFit Template gm_smartfit_template',
@@ -68,7 +68,7 @@ const tables = {
 const tableNameMap = {
   gm_image_vector_pending:'image_vector_pending',
   gm_product_image_vector:'product_image_vector', gm_product_option:'product_options', gm_product:'products', gm_product_archive:'product_archive',
-  gm_category:'category', gm_category_keyword:'category_keyword', gm_ui_dictionary_source:'ui_dictionary_source',
+  gm_category:'category', gm_category_keyword:'category_keyword', gm_ui_dictionary:'ui_dictionary', gm_ui_dictionary_source:'ui_dictionary',
   gm_search_keyword_stat:'search_keyword_stat', gm_category_search_stat:'category_search_stat', gm_category_search_monthly:'category_search_monthly', gm_category_search_yearly:'category_search_yearly', gm_product_sales_monthly:'product_sales_monthly', gm_product_sales_yearly:'product_sales_yearly', gm_product_country_sales_monthly:'product_country_sales_monthly', gm_product_country_sales_yearly:'product_country_sales_yearly', gm_category_sales_monthly:'category_sales_monthly', gm_category_sales_yearly:'category_sales_yearly', gm_category_country_sales_monthly:'category_country_sales_monthly', gm_category_country_sales_yearly:'category_country_sales_yearly',
   gm_basket:'cart', gm_order:'orders', gm_order_item:'order_items', gm_supplier:'supplier',
   gm_cs:'cs', gm_cs_message:'cs_messages', gm_member:'member', gm_member_address:'member_address', gm_keyword_relation:'keyword_relation', gm_keyword_translate:'keyword_translate',
@@ -95,7 +95,7 @@ async function loadBuilderTableSpecs(){
 }
 const builderTableGroups = [
   {key:'CATEGORY',label:'카테고리',items:['category','category_dynamic','category_keyword']},
-  {key:'LANGUAGE',label:'UI / 언어',items:['ui_dictionary_source','keyword_translate','keyword_relation']},
+  {key:'LANGUAGE',label:'UI / 언어',items:['ui_dictionary','keyword_translate','keyword_relation']},
   {key:'PRODUCT',label:'상품',items:['products','product_options','product_archive','product_image_vector','image_vector_pending','supplier','product_interest','product_upsert_queue']},
   {key:'ORDER',label:'주문 / 회원 / CS',items:['cart','orders','order_items','member','member_address','member_ledger','member_payment_info','member_device','member_relation_count','guest_member_link','cs','cs_messages','order_message']},
   {key:'STATS',label:'검색 / 판매 / 통계',items:['search_keyword_stat','category_search_stat','category_search_monthly','category_search_yearly','product_sales_monthly','product_sales_yearly','product_country_sales_monthly','product_country_sales_yearly','category_sales_monthly','category_sales_yearly','category_country_sales_monthly','category_country_sales_yearly','search_log','sales_aggregate_event','dashboard_snapshot']},
