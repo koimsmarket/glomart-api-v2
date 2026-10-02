@@ -278,7 +278,7 @@ const TABLES = {
     numeric: [],
     defaults: { page_name:'' },
     enums: {},
-    blocked: ['updated_at'],
+    blocked: ['updated_at','source_file','source_locator','source_type','active_yn','translation_status','first_seen_at','last_seen_at','removed_at'],
     allowInsert: true
   },
 
