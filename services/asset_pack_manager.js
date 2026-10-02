@@ -1,17 +1,21 @@
 'use strict';
-/* GM_ASSET_PACK_MANAGER_V006_RUNTIME_CONFIG_BIND_FIX
+/* GM_ASSET_PACK_MANAGER_V007_STANDALONE_CATEGORY_ROOT
  * Category client sync contract:
  *   base_started_at : YYYYMMDD_HHMM of current base
  *   last_updated_at : YYYYMMDD_HHMM of latest published cumulative delta
  */
 const fs=require('fs');
 const path=require('path');
+const os=require('os');
 const LANGS=['kr','en','vi','zh','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const COL={kr:'name_ko',en:'name_en',vi:'name_vi',zh:'name_zh',ja:'name_ja',tw:'name_tw',th:'name_th',uz:'name_uz',ne:'name_ne',km:'name_km',id:'name_id',tl:'name_tl',mn:'name_mn',my:'name_my',kk:'name_kk',si:'name_si',ru:'name_ru',bn:'name_bn',ur:'name_ur',lo:'name_lo',hi:'name_hi',tr:'name_tr',fa:'name_fa',es:'name_es',fr:'name_fr'};
-const PUBLIC_ROOT=path.join(__dirname,'..','public','data','gm-assets');
-const CATEGORY_ROOT=path.join(PUBLIC_ROOT,'category');
-const UI_ROOT=path.join(PUBLIC_ROOT,'ui');
-const PRIVATE_ROOT=path.join(__dirname,'..','storage','gm-assets');
+// Category packs are runtime-generated assets. Never write them under /app/public.
+// Cloudtype deploy image may expose /app as read-only. Keep category packs in one
+// dedicated writable folder. GM_CATEGORY_PACK_ROOT can point at a mounted/persistent
+// volume; otherwise use the container temp area so generation works immediately.
+const CATEGORY_ROOT=path.resolve(process.env.GM_CATEGORY_PACK_ROOT || path.join(os.tmpdir(),'glomart-category-pack'));
+const UI_ROOT=path.join(__dirname,'..','public','data','gm-assets','ui');
+const PRIVATE_ROOT=path.join(CATEGORY_ROOT,'_state');
 const BASE_SNAPSHOT_FILE=path.join(PRIVATE_ROOT,'category_base_snapshot.json');
 let poolRef=null,timer=null,pumping=false;
 let lastState={state:'IDLE',running:false,last_error:'',last_run_at:null,last_result:null};
