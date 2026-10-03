@@ -1,5 +1,5 @@
 'use strict';
-/* GM_ASSET_PACK_MANAGER_V007_STANDALONE_CATEGORY_ROOT
+/* GM_ASSET_PACK_MANAGER_V008_HNSW_VECTORS
  * Category client sync contract:
  *   base_started_at : YYYYMMDD_HHMM of current base
  *   last_updated_at : YYYYMMDD_HHMM of latest published cumulative delta
@@ -56,7 +56,7 @@ async function categoryRows(db){const cols=['gm_code','depth','leaf_yn','display
 function categoryMeta(){return readJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:'',last_updated_at:'',base_version:0,delta_versions:[],updated_at:null,languages:LANGS});}
 function packFiles(kind,token){const root=path.join(CATEGORY_ROOT,kind,token);return LANGS.map(lang=>path.join(root,lang+'.json'));}
 function hnswFile(token){return path.join(CATEGORY_ROOT,'hnsw',token,'index.json');}
-function hnswState(token){const file=token?hnswFile(token):'';if(!file||!fs.existsSync(file))return {ok:false,version:s(token),count:0,bytes:0};const j=readJson(file,null);return {ok:!!(j&&j.graph&&Array.isArray(j.codes)&&n(j.count,-1)===j.codes.length),version:s(token),count:n(j&&j.count,0),bytes:fs.statSync(file).size};}
+function hnswState(token){const file=token?hnswFile(token):'';if(!file||!fs.existsSync(file))return {ok:false,version:s(token),count:0,bytes:0};const j=readJson(file,null);return {ok:!!(j&&j.graph&&Array.isArray(j.codes)&&n(j.count,-1)===j.codes.length&&s(j.vector_encoding)==='f32le_base64'&&s(j.vectors_b64)&&n(j.vector_bytes,0)===n(j.count,0)*n(j.dimensions,0)*4),version:s(token),count:n(j&&j.count,0),bytes:fs.statSync(file).size,vector_bytes:n(j&&j.vector_bytes,0),vector_encoding:s(j&&j.vector_encoding)};}
 function publishHnsw(rows,token,baseToken,legacyV){const pack=categoryHnsw.build(rows,token,baseToken);writeJson(hnswFile(token),pack);if(n(legacyV)>0)writeJson(path.join(CATEGORY_ROOT,'hnsw','v'+n(legacyV),'index.json'),pack);const st=hnswState(token);if(!st.ok||st.count!==pack.count){const e=new Error('CATEGORY_HNSW_VERIFY_FAILED '+JSON.stringify(st));e.code='HNSW_VERIFY';throw e;}return st;}
 function verifyPack(kind,token,expectedCount){const files=packFiles(kind,token),missing=[],bad=[];for(const f of files){if(!fs.existsSync(f)){missing.push(path.basename(f));continue;}const j=readJson(f,null);if(!j||!Array.isArray(j.items)||n(j.count,-1)!==n(expectedCount,-2))bad.push(path.basename(f));}return {ok:missing.length===0&&bad.length===0,total:LANGS.length,ready:LANGS.length-missing.length-bad.length,missing,bad};}
 function categoryFileState(){const meta=categoryMeta(),base=s(meta.base_started_at),updated=s(meta.last_updated_at),baseCheck=base?verifyPack('base',base,n(readJson(path.join(CATEGORY_ROOT,'base',base,'kr.json'),{}).count,0)):{ok:false,total:LANGS.length,ready:0,missing:LANGS.map(x=>x+'.json'),bad:[]};let deltaCheck={ok:true,total:0,ready:0,missing:[],bad:[]};if(base&&updated&&updated!==base){const kr=readJson(path.join(CATEGORY_ROOT,'delta',updated,'kr.json'),{});deltaCheck=verifyPack('delta',updated,n(kr.count,0));}return {base_started_at:base,last_updated_at:updated,base_files:baseCheck,delta_files:deltaCheck,hnsw:hnswState(s(meta.hnsw_version||updated||base))};}

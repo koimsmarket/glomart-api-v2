@@ -1,9 +1,10 @@
 'use strict';
-/* GM_CATEGORY_HNSW_PACK_V001
+/* GM_CATEGORY_HNSW_PACK_V002_VECTORS
  * Builds one deterministic HNSW graph per category-pack version.
  * - Source text: name_ko + keyword (same contract as mobile GM_CATEGORY_LOCAL_SEARCH)
  * - One graph is shared by all language packs because graph vectors are Korean canonical text.
- * - The JSON stores graph topology + gm_code order only; vectors are regenerated on-device.
+ * - The JSON stores graph topology + gm_code order + server-built Float32 vectors.
+ * - Mobile restores vectors directly; full vector regeneration is fallback only.
  */
 const DIM=128,M=10,EF_CONSTRUCTION=48,EF_SEARCH=72;
 function s(v){return String(v==null?'':v).replace(/[\u00a0\u200b-\u200d\ufeff]/g,' ').replace(/\s+/g,' ').trim();}
@@ -26,5 +27,6 @@ class Hnsw{
   add(entry,id){const level=levelForKey(entry.code||entry.ko||id),links=[];for(let l=0;l<=level;l++)links.push([]);this.nodes.push({v:entry.vector,level,links});if(this.entry<0){this.entry=id;this.maxLevel=level;return;}let ep=this.entry;for(let l=this.maxLevel;l>level;l--)ep=this.greedy(entry.vector,ep,l).id;for(let l=Math.min(level,this.maxLevel);l>=0;l--){const found=this.searchLayer(entry.vector,[ep],EF_CONSTRUCTION,l),sel=found.slice(0,M);for(const x of sel)this.connect(id,x.id,l);if(found.length)ep=found[0].id;}if(level>this.maxLevel){this.entry=id;this.maxLevel=level;}}
   dump(){return {entry:this.entry,maxLevel:this.maxLevel,links:this.nodes.map(n=>({level:n.level,links:n.links}))};}
 }
-function build(rows,version,baseStartedAt){const started=Date.now(),entries=[];for(const r of rows||[]){const code=s(r&&r.gm_code).toUpperCase(),ko=s(r&&r.name_ko||r&&r.keyword),keyword=s(r&&r.keyword||r&&r.keyword_seed||ko);if(!code||!ko)continue;entries.push({code,ko,keyword,vector:vectorize(ko+' '+keyword)});}const h=new Hnsw();for(let i=0;i<entries.length;i++)h.add(entries[i],i);return {type:'category_hnsw',version:s(version),base_started_at:s(baseStartedAt||version),count:entries.length,dimensions:DIM,M,efConstruction:EF_CONSTRUCTION,efSearch:EF_SEARCH,vector_contract:'hangul_jamo_hash_v1:name_ko+keyword',codes:entries.map(e=>e.code),graph:h.dump(),build_ms:Date.now()-started,generated_at:new Date().toISOString()};}
+function encodeVectors(entries){const count=entries.length,buf=Buffer.allocUnsafe(count*DIM*4);let off=0;for(let i=0;i<count;i++){const v=entries[i].vector;for(let j=0;j<DIM;j++,off+=4)buf.writeFloatLE(Number(v[j]||0),off);}return {encoding:'f32le_base64',bytes:buf.length,data:buf.toString('base64')};}
+function build(rows,version,baseStartedAt){const started=Date.now(),entries=[];for(const r of rows||[]){const code=s(r&&r.gm_code).toUpperCase(),ko=s(r&&r.name_ko||r&&r.keyword),keyword=s(r&&r.keyword||r&&r.keyword_seed||ko);if(!code||!ko)continue;entries.push({code,ko,keyword,vector:vectorize(ko+' '+keyword)});}const h=new Hnsw();for(let i=0;i<entries.length;i++)h.add(entries[i],i);const vectors=encodeVectors(entries);return {type:'category_hnsw',version:s(version),base_started_at:s(baseStartedAt||version),count:entries.length,dimensions:DIM,M,efConstruction:EF_CONSTRUCTION,efSearch:EF_SEARCH,vector_contract:'hangul_jamo_hash_v1:name_ko+keyword',vector_encoding:vectors.encoding,vector_bytes:vectors.bytes,vectors_b64:vectors.data,codes:entries.map(e=>e.code),graph:h.dump(),build_ms:Date.now()-started,generated_at:new Date().toISOString()};}
 module.exports={DIM,M,EF_CONSTRUCTION,EF_SEARCH,build};

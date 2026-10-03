@@ -1,4 +1,4 @@
-// GM_BUILDER_ASSET_PACK_UI_V005_SHOW_SERVER_DETAIL
+// GM_BUILDER_ASSET_PACK_UI_V006_HNSW_VECTORS
 function apEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function loadAssetPack(){
   const box=document.getElementById('assetPackStatus');if(!box)return;
@@ -15,7 +15,7 @@ async function loadAssetPack(){
       <tr><th>추가본 최종일시</th><td><b>${apEsc(v.last_updated_at||m.last_updated_at||'-')}</b></td></tr>
       <tr><th>원본 JSON</th><td>${apEsc(Number(bf.ready||0))}/${apEsc(Number(bf.total||25))}개 언어</td></tr>
       <tr><th>추가본 JSON</th><td>${apEsc(deltaFiles)}${deltaFiles==='-'?'':'개 언어'}</td></tr>
-      <tr><th>HNSW JSON</th><td>${hf.ok?'준비':'미생성'} · 버전 ${apEsc(hf.version||'-')} · ${apEsc(Number(hf.count||0))}건 · ${apEsc(Number(hf.bytes||0))} bytes</td></tr>
+      <tr><th>HNSW JSON</th><td>${hf.ok?'준비(벡터 포함)':'미생성'} · 버전 ${apEsc(hf.version||'-')} · ${apEsc(Number(hf.count||0))}건 · 파일 ${apEsc(Number(hf.bytes||0))} bytes · 벡터 ${apEsc(Number(hf.vector_bytes||0))} bytes</td></tr>
       <tr><th>원본 카테고리</th><td>${apEsc(v.base_category_count||0)}건</td></tr>
       <tr><th>최근 누적 변경</th><td>${apEsc(v.last_delta_count||0)}건</td></tr>`;
     const ps=document.getElementById('assetPackPendingSummary'),pr=document.getElementById('assetPackPendingRows');
@@ -38,7 +38,7 @@ async function generateCategoryBaseNow(){
   try{
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/base/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.base.generate',result:j.result});
-    alert(`원본 25개국 JSON + HNSW 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25\nHNSW: ${j.result.hnsw_count||0}건`);
+    alert(`원본 25개국 JSON + HNSW 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25\nHNSW: ${j.result.hnsw_count||0}건 (벡터 포함)`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }
@@ -48,8 +48,8 @@ async function generateCategoryDeltaNow(){
   try{
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/delta/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.delta.generate',result:j.result});
-    if(j.result&&j.result.state==='NO_CHANGES')alert(j.result.hnsw_rebuilt?`카테고리 변경은 없습니다.\n현재 버전(${j.result.last_updated_at})의 HNSW만 새로 생성했습니다.\nHNSW: ${j.result.hnsw_count||0}건`:'원본 이후 추가/변경 카테고리가 없습니다.\n최종 업데이트 시간은 변경하지 않았습니다.');
-    else alert(`추가본 25개국 JSON + 전체 HNSW 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25\nHNSW: ${j.result.hnsw_count||0}건`);
+    if(j.result&&j.result.state==='NO_CHANGES')alert(j.result.hnsw_rebuilt?`카테고리 변경은 없습니다.\n현재 버전(${j.result.last_updated_at})의 HNSW만 새로 생성했습니다.\nHNSW: ${j.result.hnsw_count||0}건 (벡터 포함)`:'원본 이후 추가/변경 카테고리가 없습니다.\n최종 업데이트 시간은 변경하지 않았습니다.');
+    else alert(`추가본 25개국 JSON + 전체 HNSW 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25\nHNSW: ${j.result.hnsw_count||0}건 (벡터 포함)`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }
