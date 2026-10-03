@@ -8,19 +8,20 @@ async function loadAssetPack(){
     document.getElementById('assetPackMode').value=c.asset_pack_background_mode||'AUTO';
     document.getElementById('assetPackStart').value=c.asset_pack_auto_start||'00:00';
     document.getElementById('assetPackEnd').value=c.asset_pack_auto_end||'08:00';
-    const bf=f.base_files||{},df=f.delta_files||{};
+    const bf=f.base_files||{},df=f.delta_files||{},hf=f.hnsw||{};
     const deltaFiles=(v.base_started_at&&v.last_updated_at&&v.base_started_at!==v.last_updated_at)?`${Number(df.ready||0)}/${Number(df.total||25)}`:'-';
     document.getElementById('assetPackVersions').innerHTML=`
       <tr><th>원본 시작일시</th><td><b>${apEsc(v.base_started_at||m.base_started_at||'-')}</b></td></tr>
       <tr><th>추가본 최종일시</th><td><b>${apEsc(v.last_updated_at||m.last_updated_at||'-')}</b></td></tr>
       <tr><th>원본 JSON</th><td>${apEsc(Number(bf.ready||0))}/${apEsc(Number(bf.total||25))}개 언어</td></tr>
       <tr><th>추가본 JSON</th><td>${apEsc(deltaFiles)}${deltaFiles==='-'?'':'개 언어'}</td></tr>
+      <tr><th>HNSW JSON</th><td>${hf.ok?'준비':'미생성'} · 버전 ${apEsc(hf.version||'-')} · ${apEsc(Number(hf.count||0))}건 · ${apEsc(Number(hf.bytes||0))} bytes</td></tr>
       <tr><th>원본 카테고리</th><td>${apEsc(v.base_category_count||0)}건</td></tr>
       <tr><th>최근 누적 변경</th><td>${apEsc(v.last_delta_count||0)}건</td></tr>`;
     const ps=document.getElementById('assetPackPendingSummary'),pr=document.getElementById('assetPackPendingRows');
     if(ps)ps.textContent=`추가본 대기 ${Number(j.pending_count||0)}건`;
     if(pr)pr.innerHTML=pending.length?pending.map(x=>`<tr><td>${apEsc(x.status)}</td><td>${apEsc(x.change_kind)}</td><td>${apEsc(x.gm_code)}</td><td>${apEsc(x.cp_code)}</td><td>${apEsc(x.name_ko)}</td><td>${apEsc(x.parent_gm_code||x.parent_cp_code)}</td><td>${apEsc(x.last_seen_at||'')}</td></tr>`).join(''):'<tr><td colspan="7">대기 카테고리 없음</td></tr>';
-    box.textContent=`카테고리 JSON ${Number(bf.ready||0)===25?'원본 준비':'원본 미생성'} · 상태 ${g.state||'-'}${g.last_error?' · 오류 '+g.last_error:''}`;
+    box.textContent=`카테고리 JSON ${Number(bf.ready||0)===25?'원본 준비':'원본 미생성'} · HNSW ${hf.ok?'준비':'미생성'} · 상태 ${g.state||'-'}${g.last_error?' · 오류 '+g.last_error:''}`;
   }catch(e){box.textContent='조회 실패: '+String(e&&e.message||e);}
 }
 async function saveAssetPackSchedule(){
@@ -37,7 +38,7 @@ async function generateCategoryBaseNow(){
   try{
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/base/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.base.generate',result:j.result});
-    alert(`원본 25개국 JSON 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
+    alert(`원본 25개국 JSON + HNSW 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25\nHNSW: ${j.result.hnsw_count||0}건`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }
@@ -47,8 +48,8 @@ async function generateCategoryDeltaNow(){
   try{
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/delta/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.delta.generate',result:j.result});
-    if(j.result&&j.result.state==='NO_CHANGES')alert('원본 이후 추가/변경 카테고리가 없습니다.\n최종 업데이트 시간은 변경하지 않았습니다.');
-    else alert(`추가본 25개국 JSON 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
+    if(j.result&&j.result.state==='NO_CHANGES')alert(j.result.hnsw_rebuilt?`카테고리 변경은 없습니다.\n현재 버전(${j.result.last_updated_at})의 HNSW만 새로 생성했습니다.\nHNSW: ${j.result.hnsw_count||0}건`:'원본 이후 추가/변경 카테고리가 없습니다.\n최종 업데이트 시간은 변경하지 않았습니다.');
+    else alert(`추가본 25개국 JSON + 전체 HNSW 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25\nHNSW: ${j.result.hnsw_count||0}건`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }

@@ -1,0 +1,30 @@
+'use strict';
+/* GM_CATEGORY_HNSW_PACK_V001
+ * Builds one deterministic HNSW graph per category-pack version.
+ * - Source text: name_ko + keyword (same contract as mobile GM_CATEGORY_LOCAL_SEARCH)
+ * - One graph is shared by all language packs because graph vectors are Korean canonical text.
+ * - The JSON stores graph topology + gm_code order only; vectors are regenerated on-device.
+ */
+const DIM=128,M=10,EF_CONSTRUCTION=48,EF_SEARCH=72;
+function s(v){return String(v==null?'':v).replace(/[\u00a0\u200b-\u200d\ufeff]/g,' ').replace(/\s+/g,' ').trim();}
+function norm(v){return s(v).toLowerCase().replace(/[\s"'“”‘’.,/\\|_\-()\[\]{}]+/g,'');}
+function hangulJamo(x){x=norm(x);let out='';for(let i=0;i<x.length;i++){const cp=x.charCodeAt(i);if(cp>=0xAC00&&cp<=0xD7A3){const n=cp-0xAC00,l=Math.floor(n/588),v=Math.floor((n%588)/28),t=n%28;out+=String.fromCharCode(0x1100+l)+String.fromCharCode(0x1161+v);if(t)out+=String.fromCharCode(0x11A7+t);}else out+=x.charAt(i);}return out;}
+function fnv(x){let h=2166136261>>>0;for(let i=0;i<x.length;i++){h^=x.charCodeAt(i);h=Math.imul(h,16777619)>>>0;}return h>>>0;}
+function addFeature(vec,key,weight){const h=fnv(key),idx=h%DIM,sign=(h&0x80000000)?-1:1;vec[idx]+=sign*(weight||1);}
+function vectorize(text){const x=hangulJamo(text),v=new Float32Array(DIM);if(!x)return v;addFeature(v,'^'+x.charAt(0),1.2);addFeature(v,x.charAt(x.length-1)+'$',1.2);for(let i=0;i<x.length;i++)addFeature(v,'u:'+x.charAt(i),0.35);for(let n=2;n<=3;n++)for(let i=0;i<=x.length-n;i++)addFeature(v,n+':'+x.substr(i,n),n===2?1:1.25);let q=0;for(let i=0;i<DIM;i++)q+=v[i]*v[i];q=Math.sqrt(q)||1;for(let i=0;i<DIM;i++)v[i]/=q;return v;}
+function dot(a,b){let z=0;for(let i=0;i<a.length;i++)z+=a[i]*b[i];return z;}
+function levelForKey(key){let u=((fnv(key)+1)>>>0)/4294967297;u=Math.max(1e-12,Math.min(1-1e-12,u));return Math.min(16,Math.max(0,Math.floor(-Math.log(u)*(1/Math.log(M)))));}
+class MaxHeap{constructor(){this.a=[];}push(x){const a=this.a;a.push(x);let i=a.length-1;while(i>0){const p=(i-1)>>1;if(a[p].score>=x.score)break;a[i]=a[p];i=p;}a[i]=x;}pop(){const a=this.a;if(!a.length)return null;const top=a[0],last=a.pop();if(a.length){a[0]=last;let i=0;while(true){const l=i*2+1,r=l+1;let b=i;if(l<a.length&&a[l].score>a[b].score)b=l;if(r<a.length&&a[r].score>a[b].score)b=r;if(b===i)break;const t=a[i];a[i]=a[b];a[b]=t;i=b;}}return top;}}
+class MinHeap{constructor(){this.a=[];}push(x){const a=this.a;a.push(x);let i=a.length-1;while(i>0){const p=(i-1)>>1;if(a[p].score<=x.score)break;a[i]=a[p];i=p;}a[i]=x;}pop(){const a=this.a;if(!a.length)return null;const top=a[0],last=a.pop();if(a.length){a[0]=last;let i=0;while(true){const l=i*2+1,r=l+1;let b=i;if(l<a.length&&a[l].score<a[b].score)b=l;if(r<a.length&&a[r].score<a[b].score)b=r;if(b===i)break;const t=a[i];a[i]=a[b];a[b]=t;i=b;}}return top;}}
+class Hnsw{
+  constructor(){this.nodes=[];this.entry=-1;this.maxLevel=-1;}
+  score(q,id){return dot(q,this.nodes[id].v);}
+  greedy(q,entry,level){let cur=entry,cs=this.score(q,cur),changed=true;while(changed){changed=false;const links=this.nodes[cur].links[level]||[];for(let i=0;i<links.length;i++){const n=links[i],x=this.score(q,n);if(x>cs){cur=n;cs=x;changed=true;}}}return {id:cur,score:cs};}
+  searchLayer(q,entries,ef,level){const cand=new MaxHeap(),best=new MinHeap(),seen={};for(const id0 of entries){const id=Number(id0);if(id<0||seen[id])continue;seen[id]=1;const sc=this.score(q,id),x={id,score:sc};cand.push(x);best.push(x);}while(cand.a.length){const cur=cand.pop(),worst=best.a[0];if(worst&&best.a.length>=ef&&cur.score<worst.score)break;const links=this.nodes[cur.id].links[level]||[];for(const n of links){if(seen[n])continue;seen[n]=1;const ns=this.score(q,n),w=best.a[0];if(best.a.length<ef||!w||ns>w.score){const y={id:n,score:ns};cand.push(y);best.push(y);if(best.a.length>ef)best.pop();}}}return best.a.slice().sort((a,b)=>b.score-a.score);}
+  prune(id,level){const links=this.nodes[id].links[level]||[];if(links.length<=M)return;const base=this.nodes[id].v;links.sort((a,b)=>dot(base,this.nodes[b].v)-dot(base,this.nodes[a].v));const keep=links.slice(0,M),drop=links.slice(M);this.nodes[id].links[level]=keep;for(const d of drop){const ol=this.nodes[d].links[level]||[],p=ol.indexOf(id);if(p>=0)ol.splice(p,1);}}
+  connect(a,b,level){const la=this.nodes[a].links[level]||(this.nodes[a].links[level]=[]),lb=this.nodes[b].links[level]||(this.nodes[b].links[level]=[]);if(la.indexOf(b)<0)la.push(b);if(lb.indexOf(a)<0)lb.push(a);if(la.length>M)this.prune(a,level);if(lb.length>M)this.prune(b,level);}
+  add(entry,id){const level=levelForKey(entry.code||entry.ko||id),links=[];for(let l=0;l<=level;l++)links.push([]);this.nodes.push({v:entry.vector,level,links});if(this.entry<0){this.entry=id;this.maxLevel=level;return;}let ep=this.entry;for(let l=this.maxLevel;l>level;l--)ep=this.greedy(entry.vector,ep,l).id;for(let l=Math.min(level,this.maxLevel);l>=0;l--){const found=this.searchLayer(entry.vector,[ep],EF_CONSTRUCTION,l),sel=found.slice(0,M);for(const x of sel)this.connect(id,x.id,l);if(found.length)ep=found[0].id;}if(level>this.maxLevel){this.entry=id;this.maxLevel=level;}}
+  dump(){return {entry:this.entry,maxLevel:this.maxLevel,links:this.nodes.map(n=>({level:n.level,links:n.links}))};}
+}
+function build(rows,version,baseStartedAt){const started=Date.now(),entries=[];for(const r of rows||[]){const code=s(r&&r.gm_code).toUpperCase(),ko=s(r&&r.name_ko||r&&r.keyword),keyword=s(r&&r.keyword||r&&r.keyword_seed||ko);if(!code||!ko)continue;entries.push({code,ko,keyword,vector:vectorize(ko+' '+keyword)});}const h=new Hnsw();for(let i=0;i<entries.length;i++)h.add(entries[i],i);return {type:'category_hnsw',version:s(version),base_started_at:s(baseStartedAt||version),count:entries.length,dimensions:DIM,M,efConstruction:EF_CONSTRUCTION,efSearch:EF_SEARCH,vector_contract:'hangul_jamo_hash_v1:name_ko+keyword',codes:entries.map(e=>e.code),graph:h.dump(),build_ms:Date.now()-started,generated_at:new Date().toISOString()};}
+module.exports={DIM,M,EF_CONSTRUCTION,EF_SEARCH,build};

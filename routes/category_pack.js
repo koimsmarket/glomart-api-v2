@@ -12,6 +12,7 @@ function sendJsonFile(res,file){if(!fs.existsSync(file))return res.status(404).j
 router.get('/api/gm/category-pack/meta',(req,res)=>sendJsonFile(res,path.join(mgr.paths.CATEGORY_ROOT,'meta.json')));
 router.get('/api/gm/category-pack/base/:version/:lang',(req,res)=>{const raw=String(req.params.version||''),lang=normLang(req.params.lang),t=safeToken(raw);const dir=t?t:('v'+safeLegacy(raw));if(!dir||dir==='v')return res.status(400).json({ok:false,error:'INVALID_VERSION'});sendJsonFile(res,path.join(mgr.paths.CATEGORY_ROOT,'base',dir,lang+'.json'));});
 router.get('/api/gm/category-pack/delta/:version/:lang',(req,res)=>{const raw=String(req.params.version||''),lang=normLang(req.params.lang),t=safeToken(raw);const dir=t?t:('v'+safeLegacy(raw));if(!dir||dir==='v')return res.status(400).json({ok:false,error:'INVALID_VERSION'});sendJsonFile(res,path.join(mgr.paths.CATEGORY_ROOT,'delta',dir,lang+'.json'));});
+router.get('/api/gm/category-pack/hnsw/:version',(req,res)=>{const raw=String(req.params.version||''),t=safeToken(raw);const dir=t?t:('v'+safeLegacy(raw));if(!dir||dir==='v')return res.status(400).json({ok:false,error:'INVALID_VERSION'});sendJsonFile(res,path.join(mgr.paths.CATEGORY_ROOT,'hnsw',dir,'index.json'));});
 router.get('/api/gm/ui-dictionary/meta',(req,res)=>sendJsonFile(res,path.join(mgr.paths.UI_ROOT,'meta.json')));
 router.get('/api/gm/ui-dictionary/ko/:version',(req,res)=>{const v=safeLegacy(req.params.version);sendJsonFile(res,path.join(mgr.paths.UI_ROOT,'ko','v'+v+'.json'));});
 module.exports=router;
