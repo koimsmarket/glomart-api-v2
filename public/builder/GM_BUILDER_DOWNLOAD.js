@@ -273,4 +273,4 @@ async function downloadAll(button){
   }
 }
 
-fillSelect('downTable'); fillChecks('exportTableChecks');
+fillSelect('downTable').then(()=>{try{const key=new URLSearchParams(location.search||'').get('table');const el=document.getElementById('downTable');if(key&&el&&Array.from(el.options).some(o=>o.value===key))el.value=key;}catch(_){}}); fillChecks('exportTableChecks');

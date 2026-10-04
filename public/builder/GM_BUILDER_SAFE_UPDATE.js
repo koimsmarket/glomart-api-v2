@@ -41,7 +41,7 @@ async function sendAll(apply,button){
   try{ for(const f of files){ const text=await readCsvText(f); if(isCafe24MemberCsvText(text)){ await uploadCafe24MemberText(text,f.name,apply); result.push({file:f.name,table:'cafe24_member',result:'DONE'}); continue; } const key=inferTableFromFileName(f.name); if(!key){result.push({file:f.name,result:'SKIP',reason:'테이블명 추정 실패'});continue;} await uploadSafe(key,f,apply); result.push({file:f.name,table:key,result:'DONE'}); } log(result); }catch(e){log(String(e&&e.message||e));}finally{stopButtonTimer(timed);}
 }
 function dryRun(button){return send(false,button)} function applyUpdate(button){return send(true,button)} function dryRunAll(button){return sendAll(false,button)} function applyAll(button){return sendAll(true,button)}
-fillSelect('upTable');
+fillSelect('upTable').then(()=>{try{const key=new URLSearchParams(location.search||'').get('table');const el=document.getElementById('upTable');if(key&&el&&Array.from(el.options).some(o=>o.value===key))el.value=key;}catch(_){}});
 
 async function applyLeafOnly(button){
   const f=document.getElementById('file').files[0]; if(!f){alert('Excel 또는 CSV 파일을 선택하세요.');return;}
