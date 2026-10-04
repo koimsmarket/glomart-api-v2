@@ -1,5 +1,5 @@
 'use strict';
-// GM_ASSET_PACK_BUILDER_V007_TEMP_REHYDRATE
+// GM_ASSET_PACK_BUILDER_V005_ERROR_DETAIL_LOG
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -7,7 +7,7 @@ const mgr=require('../../services/asset_pack_manager');
 
 async function state(db){
   const c=await mgr.config(db),version=await mgr.versionState(db),pending=await mgr.pendingRows(db,300),pending_count=await mgr.pendingCount(db);
-  return {config:c,generator:mgr.status(),storage:mgr.storageInfo(),category_meta:mgr.categoryMeta(),category_files:mgr.categoryFileState(),version,pending_count,pending,languages:mgr.LANGS};
+  return {config:c,generator:mgr.status(),category_meta:mgr.categoryMeta(),category_files:mgr.categoryFileState(),version,pending_count,pending,languages:mgr.LANGS};
 }
 async function nextInternal(db,targetKey,publishedKey){
   const c=await mgr.config(db);
