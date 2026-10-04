@@ -1,5 +1,5 @@
 'use strict';
-/* GM_ASSET_PACK_MANAGER_V010_MULTILANG_CANONICAL_PACK
+/* GM_ASSET_PACK_MANAGER_V011_TEMP_REHYDRATE_MULTILANG_HNSW
  * Category client sync contract:
  *   base_started_at : YYYYMMDD_HHMM of current base
  *   last_updated_at : YYYYMMDD_HHMM of latest published cumulative delta
@@ -7,62 +7,23 @@
 const fs=require('fs');
 const path=require('path');
 const os=require('os');
+const categoryHnsw=require('./category_hnsw_pack');
 const LANGS=['kr','en','vi','zh','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const MATCH_SCHEMA='GM_CATEGORY_MULTILANG_CANONICAL_V001';
 const COL={kr:'name_ko',en:'name_en',vi:'name_vi',zh:'name_zh',ja:'name_ja',tw:'name_tw',th:'name_th',uz:'name_uz',ne:'name_ne',km:'name_km',id:'name_id',tl:'name_tl',mn:'name_mn',my:'name_my',kk:'name_kk',si:'name_si',ru:'name_ru',bn:'name_bn',ur:'name_ur',lo:'name_lo',hi:'name_hi',tr:'name_tr',fa:'name_fa',es:'name_es',fr:'name_fr'};
-// Category packs are runtime-generated assets. Never write them under /app/public or /tmp.
-// Persistence priority:
-//   1) GM_CATEGORY_PACK_ROOT (explicit mounted-volume path)
-//   2) GM_PERSISTENT_DATA_ROOT/category-pack
-//   3) DATA_DIR/category-pack
-//   4) /data/glomart-category-pack (Cloudtype persistent-volume mount target)
-// IMPORTANT: mount the Cloudtype persistent disk at /data, or set one of the env vars above.
-const LEGACY_CATEGORY_ROOT=path.resolve(path.join(os.tmpdir(),'glomart-category-pack'));
-function isVolatileRoot(p){
-  const r=path.resolve(String(p||''));
-  const tmp=path.resolve(os.tmpdir());
-  const appPublic=path.resolve(__dirname,'..','public');
-  return r===tmp||r.startsWith(tmp+path.sep)||r===appPublic||r.startsWith(appPublic+path.sep);
-}
-function resolveCategoryRoot(){
-  const explicit=String(process.env.GM_CATEGORY_PACK_ROOT||'').trim();
-  if(explicit)return {root:path.resolve(explicit),source:'GM_CATEGORY_PACK_ROOT'};
-  const persistent=String(process.env.GM_PERSISTENT_DATA_ROOT||'').trim();
-  if(persistent)return {root:path.resolve(persistent,'category-pack'),source:'GM_PERSISTENT_DATA_ROOT'};
-  const dataDir=String(process.env.DATA_DIR||'').trim();
-  if(dataDir&&!isVolatileRoot(dataDir))return {root:path.resolve(dataDir,'category-pack'),source:'DATA_DIR'};
-  return {root:path.resolve('/data/glomart-category-pack'),source:'DEFAULT_/data'};
-}
-const CATEGORY_ROOT_RESOLVED=resolveCategoryRoot();
-const CATEGORY_ROOT=CATEGORY_ROOT_RESOLVED.root;
-try{fs.mkdirSync(CATEGORY_ROOT,{recursive:true});}catch(e){console.error('[GM_CATEGORY_PACK_ROOT_ERROR]',JSON.stringify({root:CATEGORY_ROOT,error:String(e&&e.message||e)}));}
-// One-time compatibility copy: if the old /tmp pack still exists in the same runtime,
-// move forward without forcing the Builder to regenerate it. Never overwrite a new pack.
-try{
-  const newMeta=path.join(CATEGORY_ROOT,'meta.json'),oldMeta=path.join(LEGACY_CATEGORY_ROOT,'meta.json');
-  if(!fs.existsSync(newMeta)&&CATEGORY_ROOT!==LEGACY_CATEGORY_ROOT&&fs.existsSync(oldMeta)){
-    fs.cpSync(LEGACY_CATEGORY_ROOT,CATEGORY_ROOT,{recursive:true,force:false,errorOnExist:false});
-    console.log('[GM_CATEGORY_PACK_MIGRATE_TMP_TO_PERSISTENT]',JSON.stringify({from:LEGACY_CATEGORY_ROOT,to:CATEGORY_ROOT,meta:fs.existsSync(newMeta)}));
-  }
-}catch(e){console.warn('[GM_CATEGORY_PACK_MIGRATE_SKIP]',JSON.stringify({from:LEGACY_CATEGORY_ROOT,to:CATEGORY_ROOT,error:String(e&&e.message||e)}));}
-console.log('[GM_CATEGORY_PACK_ROOT_V009]',JSON.stringify({root:CATEGORY_ROOT,source:CATEGORY_ROOT_RESOLVED.source,volatile:isVolatileRoot(CATEGORY_ROOT)}));
+// Category packs are runtime-generated delivery assets. They intentionally live in TEMP.
+// On every server process start, the current published version stored in DB is rebuilt
+// into this folder. Rehydration NEVER mints or updates a category-pack version.
+// Keep this independent from the old persistent-root setting so stale /data env values cannot block boot.
+// Optional GM_CATEGORY_PACK_TEMP_ROOT is only for local diagnostics; production default is OS TEMP.
+const CATEGORY_ROOT=path.resolve(process.env.GM_CATEGORY_PACK_TEMP_ROOT || path.join(os.tmpdir(),'glomart-category-pack'));
 const UI_ROOT=path.join(__dirname,'..','public','data','gm-assets','ui');
 const PRIVATE_ROOT=path.join(CATEGORY_ROOT,'_state');
 const BASE_SNAPSHOT_FILE=path.join(PRIVATE_ROOT,'category_base_snapshot.json');
 let poolRef=null,timer=null,pumping=false;
-let lastState={state:'IDLE',running:false,last_error:'',last_run_at:null,last_result:null};
+let lastState={state:'IDLE',running:false,last_error:'',last_run_at:null,last_result:null,rehydrate_state:'IDLE',rehydrate_at:null,rehydrate_result:null};
 function s(v){return String(v==null?'':v).trim();}
-
-function storageInfo(){
-  let writable=false,exists=false,error='';
-  try{mkdirp(CATEGORY_ROOT);exists=fs.existsSync(CATEGORY_ROOT);const probe=path.join(CATEGORY_ROOT,'.gm_pack_write_probe_'+process.pid);fs.writeFileSync(probe,'ok','utf8');fs.unlinkSync(probe);writable=true;}catch(e){error=String(e&&e.message||e);}
-  return {root:CATEGORY_ROOT,source:CATEGORY_ROOT_RESOLVED.source,exists:exists,writable:writable,volatile:isVolatileRoot(CATEGORY_ROOT),safe_for_generate:writable&&!isVolatileRoot(CATEGORY_ROOT),error:error};
-}
-function assertPersistentStorage(){
-  const info=storageInfo();
-  if(!info.safe_for_generate){const e=new Error('CATEGORY_PACK_PERSISTENT_STORAGE_REQUIRED '+JSON.stringify(info));e.code='PERSISTENT_STORAGE_REQUIRED';e.storage=info;throw e;}
-  return info;
-}
+function storageInfo(){let writable=false,error='';try{mkdirp(CATEGORY_ROOT);const p=path.join(CATEGORY_ROOT,'.gm_pack_write_probe_'+process.pid);fs.writeFileSync(p,'ok','utf8');fs.unlinkSync(p);writable=true;}catch(e){error=String(e&&e.message||e);}return {root:CATEGORY_ROOT,mode:'TEMP_REHYDRATE',writable,volatile:true,safe_for_generate:writable,rebuild_on_start:true,error};}
 function n(v,d=0){const x=Number(v);return Number.isFinite(x)?Math.trunc(x):d;}
 function mkdirp(p){fs.mkdirSync(p,{recursive:true});}
 function writeJson(file,obj){mkdirp(path.dirname(file));const tmp=file+'.tmp';fs.writeFileSync(tmp,JSON.stringify(obj),'utf8');fs.renameSync(tmp,file);}
@@ -96,12 +57,14 @@ function uniqueTerms(arr){const out=[],seen=new Set();for(const v of arr||[]){co
 function localized(r,lang){const core=rowCore(r),col=COL[lang]||'name_ko',localName=s(r[col])||s(r.name_ko);return Object.assign(core,{name:localName,name_local:localName,match_terms:uniqueTerms([localName,core.name_ko,core.canonical_ko])});}
 function signature(r){const o={};for(const k of ['gm_code','depth','leaf_yn','display_yn','sort_order','keyword','keyword_seed','name_ko',...Object.values(COL)])o[k]=r[k]==null?'':r[k];return JSON.stringify(o);}
 async function categoryRows(db){const cols=['gm_code','depth','leaf_yn','display_yn','sort_order','keyword','keyword_seed','name_ko',...Array.from(new Set(Object.values(COL)))];const q=await db.query(`SELECT ${cols.join(',')} FROM gm_category WHERE COALESCE(display_yn,'Y')='Y' ORDER BY depth,COALESCE(sort_order,2147483647),category_id`);return q.rows||[];}
-function categoryMeta(){return readJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:'',last_updated_at:'',base_version:0,delta_versions:[],updated_at:null,languages:LANGS,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});}
+function categoryMeta(){return readJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:'',last_updated_at:'',hnsw_version:'',hnsw_count:0,base_version:0,delta_versions:[],updated_at:null,languages:LANGS,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});}
 function packFiles(kind,token){const root=path.join(CATEGORY_ROOT,kind,token);return LANGS.map(lang=>path.join(root,lang+'.json'));}
+function hnswFile(token){return path.join(CATEGORY_ROOT,'hnsw',token,'index.json');}
+function hnswState(token){const file=token?hnswFile(token):'';if(!file||!fs.existsSync(file))return {ok:false,version:s(token),count:0,bytes:0};const j=readJson(file,null);return {ok:!!(j&&j.graph&&Array.isArray(j.codes)&&n(j.count,-1)===j.codes.length&&s(j.vector_encoding)==='f32le_base64'&&s(j.vectors_b64)&&n(j.vector_bytes,0)===n(j.count,0)*n(j.dimensions,0)*4),version:s(token),count:n(j&&j.count,0),bytes:fs.statSync(file).size,vector_bytes:n(j&&j.vector_bytes,0),vector_encoding:s(j&&j.vector_encoding)};}
+function publishHnsw(rows,token,baseToken,legacyV){const pack=categoryHnsw.build(rows,token,baseToken);writeJson(hnswFile(token),pack);if(n(legacyV)>0)writeJson(path.join(CATEGORY_ROOT,'hnsw','v'+n(legacyV),'index.json'),pack);const st=hnswState(token);if(!st.ok||st.count!==pack.count){const e=new Error('CATEGORY_HNSW_VERIFY_FAILED '+JSON.stringify(st));e.code='HNSW_VERIFY';throw e;}return st;}
 function verifyPack(kind,token,expectedCount){const files=packFiles(kind,token),missing=[],bad=[];for(const f of files){if(!fs.existsSync(f)){missing.push(path.basename(f));continue;}const j=readJson(f,null);if(!j||!Array.isArray(j.items)||n(j.count,-1)!==n(expectedCount,-2))bad.push(path.basename(f));}return {ok:missing.length===0&&bad.length===0,total:LANGS.length,ready:LANGS.length-missing.length-bad.length,missing,bad};}
-function categoryFileState(){const meta=categoryMeta(),base=s(meta.base_started_at),updated=s(meta.last_updated_at),baseCheck=base?verifyPack('base',base,n(readJson(path.join(CATEGORY_ROOT,'base',base,'kr.json'),{}).count,0)):{ok:false,total:LANGS.length,ready:0,missing:LANGS.map(x=>x+'.json'),bad:[]};let deltaCheck={ok:true,total:0,ready:0,missing:[],bad:[]};if(base&&updated&&updated!==base){const kr=readJson(path.join(CATEGORY_ROOT,'delta',updated,'kr.json'),{});deltaCheck=verifyPack('delta',updated,n(kr.count,0));}return {base_started_at:base,last_updated_at:updated,base_files:baseCheck,delta_files:deltaCheck};}
+function categoryFileState(){const meta=categoryMeta(),base=s(meta.base_started_at),updated=s(meta.last_updated_at),baseCheck=base?verifyPack('base',base,n(readJson(path.join(CATEGORY_ROOT,'base',base,'kr.json'),{}).count,0)):{ok:false,total:LANGS.length,ready:0,missing:LANGS.map(x=>x+'.json'),bad:[]};let deltaCheck={ok:true,total:0,ready:0,missing:[],bad:[]};if(base&&updated&&updated!==base){const kr=readJson(path.join(CATEGORY_ROOT,'delta',updated,'kr.json'),{});deltaCheck=verifyPack('delta',updated,n(kr.count,0));}return {base_started_at:base,last_updated_at:updated,base_files:baseCheck,delta_files:deltaCheck,hnsw:hnswState(s(meta.hnsw_version||updated||base))};}
 async function publishBase(db,version){
-  assertPersistentStorage();
   const rows=await categoryRows(db),legacyV=n(version),tm=kstParts(),baseToken=tm.token;
   const targetDir=path.join(CATEGORY_ROOT,'base',baseToken);
   if(fs.existsSync(targetDir)){const e=new Error('CATEGORY_BASE_ALREADY_EXISTS_THIS_MINUTE');e.code='SAME_MINUTE';throw e;}
@@ -112,25 +75,35 @@ async function publishBase(db,version){
   }
   const check=verifyPack('base',baseToken,rows.length);
   if(!check.ok){const e=new Error('CATEGORY_BASE_25LANG_VERIFY_FAILED '+JSON.stringify(check));e.code='PACK_VERIFY';throw e;}
+  const hnsw=publishHnsw(rows,baseToken,baseToken,legacyV);
   const snap={base_started_at:baseToken,legacy_version:legacyV,rows:{}};
   for(const r of rows)snap.rows[s(r.gm_code).toUpperCase()]={sig:signature(r),row:r};
   writeJson(BASE_SNAPSHOT_FILE,snap);
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:baseToken,base_version:legacyV,delta_versions:[],updated_at:tm.iso,languages:LANGS,base_files:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:baseToken,hnsw_version:baseToken,hnsw_count:hnsw.count,base_version:legacyV,delta_versions:[],updated_at:tm.iso,languages:LANGS,base_files:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});
   await setConfig(db,'category_pack_base_started_at',baseToken);
   await setConfig(db,'category_pack_last_updated_at',baseToken);
   try{await db.query(`UPDATE gm_category_pack_pending SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE status='PENDING'`);}catch(e){if(!(e&&e.code==='42P01'))throw e;}
   await setConfig(db,'category_pack_base_published',legacyV);
-  return {kind:'category_base',base_started_at:baseToken,last_updated_at:baseToken,version:legacyV,count:rows.length,languages:LANGS.length,files_ready:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'};
+  return {kind:'category_base',base_started_at:baseToken,last_updated_at:baseToken,hnsw_version:baseToken,hnsw_count:hnsw.count,hnsw_bytes:hnsw.bytes,version:legacyV,count:rows.length,languages:LANGS.length,files_ready:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'};
 }
 async function publishDelta(db,version){
-  assertPersistentStorage();
   const current=await categoryRows(db),snap=readJson(BASE_SNAPSHOT_FILE,null),legacyV=n(version),tm=kstParts();
   if(!snap||!snap.rows||!s(snap.base_started_at)){const e=new Error('CATEGORY_BASE_NOT_READY');e.code='BASE_NOT_READY';throw e;}
   const c0=await config(db),vs={base_started_at:s(c0.category_pack_base_started_at),last_updated_at:s(c0.category_pack_last_updated_at)};
   const curMap=new Map(current.map(r=>[s(r.gm_code).toUpperCase(),r])),changes=[];
   for(const r of current){const code=s(r.gm_code).toUpperCase(),old=snap.rows[code];if(!old||old.sig!==signature(r))changes.push({op:'upsert',row:r});}
   for(const code of Object.keys(snap.rows))if(!curMap.has(code))changes.push({op:'delete',gm_code:code});
-  if(!changes.length)return {kind:'category_delta',state:'NO_CHANGES',base_started_at:s(snap.base_started_at),last_updated_at:s(vs.last_updated_at)||s(snap.base_started_at),version:n(c0.category_pack_delta_published,0),count:0,languages:LANGS.length,files_ready:0};
+  if(!changes.length){
+    const stableToken=s(vs.last_updated_at)||s(snap.base_started_at),existingHnsw=hnswState(stableToken);
+    if(stableToken&&!existingHnsw.ok){
+      // Existing category-pack deployments may predate HNSW. Build only HNSW for the
+      // current full category state without changing base/delta version timestamps.
+      const legacyCurrent=n(c0.category_pack_delta_published,0)||n(c0.category_pack_base_published,0),hnsw=publishHnsw(current,stableToken,s(snap.base_started_at),legacyCurrent),meta0=categoryMeta();
+      writeJson(path.join(CATEGORY_ROOT,'meta.json'),Object.assign({},meta0,{base_started_at:s(meta0.base_started_at||snap.base_started_at),last_updated_at:stableToken,hnsw_version:stableToken,hnsw_count:hnsw.count,updated_at:tm.iso,languages:LANGS,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'}));
+      return {kind:'category_delta',state:'NO_CHANGES',hnsw_rebuilt:true,base_started_at:s(snap.base_started_at),last_updated_at:stableToken,hnsw_version:stableToken,hnsw_count:hnsw.count,hnsw_bytes:hnsw.bytes,version:n(c0.category_pack_delta_published,0),count:0,languages:LANGS.length,files_ready:0};
+    }
+    return {kind:'category_delta',state:'NO_CHANGES',hnsw_rebuilt:false,base_started_at:s(snap.base_started_at),last_updated_at:stableToken,hnsw_version:s(categoryMeta().hnsw_version||''),hnsw_count:n(categoryMeta().hnsw_count,0),version:n(c0.category_pack_delta_published,0),count:0,languages:LANGS.length,files_ready:0};
+  }
   const baseToken0=s(snap.base_started_at)||s(vs.base_started_at);if(tm.token===baseToken0||tm.token===s(vs.last_updated_at)){const e=new Error('CATEGORY_PACK_SAME_MINUTE_PUBLISH_BLOCKED');e.code='SAME_MINUTE';throw e;}
   const updateToken=tm.token,baseToken=s(snap.base_started_at)||s(vs.base_started_at),targetDir=path.join(CATEGORY_ROOT,'delta',updateToken);
   if(fs.existsSync(targetDir)){const e=new Error('CATEGORY_DELTA_ALREADY_EXISTS_THIS_MINUTE');e.code='SAME_MINUTE';throw e;}
@@ -142,13 +115,54 @@ async function publishDelta(db,version){
   }
   const check=verifyPack('delta',updateToken,changes.length);
   if(!check.ok){const e=new Error('CATEGORY_DELTA_25LANG_VERIFY_FAILED '+JSON.stringify(check));e.code='PACK_VERIFY';throw e;}
+  // HNSW always represents the full current category set, never only the delta rows.
+  const hnsw=publishHnsw(current,updateToken,baseToken,legacyV);
   const meta0=categoryMeta(),ds=Array.from(new Set([...(meta0.delta_versions||[]).map(Number),legacyV])).filter(x=>x>0).sort((a,b)=>a-b);
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:updateToken,base_version:n(meta0.base_version||snap.legacy_version),delta_versions:ds,updated_at:tm.iso,languages:LANGS,base_files:LANGS.length,delta_files:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:updateToken,hnsw_version:updateToken,hnsw_count:hnsw.count,base_version:n(meta0.base_version||snap.legacy_version),delta_versions:ds,updated_at:tm.iso,languages:LANGS,base_files:LANGS.length,delta_files:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});
   if(!s(c0.category_pack_base_started_at))await setConfig(db,'category_pack_base_started_at',baseToken);
   await setConfig(db,'category_pack_last_updated_at',updateToken);
   try{await db.query(`UPDATE gm_category_pack_pending SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE status='PENDING'`);}catch(e){if(!(e&&e.code==='42P01'))throw e;}
   await setConfig(db,'category_pack_delta_published',legacyV);
-  return {kind:'category_delta',state:'PUBLISHED',base_started_at:baseToken,last_updated_at:updateToken,version:legacyV,count:changes.length,cumulative_since_base:true,languages:LANGS.length,files_ready:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'};
+  return {kind:'category_delta',state:'PUBLISHED',base_started_at:baseToken,last_updated_at:updateToken,hnsw_version:updateToken,hnsw_count:hnsw.count,hnsw_bytes:hnsw.bytes,version:legacyV,count:changes.length,cumulative_since_base:true,languages:LANGS.length,files_ready:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'};
+}
+
+async function rehydratePublishedPack(db){
+  const started=Date.now();
+  await ensureDefaults(db);
+  const c=await config(db);
+  // The latest published time-token is the effective client version. Reuse it exactly.
+  // If DELTA existed before restart, collapse current DB state into a full BASE at that
+  // already-published latest token. No DB config/version is modified.
+  const token=s(c.category_pack_last_updated_at)||s(c.category_pack_base_started_at);
+  if(!token){
+    const out={state:'WAIT_BUILDER_BASE',reason:'NO_PUBLISHED_VERSION',root:CATEGORY_ROOT};
+    lastState.rehydrate_state=out.state;lastState.rehydrate_at=new Date().toISOString();lastState.rehydrate_result=out;
+    console.log('[GM_CATEGORY_PACK_REHYDRATE_SKIP]',JSON.stringify(out));
+    return out;
+  }
+  if(!/^\d{8}_\d{4}$/.test(token))throw new Error('CATEGORY_PACK_REHYDRATE_INVALID_VERSION '+token);
+  const rows=await categoryRows(db);
+  const legacyV=Math.max(n(c.category_pack_delta_published,0),n(c.category_pack_base_published,0));
+  const targetDir=path.join(CATEGORY_ROOT,'base',token);
+  try{fs.rmSync(CATEGORY_ROOT,{recursive:true,force:true});}catch(_e){}
+  mkdirp(targetDir);
+  for(const lang of LANGS){
+    const pack={type:'base',base_started_at:token,last_updated_at:token,legacy_version:legacyV,lang,count:rows.length,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko',rehydrated:true,items:rows.map(r=>localized(r,lang))};
+    writeJson(path.join(targetDir,lang+'.json'),pack);
+    if(legacyV>0)writeJson(path.join(CATEGORY_ROOT,'base','v'+legacyV,lang+'.json'),pack);
+  }
+  const check=verifyPack('base',token,rows.length);
+  if(!check.ok){const e=new Error('CATEGORY_REHYDRATE_BASE_VERIFY_FAILED '+JSON.stringify(check));e.code='PACK_VERIFY';throw e;}
+  const hnsw=publishHnsw(rows,token,token,legacyV);
+  const snap={base_started_at:token,legacy_version:legacyV,rows:{}};
+  for(const r of rows)snap.rows[s(r.gm_code).toUpperCase()]={sig:signature(r),row:r};
+  writeJson(BASE_SNAPSHOT_FILE,snap);
+  const meta={base_started_at:token,last_updated_at:token,hnsw_version:token,hnsw_count:hnsw.count,base_version:n(c.category_pack_base_published,legacyV),delta_versions:[],updated_at:new Date().toISOString(),languages:LANGS,base_files:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko',rehydrated:true,rehydrate_source:'DB_CURRENT_STATE',rehydrate_ms:Date.now()-started};
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),meta);
+  const out={state:'READY',version:token,count:rows.length,files_ready:check.ready,hnsw_count:hnsw.count,hnsw_bytes:hnsw.bytes,root:CATEGORY_ROOT,elapsed_ms:Date.now()-started,db_version_unchanged:true};
+  lastState.rehydrate_state=out.state;lastState.rehydrate_at=new Date().toISOString();lastState.rehydrate_result=out;
+  console.log('[GM_CATEGORY_PACK_REHYDRATE_DONE]',JSON.stringify(out));
+  return out;
 }
 async function publishUi(db,version){const q=await db.query(`SELECT gm_code AS dict_key, kr AS source_text, kr AS source_value FROM gm_ui_dictionary ORDER BY gm_code`);const items=(q.rows||[]).map(x=>({dict_key:s(x.dict_key),source_text:s(x.source_text),value:s(x.source_value)})),v=n(version);writeJson(path.join(UI_ROOT,'ko','v'+v+'.json'),{type:'ui_dictionary',lang:'ko',version:v,count:items.length,items});writeJson(path.join(UI_ROOT,'meta.json'),{version:v,updated_at:new Date().toISOString(),lang:'ko',count:items.length});await setConfig(db,'ui_dictionary_published',v);return {kind:'ui_dictionary',version:v,count:items.length};}
 async function runPending(db,force=false){
@@ -166,6 +180,6 @@ async function runPending(db,force=false){
   if(ut>up)results.push(await publishUi(db,ut));return {state:results.length?'PUBLISHED':'NO_PENDING',results};
 }
 async function pump(){if(!poolRef||pumping)return;pumping=true;lastState.running=true;try{const r=await runPending(poolRef,false);lastState.state=r.state;lastState.last_result=r;lastState.last_error='';lastState.last_run_at=new Date().toISOString();}catch(e){lastState.state='ERROR';lastState.last_error=String(e&&e.stack||e);}finally{lastState.running=false;pumping=false;}}
-function ensureStarted(pool){if(pool)poolRef=pool;if(timer||!poolRef)return;timer=setInterval(()=>pump().catch(()=>{}),60000);if(timer.unref)timer.unref();setTimeout(()=>pump().catch(()=>{}),2000);}
+function ensureStarted(pool){if(pool)poolRef=pool;if(timer||!poolRef)return;timer=setInterval(()=>pump().catch(()=>{}),60000);if(timer.unref)timer.unref();setTimeout(()=>{lastState.rehydrate_state='RUNNING';rehydratePublishedPack(poolRef).catch(e=>{lastState.rehydrate_state='ERROR';lastState.rehydrate_at=new Date().toISOString();lastState.last_error=String(e&&e.stack||e);console.error('[GM_CATEGORY_PACK_REHYDRATE_FAIL]',lastState.last_error);}).finally(()=>pump().catch(()=>{}));},250);}
 function status(){return Object.assign({},lastState);}
-module.exports={LANGS,MATCH_SCHEMA,ensureDefaults,versionState,pendingRows,pendingCount,config,status,ensureStarted,runPending,publishBase,publishDelta,publishUi,categoryMeta,categoryFileState,verifyPack,storageInfo,assertPersistentStorage,paths:{CATEGORY_ROOT,UI_ROOT}};
+module.exports={LANGS,MATCH_SCHEMA,ensureDefaults,versionState,pendingRows,pendingCount,config,status,storageInfo,ensureStarted,rehydratePublishedPack,runPending,publishBase,publishDelta,publishUi,categoryMeta,categoryFileState,verifyPack,hnswState,paths:{CATEGORY_ROOT,UI_ROOT}};

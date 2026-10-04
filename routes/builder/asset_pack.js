@@ -1,5 +1,5 @@
 'use strict';
-// GM_ASSET_PACK_BUILDER_V006_PERSISTENT_STORAGE_GUARD
+// GM_ASSET_PACK_BUILDER_V007_TEMP_REHYDRATE
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -23,7 +23,6 @@ function packError(res,e,label){
   if(code==='SAME_MINUTE')return fail(res,409,'같은 분 안에서는 같은 종류의 카테고리 JSON을 두 번 생성할 수 없습니다.',{detail});
   if(code==='BASE_NOT_READY')return fail(res,409,'원본(BASE) 25개국 JSON을 먼저 생성해야 합니다.',{detail});
   if(code==='PACK_VERIFY')return fail(res,500,label+' 25개국 파일 검증에 실패했습니다.',{detail});
-  if(code==='PERSISTENT_STORAGE_REQUIRED')return fail(res,409,'영구 저장경로가 준비되지 않아 생성할 수 없습니다.',{detail,storage:e&&e.storage||mgr.storageInfo()});
   return fail(res,500,label+' 생성 실패',{detail});
 }
 

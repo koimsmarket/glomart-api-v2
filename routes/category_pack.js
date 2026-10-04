@@ -1,5 +1,5 @@
 'use strict';
-// GM_CATEGORY_PACK_USER_V005_PERSISTENT_STORAGE_DIAG
+// GM_CATEGORY_PACK_USER_V006_TEMP_REHYDRATE_HNSW
 const express=require('express');
 const fs=require('fs');
 const path=require('path');
@@ -12,6 +12,7 @@ function sendJsonFile(req,res,file){if(!fs.existsSync(file)){console.warn('[GM_C
 router.get('/api/gm/category-pack/meta',(req,res)=>sendJsonFile(req,res,path.join(mgr.paths.CATEGORY_ROOT,'meta.json')));
 router.get('/api/gm/category-pack/base/:version/:lang',(req,res)=>{const raw=String(req.params.version||''),lang=normLang(req.params.lang),t=safeToken(raw);const dir=t?t:('v'+safeLegacy(raw));if(!dir||dir==='v')return res.status(400).json({ok:false,error:'INVALID_VERSION'});sendJsonFile(req,res,path.join(mgr.paths.CATEGORY_ROOT,'base',dir,lang+'.json'));});
 router.get('/api/gm/category-pack/delta/:version/:lang',(req,res)=>{const raw=String(req.params.version||''),lang=normLang(req.params.lang),t=safeToken(raw);const dir=t?t:('v'+safeLegacy(raw));if(!dir||dir==='v')return res.status(400).json({ok:false,error:'INVALID_VERSION'});sendJsonFile(req,res,path.join(mgr.paths.CATEGORY_ROOT,'delta',dir,lang+'.json'));});
+router.get('/api/gm/category-pack/hnsw/:version',(req,res)=>{const raw=String(req.params.version||''),t=safeToken(raw);const dir=t?t:('v'+safeLegacy(raw));if(!dir||dir==='v')return res.status(400).json({ok:false,error:'INVALID_VERSION'});sendJsonFile(req,res,path.join(mgr.paths.CATEGORY_ROOT,'hnsw',dir,'index.json'));});
 router.get('/api/gm/ui-dictionary/meta',(req,res)=>sendJsonFile(req,res,path.join(mgr.paths.UI_ROOT,'meta.json')));
 router.get('/api/gm/ui-dictionary/ko/:version',(req,res)=>{const v=safeLegacy(req.params.version);sendJsonFile(req,res,path.join(mgr.paths.UI_ROOT,'ko','v'+v+'.json'));});
 module.exports=router;
