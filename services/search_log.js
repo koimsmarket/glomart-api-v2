@@ -274,9 +274,9 @@ module.exports = function installSearchLogService(deps){
       }
       if(eventService && typeof eventService.applySearch==='function'){
         try{
-          const alreadyCounted=old && String(old.category_counted_yn||'N').toUpperCase()==='Y';
-          await eventService.applySearch(nowRow,alreadyCounted?old:null);
-          await dbQuery(`UPDATE gm_search_log SET category_counted_yn='Y',updated_at=now() WHERE search_event_id=$1`,[eventId]);
+          // GM_SEARCH_V040: gm_search_log 개편 후 남은 category_counted_yn 플래그를 사용하지 않는다.
+          // eventService.applySearch()가 previousRow(old)로 신규/동일/카테고리 변경을 자체 판정한다.
+          await eventService.applySearch(nowRow,old);
         }catch(e){
           const message=String(e&&e.message||e);
           postprocessWarnings.push({stage:'event_search',message});
