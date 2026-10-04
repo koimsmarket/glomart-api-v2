@@ -1,5 +1,5 @@
 'use strict';
-/* GM_ASSET_PACK_MANAGER_V009_BUILDER_PERSISTENT_GUARD
+/* GM_ASSET_PACK_MANAGER_V010_MULTILANG_CANONICAL_PACK
  * Category client sync contract:
  *   base_started_at : YYYYMMDD_HHMM of current base
  *   last_updated_at : YYYYMMDD_HHMM of latest published cumulative delta
@@ -8,6 +8,7 @@ const fs=require('fs');
 const path=require('path');
 const os=require('os');
 const LANGS=['kr','en','vi','zh','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+const MATCH_SCHEMA='GM_CATEGORY_MULTILANG_CANONICAL_V001';
 const COL={kr:'name_ko',en:'name_en',vi:'name_vi',zh:'name_zh',ja:'name_ja',tw:'name_tw',th:'name_th',uz:'name_uz',ne:'name_ne',km:'name_km',id:'name_id',tl:'name_tl',mn:'name_mn',my:'name_my',kk:'name_kk',si:'name_si',ru:'name_ru',bn:'name_bn',ur:'name_ur',lo:'name_lo',hi:'name_hi',tr:'name_tr',fa:'name_fa',es:'name_es',fr:'name_fr'};
 // Category packs are runtime-generated assets. Never write them under /app/public or /tmp.
 // Persistence priority:
@@ -90,11 +91,12 @@ async function pendingCount(db){try{const r=await db.query(`SELECT count(*)::int
 async function config(db){await ensureDefaults(db);const r=await db.query(`SELECT config_key,config_value FROM gm_runtime_config WHERE config_key LIKE 'asset_pack_%' OR config_key LIKE 'category_pack_%' OR config_key LIKE 'ui_dictionary_%'`);const m={};for(const x of r.rows)m[x.config_key]=s(x.config_value);return m;}
 async function setConfig(db,key,value){await db.query(`UPDATE gm_runtime_config SET config_value=$2,updated_at=now() WHERE config_key=$1`,[key,String(value)]);}
 function parentCode(code,depth){const a=s(code).toUpperCase().split('-');if(depth<=0||!a.length)return '';for(let i=depth;i<a.length;i++)a[i]='0'.repeat(Math.max(1,String(a[i]||'').length));return a.join('-');}
-function rowCore(r){const code=s(r.gm_code).toUpperCase(),depth=n(r.depth);return {gm_code:code,parent_code:parentCode(code,depth),depth,leaf_yn:s(r.leaf_yn).toUpperCase()||'N',display_yn:s(r.display_yn).toUpperCase()||'Y',sort_order:n(r.sort_order),keyword:s(r.keyword)||s(r.keyword_seed)||s(r.name_ko),name_ko:s(r.name_ko)};}
-function localized(r,lang){const core=rowCore(r),col=COL[lang]||'name_ko';return Object.assign(core,{name:s(r[col])||s(r.name_ko)});}
+function rowCore(r){const code=s(r.gm_code).toUpperCase(),depth=n(r.depth),canonical=s(r.keyword)||s(r.keyword_seed)||s(r.name_ko);return {gm_code:code,parent_code:parentCode(code,depth),depth,leaf_yn:s(r.leaf_yn).toUpperCase()||'N',display_yn:s(r.display_yn).toUpperCase()||'Y',sort_order:n(r.sort_order),keyword:canonical,canonical_ko:canonical,name_ko:s(r.name_ko)};}
+function uniqueTerms(arr){const out=[],seen=new Set();for(const v of arr||[]){const x=s(v);if(!x)continue;const k=x.toLocaleLowerCase();if(seen.has(k))continue;seen.add(k);out.push(x);}return out;}
+function localized(r,lang){const core=rowCore(r),col=COL[lang]||'name_ko',localName=s(r[col])||s(r.name_ko);return Object.assign(core,{name:localName,name_local:localName,match_terms:uniqueTerms([localName,core.name_ko,core.canonical_ko])});}
 function signature(r){const o={};for(const k of ['gm_code','depth','leaf_yn','display_yn','sort_order','keyword','keyword_seed','name_ko',...Object.values(COL)])o[k]=r[k]==null?'':r[k];return JSON.stringify(o);}
 async function categoryRows(db){const cols=['gm_code','depth','leaf_yn','display_yn','sort_order','keyword','keyword_seed','name_ko',...Array.from(new Set(Object.values(COL)))];const q=await db.query(`SELECT ${cols.join(',')} FROM gm_category WHERE COALESCE(display_yn,'Y')='Y' ORDER BY depth,COALESCE(sort_order,2147483647),category_id`);return q.rows||[];}
-function categoryMeta(){return readJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:'',last_updated_at:'',base_version:0,delta_versions:[],updated_at:null,languages:LANGS});}
+function categoryMeta(){return readJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:'',last_updated_at:'',base_version:0,delta_versions:[],updated_at:null,languages:LANGS,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});}
 function packFiles(kind,token){const root=path.join(CATEGORY_ROOT,kind,token);return LANGS.map(lang=>path.join(root,lang+'.json'));}
 function verifyPack(kind,token,expectedCount){const files=packFiles(kind,token),missing=[],bad=[];for(const f of files){if(!fs.existsSync(f)){missing.push(path.basename(f));continue;}const j=readJson(f,null);if(!j||!Array.isArray(j.items)||n(j.count,-1)!==n(expectedCount,-2))bad.push(path.basename(f));}return {ok:missing.length===0&&bad.length===0,total:LANGS.length,ready:LANGS.length-missing.length-bad.length,missing,bad};}
 function categoryFileState(){const meta=categoryMeta(),base=s(meta.base_started_at),updated=s(meta.last_updated_at),baseCheck=base?verifyPack('base',base,n(readJson(path.join(CATEGORY_ROOT,'base',base,'kr.json'),{}).count,0)):{ok:false,total:LANGS.length,ready:0,missing:LANGS.map(x=>x+'.json'),bad:[]};let deltaCheck={ok:true,total:0,ready:0,missing:[],bad:[]};if(base&&updated&&updated!==base){const kr=readJson(path.join(CATEGORY_ROOT,'delta',updated,'kr.json'),{});deltaCheck=verifyPack('delta',updated,n(kr.count,0));}return {base_started_at:base,last_updated_at:updated,base_files:baseCheck,delta_files:deltaCheck};}
@@ -104,7 +106,7 @@ async function publishBase(db,version){
   const targetDir=path.join(CATEGORY_ROOT,'base',baseToken);
   if(fs.existsSync(targetDir)){const e=new Error('CATEGORY_BASE_ALREADY_EXISTS_THIS_MINUTE');e.code='SAME_MINUTE';throw e;}
   for(const lang of LANGS){
-    const pack={type:'base',base_started_at:baseToken,last_updated_at:baseToken,legacy_version:legacyV,lang,count:rows.length,items:rows.map(r=>localized(r,lang))};
+    const pack={type:'base',base_started_at:baseToken,last_updated_at:baseToken,legacy_version:legacyV,lang,count:rows.length,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko',items:rows.map(r=>localized(r,lang))};
     writeJson(path.join(targetDir,lang+'.json'),pack);
     if(legacyV>0)writeJson(path.join(CATEGORY_ROOT,'base','v'+legacyV,lang+'.json'),pack);
   }
@@ -113,12 +115,12 @@ async function publishBase(db,version){
   const snap={base_started_at:baseToken,legacy_version:legacyV,rows:{}};
   for(const r of rows)snap.rows[s(r.gm_code).toUpperCase()]={sig:signature(r),row:r};
   writeJson(BASE_SNAPSHOT_FILE,snap);
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:baseToken,base_version:legacyV,delta_versions:[],updated_at:tm.iso,languages:LANGS,base_files:check.ready});
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:baseToken,base_version:legacyV,delta_versions:[],updated_at:tm.iso,languages:LANGS,base_files:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});
   await setConfig(db,'category_pack_base_started_at',baseToken);
   await setConfig(db,'category_pack_last_updated_at',baseToken);
   try{await db.query(`UPDATE gm_category_pack_pending SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE status='PENDING'`);}catch(e){if(!(e&&e.code==='42P01'))throw e;}
   await setConfig(db,'category_pack_base_published',legacyV);
-  return {kind:'category_base',base_started_at:baseToken,last_updated_at:baseToken,version:legacyV,count:rows.length,languages:LANGS.length,files_ready:check.ready};
+  return {kind:'category_base',base_started_at:baseToken,last_updated_at:baseToken,version:legacyV,count:rows.length,languages:LANGS.length,files_ready:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'};
 }
 async function publishDelta(db,version){
   assertPersistentStorage();
@@ -134,19 +136,19 @@ async function publishDelta(db,version){
   if(fs.existsSync(targetDir)){const e=new Error('CATEGORY_DELTA_ALREADY_EXISTS_THIS_MINUTE');e.code='SAME_MINUTE';throw e;}
   for(const lang of LANGS){
     const items=changes.map(x=>x.op==='delete'?{op:'delete',gm_code:x.gm_code}:{op:'upsert',item:localized(x.row,lang)});
-    const pack={type:'delta',base_started_at:baseToken,last_updated_at:updateToken,legacy_version:legacyV,lang,count:items.length,items};
+    const pack={type:'delta',base_started_at:baseToken,last_updated_at:updateToken,legacy_version:legacyV,lang,count:items.length,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko',items};
     writeJson(path.join(targetDir,lang+'.json'),pack);
     if(legacyV>0)writeJson(path.join(CATEGORY_ROOT,'delta','v'+legacyV,lang+'.json'),pack);
   }
   const check=verifyPack('delta',updateToken,changes.length);
   if(!check.ok){const e=new Error('CATEGORY_DELTA_25LANG_VERIFY_FAILED '+JSON.stringify(check));e.code='PACK_VERIFY';throw e;}
   const meta0=categoryMeta(),ds=Array.from(new Set([...(meta0.delta_versions||[]).map(Number),legacyV])).filter(x=>x>0).sort((a,b)=>a-b);
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:updateToken,base_version:n(meta0.base_version||snap.legacy_version),delta_versions:ds,updated_at:tm.iso,languages:LANGS,base_files:LANGS.length,delta_files:check.ready});
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:updateToken,base_version:n(meta0.base_version||snap.legacy_version),delta_versions:ds,updated_at:tm.iso,languages:LANGS,base_files:LANGS.length,delta_files:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'});
   if(!s(c0.category_pack_base_started_at))await setConfig(db,'category_pack_base_started_at',baseToken);
   await setConfig(db,'category_pack_last_updated_at',updateToken);
   try{await db.query(`UPDATE gm_category_pack_pending SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE status='PENDING'`);}catch(e){if(!(e&&e.code==='42P01'))throw e;}
   await setConfig(db,'category_pack_delta_published',legacyV);
-  return {kind:'category_delta',state:'PUBLISHED',base_started_at:baseToken,last_updated_at:updateToken,version:legacyV,count:changes.length,cumulative_since_base:true,languages:LANGS.length,files_ready:check.ready};
+  return {kind:'category_delta',state:'PUBLISHED',base_started_at:baseToken,last_updated_at:updateToken,version:legacyV,count:changes.length,cumulative_since_base:true,languages:LANGS.length,files_ready:check.ready,match_schema:MATCH_SCHEMA,canonical_field:'canonical_ko'};
 }
 async function publishUi(db,version){const q=await db.query(`SELECT gm_code AS dict_key, kr AS source_text, kr AS source_value FROM gm_ui_dictionary ORDER BY gm_code`);const items=(q.rows||[]).map(x=>({dict_key:s(x.dict_key),source_text:s(x.source_text),value:s(x.source_value)})),v=n(version);writeJson(path.join(UI_ROOT,'ko','v'+v+'.json'),{type:'ui_dictionary',lang:'ko',version:v,count:items.length,items});writeJson(path.join(UI_ROOT,'meta.json'),{version:v,updated_at:new Date().toISOString(),lang:'ko',count:items.length});await setConfig(db,'ui_dictionary_published',v);return {kind:'ui_dictionary',version:v,count:items.length};}
 async function runPending(db,force=false){
@@ -166,4 +168,4 @@ async function runPending(db,force=false){
 async function pump(){if(!poolRef||pumping)return;pumping=true;lastState.running=true;try{const r=await runPending(poolRef,false);lastState.state=r.state;lastState.last_result=r;lastState.last_error='';lastState.last_run_at=new Date().toISOString();}catch(e){lastState.state='ERROR';lastState.last_error=String(e&&e.stack||e);}finally{lastState.running=false;pumping=false;}}
 function ensureStarted(pool){if(pool)poolRef=pool;if(timer||!poolRef)return;timer=setInterval(()=>pump().catch(()=>{}),60000);if(timer.unref)timer.unref();setTimeout(()=>pump().catch(()=>{}),2000);}
 function status(){return Object.assign({},lastState);}
-module.exports={LANGS,ensureDefaults,versionState,pendingRows,pendingCount,config,status,ensureStarted,runPending,publishBase,publishDelta,publishUi,categoryMeta,categoryFileState,verifyPack,storageInfo,assertPersistentStorage,paths:{CATEGORY_ROOT,UI_ROOT}};
+module.exports={LANGS,MATCH_SCHEMA,ensureDefaults,versionState,pendingRows,pendingCount,config,status,ensureStarted,runPending,publishBase,publishDelta,publishUi,categoryMeta,categoryFileState,verifyPack,storageInfo,assertPersistentStorage,paths:{CATEGORY_ROOT,UI_ROOT}};

@@ -1,4 +1,4 @@
-// GM_BUILDER_ASSET_PACK_UI_V006_SHOW_PERSISTENT_STORAGE
+// GM_BUILDER_ASSET_PACK_UI_V007_MULTILANG_CANONICAL_STATUS
 function apEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function loadAssetPack(){
   const box=document.getElementById('assetPackStatus');if(!box)return;
@@ -16,7 +16,8 @@ async function loadAssetPack(){
       <tr><th>원본 JSON</th><td>${apEsc(Number(bf.ready||0))}/${apEsc(Number(bf.total||25))}개 언어</td></tr>
       <tr><th>추가본 JSON</th><td>${apEsc(deltaFiles)}${deltaFiles==='-'?'':'개 언어'}</td></tr>
       <tr><th>원본 카테고리</th><td>${apEsc(v.base_category_count||0)}건</td></tr>
-      <tr><th>최근 누적 변경</th><td>${apEsc(v.last_delta_count||0)}건</td></tr>`;
+      <tr><th>최근 누적 변경</th><td>${apEsc(v.last_delta_count||0)}건</td></tr>
+      <tr><th>다국어→한국어 매핑</th><td><b>${apEsc(m.match_schema||'-')}</b> · canonical=${apEsc(m.canonical_field||'-')}</td></tr>`;
     const ps=document.getElementById('assetPackPendingSummary'),pr=document.getElementById('assetPackPendingRows');
     if(ps)ps.textContent=`추가본 대기 ${Number(j.pending_count||0)}건`;
     if(pr)pr.innerHTML=pending.length?pending.map(x=>`<tr><td>${apEsc(x.status)}</td><td>${apEsc(x.change_kind)}</td><td>${apEsc(x.gm_code)}</td><td>${apEsc(x.cp_code)}</td><td>${apEsc(x.name_ko)}</td><td>${apEsc(x.parent_gm_code||x.parent_cp_code)}</td><td>${apEsc(x.last_seen_at||'')}</td></tr>`).join(''):'<tr><td colspan="7">대기 카테고리 없음</td></tr>';
@@ -45,7 +46,7 @@ async function generateCategoryBaseNow(){
     await ensurePersistentAssetPackStorage();
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/base/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.base.generate',result:j.result});
-    alert(`원본 25개국 JSON 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
+    alert(`원본 25개국 JSON 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25\n다국어→한국어 매핑: ${j.result.match_schema||'-'}`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }
@@ -57,7 +58,7 @@ async function generateCategoryDeltaNow(){
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/delta/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.delta.generate',result:j.result});
     if(j.result&&j.result.state==='NO_CHANGES')alert('원본 이후 추가/변경 카테고리가 없습니다.\n최종 업데이트 시간은 변경하지 않았습니다.');
-    else alert(`추가본 25개국 JSON 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
+    else alert(`추가본 25개국 JSON 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25\n다국어→한국어 매핑: ${j.result.match_schema||'-'}`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }
