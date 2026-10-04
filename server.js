@@ -548,6 +548,33 @@ async function initGmDb({ reset=false } = {}){
 
       if(prev){
         if(String(prev.checksum_sha256) !== checksum){
+          // GM_UI_DICTIONARY_V007: one-time controlled rebuild of migration 133 only.
+          // V005 already applied the first 133 schema, but V007 intentionally reduces it
+          // to the four approved runtime columns. Every other applied migration remains immutable.
+          const canRebuildUi133 =
+            name === '133_gm_ui_dictionary_runtime_usage.sql' &&
+            String(prev.checksum_sha256) === '648555a39ecc169e366023003b48d59aa873eba0a900cbff23fd47b6d8aad637' &&
+            /GM_UI_DICTIONARY_V007_REBUILD_133/.test(sql);
+
+          if(canRebuildUi133){
+            await client.query('BEGIN');
+            try{
+              await client.query(sql);
+              await client.query(`
+                UPDATE gm_schema_migrations
+                SET checksum_sha256=$2, apply_type='REAPPLIED', applied_at=now()
+                WHERE migration_name=$1
+              `,[name,checksum]);
+              await client.query('COMMIT');
+              result.newly_applied.push('migrations/' + name + ':REBUILT');
+              known.set(name,{...prev,checksum_sha256:checksum,apply_type:'REAPPLIED'});
+              continue;
+            }catch(e){
+              await client.query('ROLLBACK');
+              throw e;
+            }
+          }
+
           throw new Error(
             '[migration-checksum:' + name + '] historical migration was modified. ' +
             'Create a NEW migration file instead of editing an applied migration.'

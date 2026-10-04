@@ -4,8 +4,6 @@
 // V2 policy: Korean UI phrase -> normalize safe dynamic values -> reuse/create GM_CODE
 // -> accumulate source/use counters -> fill missing 24 translations. Never auto-remove.
 
-const crypto=require('crypto');
-
 const LANGS=['kr','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const TARGET={tw:'zh-TW'};
 const FOREIGN=LANGS.filter(x=>x!=='kr');
@@ -18,7 +16,6 @@ const TRANSLATE_CONCURRENCY=2;
 
 function s(v){return String(v==null?'':v).replace(/\s+/g,' ').trim();}
 function hasKo(v){return /[가-힣]/.test(String(v||''));}
-function hash(v){return crypto.createHash('sha256').update(String(v||''),'utf8').digest('hex');}
 function safeApp(v){v=s(v).toUpperCase();return v==='GUPPY'?'GUPPY':'GLOMART';}
 function safeSurface(v){return s(v).replace(/[^A-Za-z0-9_\-/.]/g,'_').slice(0,120)||'UNKNOWN';}
 function safeLocator(v){return s(v).slice(0,500);}
@@ -52,7 +49,7 @@ function normalizeTemplate(raw){
   text=s(text);
   // If unclassified digits remain, keep the exact phrase only when it has an explicit GM code.
   // Caller decides whether an ambiguous auto-code phrase is safe to create.
-  return {ok:true,raw:cleanText(raw),template:text,changed,has_unclassified_digit:/\d/.test(text),template_hash:hash(text)};
+  return {ok:true,raw:cleanText(raw),template:text,changed,has_variable:changed||/%[dsm]/.test(text),has_unclassified_digit:/\d/.test(text)};
 }
 
 function sourceKey(row){
@@ -150,38 +147,41 @@ async function observe(db,input,opt={}){
   if(!norm.ok)return {skip:true,reason:norm.reason};
   const explicit=s(input.gm_code||input.gmCode).toUpperCase();
   if(!explicit && norm.has_unclassified_digit)return {skip:true,reason:'AMBIGUOUS_NUMBER',text:norm.raw};
-  const app=safeApp(input.source_app||input.sourceApp),surface=safeSurface(input.source_surface||input.sourceSurface||input.page_name||input.page),page=safePage(input.page_name||input.page),locator=safeLocator(input.source_locator||input.locator),sourceType=s(input.source_type||input.sourceType||'RUNTIME_V2').slice(0,40)||'RUNTIME_V2';
+  const app=safeApp(input.source_app||input.sourceApp),surface=safeSurface(input.source_surface||input.sourceSurface||input.page_name||input.page),page=safePage(input.page_name||input.page),locator=safeLocator(input.source_locator||input.locator);
   const increment=opt.incrementUsage!==false;
+  const variableYn=norm.has_variable?'Y':'N';
   const client=await db.connect();
   try{
     await client.query('BEGIN');
-    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`,['gm_ui_dictionary_template:'+norm.template_hash]);
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`,['gm_ui_dictionary_phrase:'+norm.template]);
     let row=null;
     if(/^GM_\d{4,}$/.test(explicit))row=(await client.query(`SELECT * FROM gm_ui_dictionary WHERE gm_code=$1 FOR UPDATE`,[explicit])).rows[0]||null;
-    if(!row)row=(await client.query(`SELECT * FROM gm_ui_dictionary WHERE template_hash=$1 OR kr=$2 ORDER BY CASE WHEN template_hash=$1 THEN 0 ELSE 1 END,gm_code LIMIT 1 FOR UPDATE`,[norm.template_hash,norm.template])).rows[0]||null;
+    if(!row)row=(await client.query(`SELECT * FROM gm_ui_dictionary WHERE kr=$1 ORDER BY gm_code LIMIT 1 FOR UPDATE`,[norm.template])).rows[0]||null;
     let code='',created=false,changed=false;
     if(!row){
       code=(/^GM_\d{4,}$/.test(explicit)&&!(await client.query(`SELECT 1 FROM gm_ui_dictionary WHERE gm_code=$1`,[explicit])).rowCount)?explicit:await nextCode(client);
       const sm=mergeSourceMap({}, {source_app:app,source_surface:surface,page_name:page,source_locator:locator},increment);
-      await client.query(`INSERT INTO gm_ui_dictionary(gm_code,page_name,kr,source_file,source_locator,source_type,active_yn,translation_status,first_seen_at,last_seen_at,template_hash,source_map,use_count,glomart_use_count,guppy_use_count,first_used_at,last_used_at) VALUES($1,$2,$3,$4,$5,$6,'Y','NEW',now(),now(),$7,$8::jsonb,$9,$10,$11,CASE WHEN $9>0 THEN now() END,CASE WHEN $9>0 THEN now() END)`,[code,page,norm.template,page,locator,sourceType,norm.template_hash,JSON.stringify(sm),increment?1:0,increment&&app==='GLOMART'?1:0,increment&&app==='GUPPY'?1:0]);
+      await client.query(`INSERT INTO gm_ui_dictionary(gm_code,page_name,kr,active_yn,translation_status,source_map,use_count,last_used_at,has_variable) VALUES($1,$2,$3,'Y','NEW',$4::jsonb,$5,CASE WHEN $5>0 THEN now() END,$6)`,[code,page,norm.template,JSON.stringify(sm),increment?1:0,variableYn]);
       created=true;
     }else{
       code=s(row.gm_code).toUpperCase();
       if(/^GM_\d{4,}$/.test(explicit)&&code===explicit&&s(row.kr)!==norm.template){
-        await client.query(`INSERT INTO gm_ui_dictionary_history(gm_code,old_kr,new_kr,change_type,source_file,source_locator,source_type) VALUES($1,$2,$3,'CHANGED',$4,$5,$6)`,[code,row.kr||'',norm.template,page,locator,sourceType]);
+        await client.query(`INSERT INTO gm_ui_dictionary_history(gm_code,old_kr,new_kr,change_type,source_file,source_locator,source_type) VALUES($1,$2,$3,'CHANGED',$4,$5,$6)`,[code,row.kr||'',norm.template,page,locator,'RUNTIME_V2']);
         const clear=FOREIGN.map(l=>`${l}=''`).join(',');
-        await client.query(`UPDATE gm_ui_dictionary SET kr=$2,template_hash=$3,${clear},translation_status='RECHECK',active_yn='Y',removed_at=NULL,updated_at=now() WHERE gm_code=$1`,[code,norm.template,norm.template_hash]);
-        row.kr=norm.template;row.template_hash=norm.template_hash;changed=true;
-      }else if(!s(row.template_hash)){
-        await client.query(`UPDATE gm_ui_dictionary SET template_hash=$2 WHERE gm_code=$1`,[code,norm.template_hash]);
+        await client.query(`UPDATE gm_ui_dictionary SET kr=$2,${clear},translation_status='RECHECK',active_yn='Y',has_variable=$3,updated_at=now() WHERE gm_code=$1`,[code,norm.template,variableYn]);
+        row.kr=norm.template;row.has_variable=variableYn;changed=true;
+      }else if(s(row.has_variable)!==variableYn){
+        await client.query(`UPDATE gm_ui_dictionary SET has_variable=$2 WHERE gm_code=$1`,[code,variableYn]);
+        row.has_variable=variableYn;
       }
       const sm=mergeSourceMap(row.source_map||{}, {source_app:app,source_surface:surface,page_name:page,source_locator:locator},increment);
-      await client.query(`UPDATE gm_ui_dictionary SET source_map=$2::jsonb,source_file=CASE WHEN source_file='' THEN $3 ELSE source_file END,source_locator=CASE WHEN source_locator='' THEN $4 ELSE source_locator END,source_type=CASE WHEN source_type='MANUAL' THEN source_type ELSE $5 END,last_seen_at=now(),first_seen_at=COALESCE(first_seen_at,now()),active_yn='Y',removed_at=NULL,use_count=use_count+$6,glomart_use_count=glomart_use_count+$7,guppy_use_count=guppy_use_count+$8,first_used_at=CASE WHEN $6>0 THEN COALESCE(first_used_at,now()) ELSE first_used_at END,last_used_at=CASE WHEN $6>0 THEN now() ELSE last_used_at END WHERE gm_code=$1`,[code,JSON.stringify(sm),page,locator,sourceType,increment?1:0,increment&&app==='GLOMART'?1:0,increment&&app==='GUPPY'?1:0]);
+      await client.query(`UPDATE gm_ui_dictionary SET source_map=$2::jsonb,use_count=use_count+$3,last_used_at=CASE WHEN $3>0 THEN now() ELSE last_used_at END WHERE gm_code=$1`,[code,JSON.stringify(sm),increment?1:0]);
     }
     await client.query('COMMIT');
-    return {ok:true,gm_code:code,template:norm.template,created,changed,needs_translation:created||changed||needsTranslation(row)};
+    return {ok:true,gm_code:code,template:norm.template,has_variable:variableYn,created,changed,needs_translation:created||changed||needsTranslation(row)};
   }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
 }
+
 async function captureMany(db,items,opt={}){
   const stats={received:items.length,created:0,changed:0,reused:0,skipped:0,ambiguous_number:0,translate_codes:[]};
   for(const item of items){
