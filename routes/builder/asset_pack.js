@@ -1,5 +1,5 @@
 'use strict';
-// GM_ASSET_PACK_BUILDER_V005_ERROR_DETAIL_LOG
+// GM_ASSET_PACK_BUILDER_V006_PERSISTENT_STORAGE_GUARD
 const express=require('express');
 const router=express.Router();
 const {dbFrom,ok,fail}=require('./core');
@@ -7,7 +7,7 @@ const mgr=require('../../services/asset_pack_manager');
 
 async function state(db){
   const c=await mgr.config(db),version=await mgr.versionState(db),pending=await mgr.pendingRows(db,300),pending_count=await mgr.pendingCount(db);
-  return {config:c,generator:mgr.status(),category_meta:mgr.categoryMeta(),category_files:mgr.categoryFileState(),version,pending_count,pending,languages:mgr.LANGS};
+  return {config:c,generator:mgr.status(),storage:mgr.storageInfo(),category_meta:mgr.categoryMeta(),category_files:mgr.categoryFileState(),version,pending_count,pending,languages:mgr.LANGS};
 }
 async function nextInternal(db,targetKey,publishedKey){
   const c=await mgr.config(db);
@@ -23,7 +23,7 @@ function packError(res,e,label){
   if(code==='SAME_MINUTE')return fail(res,409,'같은 분 안에서는 같은 종류의 카테고리 JSON을 두 번 생성할 수 없습니다.',{detail});
   if(code==='BASE_NOT_READY')return fail(res,409,'원본(BASE) 25개국 JSON을 먼저 생성해야 합니다.',{detail});
   if(code==='PACK_VERIFY')return fail(res,500,label+' 25개국 파일 검증에 실패했습니다.',{detail});
-  if(code==='HNSW_VERIFY')return fail(res,500,label+' HNSW 파일 검증에 실패했습니다.',{detail});
+  if(code==='PERSISTENT_STORAGE_REQUIRED')return fail(res,409,'영구 저장경로가 준비되지 않아 생성할 수 없습니다.',{detail,storage:e&&e.storage||mgr.storageInfo()});
   return fail(res,500,label+' 생성 실패',{detail});
 }
 
