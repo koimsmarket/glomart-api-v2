@@ -5,6 +5,7 @@ const fs=require('fs');
 const path=require('path');
 const router=express.Router();
 const {dbFrom}=require('./core');
+const uiV2=require('../../services/ui_dictionary_v2');
 function s(v){return String(v==null?'':v).replace(/\s+/g,' ').trim();}
 function hasKo(v){return /[가-힣]/.test(String(v||''));}
 function pageNameFromFile(f){return String(f||'').replace(/\\/g,'/').replace(/^.*?public\//,'').replace(/\.[^.]+$/,'').slice(0,240);}
@@ -62,4 +63,54 @@ router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1m
     await client.query('COMMIT');res.json({ok:true,applied:out.length,items:out});
   }catch(e){await client.query('ROLLBACK').catch(()=>{});res.status(500).json({ok:false,error:String(e&&e.message||e)});}finally{client.release();}});
 router.post('/api/gm/builder/ui-dictionary-auto/ignore',express.json({limit:'256kb'}),async(req,res)=>{const db=dbFrom(req),ids=(Array.isArray(req.body&&req.body.pending_ids)?req.body.pending_ids:[]).map(Number).filter(Number.isFinite);try{const r=await db.query(`UPDATE gm_ui_dictionary_pending SET status='IGNORED',reviewed_at=now() WHERE pending_id=ANY($1::bigint[]) AND status='PENDING' RETURNING pending_id`,[ids]);res.json({ok:true,ignored:r.rowCount});}catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}});
+
+// GM_UI_DICTIONARY_V005: V2 experimental path.
+// Existing pending/approve/REMOVED flow above remains untouched for immediate rollback.
+router.get('/api/gm/builder/ui-dictionary-auto/v2/status',async(req,res)=>{
+  const db=dbFrom(req);
+  try{
+    const foreign=uiV2.FOREIGN;
+    const miss=foreign.map(l=>`COALESCE(${l},'')=''`).join(' OR ');
+    const d=(await db.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE active_yn='Y')::int active,COUNT(*) FILTER(WHERE template_hash<>'')::int templated,COALESCE(SUM(use_count),0)::bigint use_count,COALESCE(SUM(glomart_use_count),0)::bigint glomart_use_count,COALESCE(SUM(guppy_use_count),0)::bigint guppy_use_count,COUNT(*) FILTER(WHERE translation_status<>'READY' OR ${miss})::int translation_pending FROM gm_ui_dictionary`)).rows[0];
+    const recent=(await db.query(`SELECT gm_code,kr,translation_status,use_count,glomart_use_count,guppy_use_count,first_used_at,last_used_at,updated_at,source_map FROM gm_ui_dictionary WHERE template_hash<>'' ORDER BY COALESCE(last_used_at,updated_at) DESC LIMIT 80`)).rows;
+    res.json({ok:true,dictionary:d,recent});
+  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+router.post('/api/gm/builder/ui-dictionary-auto/v2/scan-static',express.json({limit:'256kb'}),async(req,res)=>{
+  const db=dbFrom(req);
+  try{
+    const root=path.resolve(__dirname,'../..');
+    const envDirs=s(process.env.GM_UI_SCAN_DIRS||'public,routes,services').split(',').map(x=>x.trim()).filter(Boolean);
+    const files=[];envDirs.forEach(x=>walk(path.join(root,x),files,root));
+    const limit=Math.max(1,Math.min(1000,Number(req.body&&req.body.limit||250)));
+    const rows=[];
+    outer: for(const f of files){for(const row of extractFile(f)){
+      rows.push({...row,source_app:'GLOMART',source_surface:'STATIC:'+pageNameFromFile(f.rel),source_type:'STATIC_V2'});
+      if(rows.length>=limit)break outer;
+    }}
+    const stats=await uiV2.captureMany(db,rows,{incrementUsage:false});
+    uiV2.queueTranslations(db,stats.translate_codes);
+    res.json({ok:true,dirs:envDirs,limit,stats});
+  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+router.post('/api/gm/ui-dictionary/v2/runtime-capture',express.json({limit:'256kb'}),async(req,res)=>{
+  const db=dbFrom(req);
+  try{
+    const body=req.body||{},baseApp=s(body.source_app||body.sourceApp||'').toUpperCase();
+    const items=(Array.isArray(body.items)?body.items:[]).slice(0,160).map(x=>Object.assign({},x||{}, {
+      source_app:(x&&x.source_app)||(x&&x.sourceApp)||baseApp||'GLOMART',
+      source_surface:(x&&x.source_surface)||(x&&x.sourceSurface)||(x&&x.page)||'RUNTIME',
+      source_type:'RUNTIME_V2'
+    }));
+    const stats=await uiV2.captureMany(db,items,{incrementUsage:true});
+    uiV2.queueTranslations(db,stats.translate_codes);
+    res.json({ok:true,stats:{received:stats.received,created:stats.created,changed:stats.changed,reused:stats.reused,skipped:stats.skipped,ambiguous_number:stats.ambiguous_number,translation_queued:stats.translate_codes.length}});
+  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.json({limit:'64kb'}),async(req,res)=>{
+  const db=dbFrom(req);
+  try{const limit=Math.max(1,Math.min(50,Number(req.body&&req.body.limit||10)));const items=await uiV2.retryPending(db,limit);res.json({ok:true,count:items.length,items});}
+  catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+
 module.exports=router;
