@@ -1,6 +1,6 @@
 'use strict';
 
-// GM_IMAGE_REPRESENTATIVE_SEARCH_V005_CATEGORY_5_6_COMPAT
+// GM_IMAGE_REPRESENTATIVE_SEARCH_V006_SCOPED_JOIN_TIMING
 // Two explicit search modes:
 //   UNLOADING = do not keep representative HNSW in process memory; scan representative vectors in DB per image search.
 //   LOADING   = use an ACTIVE in-memory HNSW only after Builder explicitly builds it.
@@ -111,19 +111,21 @@ async function topRepresentativeMatchesDbScoped(pool,runNo,queryNorm,limit,scope
   const ranked=[];let lastNo=-1,lastPuid='',done=false;
   function keepTop(row,score){const hit={representative_no:N(row.representative_no),representative_puid:C(row.representative_puid),score};if(ranked.length<topLimit){ranked.push(hit);ranked.sort((a,b)=>b.score-a.score);return;}if(score<=ranked[ranked.length-1].score)return;ranked[ranked.length-1]=hit;ranked.sort((a,b)=>b.score-a.score);}
   while(!done){
-    const q=await pool.query(`SELECT m.representative_no,m.representative_puid,v.vector_image
-        FROM gm_image_vector_representative_map m
-        JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
-       WHERE m.run_no=$1 AND m.representative_puid IS NOT NULL AND m.puid=m.representative_puid
-         AND v.vector_image IS NOT NULL AND array_length(v.vector_image,1)=$2
-         AND (m.representative_no>$3 OR (m.representative_no=$3 AND m.representative_puid>$4))
-         AND EXISTS (
-           SELECT 1 FROM gm_image_vector_representative_map mm
-           JOIN gm_product p ON p.product_uid=mm.puid
-            WHERE mm.run_no=m.run_no AND mm.representative_puid=m.representative_puid
-              AND string_to_array(COALESCE(p.glomart_code,''),'|') && $5::text[]
-         )
-       ORDER BY m.representative_no,m.representative_puid LIMIT $6`,[runNo,DIM,lastNo,lastPuid,scopeCodes,batchSize]);
+    const q=await pool.query(`WITH scoped_representatives AS (
+          SELECT DISTINCT mm.representative_puid
+            FROM gm_image_vector_representative_map mm
+            JOIN gm_product p ON p.product_uid=mm.puid
+           WHERE mm.run_no=$1
+             AND mm.representative_puid IS NOT NULL
+             AND string_to_array(COALESCE(p.glomart_code,''),'|') && $5::text[]
+        )
+        SELECT m.representative_no,m.representative_puid,v.vector_image
+          FROM scoped_representatives sr
+          JOIN gm_image_vector_representative_map m ON m.run_no=$1 AND m.representative_puid=sr.representative_puid AND m.puid=m.representative_puid
+          JOIN gm_product_image_vector v ON v.product_uid=m.representative_puid
+         WHERE v.vector_image IS NOT NULL AND array_length(v.vector_image,1)=$2
+           AND (m.representative_no>$3 OR (m.representative_no=$3 AND m.representative_puid>$4))
+         ORDER BY m.representative_no,m.representative_puid LIMIT $6`,[runNo,DIM,lastNo,lastPuid,scopeCodes,batchSize]);
     const rows=q.rows||[];if(!rows.length)break;
     for(const r of rows){const score=exactCosine(queryNorm,r.vector_image);if(Number.isFinite(score))keepTop(r,score);lastNo=N(r.representative_no);lastPuid=C(r.representative_puid);r.vector_image=null;}
     done=rows.length<batchSize;if(!done)await new Promise(resolve=>setImmediate(resolve));
@@ -317,7 +319,7 @@ async function finishSearch(pool,qn,runNo,repTop,limit,searchMode,searchEngine,r
      WHERE (run_no=$1 AND representative_puid=ANY($2::text[])) OR run_no=0`,[runNo,repIds]):{rows:[]};
   timings.map_fetch_ms=Date.now()-t;
   let candidateIds=[...new Set((mq.rows||[]).map(r=>C(r.puid)).filter(Boolean))],run0Count=(mq.rows||[]).filter(r=>N(r.run_no)===0).length;
-  if(scopeCodes&&scopeCodes.length&&candidateIds.length){const cq=await pool.query(`SELECT product_uid FROM gm_product WHERE product_uid=ANY($1::text[]) AND string_to_array(COALESCE(glomart_code,''),'|') && $2::text[]`,[candidateIds,scopeCodes]);candidateIds=(cq.rows||[]).map(r=>C(r.product_uid)).filter(Boolean);}
+  if(scopeCodes&&scopeCodes.length&&candidateIds.length){t=Date.now();const cq=await pool.query(`SELECT product_uid FROM gm_product WHERE product_uid=ANY($1::text[]) AND string_to_array(COALESCE(glomart_code,''),'|') && $2::text[]`,[candidateIds,scopeCodes]);timings.category_member_filter_ms=Date.now()-t;candidateIds=(cq.rows||[]).map(r=>C(r.product_uid)).filter(Boolean);}
   if(!candidateIds.length)return {search_mode:searchMode,search_engine:searchEngine,memory_mode:memoryMode,run_no:runNo,representative_count:representativeCount,representative_candidates:repTop,member_candidate_count:0,run0_candidate_count:run0Count,matches:[],timings,hnsw_status:hnswStatus,...scopeStats(scopeCodes)};
   t=Date.now();const vq=await pool.query(`SELECT product_uid,vector_image FROM gm_product_image_vector WHERE product_uid=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2`,[candidateIds,DIM]);timings.vector_fetch_ms=Date.now()-t;
   t=Date.now();const exact=[];for(const r of vq.rows||[]){const score=exactCosine(qn,r.vector_image);if(Number.isFinite(score))exact.push({product_uid:C(r.product_uid),score});r.vector_image=null;}exact.sort((a,b)=>b.score-a.score);const ranked=exact.slice(0,Math.max(1,limit));timings.exact_rerank_ms=Date.now()-t;
@@ -330,9 +332,9 @@ async function search(pool,queryVector,limit,searchMode,categoryCode){
   lastPool=pool||lastPool;
   const mode=await getMemoryMode(pool,false),liveRun=await currentRepresentativeRun(pool);
   const qn=normalizedFloat32(queryVector);if(!qn)throw new Error('invalid query vector');
-  const timings={representative_scan_ms:0,representative_search_ms:0,map_fetch_ms:0,vector_fetch_ms:0,exact_rerank_ms:0,product_fetch_ms:0};
+  const timings={category_scope_ms:0,representative_scan_ms:0,representative_search_ms:0,map_fetch_ms:0,category_member_filter_ms:0,vector_fetch_ms:0,exact_rerank_ms:0,product_fetch_ms:0};
   let t=Date.now(),repTop,engine,repCount=0,hnswStatus=null,scopeCodes=[];
-  if(C(categoryCode)){scopeCodes=await categoryScopeCodes(pool,categoryCode);repTop=await topRepresentativeMatchesDbScoped(pool,liveRun,qn,REP_GROUP_LIMIT,scopeCodes);timings.representative_search_ms=Date.now()-t;timings.representative_scan_ms=timings.representative_search_ms;engine='DB_SCOPED_CATEGORY';const meta=await representativeMeta(pool);repCount=meta.count;hnswStatus=publicStatus();}
+  if(C(categoryCode)){t=Date.now();scopeCodes=await categoryScopeCodes(pool,categoryCode);timings.category_scope_ms=Date.now()-t;t=Date.now();repTop=await topRepresentativeMatchesDbScoped(pool,liveRun,qn,REP_GROUP_LIMIT,scopeCodes);timings.representative_search_ms=Date.now()-t;timings.representative_scan_ms=timings.representative_search_ms;engine='DB_SCOPED_CATEGORY';const meta=await representativeMeta(pool);repCount=meta.count;hnswStatus=publicStatus();}
   else if(mode==='LOADING'&&active.index&&active.run_no===liveRun){
     if(searchMode==='precise')repTop=topRepresentativeMatches(qn,active.rows,REP_GROUP_LIMIT);
     else repTop=active.index.search(qn,REP_GROUP_LIMIT);

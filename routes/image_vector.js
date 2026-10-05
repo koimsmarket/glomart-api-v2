@@ -8,7 +8,7 @@ const https=require('https');
 const http=require('http');
 const router=express.Router();
 const representativeSearch=require('../services/image_representative_search');
-const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V027_CATEGORY_5_6_COMPAT';
+const DIM=512, BYTE_LEN=1024, VECTOR_VERSION=2, ROUTE_VERSION='GM_IMAGE_VECTOR_ROUTE_V028_SCOPED_JOIN_TIMING';
 
 let cachedVectorColumnType=null;
 async function vectorColumnType(pool){
