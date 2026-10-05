@@ -161,7 +161,7 @@ async function observe(db,input,opt={}){
     if(!row){
       code=(/^GM_\d{4,}$/.test(explicit)&&!(await client.query(`SELECT 1 FROM gm_ui_dictionary WHERE gm_code=$1`,[explicit])).rowCount)?explicit:await nextCode(client);
       const sm=mergeSourceMap({}, {source_app:app,source_surface:surface,page_name:page,source_locator:locator},increment);
-      await client.query(`INSERT INTO gm_ui_dictionary(gm_code,page_name,kr,active_yn,translation_status,source_map,use_count,last_used_at,has_variable) VALUES($1,$2,$3,'Y','NEW',$4::jsonb,$5,CASE WHEN $5>0 THEN now() END,$6)`,[code,page,norm.template,JSON.stringify(sm),increment?1:0,variableYn]);
+      await client.query(`INSERT INTO gm_ui_dictionary(gm_code,page_name,kr,active_yn,translation_status,source_map,use_count,last_used_at,has_variable) VALUES($1,$2,$3,'Y','NEW',$4::jsonb,$5::bigint,CASE WHEN $5::bigint>0 THEN now() END,$6)`,[code,page,norm.template,JSON.stringify(sm),increment?1:0,variableYn]);
       created=true;
     }else{
       code=s(row.gm_code).toUpperCase();
@@ -175,7 +175,7 @@ async function observe(db,input,opt={}){
         row.has_variable=variableYn;
       }
       const sm=mergeSourceMap(row.source_map||{}, {source_app:app,source_surface:surface,page_name:page,source_locator:locator},increment);
-      await client.query(`UPDATE gm_ui_dictionary SET source_map=$2::jsonb,use_count=use_count+$3,last_used_at=CASE WHEN $3>0 THEN now() ELSE last_used_at END WHERE gm_code=$1`,[code,JSON.stringify(sm),increment?1:0]);
+      await client.query(`UPDATE gm_ui_dictionary SET source_map=$2::jsonb,use_count=use_count+$3::bigint,last_used_at=CASE WHEN $3::bigint>0 THEN now() ELSE last_used_at END WHERE gm_code=$1`,[code,JSON.stringify(sm),increment?1:0]);
     }
     await client.query('COMMIT');
     return {ok:true,gm_code:code,template:norm.template,has_variable:variableYn,created,changed,needs_translation:created||changed||needsTranslation(row)};
