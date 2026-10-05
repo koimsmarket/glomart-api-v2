@@ -1,5 +1,5 @@
 'use strict';
-// GM_UI_DICTIONARY_AUTO_V007
+// GM_UI_DICTIONARY_AUTO_V009_RUNTIME_500_FIX
 const express=require('express');
 const fs=require('fs');
 const path=require('path');
@@ -14,6 +14,41 @@ function cleanUiText(v){let x=s(v).replace(/<[^>]+>/g,' ').replace(/\{\$[^}]+\}/
 function hasVariable(text){return /%[dsm]/.test(String(text||''))?'Y':'N';}
 
 async function ensure(db){await db.query(`SELECT 1 FROM gm_ui_dictionary_pending LIMIT 1`);}
+
+// V009: runtime-capture requires the four canonical runtime metadata columns.
+// Keep the current UI dictionary structure; only repair a DB that missed migration 133.
+let runtimeSchemaReady=false;
+let runtimeSchemaPromise=null;
+async function ensureRuntimeSchema(db){
+  if(runtimeSchemaReady)return;
+  if(runtimeSchemaPromise)return runtimeSchemaPromise;
+  runtimeSchemaPromise=(async()=>{
+    await db.query(`ALTER TABLE gm_ui_dictionary ADD COLUMN IF NOT EXISTS source_map JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await db.query(`ALTER TABLE gm_ui_dictionary ADD COLUMN IF NOT EXISTS use_count BIGINT NOT NULL DEFAULT 0`);
+    await db.query(`ALTER TABLE gm_ui_dictionary ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ`);
+    await db.query(`ALTER TABLE gm_ui_dictionary ADD COLUMN IF NOT EXISTS has_variable CHAR(1) NOT NULL DEFAULT 'N'`);
+    runtimeSchemaReady=true;
+  })();
+  try{
+    await runtimeSchemaPromise;
+  }finally{
+    runtimeSchemaPromise=null;
+  }
+}
+
+function runtimeCaptureError(tag,e){
+  try{
+    console.error('[GM_UI_DICTIONARY_RUNTIME_V009]',tag,{
+      message:String(e&&e.message||e),
+      code:e&&e.code||'',
+      detail:e&&e.detail||'',
+      hint:e&&e.hint||'',
+      table:e&&e.table||'',
+      column:e&&e.column||'',
+      constraint:e&&e.constraint||''
+    });
+  }catch(_e){}
+}
 
 async function pendingUpsert(db,row){
   const q=await db.query(
@@ -147,6 +182,7 @@ router.post('/api/gm/ui-dictionary/runtime-capture',express.json({limit:'256kb'}
   const db=dbFrom(req);
   try{
     await ensure(db);
+    await ensureRuntimeSchema(db);
     const body=req.body||{},baseApp=s(body.source_app||body.sourceApp||'').toUpperCase();
     const items=(Array.isArray(body.items)?body.items:[]).slice(0,200).map(x=>Object.assign({},x||{}, {
       source_app:(x&&x.source_app)||(x&&x.sourceApp)||baseApp||'GLOMART',
@@ -155,7 +191,7 @@ router.post('/api/gm/ui-dictionary/runtime-capture',express.json({limit:'256kb'}
     const stats=await uiV2.captureMany(db,items,{incrementUsage:true});
     uiV2.queueTranslations(db,stats.translate_codes);
     res.json({ok:true,stats});
-  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+  }catch(e){runtimeCaptureError('compat',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
 async function nextCode(db){
@@ -277,6 +313,7 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/scan-static',express.json({li
 router.post('/api/gm/ui-dictionary/v2/runtime-capture',express.json({limit:'256kb'}),async(req,res)=>{
   const db=dbFrom(req);
   try{
+    await ensureRuntimeSchema(db);
     const body=req.body||{},baseApp=s(body.source_app||body.sourceApp||'').toUpperCase();
     const items=(Array.isArray(body.items)?body.items:[]).slice(0,160).map(x=>Object.assign({},x||{}, {
       source_app:(x&&x.source_app)||(x&&x.sourceApp)||baseApp||'GLOMART',
@@ -285,7 +322,7 @@ router.post('/api/gm/ui-dictionary/v2/runtime-capture',express.json({limit:'256k
     const stats=await uiV2.captureMany(db,items,{incrementUsage:true});
     uiV2.queueTranslations(db,stats.translate_codes);
     res.json({ok:true,stats:{received:stats.received,created:stats.created,changed:stats.changed,reused:stats.reused,skipped:stats.skipped,ambiguous_number:stats.ambiguous_number,translation_queued:stats.translate_codes.length}});
-  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+  }catch(e){runtimeCaptureError('v2',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
 router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.json({limit:'64kb'}),async(req,res)=>{

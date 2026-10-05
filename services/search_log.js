@@ -311,6 +311,26 @@ module.exports = function installSearchLogService(deps){
     SEARCH_DETAIL: handleSearchDetail
   });
 
+  // GM_SEARCH_V053: lightweight search-result upsert policy.
+  // This endpoint is intentionally separate from /api/gm/search/local so product search latency
+  // never waits on this check. It reads at most 3 indexed rows for the normalized keyword.
+  app.get('/api/gm/search/upsert-policy', async (req,res)=>{
+    try{
+      const normalized=normalizeKeywordForStat(cleanText(req.query.keyword_normalized||req.query.keyword||''));
+      if(!normalized) return fail(res,400,'keyword_normalized is required');
+      const r=await dbQuery(`SELECT COUNT(*)::int AS today_search_count FROM (
+        SELECT 1 FROM gm_search_log
+        WHERE keyword_normalized=$1
+          AND search_at >= timezone(current_setting('TIMEZONE'), date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
+          AND search_at <  timezone(current_setting('TIMEZONE'), (date_trunc('day', timezone('Asia/Seoul', now())) + interval '1 day') AT TIME ZONE 'Asia/Seoul')
+        ORDER BY search_at DESC
+        LIMIT 3
+      ) q`,[normalized]);
+      const count=toInt(r.rows[0]&&r.rows[0].today_search_count,0);
+      ok(res,{action:'search.upsert-policy',keyword_normalized:normalized,today_search_count:count,limit:3,search_result_upsert_allowed:count<3,timezone:'Asia/Seoul'});
+    }catch(e){ fail(res,500,'search upsert policy failed',{detail:String(e&&e.message||e)}); }
+  });
+
   app.get('/api/gm/search/summary', async (req,res)=>{
     try{
       const limit=Math.max(1,Math.min(100,toInt(req.query.limit,20)));
