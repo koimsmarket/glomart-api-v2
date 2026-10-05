@@ -1,6 +1,6 @@
 'use strict';
 
-// GM_IMAGE_REPRESENTATIVE_SEARCH_V004_CATEGORY_5_6_SCOPE
+// GM_IMAGE_REPRESENTATIVE_SEARCH_V005_CATEGORY_5_6_COMPAT
 // Two explicit search modes:
 //   UNLOADING = do not keep representative HNSW in process memory; scan representative vectors in DB per image search.
 //   LOADING   = use an ACTIVE in-memory HNSW only after Builder explicitly builds it.
@@ -75,19 +75,36 @@ function topRepresentativeMatches(queryNorm,rows,limit){
   }
   return out;
 }
+function isFdHsCodeParts(parts){return Array.isArray(parts)&&/^(FD|HS)$/i.test(C(parts[0]));}
+function legacyFiveAlias(code){
+  const parts=C(code).toUpperCase().split('-');
+  if(parts.length!==6||!isFdHsCodeParts(parts))return '';
+  return parts.slice(0,5).join('-');
+}
 async function categoryScopeCodes(pool,categoryCode){
   const code=C(categoryCode).toUpperCase();if(!code)return [];
   const parts=code.split('-');if(parts.length!==5&&parts.length!==6)return [];
   let last=0;for(let i=1;i<parts.length;i++){if(!/^0+$/.test(parts[i]))last=i;}
   const stem=parts.slice(0,last+1).join('-');
   const like=stem+'-%';
+  // FD/HS moved from 5-segment to 6-segment gm_code. During the remap window,
+  // gm_product can legitimately contain both forms. Keep the category scope narrow,
+  // but accept both code generations so legacy rows are not lost from image search.
+  const fdHs=isFdHsCodeParts(parts),lengths=fdHs?[5,6]:[parts.length];
   const q=await pool.query(`SELECT gm_code FROM gm_category
      WHERE COALESCE(display_yn,'Y')='Y'
-       AND array_length(string_to_array(gm_code,'-'),1)=$3
+       AND array_length(string_to_array(gm_code,'-'),1)=ANY($3::int[])
        AND (gm_code=$1 OR gm_code LIKE $2)
-     ORDER BY depth,sort_order,category_id`,[code,like,parts.length]);
-  const out=[...new Set((q.rows||[]).map(r=>C(r.gm_code).toUpperCase()).filter(Boolean))];
-  if(!out.includes(code))out.unshift(code);return out;
+     ORDER BY depth,sort_order,category_id`,[code,like,lengths]);
+  const set=new Set((q.rows||[]).map(r=>C(r.gm_code).toUpperCase()).filter(Boolean));
+  set.add(code);
+  if(fdHs){
+    // New 6-segment category rows are the source of truth. Add only their exact
+    // old 5-segment aliases; this does not widen the search outside the selected subtree.
+    for(const x of [...set]){const old=legacyFiveAlias(x);if(old)set.add(old);}
+    const selectedOld=legacyFiveAlias(code);if(selectedOld)set.add(selectedOld);
+  }
+  return [...set];
 }
 async function topRepresentativeMatchesDbScoped(pool,runNo,queryNorm,limit,scopeCodes){
   const topLimit=Math.max(1,limit),batchSize=Math.max(50,Math.min(1000,Number(process.env.GM_IMAGE_REP_DB_SCAN_BATCH||250)||250));
@@ -289,6 +306,10 @@ function onAssignment(pool,assignment,vector){
   markDirty(action||'representative_changed');
 }
 
+function scopeStats(scopeCodes){
+  const a=Array.isArray(scopeCodes)?scopeCodes:[];
+  return {category_scope_count:a.length,legacy5_scope_count:a.filter(x=>/^(FD|HS)-\d{2}-\d{3}-\d{4}-\d{4}$/i.test(C(x))).length};
+}
 async function finishSearch(pool,qn,runNo,repTop,limit,searchMode,searchEngine,representativeCount,hnswStatus,timings,scopeCodes){
   const repIds=repTop.map(x=>x.representative_puid);let t=Date.now();
   const mq=repIds.length?await pool.query(`SELECT puid,representative_no,representative_puid,run_no
@@ -297,12 +318,12 @@ async function finishSearch(pool,qn,runNo,repTop,limit,searchMode,searchEngine,r
   timings.map_fetch_ms=Date.now()-t;
   let candidateIds=[...new Set((mq.rows||[]).map(r=>C(r.puid)).filter(Boolean))],run0Count=(mq.rows||[]).filter(r=>N(r.run_no)===0).length;
   if(scopeCodes&&scopeCodes.length&&candidateIds.length){const cq=await pool.query(`SELECT product_uid FROM gm_product WHERE product_uid=ANY($1::text[]) AND string_to_array(COALESCE(glomart_code,''),'|') && $2::text[]`,[candidateIds,scopeCodes]);candidateIds=(cq.rows||[]).map(r=>C(r.product_uid)).filter(Boolean);}
-  if(!candidateIds.length)return {search_mode:searchMode,search_engine:searchEngine,memory_mode:memoryMode,run_no:runNo,representative_count:representativeCount,representative_candidates:repTop,member_candidate_count:0,run0_candidate_count:run0Count,matches:[],timings,hnsw_status:hnswStatus};
+  if(!candidateIds.length)return {search_mode:searchMode,search_engine:searchEngine,memory_mode:memoryMode,run_no:runNo,representative_count:representativeCount,representative_candidates:repTop,member_candidate_count:0,run0_candidate_count:run0Count,matches:[],timings,hnsw_status:hnswStatus,...scopeStats(scopeCodes)};
   t=Date.now();const vq=await pool.query(`SELECT product_uid,vector_image FROM gm_product_image_vector WHERE product_uid=ANY($1::text[]) AND vector_image IS NOT NULL AND array_length(vector_image,1)=$2`,[candidateIds,DIM]);timings.vector_fetch_ms=Date.now()-t;
   t=Date.now();const exact=[];for(const r of vq.rows||[]){const score=exactCosine(qn,r.vector_image);if(Number.isFinite(score))exact.push({product_uid:C(r.product_uid),score});r.vector_image=null;}exact.sort((a,b)=>b.score-a.score);const ranked=exact.slice(0,Math.max(1,limit));timings.exact_rerank_ms=Date.now()-t;
   t=Date.now();const productLookup=await fetchProductMetadata(pool,ranked.map(x=>x.product_uid));timings.product_fetch_ms=Date.now()-t;
   const matches=ranked.map((x,idx)=>{const m=Object.assign({},productLookup.byUid.get(x.product_uid)||{product_uid:x.product_uid,product_name:'',product_url:'',image_url:'',mall_code:'',keyword:'',category_keyword:''},{product_uid:x.product_uid,score:x.score});const aliases=C(m.keyword).split('|').map(C).filter(Boolean);m.search_keyword=C(aliases[0]||m.category_keyword||m.product_name);m.level_best=idx===0;return m;});
-  return {search_mode:searchMode,search_engine:searchEngine,memory_mode:memoryMode,run_no:runNo,representative_count:representativeCount,representative_candidates:repTop,member_candidate_count:candidateIds.length,run0_candidate_count:run0Count,matches,timings,hnsw_status:hnswStatus};
+  return {search_mode:searchMode,search_engine:searchEngine,memory_mode:memoryMode,run_no:runNo,representative_count:representativeCount,representative_candidates:repTop,member_candidate_count:candidateIds.length,run0_candidate_count:run0Count,matches,timings,hnsw_status:hnswStatus,...scopeStats(scopeCodes)};
 }
 
 async function search(pool,queryVector,limit,searchMode,categoryCode){
