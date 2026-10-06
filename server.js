@@ -1,18 +1,10 @@
 const express = require('express');
-const keywordRelationService = require('./services/keyword_relation');
-const installSearchLogService = require('./services/search_log');
-const createEventService = require('./services/event_service');
-const createEventQueue = require('./services/event_queue');
-const { startEventQueueWorker } = require('./workers/event_queue_worker');
-const { startMemberRelationWorker } = require('./workers/member_relation_worker');
 const cors = require('cors');
 const fs = require('fs');
-const crypto = require('crypto');
 const path = require('path');
 const { Pool } = require('pg');
 
 const VERSION = 'GLOMART_API_BASKET_DIRECT_V027';
-console.log('[GM_MIGRATION_ENGINE_V004] bootstrap baseline<=102 / ADMIN range=900~999 / first admin migration=901');
 const app = express();
 
 /* GM_HEAD_CORS_KEEPALIVE_V001
@@ -77,106 +69,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// GM_API_FIRST_HOP_TIMING_V008
-// Search-related API first-hop timing. Keep output one-line so important logs are not buried.
-app.use((req, res, next) => {
-  const pathOnly = String(req.originalUrl || req.url || '').split('?')[0];
-  if (pathOnly === '/api/gm/product/queue' || pathOnly === '/api/gm/search/log' || pathOnly === '/api/gm/search/local') {
-    req.__gmApiTiming = { path:pathOnly, ingress:process.hrtime.bigint() };
-  }
-  next();
-});
-
 app.use(cors({ origin: true, credentials: false }));
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
-
-app.use((req, res, next) => {
-  const t = req.__gmApiTiming;
-  if (!t) return next();
-  t.bodyDone = process.hrtime.bigint();
-  res.on('finish', () => {
-    try {
-      const end = process.hrtime.bigint();
-      const ms = (a,b) => Number(b-a)/1e6;
-      const bodyMs = ms(t.ingress,t.bodyDone);
-      const totalMs = ms(t.ingress,end);
-      const body = req.body && typeof req.body === 'object' ? req.body : {};
-      const q = req.query && typeof req.query === 'object' ? req.query : {};
-      const keyword = String(body.keyword || body.q || body.search_keyword || body.searchKeyword || q.keyword || q.q || '').replace(/\s+/g,' ').trim();
-      const d = req.__gmApiDiag || {};
-      let line = '[GM_API_TIMING] path='+t.path+' keyword='+keyword+' status='+res.statusCode+' body_ms='+bodyMs.toFixed(1);
-      if (d.route_ms != null) line += ' route_ms='+Number(d.route_ms).toFixed(1);
-      if (d.acquire_ms != null) line += ' acquire_ms='+Number(d.acquire_ms).toFixed(1);
-      if (d.sql_ms != null) line += ' sql_ms='+Number(d.sql_ms).toFixed(1);
-      line += ' total_ms='+totalMs.toFixed(1);
-      console.log(line);
-    } catch (_) {}
-  });
-  next();
-});
-
-/* GM_ANDROID_APK_DOWNLOAD_V001
- * Cloudtype의 실행 작업 디렉터리가 프로젝트 루트와 다르더라도
- * __dirname 기준으로 public 폴더와 APK를 정확히 찾는다.
- */
-const GM_PUBLIC_DIR = path.join(__dirname, 'public');
-const GM_ANDROID_APK_FILE = path.join(
-  GM_PUBLIC_DIR,
-  'download',
-  'android',
-  'glomart_v1.0.apk'
-);
-
-app.get('/download/android/glomart_v1.0.apk', (req, res) => {
-  if (!fs.existsSync(GM_ANDROID_APK_FILE)) {
-    console.error('[GM_ANDROID_APK_NOT_FOUND_V001]', GM_ANDROID_APK_FILE);
-    return res.status(404).send('Glomart APK file not found');
-  }
-
-  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-  res.setHeader(
-    'Content-Disposition',
-    'attachment; filename="glomart_v1.0.apk"'
-  );
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  return res.sendFile(GM_ANDROID_APK_FILE);
-});
-
-app.use(express.static(GM_PUBLIC_DIR));
-app.use('/public', express.static(GM_PUBLIC_DIR));
-
-/* GM_AUTO_ORDER_DASHBOARD_V006
- * auto-order contains both browser-side runner files and future server-side
- * routes/services/workers. Never expose the whole auto-order directory.
- * Only the admin UI and browser runner paths below are public.
- */
-const GM_AUTO_ORDER_DIR = path.join(__dirname, 'auto-order');
-const gmAutoOrderSend = (rel) => (req, res) => res.sendFile(path.join(GM_AUTO_ORDER_DIR, rel));
-
-app.get(['/auto-order', '/auto-order/'], gmAutoOrderSend('index.html'));
-app.get('/auto-order/index.html', gmAutoOrderSend('index.html'));
-app.get('/auto-order/dashboard.css', gmAutoOrderSend('dashboard.css'));
-app.get('/auto-order/dashboard_ui.js', gmAutoOrderSend('dashboard_ui.js'));
-app.get('/auto-order/manifest.webmanifest', gmAutoOrderSend('manifest.webmanifest'));
-app.get('/auto-order/sw.js', gmAutoOrderSend('sw.js'));
-app.get('/auto-order/icon.svg', gmAutoOrderSend('icon.svg'));
-
-app.get('/auto-order/order/order.html', gmAutoOrderSend(path.join('order', 'order.html')));
-app.get('/auto-order/auto/auto_order.html', gmAutoOrderSend(path.join('auto', 'auto_order.html')));
-app.get('/auto-order/account/account.html', gmAutoOrderSend(path.join('account', 'account.html')));
-app.get('/auto-order/account/account.css', gmAutoOrderSend(path.join('account', 'account.css')));
-app.get('/auto-order/account/account.js', gmAutoOrderSend(path.join('account', 'account.js')));
-app.get('/auto-order/delivery/delivery.html', gmAutoOrderSend(path.join('delivery', 'delivery.html')));
-app.get('/auto-order/claim/claim.html', gmAutoOrderSend(path.join('claim', 'claim.html')));
-app.get('/auto-order/cs/cs.html', gmAutoOrderSend(path.join('cs', 'cs.html')));
-
-/* Auto-order execution assets are exposed only from /auto-order-client.
- * Legacy /auto-order/js and /auto-order/GM_AUTO_ORDER.user.js were retired.
- */
-const GM_AUTO_ORDER_CLIENT_DIR=path.join(__dirname,'auto-order-client');
-app.use('/auto-order-client',express.static(GM_AUTO_ORDER_CLIENT_DIR,{fallthrough:true,index:false,maxAge:0}));
-app.get(['/auto-order-client','/auto-order-client/'],(req,res)=>res.redirect(302,'/auto-order-client/pc-pwa/index.html'));
+app.use(express.static('public'));
+app.use('/public', express.static(path.join(__dirname, 'public')));
 
 /* GM_HEALTH_V004_DB_RUNTIME
  * Cloudtype / UptimeRobot 운영용 health endpoint.
@@ -395,92 +292,16 @@ function makePool(){
 
 const pool = makePool();
 app.locals.pool = pool;
-
-/* GM_AUTO_ORDER_DASHBOARD_API_V012
- * Auto-order dashboard API only.
- * All dashboard logic stays inside auto-order/routes/auto_order_dashboard.js.
- */
-try {
-  app.use(require('./auto-order/routes/auto_order_dashboard'));
-  console.log('[GM_AUTO_ORDER_DASHBOARD_API_V012] mounted');
-} catch (e) {
-  console.error('[GM_AUTO_ORDER_DASHBOARD_API_V012] mount failed:', String(e && e.stack || e));
-}
-
-/* GM_AUTO_ORDER_ACCOUNT_API_V001 */
-try {
-  app.use(require('./auto-order/routes/auto_order_account'));
-  console.log('[GM_AUTO_ORDER_ACCOUNT_API_V001] mounted');
-} catch (e) {
-  console.error('[GM_AUTO_ORDER_ACCOUNT_API_V001] mount failed:', String(e && e.stack || e));
-}
-
-console.log('[GM_AUTO_ORDER_RUNTIME_BOOT_V012] mount attempt');
-try {
-  const gmAutoOrderClientRuntime = require('./auto-order/routes/auto_order_client_runtime');
-  app.use(gmAutoOrderClientRuntime);
-  console.log('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V012] mounted');
-} catch (e) {
-  console.error('[GM_AUTO_ORDER_CLIENT_RUNTIME_API_V004] mount failed:', String(e && e.stack || e));
-}
-
 let dbReady = false;
 let dbError = '';
 
-async function ensureMigrationHistory(client){
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS gm_schema_migrations (
-      migration_name TEXT PRIMARY KEY,
-      checksum_sha256 TEXT NOT NULL,
-      apply_type VARCHAR(20) NOT NULL DEFAULT 'APPLIED',
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-
-  await client.query(`
-    CREATE INDEX IF NOT EXISTS idx_gm_schema_migrations_applied_at
-      ON gm_schema_migrations(applied_at DESC)
-  `);
-}
-
-function migrationChecksum(sql){
-  return crypto.createHash('sha256').update(String(sql || ''), 'utf8').digest('hex');
-}
-
-function migrationIsDestructive(sql){
-  const s = String(sql || '')
-    .replace(/--[^\n\r]*/g, ' ')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/\s+/g, ' ')
-    .toUpperCase();
-
-  const destructive =
-    /\bTRUNCATE\s+TABLE\b/.test(s) ||
-    /\bDROP\s+TABLE\b/.test(s) ||
-    /\bDROP\s+SCHEMA\b/.test(s) ||
-    /\bDROP\s+COLUMN\b/.test(s) ||
-    /\bDELETE\s+FROM\b(?![\s\S]*\bWHERE\b)/.test(s);
-
-  const explicitlyAllowed = /GM_ALLOW_DESTRUCTIVE_MIGRATION/i.test(String(sql || ''));
-  return destructive && !explicitlyAllowed;
-}
-
-async function getMigrationState(client){
-  const r = await client.query(`
-    SELECT migration_name, checksum_sha256, apply_type, applied_at
-    FROM gm_schema_migrations
-    ORDER BY migration_name
-  `);
-  return r.rows || [];
-}
-
 async function initGmDb({ reset=false } = {}){
-  if(reset){
-    throw new Error('DB reset is disabled. Use an explicit maintenance procedure if reset is required.');
+  if (reset) {
+    throw new Error('DB reset is disabled. Use migrations manually if reset is required.');
   }
 
   const dir = path.join(__dirname, 'migrations');
-  if(!fs.existsSync(dir)){
+  if (!fs.existsSync(dir)) {
     throw new Error('migration directory not found: ' + dir);
   }
 
@@ -488,159 +309,30 @@ async function initGmDb({ reset=false } = {}){
     .filter(name => /^\d+_.*\.sql$/i.test(name))
     .sort((a,b) => a.localeCompare(b, undefined, { numeric:true }));
 
-  if(!files.length) throw new Error('no migration files found');
+  if (!files.length) throw new Error('no migration files found');
 
-  const client = await pool.connect();
-  const result = {
-    baseline: [],
-    already_applied: [],
-    newly_applied: [],
-    failed: []
-  };
-
-  try{
-    // Prevent two app instances from running the migration bootstrap at the same time.
-    await client.query(`SELECT pg_advisory_lock(hashtext('glomart_schema_migrations_v1'))`);
-    await ensureMigrationHistory(client);
-
-    const current = await getMigrationState(client);
-
-    // One-time bootstrap for the existing production DB.
-    // Historical files through migration 102 are recorded as BASELINE only.
-    // IMPORTANT: migrations 103+ are NOT baselined; they continue below and execute once.
-    if(current.length === 0){
-      const historical = files.filter(name => {
-        const m = String(name).match(/^(\d+)_/);
-        return m && Number(m[1]) <= 102;
-      });
-
-      await client.query('BEGIN');
-      try{
-        for(const name of historical){
-          const sql = fs.readFileSync(path.join(dir, name), 'utf8');
-          const checksum = migrationChecksum(sql);
-
-          await client.query(`
-            INSERT INTO gm_schema_migrations(
-              migration_name, checksum_sha256, apply_type, applied_at
-            )
-            VALUES($1,$2,'BASELINE',now())
-            ON CONFLICT (migration_name) DO NOTHING
-          `,[name,checksum]);
-
-          result.baseline.push('migrations/' + name);
-        }
-        await client.query('COMMIT');
-      }catch(e){
-        await client.query('ROLLBACK');
-        throw e;
-      }
+  const applied = [];
+  for (const name of files) {
+    const file = path.join(dir, name);
+    const sql = fs.readFileSync(file, 'utf8');
+    if (sql.trim()) {
+      await pool.query(sql);
+      applied.push('migrations/' + name);
     }
-
-    const effectiveState = current.length === 0 ? await getMigrationState(client) : current;
-    const known = new Map(effectiveState.map(r => [r.migration_name, r]));
-
-    for(const name of files){
-      const file = path.join(dir, name);
-      const sql = fs.readFileSync(file, 'utf8');
-      const checksum = migrationChecksum(sql);
-      const prev = known.get(name);
-
-      if(prev){
-        if(String(prev.checksum_sha256) !== checksum){
-          // GM_UI_DICTIONARY_V007: one-time controlled rebuild of migration 133 only.
-          // V005 already applied the first 133 schema, but V007 intentionally reduces it
-          // to the four approved runtime columns. Every other applied migration remains immutable.
-          const canRebuildUi133 =
-            name === '133_gm_ui_dictionary_runtime_usage.sql' &&
-            String(prev.checksum_sha256) === '648555a39ecc169e366023003b48d59aa873eba0a900cbff23fd47b6d8aad637' &&
-            /GM_UI_DICTIONARY_V007_REBUILD_133/.test(sql);
-
-          if(canRebuildUi133){
-            await client.query('BEGIN');
-            try{
-              await client.query(sql);
-              await client.query(`
-                UPDATE gm_schema_migrations
-                SET checksum_sha256=$2, apply_type='REAPPLIED', applied_at=now()
-                WHERE migration_name=$1
-              `,[name,checksum]);
-              await client.query('COMMIT');
-              result.newly_applied.push('migrations/' + name + ':REBUILT');
-              known.set(name,{...prev,checksum_sha256:checksum,apply_type:'REAPPLIED'});
-              continue;
-            }catch(e){
-              await client.query('ROLLBACK');
-              throw e;
-            }
-          }
-
-          throw new Error(
-            '[migration-checksum:' + name + '] historical migration was modified. ' +
-            'Create a NEW migration file instead of editing an applied migration.'
-          );
-        }
-        result.already_applied.push('migrations/' + name);
-        continue;
-      }
-
-      if(!sql.trim()){
-        await client.query(`
-          INSERT INTO gm_schema_migrations(
-            migration_name, checksum_sha256, apply_type, applied_at
-          ) VALUES($1,$2,'APPLIED',now())
-        `,[name,checksum]);
-        result.newly_applied.push('migrations/' + name);
-        continue;
-      }
-
-      if(migrationIsDestructive(sql)){
-        throw new Error(
-          '[migration-safety:' + name + '] destructive SQL blocked. ' +
-          'TRUNCATE/DROP/unscoped DELETE must be handled by an explicit maintenance procedure.'
-        );
-      }
-
-      try{
-        await client.query(sql);
-        await client.query(`
-          INSERT INTO gm_schema_migrations(
-            migration_name, checksum_sha256, apply_type, applied_at
-          ) VALUES($1,$2,'APPLIED',now())
-        `,[name,checksum]);
-        result.newly_applied.push('migrations/' + name);
-      }catch(e){
-        const msg = String(e && e.message || e);
-        result.failed.push({ file:'migrations/' + name, error:msg });
-        throw new Error('[migration:' + name + '] ' + msg);
-      }
-    }
-
-    dbReady = true;
-    dbError = '';
-    return result;
-  }finally{
-    try{ await client.query(`SELECT pg_advisory_unlock(hashtext('glomart_schema_migrations_v1'))`); }catch(_){}
-    client.release();
   }
+
+  dbReady = true;
+  dbError = '';
+  return { files:applied };
 }
 
 if(process.env.GM_DB_AUTOINIT !== '0'){
   initGmDb({ reset:false }).then((r) => {
-    const baseline = r && r.baseline ? r.baseline.length : 0;
-    const already = r && r.already_applied ? r.already_applied.length : 0;
-    const newly = r && r.newly_applied ? r.newly_applied.length : 0;
-    const failed = r && r.failed ? r.failed.length : 0;
-    console.log('[GM DB READY V002]', JSON.stringify({
-      baseline,
-      already_applied: already,
-      newly_applied: newly,
-      failed
-    }));
+    console.log('[GM DB READY] migrations/*.sql applied', r && r.files ? r.files.length : '');
   }).catch(err => {
     dbReady = false;
     dbError = String(err && err.message || err);
-    console.error('[GM DB INIT FAILED V002]', dbError);
+    console.error('[GM DB INIT SKIPPED]', dbError);
   });
 }
 
@@ -810,9 +502,8 @@ const GM_RESET_TARGETS = [
   'gm_category_country_sales_monthly',
   'gm_category_country_sales_yearly',
   'gm_sales_aggregate_event',
-  // Persistent master/learning data. Search/category learning must survive maintenance reset.
-  // 'gm_category_keyword',
-  // 'gm_category',
+  'gm_category_keyword',
+  'gm_category',
   'gm_product_archive',
   'gm_basket',
   'gm_order',
@@ -895,14 +586,14 @@ app.get('/', (req,res)=>{
   <b>DB 상태</b><span class="${dbReady?'ok':'ng'}">${dbReady?'OK':'ERROR'}</span>
   <b>DB 오류</b><code>${esc(dbError||'-')}</code>
   <b>버전</b><code>${esc(VERSION)}</code>
-  </div><p><a class="btn" href="/api/gm/health">Health 확인</a><a class="btn" href="/auto-order/">외부상품 운영센터</a><a class="btn gray" href="/gm_data_builder.html">Data Builder 열기</a><a class="btn red" href="/api/gm/builder/export-all?limit=50000">전체 CSV ZIP</a></p></div>
+  </div><p><a class="btn" href="/api/gm/health">Health 확인</a><a class="btn gray" href="/gm_data_builder.html">Data Builder 열기</a><a class="btn red" href="/api/gm/builder/export-all?limit=50000">전체 CSV ZIP</a></p></div>
   <div class="card"><h2>주요 라우트</h2><ul>${routeHtml}</ul></div>
   </div></body></html>`);
 })
 
 
 app.get('/api/gm/status', (req,res)=>ok(res,{ service:'glomart-api', version:VERSION, mode:'json-cache-plus-postgresql', dbReady, dbError, routes:[
-  'GET /','GET /health','GET /api/gm/health','GET /api/gm/status','GET /api/gm/db/migrations','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
+  'GET /','GET /health','GET /api/gm/health','GET /api/gm/status','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
   'GET /api/gm/dashboard/realtime','POST /api/gm/dashboard/snapshot','POST /api/gm/search/log',
   'POST /api/gm/product/queue','POST /api/gm/product/upsert','POST /api/gm/keyword/translate','GET /api/gm/keyword/lookup',
   'GET /api/gm/builder/export','GET /api/gm/builder/export-all','GET /gm_data_builder.html'
@@ -919,31 +610,6 @@ app.get('/api/gm/health', async (req,res)=>{
   }
 });
 
-app.get('/api/gm/db/migrations', async (req,res)=>{
-  try{
-    await dbQuery(`
-      CREATE TABLE IF NOT EXISTS gm_schema_migrations (
-        migration_name TEXT PRIMARY KEY,
-        checksum_sha256 TEXT NOT NULL,
-        apply_type VARCHAR(20) NOT NULL DEFAULT 'APPLIED',
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
-    const r = await dbQuery(`
-      SELECT migration_name, apply_type, applied_at, checksum_sha256
-      FROM gm_schema_migrations
-      ORDER BY migration_name
-    `);
-    ok(res, {
-      action:'db.migrations',
-      count:r.rows.length,
-      rows:r.rows
-    });
-  }catch(e){
-    fail(res,500,'migration status failed',{detail:String(e && e.message || e)});
-  }
-});
-
 app.post('/api/gm/db/init', async (req,res)=>{
   try{ const r = await initGmDb({ reset:false }); ok(res, { action:'db.init', ...r }); }
   catch(e){ fail(res, 500, 'db init failed', { detail:String(e && e.message || e) }); }
@@ -951,13 +617,6 @@ app.post('/api/gm/db/init', async (req,res)=>{
 
 app.post('/api/gm/db/reset', async (req,res)=>{
   try{
-    const enabled = process.env.GM_DB_RESET_ENABLED === '1';
-    const confirm = String(req.body && req.body.confirm || '').trim();
-    if(!enabled || confirm !== 'RESET GM DATA'){
-      return fail(res,403,'db reset disabled',{
-        detail:'Set GM_DB_RESET_ENABLED=1 and send confirm="RESET GM DATA" only during explicit maintenance.'
-      });
-    }
     const before = await tableCounts(GM_RESET_TARGETS);
     const existing = await dbQuery(`
       SELECT table_name
@@ -970,7 +629,7 @@ app.post('/api/gm/db/reset', async (req,res)=>{
       return ok(res, { action:'db.reset', truncated:[], before, after:{}, detail:'no target gm_* tables found' });
     }
     const quoted = tables.map(t => '"' + String(t).replace(/"/g, '""') + '"').join(', ');
-    await dbQuery('TRUNCATE TABLE ' + quoted + ' RESTART IDENTITY');
+    await dbQuery('TRUNCATE TABLE ' + quoted + ' RESTART IDENTITY CASCADE');
     const after = await tableCounts(GM_RESET_TARGETS);
     ok(res, { action:'db.reset', truncated:tables, before, after });
   }catch(e){
@@ -1373,6 +1032,226 @@ async function upsertSalesAggregate(client, order, item){
   await incrementCategoryOperationalMetric(q, item, order, { sales_qty:qty, sales_amount:salesAmount, purchase_amount:purchaseAmount, is_ad:isAd });
 }
 
+async function upsertSearchStats(row){
+  if(await tableExists('gm_search_keyword_stat')){
+    await dbQuery(`
+      INSERT INTO gm_search_keyword_stat (
+        keyword_original, keyword_normalized, keyword_canonical,
+        country_code, lang_code, member_country_code,
+        category_no, category_code, category_name,
+        mall_code, search_count, cache_used_count, cache_miss_count,
+        result_count_sum, db_insert_count_sum, queue_send_count_sum,
+        first_search_at, last_search_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,$15,now(),now(),now()
+      )
+      ON CONFLICT (keyword_normalized, country_code, lang_code, category_no, mall_code) DO UPDATE SET
+        keyword_original=EXCLUDED.keyword_original,
+        keyword_canonical=EXCLUDED.keyword_canonical,
+        member_country_code=EXCLUDED.member_country_code,
+        category_code=EXCLUDED.category_code,
+        category_name=EXCLUDED.category_name,
+        search_count=gm_search_keyword_stat.search_count+1,
+        cache_used_count=gm_search_keyword_stat.cache_used_count+EXCLUDED.cache_used_count,
+        cache_miss_count=gm_search_keyword_stat.cache_miss_count+EXCLUDED.cache_miss_count,
+        result_count_sum=gm_search_keyword_stat.result_count_sum+EXCLUDED.result_count_sum,
+        db_insert_count_sum=gm_search_keyword_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
+        queue_send_count_sum=gm_search_keyword_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
+        last_search_at=now(),
+        updated_at=now()
+    `, [
+      row.keyword_original, row.keyword_normalized, row.keyword_canonical,
+      row.country_code, row.lang_code, row.member_country_code,
+      row.category_no, row.category_code, row.category_name,
+      row.mall_code, row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
+      row.result_count, row.db_insert_count, row.queue_send_count
+    ]);
+  }
+  if(row.category_no && await tableExists('gm_category_search_stat')){
+    await dbQuery(`
+      INSERT INTO gm_category_search_stat (
+        category_no, category_code, category_name,
+        country_code, lang_code, member_country_code, mall_code,
+        search_count, cache_used_count, cache_miss_count,
+        result_count_sum, db_insert_count_sum, queue_send_count_sum,
+        first_search_at, last_search_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$11,$12,now(),now(),now()
+      )
+      ON CONFLICT (category_no, country_code, lang_code, mall_code) DO UPDATE SET
+        category_code=EXCLUDED.category_code,
+        category_name=EXCLUDED.category_name,
+        member_country_code=EXCLUDED.member_country_code,
+        search_count=gm_category_search_stat.search_count+1,
+        cache_used_count=gm_category_search_stat.cache_used_count+EXCLUDED.cache_used_count,
+        cache_miss_count=gm_category_search_stat.cache_miss_count+EXCLUDED.cache_miss_count,
+        result_count_sum=gm_category_search_stat.result_count_sum+EXCLUDED.result_count_sum,
+        db_insert_count_sum=gm_category_search_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
+        queue_send_count_sum=gm_category_search_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
+        last_search_at=now(),
+        updated_at=now()
+    `, [
+      row.category_no, row.category_code, row.category_name,
+      row.country_code, row.lang_code, row.member_country_code, row.mall_code,
+      row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
+      row.result_count, row.db_insert_count, row.queue_send_count
+    ]);
+  }
+
+  if(row.category_no){
+    const yyyymm = cleanText(row.yyyymm || currentYyyymm());
+    await incrementCategoryPeriodCounter('gm_category_search_monthly','yyyymm',yyyymm,row);
+    await incrementCategoryPeriodCounter('gm_category_search_yearly','yyyy',cleanText(row.yyyy || currentYyyy()),row);
+    if(await tableExists('gm_category')){
+      await dbQuery(`UPDATE gm_category SET search_count=COALESCE(search_count,0)+1, last_search_at=now(), updated_at=now() WHERE category_no=$1`, [cleanText(row.category_no)]);
+    }
+  }
+  if(row.product_uid && await tableExists('gm_product')){
+    await dbQuery(`UPDATE gm_product SET search_count=COALESCE(search_count,0)+1, last_search_at=now(), updated_at=now() WHERE product_uid=$1`, [cleanText(row.product_uid)]);
+  }
+}
+
+app.post('/api/gm/search/log', async (req,res)=>{
+  try{
+    if(!(await tableExists('gm_search_log'))) return fail(res, 500, 'gm_search_log table not found');
+    const b = req.body || {};
+    const keywordOriginal = cleanText(b.keyword_original || b.keyword || b.origin || '');
+    const keywordNormalized = normalizeKeywordForStat(b.keyword_normalized || keywordOriginal);
+    const uiLangCode = cleanText(b.ui_lang_code || b.uiLangCode || b.gm_lang || b.gmLang || b.lang_code || b.langCode || '');
+    const keywordLangCode = cleanText(b.keyword_lang_code || b.keywordLangCode || uiLangCode);
+    const langCode = uiLangCode;
+    let keywordCanonical = cleanText(b.keyword_canonical || b.keywordCanonical || '');
+    let categoryNo = cleanText(b.category_no || b.categoryNo || '');
+    let categoryCode = cleanText(b.category_code || b.categoryCode || '');
+    let categoryName = cleanText(b.category_name || b.categoryName || '');
+    const match = await findCategoryKeywordMatch(keywordNormalized, langCode);
+    if(match){
+      if(!keywordCanonical) keywordCanonical = cleanText(match.keyword_canonical || match.keyword_normalized || keywordNormalized);
+      if(!categoryNo) categoryNo = cleanText(match.category_no || '');
+      if(!categoryCode) categoryCode = cleanText(match.category_code || '');
+      if(!categoryName) categoryName = cleanText(match.category_name || '');
+    }
+    if(!keywordCanonical) keywordCanonical = keywordNormalized;
+    const row = {
+      keyword_original: keywordOriginal,
+      keyword_normalized: keywordNormalized,
+      keyword_canonical: keywordCanonical,
+      lang_code: langCode,
+      country_code: cleanText(b.country_code || b.countryCode || ''),
+      member_country_code: cleanText(b.member_country_code || b.memberCountryCode || ''),
+      category_code: categoryCode,
+      category_no: categoryNo,
+      category_name: categoryName,
+      mall_code: cleanText(b.mall_code || b.mallCode || ''),
+      result_count: toInt(b.result_count || b.resultCount, 0),
+      db_insert_count: toInt(b.db_insert_count || b.dbInsertCount, 0),
+      queue_send_count: toInt(b.queue_send_count || b.queueSendCount, 0),
+      cache_used: !!(b.cache_used || b.cacheUsed),
+      yyyymm: cleanText(b.yyyymm || b.year_month || b.yearMonth || '')
+    };
+    const requestId = cleanText(b.request_id || b.requestId || '');
+    const rawJsonText = JSON.stringify({ ...b, ui_lang_code:uiLangCode, keyword_lang_code:keywordLangCode, matched_category_keyword: match || null });
+    let alreadyCountedThisSearch = false;
+    if(requestId && row.keyword_normalized){
+      // search_id는 gm_search_log 레코드 고유번호로 유지한다.
+      // CPKR/ALKR는 각각 별도 row로 저장하되, 같은 request_id + normalized_keyword는 통계/카운터만 1회 처리한다.
+      const ex = await dbQuery(`
+        SELECT 1 FROM gm_search_log
+        WHERE request_id=$1 AND keyword_normalized=$2
+        LIMIT 1
+      `, [requestId, row.keyword_normalized]);
+      alreadyCountedThisSearch = !!(ex.rows && ex.rows[0]);
+    }
+    const ins = await dbQuery(`
+      INSERT INTO gm_search_log (
+        search_at, keyword_original, keyword_normalized, keyword_canonical,
+        lang_code, ui_lang_code, keyword_lang_code, country_code, member_country_code,
+        category_code, category_no, category_name,
+        mall_code, result_count, db_insert_count, queue_send_count,
+        cache_used, cache_key, search_source,
+        member_id, guest_key, device_type, request_id, raw_json, created_at
+      ) VALUES (
+        now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,now()
+      ) RETURNING search_id
+    `, [
+      row.keyword_original, row.keyword_normalized, row.keyword_canonical,
+      row.lang_code, uiLangCode, keywordLangCode, row.country_code, row.member_country_code,
+      row.category_code, row.category_no, row.category_name,
+      row.mall_code, row.result_count, row.db_insert_count, row.queue_send_count,
+      row.cache_used, cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
+      cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''), requestId,
+      rawJsonText
+    ]);
+    if(!alreadyCountedThisSearch) await upsertSearchStats(row);
+    ok(res, { action:'search.log', inserted:true, counted:!alreadyCountedThisSearch, search_id:ins.rows && ins.rows[0] && ins.rows[0].search_id, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
+  }catch(e){
+    fail(res, 500, 'search log failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/search/summary', async (req,res)=>{
+  try{
+    const limit = Math.max(1, Math.min(100, toInt(req.query.limit, 20)));
+    const out = {};
+    if(await tableExists('gm_search_keyword_stat')){
+      const r = await dbQuery(`
+        SELECT keyword_canonical, keyword_normalized, country_code, lang_code, category_no, category_code, mall_code, search_count, last_search_at
+        FROM gm_search_keyword_stat
+        ORDER BY search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit]);
+      out.top_keywords = r.rows;
+    }
+    if(await tableExists('gm_category_search_stat')){
+      const r = await dbQuery(`
+        SELECT category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+        FROM gm_category_search_stat
+        ORDER BY search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit]);
+      out.top_categories = r.rows;
+    }
+    if(await tableExists('gm_category_search_monthly')){
+      const ym = cleanText(req.query.yyyymm || req.query.month || '');
+      const r = await dbQuery(`
+        SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+        FROM gm_category_search_monthly
+        WHERE ($2 = '' OR yyyymm = $2)
+        ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit, ym]);
+      out.monthly_categories = r.rows;
+    }
+    ok(res, { action:'search.summary', ...out });
+  }catch(e){
+    fail(res, 500, 'search summary failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/search/monthly', async (req,res)=>{
+  try{
+    if(!(await tableExists('gm_category_search_monthly'))) return fail(res, 500, 'gm_category_search_monthly table not found');
+    const limit = Math.max(1, Math.min(500, toInt(req.query.limit, 100)));
+    const yyyymm = cleanText(req.query.yyyymm || req.query.month || '');
+    const country = cleanText(req.query.country_code || req.query.countryCode || '');
+    const lang = cleanText(req.query.lang_code || req.query.langCode || '');
+    const r = await dbQuery(`
+      SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code,
+             search_count, cache_used_count, cache_miss_count, result_count_sum, db_insert_count_sum, queue_send_count_sum,
+             first_search_at, last_search_at
+      FROM gm_category_search_monthly
+      WHERE ($2 = '' OR yyyymm = $2)
+        AND ($3 = '' OR country_code = $3)
+        AND ($4 = '' OR lang_code = $4)
+      ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+      LIMIT $1
+    `, [limit, yyyymm, country, lang]);
+    ok(res, { action:'search.monthly', rows:r.rows });
+  }catch(e){
+    fail(res, 500, 'search monthly failed', { detail:String(e && e.message || e) });
+  }
+});
+
 app.get('/api/gm/sales/summary', async (req,res)=>{
   try{
     const yyyymm = cleanText(req.query.yyyymm || currentYyyymm());
@@ -1540,11 +1419,90 @@ app.post('/api/gm/supplier/upsert', async (req,res)=>{
 // Do not add a duplicate /api/gm/product/upsert route here.
 
 
-/* GM_BASKET_ROUTE_SINGLE_OWNER_V035
- * /api/gm/basket/add, /api/gm/basket/list, /api/gm/basket/item are owned only by routes/basket.js.
- * Do not restore duplicate inline routes here. Express would execute the first registered route and bypass
- * the common first-INSERT cart counter used by SmartFit, external detail, and the basket page.
- */
+app.post('/api/gm/basket/add', async (req,res)=>{
+  try{
+    const b = req.body || {};
+    const own = owner(b);
+    const p = basketPayload(b);
+    if(!p.mall_code || !p.pi_ii_vi) return fail(res, 400, 'mall_code/pi_ii_vi required', { body_keys:Object.keys(b) });
+    if(!p.product_name) p.product_name = '외부상품';
+
+    console.log('[GM_BASKET_ADD_REQUEST]', {
+      member_id:p.member_id, guest_key:p.guest_key, mall_code:p.mall_code, pi_ii_vi:p.pi_ii_vi,
+      product_uid:p.mall_code + '_' + p.pi_ii_vi,
+      has_product_url:!!p.product_url, has_thumb_url:!!p.thumb_url,
+      product_name:p.product_name, amount:p.amount, quantity:p.quantity
+    });
+
+    const r = await dbQuery(`
+      INSERT INTO gm_basket (
+        mall_code, member_id, guest_key, pi_ii_vi, product_name, option_name, option_value,
+        quantity, amount, amount_type, delivery_type, delivery_fee,
+        product_url, thumb_url, thumb_file_name, added_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now())
+      ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, '')))
+      DO UPDATE SET
+        quantity = gm_basket.quantity + EXCLUDED.quantity,
+        product_name=EXCLUDED.product_name,
+        option_name=EXCLUDED.option_name,
+        option_value=EXCLUDED.option_value,
+        amount=EXCLUDED.amount,
+        amount_type=EXCLUDED.amount_type,
+        delivery_type=EXCLUDED.delivery_type,
+        delivery_fee=EXCLUDED.delivery_fee,
+        product_url=EXCLUDED.product_url,
+        thumb_url=EXCLUDED.thumb_url,
+        thumb_file_name=EXCLUDED.thumb_file_name,
+        updated_at=now()
+      RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid
+    `, [
+      p.mall_code, p.member_id, p.guest_key, p.pi_ii_vi, p.product_name,
+      p.option_name, p.option_value, p.quantity, p.amount, p.amount_type,
+      p.delivery_type, p.delivery_fee, p.product_url, p.thumb_url, p.thumb_file_name
+    ]);
+    console.log('[GM_BASKET_ADD_OK]', { product_uid:r.rows[0] && r.rows[0].product_uid, member_id:p.member_id });
+    ok(res, { item:r.rows[0] });
+  }catch(e){
+    console.error('[GM_BASKET_ADD_ERROR]', String(e && e.message || e), req.body || {});
+    fail(res, 500, 'basket add failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/basket/list', async (req,res)=>{
+  try{
+    const memberId = cleanText(req.query.member_id);
+    const guestKey = cleanText(req.query.guest_key);
+    if(!memberId && !guestKey) return fail(res, 400, 'member_id or guest_key required');
+    const r = memberId
+      ? await dbQuery(basketSelectSql('WHERE member_id=$1 ORDER BY added_at DESC'), [memberId])
+      : await dbQuery(basketSelectSql('WHERE guest_key=$1 ORDER BY added_at DESC'), [guestKey]);
+    console.log('[GM_BASKET_LIST_OK]', { member_id:memberId, guest_key:guestKey, count:r.rows.length });
+    ok(res, { items:r.rows });
+  }catch(e){
+    console.error('[GM_BASKET_LIST_ERROR]', String(e && e.message || e));
+    fail(res, 500, 'basket list failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.delete('/api/gm/basket/item', async (req,res)=>{
+  try{
+    const b = req.body || {};
+    const own = owner(b);
+    const uids = Array.isArray(b.product_uids) ? b.product_uids.map(cleanText).filter(Boolean) : [];
+    const key = basketKey(b);
+    let deleted=[];
+    if(uids.length){
+      const r = await dbQuery(`DELETE FROM gm_basket WHERE ${own.col}=$1 AND (mall_code || '_' || pi_ii_vi) = ANY($2::text[]) RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`, [own.val, uids]);
+      deleted = deleted.concat(r.rows.map(x=>x.product_uid));
+    }else{
+      if(!key.pi_ii_vi) return fail(res, 400, 'pi_ii_vi/product_uid required');
+      const r = await dbQuery(`DELETE FROM gm_basket WHERE ${own.col}=$1 AND mall_code=$2 AND pi_ii_vi=$3 RETURNING (mall_code || '_' || pi_ii_vi) AS product_uid`, [own.val, key.mall_code, key.pi_ii_vi]);
+      deleted = deleted.concat(r.rows.map(x=>x.product_uid));
+    }
+    ok(res, { deleted });
+  }catch(e){ fail(res, 500, 'basket delete failed', { detail:String(e && e.message || e) }); }
+});
+
 
 /* GM_ADMIN_ORDER_QUEUE_V003
  * 관리자 주문처리용 Queue API.
@@ -1932,77 +1890,19 @@ try{
 }catch(e){
   console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
 }
-const eventService = createEventService({ pool, tableExists, cleanText, currentYyyymm, currentYyyy });
-app.locals.eventService = eventService;
-const eventQueue = createEventQueue(pool);
-app.locals.eventQueue = eventQueue;
-startEventQueueWorker(pool, eventService, { intervalMs:2000 });
-startMemberRelationWorker(pool, eventService);
-installSearchLogService({
-  app,
-  pool,
-  dbQuery,
-  tableExists,
-  cleanText,
-  toInt,
-  ok,
-  fail,
-  normalizeKeywordForStat,
-  findCategoryKeywordMatch,
-  incrementCategoryPeriodCounter,
-  currentYyyymm,
-  currentYyyy,
-  keywordRelationService,
-  eventService
-});
-
 app.use(require('./routes/health'));
-app.use(require('./routes/event'));
-console.log('[EVENT_ROUTE_V009] routes/event registered');
-app.use(require('./routes/category_menu'));
-console.log('[GM_CATEGORY_MENU_V001] routes/category_menu registered');
-app.use(require('./routes/category_pack'));
-console.log('[GM_CATEGORY_PACK_USER_V001] routes/category_pack registered');
-try{ require('./services/asset_pack_manager').ensureStarted(pool); }catch(e){ console.warn('[GM_ASSET_PACK_MANAGER] start skipped:',String(e&&e.message||e)); }
-app.use(require('./routes/search_keyword'));
-console.log('[GM_SEARCH_KEYWORD_ROUTE_V002] routes/search_keyword registered');
-app.use(require('./routes/search_local'));
-console.log('[GM_SEARCH_LOCAL_V001] routes/search_local registered');
-app.use(require('./routes/barcode'));
-console.log('[GM_BARCODE_ROUTE_V001] routes/barcode registered');
-app.use(require('./routes/image_vector'));
-console.log('[GM_IMAGE_VECTOR_ROUTE_V001] routes/image_vector registered');
-try{
-  const imageVectorBackground=require('./background/image-vector');
-  imageVectorBackground.init(pool);
-  app.use(imageVectorBackground.router);
-  console.log('[GM_IMAGE_VECTOR_BACKGROUND_V006] background/image-vector registered');
-}catch(e){
-  console.error('[GM_IMAGE_VECTOR_BACKGROUND_MOUNT_FAIL]',String(e&&e.message||e));
-}
-try {
-  app.use(require('./special/category-batch/category_batch'));
-  console.log('[GM_CATEGORY_BATCH_SPECIAL_V006] mounted');
-} catch (e) {
-  console.error('[GM_CATEGORY_BATCH_SPECIAL_V006] mount failed:', String(e && e.stack || e));
-}
-app.use(require('./routes/address_map'));
-console.log('[GM_ORDER_MAP_ADDRESS_ROUTE_V001] routes/address_map registered');
-app.use(require('./routes/smartfit_vector'));
-console.log('[GM_SMARTFIT_VECTOR_ROUTE_V001] routes/smartfit_vector registered');
-app.use(require('./routes/product')); // GM_PRODUCT_SPLIT_V004: routes/product/index mounts queue + detail_fast
+app.use(require('./routes/product_event'));
+app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
 app.use(require('./routes/account'));
-app.use(require('./routes/deposit')); // Glomart deposit read API
 app.use(require('./routes/order'));
-app.use(require('./routes/order_history')); // GM 주문조회 전용 라우트(서버는 평면 구조 유지)
-app.use(require('./routes/order_cs')); // GM 주문 취소/교환/반품/구매확정 전용 라우트
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
 app.use(require('./routes/network'));
+app.use(require('./routes/ui_dictionary_admin'));
 app.use(require('./routes/smartfit'));
 app.use(require('./routes/message'));
 console.log('[GM_SMARTFIT_ROUTE_V001] routes/smartfit registered');

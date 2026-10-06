@@ -1,5 +1,5 @@
 'use strict';
-// GM_UI_DICTIONARY_V005
+// GM_UI_DICTIONARY_V011_DYNAMIC_NON_UI_FILTER
 // Reuses the existing gm_ui_dictionary + GM_MATCH_ENGINE slot contract (%d/%m/%s).
 // V2 policy: Korean UI phrase -> normalize safe dynamic values -> reuse/create GM_CODE
 // -> accumulate source/use counters -> fill missing 24 translations. Never auto-remove.
@@ -22,6 +22,58 @@ function safeLocator(v){return s(v).slice(0,500);}
 function safePage(v){return s(v).slice(0,240);}
 function cleanText(v){let x=s(v).replace(/<[^>]+>/g,' ').replace(/\{\$[^}]+\}/g,' ').replace(/\s+/g,' ').trim();return x.length>500?'':x;}
 function needsTranslation(row){return !row || s(row.translation_status)!=='READY' || FOREIGN.some(l=>!s(row[l]));}
+
+// V011: runtime capture is for reusable UI copy only.
+// Product/search/option/seller values are business data and must never create GM_CODE rows.
+// Do not block merely because a phrase contains words such as "상품" or "옵션"; fixed UI copy
+// like "상품정보 확인중" and "옵션을 선택해주세요" must continue to be captured.
+function dynamicNonUiReason(input,norm){
+  input=input||{};
+  const explicit=s(input.gm_code||input.gmCode).toUpperCase();
+  // Explicit GM_CODE is authored/static UI and is allowed to update its own dictionary row.
+  if(/^GM_\d{4,}$/.test(explicit)) return '';
+
+  const raw=s((norm&&norm.raw)||input.source_text_ko||input.text||input.kr||input.value||'');
+  if(!raw) return '';
+  const page=s(input.page_name||input.page||input.pathname||'').toLowerCase();
+  const surface=s(input.source_surface||input.sourceSurface||'').toLowerCase();
+  const locator=s(input.source_locator||input.locator||input.selector||'').toLowerCase();
+  const meta=[input.source_type,input.sourceType,input.kind,input.role,input.field,input.field_name,input.fieldName,input.semantic,input.value_type,input.valueType].map(s).join(' ').toLowerCase();
+  const context=[page,surface,locator,meta].join(' ');
+
+  // If the capture producer already identifies the semantic value, trust that strong signal.
+  if(/(?:^|[\s_.:-])(product[_ -]?name|mall[_ -]?product[_ -]?name|option[_ -]?name|option[_ -]?value|search[_ -]?keyword|keyword[_ -]?value|seller[_ -]?name|vendor[_ -]?name)(?:$|[\s_.:-])/.test(meta)){
+    return 'DYNAMIC_SEMANTIC_VALUE';
+  }
+
+  // Glomart product/search pages expose changing search/history/recommendation terms as bare
+  // positional anchors (a:11, a:13, ...). They are data, not reusable UI labels.
+  const productLikePage = !page || page==='/' || /\/product\/(?:gm_search|gm_detail)\.html|\/order\/basket\.html/.test(page);
+  if(productLikePage && /(?:^|#)a:\d+$/.test(locator)) return 'DYNAMIC_POSITIONAL_LINK';
+
+  // Product titles are dynamic. Keep this selector list deliberately narrow to title nodes.
+  if(/(?:^|[#.\s>])(h1\.name|h1\.product-title|h1\.product_title|\.product-title|\.product_title|\.prdname|\.prd-name|#product_name|#prdname)(?::\d+)?(?:$|[\s>])/.test(locator)){
+    return 'DYNAMIC_PRODUCT_TITLE';
+  }
+  // Known external/browser title-shaped product text.
+  if(/\|\s*(?:쿠팡|coupang)\s*$/i.test(raw) || /^null\s*-\s*.+\|\s*(?:쿠팡|coupang)\s*$/i.test(raw)) return 'DYNAMIC_PRODUCT_TITLE';
+
+  // Seller/vendor actual values (not labels such as "판매자") when they come from seller fields.
+  if(/(?:seller|vendor|supplier)[-_ .]*(?:name|value|text)/.test(context)) return 'DYNAMIC_SELLER_VALUE';
+
+  // Option value rows: block concrete quantity/size/price combinations only when captured from
+  // option/value/item nodes. Static guidance such as "최대 10개" outside option rows is allowed.
+  const optionContext=/(?:option|옵션)[-_ .]*(?:value|item|row|choice|selected|name)|(?:sku|variant)/.test(context);
+  const concreteOption=/\d+(?:\.\d+)?\s*(?:kg|g|mg|ml|l|cm|mm|m|개|팩|봉|병|박스|세트|매|입)\b/i.test(raw)
+    || /\d+\s*[x×]\s*\d+/i.test(raw)
+    || /\b\d{1,3}(?:,\d{3})+\s*원\b/.test(raw);
+  if(optionContext && concreteOption) return 'DYNAMIC_OPTION_VALUE';
+
+  // Search boxes/history may send the current query value with semantic locator names.
+  if(/(?:search|keyword|검색)[-_ .]*(?:input|value|term|word|query)/.test(context)) return 'DYNAMIC_SEARCH_VALUE';
+
+  return '';
+}
 
 // Important: do not normalize every number. Existing static UI numbers such as 1:1,
 // 10초/30초, 24시간 can be semantic controls. Only clearly dynamic patterns become slots.
@@ -143,8 +195,10 @@ async function nextCode(client){
   return 'GM_'+String(r.rows[0].n).padStart(4,'0');
 }
 async function observe(db,input,opt={}){
-  const norm=normalizeTemplate(input.source_text_ko||input.text||'');
+  const norm=normalizeTemplate(input.source_text_ko||input.text||input.kr||input.value||'');
   if(!norm.ok)return {skip:true,reason:norm.reason};
+  const nonUiReason=dynamicNonUiReason(input,norm);
+  if(nonUiReason)return {skip:true,reason:nonUiReason,text:norm.raw};
   const explicit=s(input.gm_code||input.gmCode).toUpperCase();
   if(!explicit && norm.has_unclassified_digit)return {skip:true,reason:'AMBIGUOUS_NUMBER',text:norm.raw};
   const app=safeApp(input.source_app||input.sourceApp),surface=safeSurface(input.source_surface||input.sourceSurface||input.page_name||input.page),page=safePage(input.page_name||input.page),locator=safeLocator(input.source_locator||input.locator);
@@ -183,10 +237,10 @@ async function observe(db,input,opt={}){
 }
 
 async function captureMany(db,items,opt={}){
-  const stats={received:items.length,created:0,changed:0,reused:0,skipped:0,ambiguous_number:0,translate_codes:[]};
+  const stats={received:items.length,created:0,changed:0,reused:0,skipped:0,ambiguous_number:0,dynamic_non_ui:0,dynamic_non_ui_reasons:{},translate_codes:[]};
   for(const item of items){
     const r=await observe(db,item,opt);
-    if(r.skip){stats.skipped++;if(r.reason==='AMBIGUOUS_NUMBER')stats.ambiguous_number++;continue;}
+    if(r.skip){stats.skipped++;if(r.reason==='AMBIGUOUS_NUMBER')stats.ambiguous_number++;if(/^DYNAMIC_/.test(r.reason||'')){stats.dynamic_non_ui++;stats.dynamic_non_ui_reasons[r.reason]=(stats.dynamic_non_ui_reasons[r.reason]||0)+1;}continue;}
     if(r.created)stats.created++;else if(r.changed)stats.changed++;else stats.reused++;
     if(r.needs_translation)stats.translate_codes.push(r.gm_code);
   }
@@ -200,4 +254,4 @@ async function retryPending(db,limit=20){
   const out=[];for(const x of r.rows)out.push({gm_code:x.gm_code,result:await fillTranslations(db,x.gm_code)});return out;
 }
 
-module.exports={LANGS,FOREIGN,normalizeTemplate,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey};
+module.exports={LANGS,FOREIGN,normalizeTemplate,dynamicNonUiReason,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey};

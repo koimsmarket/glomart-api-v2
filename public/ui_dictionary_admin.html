@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UI 사전 관리</title>
+<style>
+body{font-family:Arial,"Noto Sans KR",sans-serif;margin:0;background:#f5f6f8;color:#222}.wrap{max-width:1200px;margin:auto;padding:18px}.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}input{flex:1;min-width:240px;padding:10px;border:1px solid #bbb;border-radius:6px}button{padding:9px 14px;border:1px solid #999;border-radius:6px;background:#fff;cursor:pointer}.danger{background:#c62828;color:#fff;border-color:#c62828}.danger:disabled{opacity:.45;cursor:not-allowed}.msg{margin:8px 0;font-size:14px}.table{background:#fff;border:1px solid #ddd;border-radius:8px;overflow:auto}table{width:100%;border-collapse:collapse;min-width:900px}th,td{border-bottom:1px solid #eee;padding:9px;text-align:left;font-size:13px}th{position:sticky;top:0;background:#fafafa}.kr{max-width:520px;white-space:normal}.muted{color:#777}.ok{color:#0a7b34}.err{color:#b00020}
+</style>
+</head>
+<body><div class="wrap">
+<h2>UI 사전 조회 / 삭제</h2>
+<div class="bar"><input id="q" placeholder="gm_code / 한국어 / page_name 검색"><button id="search">조회</button><button id="reload">최근 100개</button><button id="delete" class="danger" disabled>선택 삭제</button></div>
+<div id="msg" class="msg muted">조회 후 삭제할 항목을 선택하세요.</div>
+<div class="table"><table><thead><tr><th><input type="checkbox" id="all"></th><th>gm_code</th><th>page</th><th>한국어</th><th>활성</th><th>번역상태</th><th>수정일</th></tr></thead><tbody id="rows"></tbody></table></div>
+</div>
+<script>
+const $=s=>document.querySelector(s), rows=$('#rows'), msg=$('#msg'), delBtn=$('#delete');
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function selected(){return [...document.querySelectorAll('.pick:checked')].map(x=>x.value);}
+function sync(){delBtn.disabled=selected().length===0;}
+async function load(){
+  const q=$('#q').value.trim(); msg.textContent='조회중...'; msg.className='msg muted';
+  try{
+    const r=await fetch('/api/gm/ui-dictionary/admin/list?q='+encodeURIComponent(q)+'&limit=100',{cache:'no-store'}); const j=await r.json();
+    if(!r.ok||!j.ok) throw new Error(j.error||('HTTP '+r.status));
+    rows.innerHTML=(j.rows||[]).map(x=>`<tr><td><input class="pick" type="checkbox" value="${esc(x.gm_code)}"></td><td>${esc(x.gm_code)}</td><td>${esc(x.page_name)}</td><td class="kr">${esc(x.kr)}</td><td>${esc(x.active_yn)}</td><td>${esc(x.translation_status)}</td><td>${esc(x.updated_at)}</td></tr>`).join('');
+    msg.textContent=`${j.count}개 조회됨 · table=${j.table}`; msg.className='msg ok'; $('#all').checked=false; sync();
+    document.querySelectorAll('.pick').forEach(x=>x.addEventListener('change',sync));
+  }catch(e){msg.textContent='조회 실패: '+e.message;msg.className='msg err';}
+}
+$('#search').onclick=load; $('#reload').onclick=()=>{$('#q').value='';load();}; $('#q').addEventListener('keydown',e=>{if(e.key==='Enter')load();});
+$('#all').onchange=e=>{document.querySelectorAll('.pick').forEach(x=>x.checked=e.target.checked);sync();};
+delBtn.onclick=async()=>{
+  const codes=selected(); if(!codes.length)return;
+  if(!confirm(`${codes.length}개 UI 사전 항목을 실제 삭제합니다.\n삭제 후 되돌릴 수 없습니다. 계속할까요?`))return;
+  msg.textContent='삭제중...'; msg.className='msg muted'; delBtn.disabled=true;
+  try{
+    const r=await fetch('/api/gm/ui-dictionary/admin/items',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({gm_codes:codes,confirm:'DELETE'})});
+    const j=await r.json(); if(!r.ok||!j.ok)throw new Error(j.error||('HTTP '+r.status));
+    msg.textContent=`삭제 완료: ${j.deleted}개`; msg.className='msg ok'; await load();
+  }catch(e){msg.textContent='삭제 실패: '+e.message;msg.className='msg err';sync();}
+};
+load();
+</script></body></html>
