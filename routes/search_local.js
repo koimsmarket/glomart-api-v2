@@ -1,7 +1,7 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_SEARCH_LOCAL_V009_PRIORITY_TEST_DIAG';
+const VERSION = 'GM_SEARCH_LOCAL_V010_TEMP_SOLDOUT_3D';
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):d; }
@@ -67,8 +67,21 @@ const PRODUCT_COLS=`
 `;
 const ACTIVE_WHERE=`
   mall_code IN ('CPKR','ALKR')
-  AND COALESCE(sale_status,'active')='active'
-  AND COALESCE(soldout_yn,'N')<>'Y'
+  /* 과거 상세판정이 sale_status='unavailable'까지 저장한 행도 soldout_yn='Y'이면
+     영구삭제로 보지 않고 동일한 3일 임시품절 정책으로 회복시킨다. */
+  AND (
+    COALESCE(sale_status,'active')='active'
+    OR (
+      COALESCE(soldout_yn,'N')='Y'
+      AND LOWER(COALESCE(sale_status,'')) IN ('unavailable','soldout','stopped')
+    )
+  )
+  /* 품절 확인 시 upsert의 updated_at=NOW()를 기준으로 3일간만 검색 비노출.
+     3일이 지나면 soldout_yn='Y'여도 다시 검색 후보가 되어 외부 상세에서 재검증한다. */
+  AND NOT (
+    COALESCE(soldout_yn,'N')='Y'
+    AND COALESCE(updated_at,last_seen_at) >= NOW() - INTERVAL '3 days'
+  )
 `;
 
 async function exactStage(pool,column,keyword,limit){
