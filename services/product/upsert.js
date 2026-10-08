@@ -9,6 +9,27 @@ const {normalizeMallCategoryJson,pickMallCategoryLeaf}=require('./search_categor
 const {normalizeOptionJson,makeProductOptionLinkJson,upsertProductOptions}=require('./option');
 const {normalizeThumbJson,normalizeDetailJson,detailSignalStats,applyDetailPatch}=require('./detail');
 const {cleanText,toInt,resolveUnitPriceSource,normalizeProductPayload,pickPrice,pickNormalPrice,pickFinalSupplyPrice,pickDiscountPrice,pickDeliveryFee,pickDeliveryText,pickDeliveryType,pickReviewCount,pickMallSalesCount,pickRatingScore,cleanDupMallProductName,pickProductUrl,buildProductUrlFromId,pickThumbUrl,pickSupplierName,pickSupplierId,isStandardCoupangSupplier,pickAny,sourceMallFrom,sourceUidFrom,safeJsonString,compactError,pickTaxType,ensureProductLightJsonColumns,pickBuyableQty,pickMinOrderQty,pickMaxOrderQty,pickReturnShippingFee,normalizeUrl}=shared;
+
+function normalizeProductSaleState(p){
+  p=p||{};
+  const raw=cleanText(p.sale_status || p.saleStatus || p.status || p.product_status || p.productStatus || '').toLowerCase();
+  const text=cleanText([
+    p.sale_status,p.saleStatus,p.status,p.product_status,p.productStatus,
+    p.status_text,p.statusText,p.sale_status_text,p.saleStatusText,
+    p.soldout_text,p.soldoutText,p.availability_text,p.availabilityText
+  ].filter(Boolean).join(' '));
+
+  // 쿠팡 상세의 "현재 판매 중인 상품이 아닙니다" 계열은 임시 3일 제외가 아니라 inactive로 고정한다.
+  if(/현재\s*판매\s*중인\s*상품이\s*아닙니다|판매\s*중지|판매\s*종료|판매\s*불가|판매하지\s*않|not\s*(?:currently\s*)?(?:for\s*)?sale|unavailable/i.test(text)
+     || /^(inactive|unavailable|stopped|stop|deleted|not_for_sale|not-for-sale)$/.test(raw)){
+    return {sale_status:'inactive', soldout_yn:'N'};
+  }
+  const soldoutRaw=cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N');
+  const soldout=/^(y|yes|true|1|soldout|sold_out)$/i.test(soldoutRaw) || /품절|일시품절|sold\s*out/i.test(text);
+  if(soldout || raw==='soldout') return {sale_status:'soldout', soldout_yn:'Y'};
+  // 정상 외부 수집이 다시 들어오면 기존 inactive 상품도 자동으로 active 복구된다.
+  return {sale_status:'active', soldout_yn:'N'};
+}
 const {pickSearchKeyword,pickCategoryKeyword,pickRelatedKeywords,pickKeywordMeta,uniqClean,ensureKeywordRelationSchema,saveKeywordTranslatePayload,saveProductKeywordMeta,updateSearchLogCategoryByKeyword}=keyword;
 async function upsertProduct(pool, raw, parent={}){
   const sourceUnitPrice = resolveUnitPriceSource(raw,parent);
@@ -225,6 +246,8 @@ async function upsertProduct(pool, raw, parent={}){
 
   const productOptionLinkJson = optionCount >= 2 ? makeProductOptionLinkJson(optionJson, id) : null;
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
+  const saleState = normalizeProductSaleState(p);
+
   const vals = [
     id.uid, resolvedGlomartCode, cleanText(p.gm_category || p.gmCategory),
     categoryKeyword, searchKeyword,
@@ -245,7 +268,7 @@ async function upsertProduct(pool, raw, parent={}){
     standardCoupangSupplier ? '' : pickAny(p,['supplier_email','supplierEmail','seller_email','sellerEmail']),
     standardCoupangSupplier ? '' : pickAny(p,['supplier_address','supplierAddress','seller_address','sellerAddress']),
     productUrl, thumbUrl,
-    cleanText(p.soldout_yn || p.soldoutYn || p.soldout || 'N'), cleanText(p.sale_status || p.saleStatus || 'active'), pickRatingScore(p),
+    saleState.soldout_yn, saleState.sale_status, pickRatingScore(p),
     pickBuyableQty(p), pickMinOrderQty(p), pickMaxOrderQty(p),
     cleanText(p.return_available_yn || p.returnAvailableYn || 'Y'), cleanText(p.exchange_available_yn || p.exchangeAvailableYn || 'Y'),
     cleanText(p.return_policy_text || p.returnPolicyText || p.return_policy || p.returnPolicy || ''),

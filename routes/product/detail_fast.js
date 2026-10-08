@@ -14,7 +14,7 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_DETAIL_FAST_SERVER_V004_TEMP_SOLDOUT_3D';
+const VERSION = 'GM_DETAIL_FAST_SERVER_V005_INACTIVE_STATE';
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
@@ -86,13 +86,10 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     }
 
     const p=pr.rows[0];
-    /* 3일 임시 품절 만료: DB 이력값 Y는 보존하되 FAST 화면에는 더 이상 품절로 잠그지 않는다.
-       이후 외부 상세가 정상 수집되면 기존 upsert가 soldout_yn='N'으로 실제 DB 상태도 복구한다. */
-    const soldoutAgeMs=p.updated_at?Math.max(0,Date.now()-new Date(p.updated_at).getTime()):0;
+    /* 상품 상태는 시간 경과로 자동 복구하지 않는다.
+       외부 수집에서 정상 판매 상태가 다시 들어올 때만 upsert가 active로 복구한다. */
     const storedSoldout=String(p.soldout_yn||'N').toUpperCase()==='Y';
-    const tempSoldoutActive=storedSoldout && soldoutAgeMs < 3*24*60*60*1000;
-    const storedSaleStatus=C(p.sale_status).toLowerCase();
-    const effectiveSaleStatus=(!tempSoldoutActive && storedSoldout && /^(unavailable|soldout|stopped)$/.test(storedSaleStatus))?'active':(p.sale_status||'');
+    const storedSaleStatus=C(p.sale_status).toLowerCase()||'active';
     const or=await pool.query(`
       SELECT product_id,item_id,vendor_item_id,pi_ii_vi,option_name,option_image_url,
              normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
@@ -119,7 +116,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
         shippingBadge:o.delivery_type||'', deliveryType:o.delivery_type||'', delivery_type:o.delivery_type||'',
         shippingFeeText:o.delivery_fee||0, deliveryFee:o.delivery_fee||0, delivery_fee:o.delivery_fee||0,
         delivery_eta_text:o.delivery_eta_text||'',
-        soldout:sold, disabled:sold||saleStatus==='soldout',
+        soldout:sold, disabled:sold||saleStatus!=='active',
         buyable_qty:o.buyable_qty, min_order_qty:o.min_order_qty, max_order_qty:o.max_order_qty
       };
     });
@@ -150,7 +147,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       delivery_fee:fee, deliveryFee:fee, delivery_eta_text:eta, deliveryType:dtype, delivery_type:dtype,
       jeju_delivery_yn:p.jeju_delivery_yn, jeju_extra_delivery_fee:p.jeju_extra_delivery_fee||0,
       island_delivery_yn:p.island_delivery_yn, island_extra_delivery_fee:p.island_extra_delivery_fee||0,
-      soldout_yn:tempSoldoutActive?'Y':'N', sale_status:effectiveSaleStatus, temporarySoldout:tempSoldoutActive,
+      soldout_yn:storedSoldout?'Y':'N', sale_status:storedSaleStatus, temporarySoldout:false,
       buyable_qty:sel?sel.buyable_qty:p.buyable_qty,
       min_order_qty:sel?sel.min_order_qty:p.min_order_qty,
       max_order_qty:sel?sel.max_order_qty:p.max_order_qty,
