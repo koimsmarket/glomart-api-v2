@@ -1,4 +1,4 @@
-let recordMeta=null, recordItems=[], selectedRecord=null, selectedKey=null;
+let recordMeta=null, recordItems=[], selectedRecord=null, selectedKey=null, lastSearchPayload=null;
 function esc(v){ return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function displayValue(v){ if(v===null)return 'NULL'; if(typeof v==='object')return JSON.stringify(v); return String(v); }
 function metaOf(c){ return recordMeta && recordMeta.column_meta ? (recordMeta.column_meta[c]||{}) : {}; }
@@ -17,22 +17,82 @@ async function loadRecordMeta(){
   const table=document.getElementById('tableSelect').value; if(!table)return;
   const r=await fetch(`${API}/api/gm/builder/record/meta?table=${encodeURIComponent(table)}&t=${Date.now()}`); const j=await r.json();
   if(!r.ok||!j.ok){ log(j); return; } recordMeta=j; recordItems=[]; closeEditor();
-  document.getElementById('fieldSelect').innerHTML='<option value="">전체</option>'+j.columns.map(c=>`<option value="${esc(c)}">${esc(c)} · ${esc(typeLabel(metaOf(c)))}</option>`).join('');
+  const opts=j.columns.map(c=>`<option value="${esc(c)}">${esc(c)} · ${esc(typeLabel(metaOf(c)))}</option>`).join('');
+  document.getElementById('rangeField').innerHTML=opts;
+  document.getElementById('sortField').innerHTML='<option value="">기본 정렬</option>'+opts;
+  document.getElementById('filterRows').innerHTML='';
+  addFilterRow();
+  const preferred=j.columns.find(c=>c==='id'||/_id$/i.test(c))||(j.key_sets&&j.key_sets[0]&&j.key_sets[0][0])||j.columns[0]||'';
+  if(preferred){ document.getElementById('rangeField').value=preferred; document.getElementById('sortField').value=preferred; }
   document.getElementById('resultInfo').textContent=`조회 전 · 기준키: ${keySummary()}`;
   document.getElementById('resultTable').innerHTML='<tbody><tr><td>조회 전</td></tr></tbody>';
 }
-async function searchRecords(){
-  const table=document.getElementById('tableSelect').value, field=document.getElementById('fieldSelect').value, value=document.getElementById('valueInput').value, mode=document.getElementById('modeSelect').value, limit=document.getElementById('limitInput').value||50;
-  if(field && !value){ log('조회 컬럼을 선택한 경우 조회값이 필요합니다.'); return; }
-  const q=new URLSearchParams({table,limit,mode}); if(field){q.set('field',field);q.set('value',value);}
-  const r=await fetch(`${API}/api/gm/builder/record/search?${q.toString()}`); const j=await r.json(); if(!r.ok||!j.ok){log(j);return;}
+const FILTER_OPS=[
+  ['exact','정확히 일치'],['not_equal','같지 않음'],['contains','포함'],['starts_with','시작'],['ends_with','끝'],
+  ['gt','보다 큼 >'],['gte','이상 ≥'],['lt','보다 작음 <'],['lte','이하 ≤'],['between','범위 BETWEEN'],['in','목록 IN (쉼표)'],
+  ['is_null','NULL'],['not_null','NOT NULL']
+];
+function filterColumnOptions(){ return (recordMeta&&recordMeta.columns||[]).map(c=>`<option value="${esc(c)}">${esc(c)} · ${esc(typeLabel(metaOf(c)))}</option>`).join(''); }
+function addFilterRow(preset={}){
+  const wrap=document.getElementById('filterRows'); if(!wrap||!recordMeta)return;
+  if(wrap.children.length>=8){log('검색 조건은 최대 8개까지 가능합니다.');return;}
+  const row=document.createElement('div'); row.className='filter-row';
+  row.style.cssText='display:grid;grid-template-columns:minmax(170px,1.2fr) minmax(150px,1fr) minmax(160px,1.3fr) minmax(160px,1.3fr) 72px;gap:8px;align-items:end;margin:8px 0';
+  row.innerHTML=`<div><label>컬럼</label><select class="filter-field">${filterColumnOptions()}</select></div><div><label>조건</label><select class="filter-op">${FILTER_OPS.map(x=>`<option value="${x[0]}">${x[1]}</option>`).join('')}</select></div><div><label>값</label><input class="filter-value" placeholder="조회값"></div><div class="filter-value2-wrap" style="display:none"><label>끝값</label><input class="filter-value2" placeholder="범위 끝값"></div><div><button class="red" type="button" onclick="removeFilterRow(this)">삭제</button></div>`;
+  wrap.appendChild(row);
+  if(preset.field)row.querySelector('.filter-field').value=preset.field;
+  if(preset.op)row.querySelector('.filter-op').value=preset.op;
+  if(preset.value!==undefined)row.querySelector('.filter-value').value=preset.value;
+  if(preset.value2!==undefined)row.querySelector('.filter-value2').value=preset.value2;
+  const op=row.querySelector('.filter-op'); op.addEventListener('change',()=>syncFilterRow(row)); syncFilterRow(row);
+}
+function removeFilterRow(btn){ const row=btn.closest('.filter-row'); if(row)row.remove(); }
+function syncFilterRow(row){
+  const op=row.querySelector('.filter-op').value;
+  const noValue=op==='is_null'||op==='not_null';
+  row.querySelector('.filter-value').disabled=noValue;
+  row.querySelector('.filter-value2-wrap').style.display=op==='between'?'block':'none';
+}
+function collectFilters(){
+  return [...document.querySelectorAll('#filterRows .filter-row')].map(row=>{
+    const op=row.querySelector('.filter-op').value, value=row.querySelector('.filter-value').value.trim(), value2=row.querySelector('.filter-value2').value.trim();
+    const f={field:row.querySelector('.filter-field').value,op};
+    if(op!=='is_null'&&op!=='not_null')f.value=value;
+    if(op==='between')f.value2=value2;
+    return f;
+  }).filter(f=>f.op==='is_null'||f.op==='not_null'||String(f.value||'')!=='');
+}
+async function performAdvancedSearch(payload){
+  lastSearchPayload=JSON.parse(JSON.stringify(payload));
+  const r=await fetch(`${API}/api/gm/builder/record/search-advanced`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const j=await r.json(); if(!r.ok||!j.ok){log(j);return;}
   recordItems=j.items||[];
-  if(j.key_sets)recordMeta.key_sets=j.key_sets;
-  if(j.key_info)recordMeta.key_info=j.key_info;
-  if(j.editable)recordMeta.editable=j.editable;
-  document.getElementById('resultInfo').textContent=`${j.table} · ${j.count}건 · 기준키: ${keySummary()}`;
+  if(j.key_sets)recordMeta.key_sets=j.key_sets; if(j.key_info)recordMeta.key_info=j.key_info; if(j.editable)recordMeta.editable=j.editable;
+  const filterText=(j.applied_filters||[]).map(f=>`${f.field}:${f.op}${f.value!==undefined?'='+f.value:''}${f.value2!==undefined?'~'+f.value2:''}`).join(' / ');
+  document.getElementById('resultInfo').textContent=`${j.table} · ${j.count}건 · ${filterText||'전체'} · 기준키: ${keySummary()}`;
   renderResults(); closeEditor();
 }
+async function searchAdvancedRecords(){
+  const table=document.getElementById('tableSelect').value, limit=document.getElementById('limitInput').value||100;
+  await performAdvancedSearch({table,limit,join:document.getElementById('joinSelect').value,filters:collectFilters(),sort_field:document.getElementById('sortField').value,sort_direction:document.getElementById('sortDirection').value});
+}
+async function searchAllRecords(){
+  const table=document.getElementById('tableSelect').value, limit=document.getElementById('limitInput').value||100;
+  await performAdvancedSearch({table,limit,filters:[],sort_field:document.getElementById('sortField').value,sort_direction:document.getElementById('sortDirection').value});
+}
+async function quickRangeSearch(direction){
+  const table=document.getElementById('tableSelect').value, field=document.getElementById('rangeField').value, value=document.getElementById('rangeValue').value.trim(), limit=document.getElementById('limitInput').value||100;
+  if(!field||!value){log('기준 컬럼과 시작값을 입력하세요.');return;}
+  const after=direction==='after';
+  document.getElementById('sortField').value=field; document.getElementById('sortDirection').value=after?'ASC':'DESC';
+  await performAdvancedSearch({table,limit,join:'AND',filters:[{field,op:after?'gt':'lt',value}],sort_field:field,sort_direction:after?'ASC':'DESC'});
+}
+function clearSearchConditions(){
+  document.getElementById('rangeValue').value=''; document.getElementById('filterRows').innerHTML=''; addFilterRow();
+  document.getElementById('joinSelect').value='AND'; document.getElementById('sortDirection').value='ASC';
+}
+// 기존 외부 호출 호환용: 고급조회로 연결한다.
+async function searchRecords(){ return lastSearchPayload?performAdvancedSearch(lastSearchPayload):searchAdvancedRecords(); }
 function renderResults(){
   const t=document.getElementById('resultTable');
   if(!recordItems.length){t.innerHTML='<tbody><tr><td>조회 결과 없음</td></tr></tbody>';return;}

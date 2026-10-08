@@ -13,7 +13,7 @@ const BOOLEAN_UDT = new Set(['bool']);
 const JSON_UDT = new Set(['json','jsonb']);
 const DATE_UDT = new Set(['date','timestamp','timestamptz','time','timetz','interval']);
 
-function safeLimit(v){ return Math.min(Math.max(Number(v || 50), 1), 100); }
+function safeLimit(v){ return Math.min(Math.max(Number(v || 50), 1), 200); }
 function hiddenColumns(spec){ return HIDDEN_COLUMNS_BY_TABLE[spec.table] || new Set(); }
 function visibleColumns(spec, columns){
   const hidden = hiddenColumns(spec);
@@ -159,6 +159,40 @@ function sameValue(a,b){ return JSON.stringify(comparable(a)) === JSON.stringify
 function keyWhere(key){ return key.keys.map((k,i)=>`${qIdent(k)}=$${i+1}`).join(' AND '); }
 function publicKeyInfo(info){ return info.map(x=>({columns:x.columns,source:x.source,name:x.name||''})); }
 
+function normalizeJoin(v){ return String(v||'AND').toUpperCase()==='OR'?'OR':'AND'; }
+function normalizeDirection(v){ return String(v||'ASC').toUpperCase()==='DESC'?'DESC':'ASC'; }
+function buildAdvancedFilter(columns, filters, join, params){
+  if(!Array.isArray(filters)) return '';
+  const clauses=[];
+  for(const raw of filters.slice(0,8)){
+    if(!raw || typeof raw!=='object') continue;
+    const field=String(raw.field||'').trim();
+    const op=String(raw.op||'exact').toLowerCase();
+    if(!field) continue;
+    if(!columns.includes(field)) throw invalidValue(field,'INVALID_FILTER_FIELD');
+    const col=qIdent(field);
+    const push=v=>{ params.push(v); return `$${params.length}`; };
+    const value=raw.value;
+    const value2=raw.value2;
+    if(op==='is_null'){ clauses.push(`${col} IS NULL`); continue; }
+    if(op==='not_null'){ clauses.push(`${col} IS NOT NULL`); continue; }
+    if(op==='contains'){ if(value===undefined||value===null||String(value)==='') throw invalidValue(field,'FILTER_VALUE_REQUIRED'); const p=push(value); clauses.push(`${col}::text ILIKE '%' || ${p}::text || '%'`); continue; }
+    if(op==='starts_with'){ if(value===undefined||value===null||String(value)==='') throw invalidValue(field,'FILTER_VALUE_REQUIRED'); const p=push(value); clauses.push(`${col}::text ILIKE ${p}::text || '%'`); continue; }
+    if(op==='ends_with'){ if(value===undefined||value===null||String(value)==='') throw invalidValue(field,'FILTER_VALUE_REQUIRED'); const p=push(value); clauses.push(`${col}::text ILIKE '%' || ${p}::text`); continue; }
+    if(op==='not_equal'){ if(value===undefined||value===null||String(value)==='') throw invalidValue(field,'FILTER_VALUE_REQUIRED'); const p=push(value); clauses.push(`${col} <> ${p}`); continue; }
+    if(op==='gt'||op==='gte'||op==='lt'||op==='lte'){ if(value===undefined||value===null||String(value)==='') throw invalidValue(field,'FILTER_VALUE_REQUIRED'); const p=push(value); const sym={gt:'>',gte:'>=',lt:'<',lte:'<='}[op]; clauses.push(`${col} ${sym} ${p}`); continue; }
+    if(op==='between'){ if(value===undefined||value===null||String(value)===''||value2===undefined||value2===null||String(value2)==='') throw invalidValue(field,'FILTER_RANGE_REQUIRED'); const p1=push(value),p2=push(value2); clauses.push(`${col} BETWEEN ${p1} AND ${p2}`); continue; }
+    if(op==='in'){
+      const vals=Array.isArray(value)?value:String(value??'').split(',').map(x=>x.trim()).filter(Boolean);
+      if(!vals.length) throw invalidValue(field,'FILTER_VALUE_REQUIRED');
+      const p=push(vals); clauses.push(`${col}::text = ANY(${p}::text[])`); continue;
+    }
+    if(value===undefined||value===null||String(value)==='') throw invalidValue(field,'FILTER_VALUE_REQUIRED');
+    const p=push(value); clauses.push(`${col} = ${p}`);
+  }
+  return clauses.length ? ` WHERE ${clauses.join(` ${normalizeJoin(join)} `)}` : '';
+}
+
 router.get('/api/gm/builder/record/meta', async (req,res)=>{
   const spec = tableSpec(req.query.table);
   if(!spec) return fail(res,400,'invalid table');
@@ -210,6 +244,41 @@ router.get('/api/gm/builder/record/search', async (req,res)=>{
       editable:editableColumns(spec,allColumns,identity)
     });
   }catch(e){ fail(res,500,'record search failed',{detail:String(e&&e.message||e)}); }
+});
+
+router.post('/api/gm/builder/record/search-advanced', express.json({limit:'256kb'}), async (req,res)=>{
+  const body=req.body||{};
+  const spec=tableSpec(body.table);
+  if(!spec) return fail(res,400,'invalid table');
+  const db=dbFrom(req);
+  try{
+    const allColumns=await getColumns(db,spec.table);
+    const columns=visibleColumns(spec,allColumns);
+    const identity=await recordKeyInfo(db,spec,allColumns);
+    const params=[];
+    const where=buildAdvancedFilter(columns,body.filters,body.join,params);
+    const limit=safeLimit(body.limit);
+    const sortField=String(body.sort_field||'').trim();
+    let order='';
+    if(sortField){
+      if(!columns.includes(sortField)) return fail(res,400,'invalid sort field');
+      order=` ORDER BY ${qIdent(sortField)} ${normalizeDirection(body.sort_direction)}`;
+    }else if(spec.order){ order=` ORDER BY ${spec.order}`; }
+    params.push(limit);
+    const selectSql=columns.map(qIdent).join(', ');
+    const r=await db.query(`SELECT ${selectSql} FROM ${qIdent(spec.table)}${where}${order} LIMIT $${params.length}`,params);
+    ok(res,{
+      table:spec.table,count:r.rows.length,items:r.rows,
+      key_sets:identity.map(x=>x.columns),key_info:publicKeyInfo(identity),
+      blocked:(spec.blocked||[]).filter(c=>columns.includes(c)),
+      editable:editableColumns(spec,allColumns,identity),
+      applied_filters:Array.isArray(body.filters)?body.filters.slice(0,8):[],
+      join:normalizeJoin(body.join),sort_field:sortField||null,sort_direction:normalizeDirection(body.sort_direction),limit
+    });
+  }catch(e){
+    if(e&&e.status) return fail(res,e.status,e.publicError||e.message,e.extra);
+    fail(res,500,'advanced record search failed',{detail:String(e&&e.message||e)});
+  }
 });
 
 router.post('/api/gm/builder/record/update', express.json({limit:'2mb'}), async (req,res)=>{
