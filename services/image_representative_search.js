@@ -334,7 +334,15 @@ async function search(pool,queryVector,limit,searchMode,categoryCode){
   const qn=normalizedFloat32(queryVector);if(!qn)throw new Error('invalid query vector');
   const timings={category_scope_ms:0,representative_scan_ms:0,representative_search_ms:0,map_fetch_ms:0,category_member_filter_ms:0,vector_fetch_ms:0,exact_rerank_ms:0,product_fetch_ms:0};
   let t=Date.now(),repTop,engine,repCount=0,hnswStatus=null,scopeCodes=[];
-  if(C(categoryCode)){t=Date.now();scopeCodes=await categoryScopeCodes(pool,categoryCode);timings.category_scope_ms=Date.now()-t;t=Date.now();repTop=await topRepresentativeMatchesDbScoped(pool,liveRun,qn,REP_GROUP_LIMIT,scopeCodes);timings.representative_search_ms=Date.now()-t;timings.representative_scan_ms=timings.representative_search_ms;engine='DB_SCOPED_CATEGORY';const meta=await representativeMeta(pool);repCount=meta.count;hnswStatus=publicStatus();}
+  if(C(categoryCode)){
+    t=Date.now();scopeCodes=await categoryScopeCodes(pool,categoryCode);timings.category_scope_ms=Date.now()-t;t=Date.now();
+    // V013: selected category must not bypass the representative HNSW.
+    // Stage 1 stays representative HNSW (or the normal DB fallback only when HNSW is not ready);
+    // Stage 2 filters the mapped member candidates to the selected category subtree in finishSearch().
+    if(mode==='LOADING'&&active.index&&active.run_no===liveRun){repTop=searchMode==='precise'?topRepresentativeMatches(qn,active.rows,REP_GROUP_LIMIT):active.index.search(qn,REP_GROUP_LIMIT);engine=searchMode==='precise'?'EXACT_MEMORY_CATEGORY_MEMBER_FILTER':'HNSW_MEMORY_CATEGORY_MEMBER_FILTER';repCount=active.rows.length;hnswStatus=active.index.status();}
+    else{repTop=await topRepresentativeMatchesDb(pool,liveRun,qn,REP_GROUP_LIMIT);engine=mode==='LOADING'?'DB_FALLBACK_NOT_READY_CATEGORY_MEMBER_FILTER':'DB_UNLOADED_CATEGORY_MEMBER_FILTER';const meta=await representativeMeta(pool);repCount=meta.count;hnswStatus=publicStatus();}
+    timings.representative_search_ms=Date.now()-t;if(searchMode==='precise')timings.representative_scan_ms=timings.representative_search_ms;
+  }
   else if(mode==='LOADING'&&active.index&&active.run_no===liveRun){
     if(searchMode==='precise')repTop=topRepresentativeMatches(qn,active.rows,REP_GROUP_LIMIT);
     else repTop=active.index.search(qn,REP_GROUP_LIMIT);
