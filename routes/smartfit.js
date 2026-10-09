@@ -654,6 +654,31 @@ router.get('/api/gm/smartfit/space/detail', async (req,res)=>{
 });
 
 
+/* Existing collection table read API for Mobile SmartFit. No search/vector/product-search change. */
+router.get('/api/gm/smartfit/collection/list', async (req,res)=>{
+  try{
+    const pool=db(req);
+    const member=s(req.query.member_id || req.query.memberId || '');
+    const limit=Math.min(100, Math.max(1, i(req.query.limit,100)));
+    if(!member) return fail(res,401,'login required');
+    const r=await pool.query(`SELECT t.*, c.collected_at,
+        sp.space_title_source, sp.space_title_ko,
+        m.member_name, m.member_nickname, m.member_nickname AS author_nickname
+      FROM gm_smartfit_collection c
+      JOIN gm_smartfit_template t ON t.template_id=c.template_id
+      LEFT JOIN gm_smartfit_space sp ON sp.space_id=t.space_id
+      LEFT JOIN gm_member m ON m.member_id=t.creator_member_id
+      WHERE c.member_id=$1
+        AND c.is_active='T'
+        AND COALESCE(c.is_deleted,'F')<>'T'
+        AND t.is_active='T'
+        AND COALESCE(t.is_deleted,'F')<>'T'
+      ORDER BY c.collected_at DESC, t.updated_at DESC
+      LIMIT $2`, [member,limit]);
+    ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template')), count:r.rowCount, limit });
+  }catch(e){ console.error('[SMARTFIT_COLLECTION_LIST_ERROR_V091]', e && (e.stack || e.message || e)); fail(res,500,'collection list failed',{ detail:String(e.message||e) }); }
+});
+
 router.post('/api/gm/smartfit/collection/add', async (req,res)=>{
   const client=await db(req).connect();
   try{
