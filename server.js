@@ -1916,7 +1916,6 @@ app.use(require('./routes/search_keyword'));
 app.use(require('./routes/search_local'));
 app.use(require('./routes/category_pack'));
 console.log('[GM_SEARCH_ROUTE_RECOVERY_V001] search_keyword/search_local/category_pack registered');
-app.use(require('./routes/product_event'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
