@@ -1111,6 +1111,27 @@ async function upsertSearchStats(row){
   }
 }
 
+// GM_SEARCH_ROUTE_RECOVERY_V001
+// Search read/upsert-policy recovery only. Keep collection/queue/save logic unchanged.
+app.get('/api/gm/search/upsert-policy', async (req,res)=>{
+  try{
+    const normalized = normalizeKeywordForStat(cleanText(req.query.keyword_normalized || req.query.keyword || ''));
+    if(!normalized) return fail(res, 400, 'keyword_normalized is required');
+    const r = await dbQuery(`SELECT COUNT(*)::int AS today_search_count FROM (
+      SELECT 1 FROM gm_search_log
+      WHERE keyword_normalized=$1
+        AND search_at >= timezone(current_setting('TIMEZONE'), date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
+        AND search_at <  timezone(current_setting('TIMEZONE'), (date_trunc('day', timezone('Asia/Seoul', now())) + interval '1 day') AT TIME ZONE 'Asia/Seoul')
+      ORDER BY search_at DESC
+      LIMIT 3
+    ) q`, [normalized]);
+    const count = toInt(r.rows[0] && r.rows[0].today_search_count, 0);
+    ok(res, { action:'search.upsert-policy', keyword_normalized:normalized, today_search_count:count, limit:3, search_result_upsert_allowed:count<3, timezone:'Asia/Seoul' });
+  }catch(e){
+    fail(res, 500, 'search upsert policy failed', { detail:String(e && e.message || e) });
+  }
+});
+
 app.post('/api/gm/search/log', async (req,res)=>{
   try{
     if(!(await tableExists('gm_search_log'))) return fail(res, 500, 'gm_search_log table not found');
@@ -1891,6 +1912,11 @@ try{
   console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
 }
 app.use(require('./routes/health'));
+app.use(require('./routes/search_keyword'));
+app.use(require('./routes/search_local'));
+app.use(require('./routes/category_pack'));
+console.log('[GM_SEARCH_ROUTE_RECOVERY_V001] search_keyword/search_local/category_pack registered');
+app.use(require('./routes/product_event'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
