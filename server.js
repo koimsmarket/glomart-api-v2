@@ -295,46 +295,27 @@ app.locals.pool = pool;
 let dbReady = false;
 let dbError = '';
 
-async function initGmDb({ reset=false } = {}){
-  if (reset) {
-    throw new Error('DB reset is disabled. Use migrations manually if reset is required.');
-  }
+/* GM_DB_MIGRATION_GUARD_V001
+ * PRODUCTION SAFETY: migration SQL must never run from API boot or HTTP.
+ * gm_schema_migrations is managed by the existing controlled migration process.
+ * Do not re-enable a blind migrations/*.sql loop: historical files include DROP.
+ */
+async function initGmDb(){
+  const err = new Error('Migration execution disabled in web server. Use an audited, history-aware migration deployment process.');
+  err.code = 'GM_MIGRATION_EXECUTION_DISABLED';
+  throw err;
+}
 
-  const dir = path.join(__dirname, 'migrations');
-  if (!fs.existsSync(dir)) {
-    throw new Error('migration directory not found: ' + dir);
-  }
-
-  const files = fs.readdirSync(dir)
-    .filter(name => /^\d+_.*\.sql$/i.test(name))
-    .sort((a,b) => a.localeCompare(b, undefined, { numeric:true }));
-
-  if (!files.length) throw new Error('no migration files found');
-
-  const applied = [];
-  for (const name of files) {
-    const file = path.join(dir, name);
-    const sql = fs.readFileSync(file, 'utf8');
-    if (sql.trim()) {
-      await pool.query(sql);
-      applied.push('migrations/' + name);
-    }
-  }
-
+// Read-only connection check; dbReady describes connectivity, not schema completeness.
+pool.query('SELECT 1 AS connected').then(() => {
   dbReady = true;
   dbError = '';
-  return { files:applied };
-}
-
-if(process.env.GM_DB_AUTOINIT !== '0'){
-  initGmDb({ reset:false }).then((r) => {
-    console.log('[GM DB READY] migrations/*.sql applied', r && r.files ? r.files.length : '');
-  }).catch(err => {
-    dbReady = false;
-    dbError = String(err && err.message || err);
-    console.error('[GM DB INIT SKIPPED]', dbError);
-  });
-}
+  console.log('[GM DB GUARD V001] database connection OK; boot migrations DISABLED; schema unchanged');
+}).catch(err => {
+  dbReady = false;
+  dbError = String(err && err.message || err);
+  console.error('[GM DB GUARD V001] database connection ERROR', dbError);
+});
 
 async function dbQuery(sql, vals=[]){
   return pool.query(sql, vals);
@@ -610,31 +591,15 @@ app.get('/api/gm/health', async (req,res)=>{
   }
 });
 
-app.post('/api/gm/db/init', async (req,res)=>{
-  try{ const r = await initGmDb({ reset:false }); ok(res, { action:'db.init', ...r }); }
-  catch(e){ fail(res, 500, 'db init failed', { detail:String(e && e.message || e) }); }
+// No HTTP endpoint may execute migrations or destructive DB reset commands.
+app.post('/api/gm/db/init', (req,res) => {
+  console.warn('[GM DB GUARD V001] blocked /api/gm/db/init');
+  res.status(403).json({ ok:false, code:'GM_DB_MIGRATION_DISABLED', error:'Migration execution is disabled over HTTP.' });
 });
 
-app.post('/api/gm/db/reset', async (req,res)=>{
-  try{
-    const before = await tableCounts(GM_RESET_TARGETS);
-    const existing = await dbQuery(`
-      SELECT table_name
-      FROM information_schema.tables
-      WHERE table_schema='public' AND table_name = ANY($1::text[])
-      ORDER BY table_name
-    `, [GM_RESET_TARGETS]);
-    const tables = existing.rows.map(r => r.table_name);
-    if(!tables.length){
-      return ok(res, { action:'db.reset', truncated:[], before, after:{}, detail:'no target gm_* tables found' });
-    }
-    const quoted = tables.map(t => '"' + String(t).replace(/"/g, '""') + '"').join(', ');
-    await dbQuery('TRUNCATE TABLE ' + quoted + ' RESTART IDENTITY CASCADE');
-    const after = await tableCounts(GM_RESET_TARGETS);
-    ok(res, { action:'db.reset', truncated:tables, before, after });
-  }catch(e){
-    fail(res, 500, 'db reset failed', { detail:String(e && e.message || e) });
-  }
+app.post('/api/gm/db/reset', (req,res) => {
+  console.warn('[GM DB GUARD V001] blocked /api/gm/db/reset');
+  res.status(403).json({ ok:false, code:'GM_DB_RESET_DISABLED', error:'Database reset is disabled over HTTP.' });
 });
 
 app.get('/api/gm/db/table-counts', async (req,res)=>{
