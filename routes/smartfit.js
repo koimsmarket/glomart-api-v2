@@ -106,6 +106,33 @@ async function loadTemplateItemsCompat(client, templateId){
   return client.query(sql,[templateId]);
 }
 
+// Operating gm_smartfit_item contract: product identity is stored in pi_ii_vi.
+// product_uid remains an API compatibility label only. Never add a product_uid DB column here.
+function itemIdentity(raw, mall){
+  const explicit=s(raw.pi_ii_vi || raw.piIiVi || '');
+  if(explicit) return explicit;
+  const uid=s(raw.product_uid || raw.productUid || raw.product_no || raw.productNo || '');
+  const prefix=s(mall)+'_';
+  return uid.startsWith(prefix) ? uid.slice(prefix.length) : uid;
+}
+function itemApiUid(mall, identity){
+  const code=s(mall), id=s(identity);
+  return id ? (id.startsWith(code+'_') ? id : code+'_'+id) : '';
+}
+function itemRoleNumber(v){
+  if(v === null || v === undefined || s(v)==='' || s(v).toUpperCase()==='ETC') return null;
+  const number=Number(v);
+  return Number.isInteger(number) && number>0 ? number : null;
+}
+function itemCompatRow(row){
+  const out=Object.assign({},row);
+  if(!out.product_uid) out.product_uid=itemApiUid(out.mall_code,out.pi_ii_vi || out.source_uid);
+  if(out.qty==null) out.qty=i(out.quantity,1);
+  if(out.sort_no==null) out.sort_no=i(out.sort_order!=null?out.sort_order:out.item_id,0);
+  if(out.sort_order==null) out.sort_order=i(out.sort_no,0);
+  return out;
+}
+
 function getSmartfitDeleteService(){
   return createSmartfitDeleteService({ r2, isOwnerOrAdmin, getTemplateCollectionLock });
 }
@@ -457,12 +484,11 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
      * product_id 컬럼이 없는 DB에서도 기존 기본 컬럼으로 상품 저장이 가능해야 한다.
      * 컬럼 검사는 트랜잭션 시작 전에 실행하여 저장 트랜잭션을 오염시키지 않는다.
      */
-    const productIdColumnCheck=await client.query(`SELECT EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='gm_smartfit_item' AND column_name='product_id'
-    ) AS ok`);
-    const hasProductId=!!((productIdColumnCheck.rows[0]||{}).ok);
-    console.log('[SMARTFIT_SAVE_V136] START', { template_id:templateId, member_id:member, item_count:Array.isArray(b.items)?b.items.length:0, has_product_id:hasProductId });
+    const itemSchema=await getSmartfitItemSchema(client);
+    for(const col of ['pi_ii_vi','quantity','member_id','product_name','item_role']){
+      if(!itemSchema.cols.has(col)) throw new Error('SmartFit item required column missing: '+col);
+    }
+    console.log('[SMARTFIT_SAVE_SCHEMA_CURRENT]', {template_id:templateId, schema:'pi_ii_vi/quantity/item_id', item_count:Array.isArray(b.items)?b.items.length:0});
     await client.query('BEGIN');
     console.log('[SMARTFIT_SAVE_V136] STEP1_BEGIN');
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
@@ -521,25 +547,26 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
       receivedItemCount=b.items.length;
       const merged=new Map();
       for(const raw of b.items){
-        const productUid=s(raw.product_uid || raw.productUid || raw.product_no || raw.productNo);
-        if(!productUid) continue;
-        const mallCode=s(raw.mall_code || raw.mallCode || 'CAFE24')||'CAFE24';
-        const key=mallCode+'|'+productUid;
-        const qty=Math.max(1,i(raw.qty||raw.quantity,1));
+        const mallCode=s(raw.mall_code || raw.mallCode || 'CPKR')||'CPKR';
+        const identity=itemIdentity(raw,mallCode);
+        if(!identity) continue;
+        const key=mallCode+'|'+identity;
+        const qty=Math.max(1,i(raw.quantity ?? raw.qty,1));
         if(merged.has(key)){
-          const existing=merged.get(key);
-          existing.qty=Math.min(999,existing.qty+qty);
-          if(!existing.product_id){
-            existing.product_id=s(raw.product_id || raw.productId || raw.product_no || raw.productNo || '');
-          }
+          const previous=merged.get(key);
+          previous.quantity=Math.min(999,previous.quantity+qty);
         }else{
           merged.set(key,{
-            item_role:s(raw.item_role||raw.role||'ETC')||'ETC',
+            item_role:itemRoleNumber(raw.item_role ?? raw.role),
             mall_code:mallCode,
-            product_id:s(raw.product_id || raw.productId || raw.product_no || raw.productNo || ''),
-            product_uid:productUid,
-            qty,
-            sort_no:merged.size+1
+            pi_ii_vi:identity,
+            quantity:qty,
+            product_name:s(raw.product_name || raw.productName || ''),
+            option_name:s(raw.option_name || raw.optionName || ''),
+            option_value:s(raw.option_value || raw.optionValue || ''),
+            product_url:s(raw.product_url || raw.productUrl || ''),
+            thumb_url:s(raw.thumb_url || raw.thumbUrl || raw.thumb_origin_url || ''),
+            member_id:member
           });
         }
       }
@@ -556,55 +583,27 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
        * 제목·설명·공간·카테고리·공개 여부 등 템플릿 일반정보는 계속 수정 가능하다.
        */
       if(productLocked){
-        const itemCols=(await client.query(`SELECT column_name FROM information_schema.columns
-          WHERE table_schema='public' AND table_name='gm_smartfit_item'
-            AND column_name IN ('is_active','is_deleted')`)).rows.map(x=>x.column_name);
-        let existingSql=`SELECT item_role,mall_code,product_uid,qty,sort_order AS sort_no FROM gm_smartfit_item WHERE template_id=$1`;
-        if(itemCols.indexOf('is_active')>=0) existingSql += " AND is_active='T'";
-        if(itemCols.indexOf('is_deleted')>=0) existingSql += " AND COALESCE(is_deleted,'F')<>'T'";
-        existingSql += ' ORDER BY sort_order,item_id';
-        const existingRows=(await client.query(existingSql,[saved.template_id])).rows.map((row,idx)=>({
-          item_role:s(row.item_role||'ETC')||'ETC',
-          mall_code:s(row.mall_code||'CAFE24')||'CAFE24',
-          product_uid:s(row.product_uid),
-          qty:Math.max(1,i(row.qty,1)),
-          sort_no:i(row.sort_no,idx+1)
-        }));
-        const incomingRows=Array.from(merged.values()).map((row,idx)=>({
-          item_role:s(row.item_role||'ETC')||'ETC',
-          mall_code:s(row.mall_code||'CAFE24')||'CAFE24',
-          product_uid:s(row.product_uid),
-          qty:Math.max(1,i(row.qty,1)),
-          sort_no:i(row.sort_no,idx+1)
-        }));
-        const sameProducts=JSON.stringify(existingRows)===JSON.stringify(incomingRows);
-        console.log('[SMARTFIT_SAVE_V141] PRODUCT_COMPARE',{template_id:saved.template_id,existing:existingRows.length,incoming:incomingRows.length,same:sameProducts});
-        if(!sameProducts) throw new Error('collected template products cannot be modified');
-        savedItemCount=existingRows.length;
-        normalizedItemCount=existingRows.length;
+        const existing=(await loadTemplateItemsCompat(client,saved.template_id)).rows
+          .map(row=>({mall_code:s(row.mall_code||'CPKR'),pi_ii_vi:s(row.pi_ii_vi),quantity:Math.max(1,i(row.quantity,1)),item_role:itemRoleNumber(row.item_role)}));
+        const incoming=Array.from(merged.values()).map(row=>({mall_code:row.mall_code,pi_ii_vi:row.pi_ii_vi,quantity:row.quantity,item_role:row.item_role}));
+        const same=JSON.stringify(existing)===JSON.stringify(incoming);
+        console.log('[SMARTFIT_SAVE_PRODUCT_LOCK_COMPARE]',{template_id:saved.template_id,existing:existing.length,incoming:incoming.length,same});
+        if(!same) throw new Error('collected template products cannot be modified');
+        savedItemCount=existing.length;
+        normalizedItemCount=existing.length;
       }else{
-        console.log('[SMARTFIT_SAVE_V136] STEP4_DELETE_ITEMS', { template_id:saved.template_id });
+        console.log('[SMARTFIT_ITEM_CURRENT_DELETE]',{template_id:saved.template_id});
         await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
-
-        console.log('[SMARTFIT_SAVE_V136] STEP5_INSERT_ITEMS', { template_id:saved.template_id, count:normalizedItemCount, has_product_id:hasProductId });
-        for(const it of merged.values()){
-          if(hasProductId){
-            await client.query(`INSERT INTO gm_smartfit_item
-              (template_id,item_role,mall_code,product_id,product_uid,qty,sort_order)
-              VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-              [saved.template_id,it.item_role,it.mall_code,it.product_id||'',it.product_uid,it.qty,it.sort_no]);
-          }else{
-            await client.query(`INSERT INTO gm_smartfit_item
-              (template_id,item_role,mall_code,product_uid,qty,sort_order)
-              VALUES ($1,$2,$3,$4,$5,$6)`,
-              [saved.template_id,it.item_role,it.mall_code,it.product_uid,it.qty,it.sort_no]);
-          }
+        let itemId=0;
+        for(const row of merged.values()){
+          itemId++;
+          await client.query(`INSERT INTO gm_smartfit_item
+            (template_id,item_id,item_role,member_id,mall_code,pi_ii_vi,quantity,product_name,option_name,option_value,product_url,thumb_url)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+            [saved.template_id,itemId,row.item_role,row.member_id,row.mall_code,row.pi_ii_vi,row.quantity,row.product_name,row.option_name,row.option_value,row.product_url,row.thumb_url]);
           savedItemCount++;
         }
-
-        if(savedItemCount!==normalizedItemCount){
-          throw new Error(`smartfit item save count mismatch: normalized=${normalizedItemCount}, saved=${savedItemCount}`);
-        }
+        if(savedItemCount!==normalizedItemCount) throw new Error('smartfit item save count mismatch');
       }
       console.log('[SMARTFIT_ITEM_SAVE_V072] DONE',{
         template_id:saved.template_id,
@@ -738,7 +737,7 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
     const items=await loadTemplateItemsCompat(pool,id);
     const meta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
     const metaMap=new Map(meta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
-    const mergedItems=items.rows.map(row=>Object.assign({},metaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
+    const mergedItems=items.rows.map(row=>{const out=itemCompatRow(row);return Object.assign({},metaMap.get(s(out.mall_code||'')+'|'+s(out.product_uid||''))||{},out);});
     ok(res,{ template:addImageUrls(Object.assign({},template,{ title:coalesceTitle(template), author:displayAuthor(template) }),'template'), items:mergedItems });
   }catch(e){ console.error('[SMARTFIT_TEMPLATE_DETAIL_V085] FAIL',{code:e&&e.code,message:String(e&&e.message||e),detail:e&&e.detail,hint:e&&e.hint,stack:e&&e.stack}); fail(res,500,'template detail failed',{ detail:String(e.message||e), code:e&&e.code||'' }); }
 });
@@ -773,7 +772,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
       if(out.quantity==null) out.quantity=i(out.qty,1);
       if(out.sort_no==null) out.sort_no=i(out.sort_order!=null?out.sort_order:out.item_id,0);
       if(out.sort_order==null) out.sort_order=i(out.sort_no,0);
-      if(!out.product_uid) out.product_uid=s(out.source_uid||out.pi_ii_vi||'');
+      if(!out.product_uid) out.product_uid=itemApiUid(out.mall_code,out.pi_ii_vi||out.source_uid);
       if(!out.thumb_url) out.thumb_url=s(out.thumb_origin_url||'');
       if(out.sale_price==null) out.sale_price=i(out.amount,0);
       return out;
@@ -1106,12 +1105,13 @@ router.post('/api/gm/smartfit/build-cart', async (req,res)=>{
     const pool=db(req); const member=s(req.body?.member_id || req.body?.memberId || '');
     const templateIds=(Array.isArray(req.body?.template_ids)?req.body.template_ids:Array.isArray(req.body?.templateIds)?req.body.templateIds:[req.body?.template_id || req.body?.templateId]).map(x=>i(x,0)).filter(Boolean);
     if(!templateIds.length) return fail(res,400,'template_ids required');
-    const r=await pool.query(`SELECT t.template_id, t.creator_member_id, t.category_no, t.template_title_source, t.template_title_ko, i.item_id, i.item_role, i.mall_code, i.product_uid, i.qty, i.sort_order AS sort_no
-      FROM gm_smartfit_template t JOIN gm_smartfit_item i ON i.template_id=t.template_id AND i.is_active='T' AND COALESCE(i.is_deleted,'F')<>'T'
+    const r=await pool.query(`SELECT t.template_id, t.creator_member_id, t.category_no, t.template_title_source, t.template_title_ko,
+        i.item_id, i.item_role, i.mall_code, i.pi_ii_vi, i.quantity
+      FROM gm_smartfit_template t JOIN gm_smartfit_item i ON i.template_id=t.template_id
       WHERE t.template_id = ANY($1::bigint[]) AND t.is_active='T' AND COALESCE(t.is_deleted,'F')<>'T'
-      ORDER BY array_position($1::bigint[], t.template_id), i.sort_order, i.item_id`, [templateIds]);
+      ORDER BY array_position($1::bigint[], t.template_id), i.item_id`, [templateIds]);
     const batchId='SFB_'+Date.now()+'_'+Math.random().toString(16).slice(2,8);
-    const items=r.rows.map(row=>({ batch_id:batchId, template_id:row.template_id, creator_member_id:row.creator_member_id, category_no:row.category_no, template_title:s(row.template_title_source || row.template_title_ko), item_id:row.item_id, item_role:row.item_role, mall_code:row.mall_code, product_uid:row.product_uid, original_qty:i(row.qty,1), selected_qty:i(row.qty,1), is_selected:true, sort_no:row.sort_no }));
+    const items=r.rows.map(row=>({ batch_id:batchId, template_id:row.template_id, creator_member_id:row.creator_member_id, category_no:row.category_no, template_title:s(row.template_title_source || row.template_title_ko), item_id:row.item_id, item_role:row.item_role, mall_code:row.mall_code, product_uid:itemApiUid(row.mall_code,row.pi_ii_vi), pi_ii_vi:row.pi_ii_vi, original_qty:i(row.quantity,1), selected_qty:i(row.quantity,1), is_selected:true, sort_no:row.item_id }));
     ok(res,{ batch_id:batchId, template_ids:templateIds, items, count:items.length, member_id:member, note:'candidate payload only; basket/order tables are not modified' });
   }catch(e){ fail(res,500,'build cart failed',{ detail:String(e.message||e) }); }
 });
