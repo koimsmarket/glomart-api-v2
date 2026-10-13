@@ -791,41 +791,4 @@ router.get(['/api/gm/member/address/default','/api/member/address/default'], asy
   }catch(e){ console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 불러오지 못했습니다. 다시 시도해 주세요.'}); }
 });
 
-
-// GM_GPAY_V009: read-only verification of an EXISTING Glomart-owned hash.
-// Private LIFE-to-MAIN API contract; never returns hash or accepts upserts.
-router.post('/api/gm/member/gpay-password-verify', async (req,res)=>{
-  res.set('Cache-Control','no-store');
-  const secret=String(process.env.GPAY_MEMBER_VERIFY_SECRET||'');
-  const supplied=String(req.get('x-gpay-member-verify-secret')||'');
-  if(secret.length<32 || supplied.length!==secret.length ||
-     !crypto.timingSafeEqual(Buffer.from(secret),Buffer.from(supplied)))
-    return res.status(403).json({ok:false,error:'INTERNAL_AUTH_DENIED'});
-  const memberId=s(req.body&&req.body.member_id);
-  const password=typeof(req.body&&req.body.password)==='string'?req.body.password:'';
-  if(!memberId || memberId.length>100 || !password || password.length>1024)
-    return res.status(400).json({ok:false,error:'INVALID_CREDENTIAL_INPUT'});
-  const pool=db(req);
-  if(!pool) return res.status(503).json({ok:false,error:'MEMBER_DB_UNAVAILABLE'});
-  try{
-    const r=await pool.query('SELECT member_id,password_hash,password_algo FROM gm_member WHERE member_id=$1 LIMIT 1',[memberId]);
-    if(r.rowCount!==1 || !r.rows[0].password_hash)
-      return res.status(401).json({ok:false,verified:false,error:'INVALID_CREDENTIALS'});
-    const stored=String(r.rows[0].password_hash);
-    let ok=false;
-    if(stored.startsWith('$argon2id$') && argon2 && argon2.verify){ok=await argon2.verify(stored,password);}
-    else if(stored.startsWith('pbkdf2_sha512$')){
-      const parts=stored.split('$');
-      const rounds=Number(parts[1]);
-      if(parts.length===4 && rounds>=100000 && rounds<=1000000 && /^[a-f0-9]{32,128}$/i.test(parts[2]) && /^[a-f0-9]{128}$/i.test(parts[3])){
-        const expected=Buffer.from(parts[3],'hex');
-        const actual=await new Promise((resolve,reject)=>crypto.pbkdf2(password,parts[2],rounds,64,'sha512',(e,v)=>e?reject(e):resolve(v)));
-        ok=crypto.timingSafeEqual(expected,actual);
-      }
-    }
-    if(!ok) return res.status(401).json({ok:false,verified:false,error:'INVALID_CREDENTIALS'});
-    return res.json({ok:true,verified:true,member_id:String(r.rows[0].member_id)});
-  }catch(e){console.error('[GM_GPAY_V009] member_verify error_code='+String(e&&e.code||e&&e.name||'ERROR'));return res.status(503).json({ok:false,error:'MEMBER_VERIFICATION_UNAVAILABLE'});}
-});
-
 module.exports=router;
