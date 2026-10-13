@@ -331,6 +331,15 @@ try {
 }
 
 
+// GM_GPAY_MEMBER_PROFILE_MOUNT_V004
+// Existing member-profile API is read-only. Register before generic routes.
+try {
+  app.use(require('./routes/gpay_member_profile'));
+  console.log('[GM_GPAY_MEMBER_PROFILE_MOUNT_V004] registered');
+} catch (e) {
+  console.error('[GM_GPAY_MEMBER_PROFILE_MOUNT_V004] register failed:', String(e && e.message || e));
+}
+
 /* GM_MEMBER_DIRECT_SERVER_V023
  * Purpose: register member profile API directly in the actual server.js entry.
  * Reason: routes/member.js exists, but live Cloudtype URL returned 404 for
