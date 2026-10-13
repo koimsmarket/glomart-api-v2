@@ -825,7 +825,7 @@ router.post('/api/gm/member/gpay-password-verify', async (req,res)=>{
     }
     if(!ok) return res.status(401).json({ok:false,verified:false,error:'INVALID_CREDENTIALS'});
     return res.json({ok:true,verified:true,member_id:String(r.rows[0].member_id)});
-  }catch(e){console.error('[GM_GPAY_V009] member_verify error_code='+String(e&&e.code||e&&e.name||'ERROR'));return res.status(503).json({ok:false,error:'MEMBER_VERIFICATION_UNAVAILABLE'});}
+  }catch(e){console.error('[GM_GPAY_V012] member_verify error_code='+String(e&&e.code||e&&e.name||'ERROR'));return res.status(503).json({ok:false,error:'MEMBER_VERIFICATION_UNAVAILABLE'});}
 });
 
 module.exports=router;
