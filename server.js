@@ -311,6 +311,8 @@ pool.query('SELECT 1 AS connected').then(() => {
   dbReady = true;
   dbError = '';
   console.log('[GM DB GUARD V001] database connection OK; boot migrations DISABLED; schema unchanged');
+  try { require('./services/asset_pack_manager').ensureStarted(pool).catch(e=>console.error('[GM_CATEGORY_PACK_BOOT_ERROR]',String(e&&e.stack||e))); }
+  catch(e) { console.error('[GM_CATEGORY_PACK_BOOT_INIT_ERROR]',String(e&&e.stack||e)); }
 }).catch(err => {
   dbReady = false;
   dbError = String(err && err.message || err);

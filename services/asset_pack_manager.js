@@ -18,7 +18,7 @@ const CATEGORY_ROOT=path.resolve(process.env.GM_CATEGORY_PACK_ROOT || path.join(
 const UI_ROOT=path.join(__dirname,'..','public','data','gm-assets','ui');
 const PRIVATE_ROOT=path.join(CATEGORY_ROOT,'_state');
 const BASE_SNAPSHOT_FILE=path.join(PRIVATE_ROOT,'category_base_snapshot.json');
-let poolRef=null,timer=null,pumping=false,rehydrating=false;
+let poolRef=null,timer=null,pumping=false,rehydrating=false,startupPromise=null;
 let lastState={state:'IDLE',running:false,last_error:'',last_run_at:null,last_result:null,rehydrate_state:'IDLE',rehydrate_at:null,rehydrate_result:null};
 function s(v){return String(v==null?'':v).trim();}
 function n(v,d=0){const x=Number(v);return Number.isFinite(x)?Math.trunc(x):d;}
@@ -69,34 +69,44 @@ async function rehydratePublishedPack(db){
   lastState.rehydrate_state='RUNNING';lastState.rehydrate_at=new Date().toISOString();lastState.rehydrate_result=null;
   await ensureDefaults(db);
   const c=await config(db);
-  const token=s(c.category_pack_last_updated_at)||s(c.category_pack_base_started_at);
-  if(!token){
+  const base=s(c.category_pack_base_started_at),updated=s(c.category_pack_last_updated_at)||base;
+  if(!base){
     const out={state:'WAIT_BUILDER_BASE',reason:'NO_PUBLISHED_VERSION',root:CATEGORY_ROOT};
     lastState.rehydrate_state=out.state;lastState.rehydrate_result=out;
     console.log('[GM_CATEGORY_PACK_REHYDRATE_SKIP]',JSON.stringify(out));
     return out;
   }
-  if(!/^\d{8}_\d{4}$/.test(token))throw new Error('CATEGORY_PACK_REHYDRATE_INVALID_VERSION '+token);
-  const rows=await categoryRows(db);
-  const legacyV=Math.max(n(c.category_pack_delta_published,0),n(c.category_pack_base_published,0));
-  // /tmp is process/container-local. Rebuild unconditionally on every server start.
-  try{fs.rmSync(CATEGORY_ROOT,{recursive:true,force:true});}catch(_e){}
-  const targetDir=path.join(CATEGORY_ROOT,'base',token);
+  if(!/^\d{8}_\d{4}$/.test(base)||!/^\d{8}_\d{4}$/.test(updated))throw new Error('CATEGORY_PACK_REHYDRATE_INVALID_VERSION');
+  // Never rewrite a historical BASE with current DB rows. Without a durable BASE
+  // snapshot, the original delta cannot be correctly reconstructed after /tmp loss.
+  if(base!==updated){
+    const prior=categoryMeta(),basePath=path.join(CATEGORY_ROOT,'base',base,'kr.json'),deltaPath=path.join(CATEGORY_ROOT,'delta',updated,'kr.json');
+    const baseReady=fs.existsSync(basePath),deltaReady=fs.existsSync(deltaPath),hnswReady=fs.existsSync(hnswFile(updated));
+    if(baseReady&&deltaReady&&hnswReady&&s(prior.base_started_at)===base&&s(prior.last_updated_at)===updated){
+      const out={state:'READY_EXISTING',base_started_at:base,last_updated_at:updated};
+      lastState.rehydrate_state=out.state;lastState.rehydrate_result=out;return out;
+    }
+    const out={state:'NEEDS_PUBLISHED_BASE_SNAPSHOT',base_started_at:base,last_updated_at:updated,root:CATEGORY_ROOT};
+    lastState.rehydrate_state=out.state;lastState.rehydrate_result=out;
+    console.error('[GM_CATEGORY_PACK_REHYDRATE_BLOCKED]',JSON.stringify(out));
+    return out;
+  }
+  const rows=await categoryRows(db),legacyV=n(c.category_pack_base_published,0);
+  const targetDir=path.join(CATEGORY_ROOT,'base',base);
   for(const lang of LANGS){
-    const pack={type:'base',base_started_at:token,last_updated_at:token,legacy_version:legacyV,lang,count:rows.length,rehydrated:true,items:rows.map(r=>localized(r,lang))};
+    const pack={type:'base',base_started_at:base,last_updated_at:base,legacy_version:legacyV,lang,count:rows.length,rehydrated:true,items:rows.map(r=>localized(r,lang))};
     writeJson(path.join(targetDir,lang+'.json'),pack);
     if(legacyV>0)writeJson(path.join(CATEGORY_ROOT,'base','v'+legacyV,lang+'.json'),pack);
   }
-  const check=verifyPack('base',token,rows.length);
+  const check=verifyPack('base',base,rows.length);
   if(!check.ok)throw new Error('CATEGORY_REHYDRATE_BASE_VERIFY_FAILED '+JSON.stringify(check));
-  const snap={base_started_at:token,legacy_version:legacyV,rows:{}};
+  const snap={base_started_at:base,legacy_version:legacyV,rows:{}};
   for(const r of rows)snap.rows[s(r.gm_code).toUpperCase()]={sig:signature(r),row:r};
   writeJson(BASE_SNAPSHOT_FILE,snap);
-  // Keep the proven HNSW algorithm untouched; only run it off the main event loop.
-  const hnsw=await buildHnswInWorker(rows,token,legacyV);
-  const meta={base_started_at:token,last_updated_at:token,hnsw_version:token,hnsw_count:n(hnsw.count,0),base_version:n(c.category_pack_base_published,legacyV),delta_versions:[],updated_at:new Date().toISOString(),languages:LANGS,base_files:check.ready,rehydrated:true};
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),meta);
-  const out={state:'READY',version:token,count:rows.length,files_ready:check.ready,hnsw_count:n(hnsw.count,0),hnsw_bytes:n(hnsw.bytes,0),root:CATEGORY_ROOT,elapsed_ms:Date.now()-started,db_version_unchanged:true};
+  const hnsw=await buildHnswInWorker(rows,base,legacyV);
+  if(!fs.existsSync(hnswFile(base)))throw new Error('CATEGORY_REHYDRATE_HNSW_MISSING');
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:base,last_updated_at:base,hnsw_version:base,hnsw_count:n(hnsw.count,0),base_version:legacyV,delta_versions:[],updated_at:new Date().toISOString(),languages:LANGS,base_files:check.ready,rehydrated:true});
+  const out={state:'READY',base_started_at:base,last_updated_at:base,count:rows.length,hnsw_count:n(hnsw.count,0),elapsed_ms:Date.now()-started,db_version_unchanged:true};
   lastState.rehydrate_state='READY';lastState.rehydrate_result=out;
   console.log('[GM_CATEGORY_PACK_REHYDRATE_DONE]',JSON.stringify(out));
   return out;
@@ -169,6 +179,17 @@ async function runPending(db,force=false){
   if(ut>up)results.push(await publishUi(db,ut));return {state:results.length?'PUBLISHED':'NO_PENDING',results};
 }
 async function pump(){if(!poolRef||pumping||rehydrating)return;pumping=true;lastState.running=true;try{const r=await runPending(poolRef,false);lastState.state=r.state;lastState.last_result=r;lastState.last_error='';lastState.last_run_at=new Date().toISOString();}catch(e){lastState.state='ERROR';lastState.last_error=String(e&&e.stack||e);}finally{lastState.running=false;pumping=false;}}
-function ensureStarted(pool){if(pool)poolRef=pool;if(timer||!poolRef)return;timer=setInterval(()=>pump().catch(()=>{}),60000);if(timer.unref)timer.unref();setTimeout(()=>{rehydrating=true;rehydratePublishedPack(poolRef).catch(e=>{lastState.rehydrate_state='ERROR';lastState.rehydrate_at=new Date().toISOString();lastState.last_error=String(e&&e.stack||e);console.error('[GM_CATEGORY_PACK_REHYDRATE_ERROR]',lastState.last_error);}).finally(()=>{rehydrating=false;});},250);setTimeout(()=>pump().catch(()=>{}),2000);}
+function ensureStarted(pool){
+  if(pool)poolRef=pool;
+  if(!poolRef)return Promise.resolve({state:'WAIT_DB'});
+  if(startupPromise)return startupPromise;
+  rehydrating=true;
+  startupPromise=rehydratePublishedPack(poolRef).catch(e=>{
+    lastState.rehydrate_state='ERROR';lastState.last_error=String(e&&e.stack||e);
+    console.error('[GM_CATEGORY_PACK_REHYDRATE_ERROR]',lastState.last_error);throw e;
+  }).finally(()=>{rehydrating=false;});
+  if(!timer){timer=setInterval(()=>pump().catch(e=>console.error('[GM_CATEGORY_PACK_PUMP_ERROR]',String(e))),60000);if(timer.unref)timer.unref();setTimeout(()=>pump().catch(()=>{}),2000);}
+  return startupPromise;
+}
 function status(){return Object.assign({},lastState);}
 module.exports={LANGS,ensureDefaults,versionState,pendingRows,pendingCount,config,status,ensureStarted,rehydratePublishedPack,runPending,publishBase,publishDelta,publishUi,categoryMeta,categoryFileState,verifyPack,paths:{CATEGORY_ROOT,UI_ROOT}};
