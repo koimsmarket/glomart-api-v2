@@ -172,6 +172,7 @@ async function fillTranslations(db,gmCode){
   const check=(await db.query(`SELECT ${FOREIGN.join(',')} FROM gm_ui_dictionary WHERE gm_code=$1`,[gmCode])).rows[0]||{};
   const missing=FOREIGN.filter(l=>!s(check[l]));
   await db.query(`UPDATE gm_ui_dictionary SET translation_status=$2 WHERE gm_code=$1`,[gmCode,missing.length?'PARTIAL':'READY']);
+  if(keys.length){try{require('./ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[GM_UI_PACK_QUEUE_ERROR]',String(e&&e.message||e));}}
   return {ok:true,translated:keys.length,missing,failed};
 }
 function pumpTranslationQueue(){
