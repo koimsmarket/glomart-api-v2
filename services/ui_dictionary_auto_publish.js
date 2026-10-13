@@ -2,6 +2,15 @@
 // GM_UI_DICTIONARY_AUTO_V002: runtime-discovered UI phrases only.
 // Publication uses a DB-stored content fingerprint; no version churn on repeated visits.
 const crypto=require('crypto');
+const fs=require('fs');
+const path=require('path');
+const os=require('os');
+// Same writable-temp policy as category packs; never write into /app/public.
+const ROOT=path.resolve(process.env.GM_UI_AUTO_PACK_ROOT || path.join(os.tmpdir(),'glomart-ui-dictionary-auto'));
+function atomicJSON(file,data){fs.mkdirSync(path.dirname(file),{recursive:true});const tmp=file+'.'+process.pid+'.tmp';fs.writeFileSync(tmp,JSON.stringify(data),'utf8');fs.renameSync(tmp,file);}
+function diskPack(lang,version){const file=path.join(ROOT,version,lang+'.json');try{const o=JSON.parse(fs.readFileSync(file,'utf8'));return o&&o.version===version&&o.lang===lang?o:null;}catch(_){return null;}}
+function materialize(version,hash,packs){for(const lang of LANGS)atomicJSON(path.join(ROOT,version,lang+'.json'),packs[lang]);atomicJSON(path.join(ROOT,'meta.json'),{ok:true,version,hash,languages:LANGS,count:packs.kr.count});}
+
 const ui=require('./ui_dictionary_v2');
 const {LANGS}=ui;
 const KEY='gm_ui_dictionary_auto_version';
@@ -25,7 +34,7 @@ async function publish(db){
  if(running)return;running=true;
  try{
   const rows=await snapshot(db); const hash=fingerprint(rows),prevHash=await read(db,HASH),prev=await read(db,KEY);
-  if(prevHash===hash && prev){console.log('[GM_UI_PACK_UNCHANGED]',prev);return;}
+  if(prevHash===hash && prev){await rehydrate(db);console.log('[GM_UI_PACK_UNCHANGED]',prev);return;}
   const v=versionNow();
   if(prev===v){ // Preserve yyMMdd_HHmm uniqueness: publish once the minute rolls over.
    const ms=60000-(Date.now()%60000)+250;
@@ -33,7 +42,8 @@ async function publish(db){
   }
   const packs={};
   for(const lang of LANGS){packs[lang]={type:'ui_dictionary',lang,version:v,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:(x[lang]||x.kr)}))};}
-  // Persist metadata only after every language's JSON has been generated in memory.
+  // Publish all files first, then DB metadata. Rebuilds never change version.
+  materialize(v,hash,packs);
   await set(db,KEY,v);await set(db,HASH,hash);
   published={version:v,hash,packs};
   console.log('[GM_UI_PACK_PUBLISHED]',JSON.stringify({version:v,count:rows.length,languages:LANGS.length}));
@@ -47,9 +57,24 @@ async function current(db){
    const rows=await snapshot(db),actual=fingerprint(rows);
    if(!v||!hash||actual!==hash){queue(db);return {version:v,ready:false};}
    const packs={};for(const lang of LANGS)packs[lang]={type:'ui_dictionary',lang,version:v,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:(x[lang]||x.kr)}))};
+   materialize(v,hash,packs);
    published={version:v,hash,packs};
  }
+ // Files may have disappeared after a Cloudtype redeploy. Never bump version for this.
+ if(!LANGS.every(l=>diskPack(l,v))){materialize(v,hash,published.packs);console.log('[GM_UI_PACK_FILES_RESTORED]',v);}
  return {version:v,ready:true};
 }
-async function getPack(db,lang,version){const m=await current(db);if(!m.ready||m.version!==version)return null;return published.packs[lang]||null;}
-module.exports={queue,current,getPack,LANGS};
+async function rehydrate(db){
+ const version=await read(db,KEY),hash=await read(db,HASH);
+ if(!version||!hash){console.log('[GM_UI_PACK_REHYDRATE_SKIP] no published version');return {ready:false};}
+ const rows=await snapshot(db),actual=fingerprint(rows);
+ if(actual!==hash){console.warn('[GM_UI_PACK_REHYDRATE_DEFER] DB changed after publish; retaining published version until next publish');queue(db);return {ready:false};}
+ const packs={};
+ for(const lang of LANGS)packs[lang]={type:'ui_dictionary',lang,version,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:(x[lang]||x.kr)}))};
+ materialize(version,hash,packs);published={version,hash,packs};
+ console.log('[GM_UI_PACK_REHYDRATE_DONE]',JSON.stringify({version,files:LANGS.length,count:rows.length,root:ROOT,db_version_unchanged:true}));
+ return {version,ready:true};
+}
+
+async function getPack(db,lang,version){const m=await current(db);if(!m.ready||m.version!==version||!LANGS.includes(lang))return null;return diskPack(lang,version)||published.packs[lang]||null;}
+module.exports={queue,current,getPack,rehydrate,LANGS,ROOT};

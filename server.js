@@ -311,8 +311,6 @@ pool.query('SELECT 1 AS connected').then(() => {
   dbReady = true;
   dbError = '';
   console.log('[GM DB GUARD V001] database connection OK; boot migrations DISABLED; schema unchanged');
-  try { require('./services/asset_pack_manager').ensureStarted(pool).catch(e=>console.error('[GM_CATEGORY_PACK_BOOT_ERROR]',String(e&&e.stack||e))); }
-  catch(e) { console.error('[GM_CATEGORY_PACK_BOOT_INIT_ERROR]',String(e&&e.stack||e)); }
 }).catch(err => {
   dbReady = false;
   dbError = String(err && err.message || err);
@@ -1880,6 +1878,21 @@ app.post('/scrap/save-batch', async (req,res)=>{
 
 // gm_* route modules
 app.locals.pool = pool;
+
+/* GM_UI_DICTIONARY_V004: Cloudtype deploy recreates ephemeral UI JSON from DB.
+ * Isolated from category-pack and search workers. No DB migration on boot. */
+try {
+  const uiAutoPack=require('./services/ui_dictionary_auto_publish');
+  let uiRestoreAttempts=0;
+  const restoreUiPack=()=>{
+    uiRestoreAttempts++;
+    uiAutoPack.rehydrate(pool).catch(e=>{
+      console.error('[GM_UI_PACK_REHYDRATE_ERROR]',String(e&&e.message||e));
+      if(uiRestoreAttempts<6){const t=setTimeout(restoreUiPack,5000);if(t.unref)t.unref();}
+    });
+  };
+  setImmediate(restoreUiPack);
+}catch(e){console.error('[GM_UI_PACK_BOOT_ERROR]',String(e&&e.message||e));}
 
 // Start queue worker from server.js as package entry may not load index.js.
 try{
