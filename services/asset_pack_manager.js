@@ -77,20 +77,12 @@ async function rehydratePublishedPack(db){
     return out;
   }
   if(!/^\d{8}_\d{4}$/.test(base)||!/^\d{8}_\d{4}$/.test(updated))throw new Error('CATEGORY_PACK_REHYDRATE_INVALID_VERSION');
-  // Never rewrite a historical BASE with current DB rows. Without a durable BASE
-  // snapshot, the original delta cannot be correctly reconstructed after /tmp loss.
-  if(base!==updated){
-    const prior=categoryMeta(),basePath=path.join(CATEGORY_ROOT,'base',base,'kr.json'),deltaPath=path.join(CATEGORY_ROOT,'delta',updated,'kr.json');
-    const baseReady=fs.existsSync(basePath),deltaReady=fs.existsSync(deltaPath),hnswReady=fs.existsSync(hnswFile(updated));
-    if(baseReady&&deltaReady&&hnswReady&&s(prior.base_started_at)===base&&s(prior.last_updated_at)===updated){
-      const out={state:'READY_EXISTING',base_started_at:base,last_updated_at:updated};
-      lastState.rehydrate_state=out.state;lastState.rehydrate_result=out;return out;
-    }
-    const out={state:'NEEDS_PUBLISHED_BASE_SNAPSHOT',base_started_at:base,last_updated_at:updated,root:CATEGORY_ROOT};
-    lastState.rehydrate_state=out.state;lastState.rehydrate_result=out;
-    console.error('[GM_CATEGORY_PACK_REHYDRATE_BLOCKED]',JSON.stringify(out));
-    return out;
-  }
+  // Runtime temp files are disposable. Rebuild download assets from the DB on boot;
+  // NEVER update the administrator-owned BASE/DELTA version keys here.
+  // Without a durable historical base snapshot, publish the current complete view as
+  // the same BASE token and also a cumulative all-upsert DELTA at the existing delta
+  // token. Existing devices keep their BASE and receive only the DELTA URL. Explicit
+  // deletions can only be reconstructed when a deletion record survives in the DB.
   const rows=await categoryRows(db),legacyV=n(c.category_pack_base_published,0);
   const targetDir=path.join(CATEGORY_ROOT,'base',base);
   for(const lang of LANGS){
@@ -103,10 +95,33 @@ async function rehydratePublishedPack(db){
   const snap={base_started_at:base,legacy_version:legacyV,rows:{}};
   for(const r of rows)snap.rows[s(r.gm_code).toUpperCase()]={sig:signature(r),row:r};
   writeJson(BASE_SNAPSHOT_FILE,snap);
-  const hnsw=await buildHnswInWorker(rows,base,legacyV);
-  if(!fs.existsSync(hnswFile(base)))throw new Error('CATEGORY_REHYDRATE_HNSW_MISSING');
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:base,last_updated_at:base,hnsw_version:base,hnsw_count:n(hnsw.count,0),base_version:legacyV,delta_versions:[],updated_at:new Date().toISOString(),languages:LANGS,base_files:check.ready,rehydrated:true});
-  const out={state:'READY',base_started_at:base,last_updated_at:base,count:rows.length,hnsw_count:n(hnsw.count,0),elapsed_ms:Date.now()-started,db_version_unchanged:true};
+  const hnsw=await buildHnswInWorker(rows,updated,n(c.category_pack_delta_published,0)||legacyV);
+  if(!fs.existsSync(hnswFile(updated)))throw new Error('CATEGORY_REHYDRATE_HNSW_MISSING');
+  let deltaCount=0;
+  if(updated!==base){
+    const legacyDelta=n(c.category_pack_delta_published,0);
+    const deltaDir=path.join(CATEGORY_ROOT,'delta',updated);
+    // Include every current category as an upsert: cumulative refresh for devices
+    // which retain the historical BASE. This cannot infer historical removals.
+    const deleted=[];
+    try{
+      const q=await db.query(`SELECT gm_code FROM gm_category_pack_pending WHERE UPPER(change_kind) IN ('DELETE','DELETED','REMOVE','REMOVED') AND status='PUBLISHED'`);
+      const live=new Set(rows.map(r=>s(r.gm_code).toUpperCase()));
+      for(const x of q.rows||[]){const code=s(x.gm_code).toUpperCase();if(code&&!live.has(code))deleted.push(code);}
+    }catch(e){if(!(e&&e.code==='42P01'))throw e;}
+    for(const lang of LANGS){
+      const items=rows.map(r=>({op:'upsert',item:localized(r,lang)})).concat(deleted.map(gm_code=>({op:'delete',gm_code})));
+      const pack={type:'delta',base_started_at:base,last_updated_at:updated,legacy_version:legacyDelta,lang,count:items.length,rehydrated:true,items};
+      writeJson(path.join(deltaDir,lang+'.json'),pack);
+      if(legacyDelta>0)writeJson(path.join(CATEGORY_ROOT,'delta','v'+legacyDelta,lang+'.json'),pack);
+    }
+    deltaCount=rows.length+deleted.length;
+    const dc=verifyPack('delta',updated,deltaCount);
+    if(!dc.ok)throw new Error('CATEGORY_REHYDRATE_DELTA_VERIFY_FAILED '+JSON.stringify(dc));
+    console.log('[GM_CATEGORY_PACK_DELTA_REBUILD]',JSON.stringify({base,updated,upserts:rows.length,deletes:deleted.length,mode:'CUMULATIVE_DB_RECONSTRUCTION'}));
+  }
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:base,last_updated_at:updated,hnsw_version:updated,hnsw_count:n(hnsw.count,0),base_version:legacyV,delta_versions:updated!==base?[n(c.category_pack_delta_published,0)].filter(x=>x>0):[],updated_at:new Date().toISOString(),languages:LANGS,base_files:check.ready,delta_files:updated!==base?LANGS.length:0,rehydrated:true});
+  const out={state:'READY',base_started_at:base,last_updated_at:updated,count:rows.length,delta_count:deltaCount,hnsw_count:n(hnsw.count,0),elapsed_ms:Date.now()-started,db_version_unchanged:true};
   lastState.rehydrate_state='READY';lastState.rehydrate_result=out;
   console.log('[GM_CATEGORY_PACK_REHYDRATE_DONE]',JSON.stringify(out));
   return out;
