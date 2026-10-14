@@ -27,6 +27,13 @@ function needsTranslation(row){return !row || s(row.translation_status)!=='READY
 // Product/search/option/seller values are business data and must never create GM_CODE rows.
 // Do not block merely because a phrase contains words such as "상품" or "옵션"; fixed UI copy
 // like "상품정보 확인중" and "옵션을 선택해주세요" must continue to be captured.
+function appLikeGuppyDynamic(input,locator){
+  const app=s(input.source_app||input.sourceApp).toUpperCase();
+  if(app!=='GUPPY')return false;
+  const loc=String(locator||'').toLowerCase();
+  return /(?:chat|message|bubble|conversation|transcript|translation|nickname|profile|member|contact|history|text-content)/.test(loc);
+}
+
 function dynamicNonUiReason(input,norm){
   input=input||{};
   const explicit=s(input.gm_code||input.gmCode).toUpperCase();
@@ -49,7 +56,11 @@ function dynamicNonUiReason(input,norm){
   // Glomart product/search pages expose changing search/history/recommendation terms as bare
   // positional anchors (a:11, a:13, ...). They are data, not reusable UI labels.
   const productLikePage = !page || page==='/' || /\/product\/(?:gm_search|gm_detail)\.html|\/order\/basket\.html/.test(page);
-  if(productLikePage && /(?:^|#)a:\d+$/.test(locator)) return 'DYNAMIC_POSITIONAL_LINK';
+  if(/(?:^|[#\s>])a(?:\.[a-z0-9_-]+)*:\d+$/.test(locator)) return 'DYNAMIC_POSITIONAL_LINK';
+  if(productLikePage && /(?:search|keyword|recent|history|recommend|product|item|prd|goods|category)[_\-.]/.test(locator) && /(?:^|[#\s>])a(?:\.|:)/.test(locator)) return 'DYNAMIC_SEARCH_LINK';
+
+  // Guppy chat and user-generated data must not become UI dictionary entries.
+  if(appLikeGuppyDynamic(input,locator)) return 'DYNAMIC_GUPPY_CONTENT';
 
   // Product titles are dynamic. Keep this selector list deliberately narrow to title nodes.
   if(/(?:^|[#.\s>])(h1\.name|h1\.product-title|h1\.product_title|\.product-title|\.product_title|\.prdname|\.prd-name|#product_name|#prdname)(?::\d+)?(?:$|[\s>])/.test(locator)){
