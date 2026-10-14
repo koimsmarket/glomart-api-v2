@@ -294,8 +294,6 @@ const pool = makePool();
 app.locals.pool = pool;
 let dbReady = false;
 let dbError = '';
-app.locals.gmServerVersion = VERSION;
-app.locals.gmDbState = { get ready(){ return dbReady; }, get error(){ return dbError; } };
 
 /* GM_DB_MIGRATION_GUARD_V001
  * PRODUCTION SAFETY: migration SQL must never run from API boot or HTTP.
@@ -341,6 +339,119 @@ try {
 } catch (e) {
   console.error('[GM_GPAY_MEMBER_PROFILE_MOUNT_V004] register failed:', String(e && e.message || e));
 }
+
+/* GM_MEMBER_DIRECT_SERVER_V023
+ * Purpose: register member profile API directly in the actual server.js entry.
+ * Reason: routes/member.js exists, but live Cloudtype URL returned 404 for
+ * /api/gm/member/me. This direct route proves the running entry and returns
+ * the member/profile payload needed by GM_MEMBER.js and GM_ORDERFORM.js.
+ */
+function gmMemberClean(v){ return v === undefined || v === null ? '' : String(v).trim(); }
+function gmMemberFirst(){
+  for (const v of arguments) {
+    const x = gmMemberClean(v);
+    if (x) return x;
+  }
+  return '';
+}
+function gmMemberBuildProfile(memberRow, addressRow){
+  const m = memberRow || {};
+  const a = addressRow || {};
+  const receiverName = gmMemberFirst(a.receiver_name, m.default_receiver_name, m.member_name, m.name);
+  const receiverPhone = gmMemberFirst(a.receiver_phone, m.default_receiver_phone, m.phone, m.mobile);
+  const receiverMobile = gmMemberFirst(a.receiver_mobile, m.default_receiver_mobile, m.mobile, m.phone);
+  const receiverZipcode = gmMemberFirst(a.zipcode, m.default_zipcode, m.zipcode);
+  const receiverAddress1 = gmMemberFirst(a.address1, m.default_address1, m.address1, m.addr1);
+  const receiverAddress2 = gmMemberFirst(a.address2, m.default_address2, m.address2, m.addr2);
+  const receiverAddressFull = gmMemberFirst(
+    a.address_full,
+    m.default_address_full,
+    [receiverZipcode ? '[' + receiverZipcode + ']' : '', receiverAddress1, receiverAddress2].filter(Boolean).join(' ')
+  );
+  return {
+    ok: true,
+    source: 'server_direct_v023',
+    member_id: gmMemberFirst(m.member_id, m.cafe24_member_id),
+    cafe24_member_id: gmMemberFirst(m.cafe24_member_id, m.member_id),
+    member_name: gmMemberFirst(m.member_name, m.name, receiverName),
+    email: gmMemberFirst(m.email, m.member_email, m.order_email),
+    phone: gmMemberFirst(m.phone, m.mobile, receiverPhone, receiverMobile),
+    language_code: gmMemberFirst(m.language_code, m.cs_language, 'ko'),
+    country_code: gmMemberFirst(m.country_code, m.country, 'KR'),
+    member_grade: gmMemberFirst(m.member_grade),
+    member_status: gmMemberFirst(m.member_status, 'active'),
+    receiver_name: receiverName,
+    receiver_phone: receiverPhone,
+    receiver_mobile: receiverMobile,
+    receiver_zipcode: receiverZipcode,
+    receiver_address1: receiverAddress1,
+    receiver_address2: receiverAddress2,
+    receiver_address_full: receiverAddressFull,
+    zipcode: receiverZipcode,
+    addr1: receiverAddress1,
+    addr2: receiverAddress2,
+    address1: receiverAddress1,
+    address2: receiverAddress2,
+    address_full: receiverAddressFull,
+    default_receiver_name: gmMemberFirst(m.default_receiver_name, receiverName),
+    default_receiver_phone: gmMemberFirst(m.default_receiver_phone, receiverPhone),
+    default_receiver_mobile: gmMemberFirst(m.default_receiver_mobile, receiverMobile),
+    default_zipcode: gmMemberFirst(m.default_zipcode, receiverZipcode),
+    default_address1: gmMemberFirst(m.default_address1, receiverAddress1),
+    default_address2: gmMemberFirst(m.default_address2, receiverAddress2),
+    default_address_full: gmMemberFirst(m.default_address_full, receiverAddressFull),
+    delivery_memo: gmMemberFirst(a.delivery_memo, m.delivery_memo),
+    default_address: (receiverName || receiverMobile || receiverAddress1) ? {
+      receiver_name: receiverName,
+      receiver_phone: receiverPhone,
+      receiver_mobile: receiverMobile,
+      zipcode: receiverZipcode,
+      address1: receiverAddress1,
+      address2: receiverAddress2,
+      address_full: receiverAddressFull,
+      delivery_memo: gmMemberFirst(a.delivery_memo, m.delivery_memo),
+      is_default: 'Y'
+    } : null
+  };
+}
+
+app.get(['/api/gm/member/diag','/api/member/diag'], async (req, res) => {
+  res.json({
+    ok: true,
+    source: 'server_direct_v023',
+    entry: 'server.js',
+    version: VERSION,
+    hasPool: !!pool,
+    dbReady,
+    dbError
+  });
+});
+
+app.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile'], async (req, res) => {
+  const memberId = gmMemberClean(req.query.member_id || req.query.memberId || req.query.id);
+  if (!memberId) return res.status(400).json({ ok:false, source:'server_direct_v023', error:'member_id is required' });
+  try {
+    const m = await dbQuery('SELECT * FROM gm_member WHERE member_id=$1 OR cafe24_member_id=$1 LIMIT 1', [memberId]);
+    const memberRow = m.rows[0] || null;
+    if (!memberRow) return res.status(404).json({ ok:false, source:'server_direct_v023', error:'member not found', member_id:memberId });
+    let addressRow = null;
+    try {
+      const a = await dbQuery(`
+        SELECT *
+        FROM gm_member_address
+        WHERE member_id=$1
+        ORDER BY CASE WHEN is_default='Y' THEN 0 ELSE 1 END, updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT 1
+      `, [memberRow.member_id || memberId]);
+      addressRow = a.rows[0] || null;
+    } catch (addressErr) {
+      addressRow = null;
+    }
+    return res.json(gmMemberBuildProfile(memberRow, addressRow));
+  } catch (e) {
+    return res.status(500).json({ ok:false, source:'server_direct_v023', error:String(e && e.message || e) });
+  }
+});
 
 async function tableCounts(tableNames){
   const targets = Array.from(new Set((tableNames || []).map(String)));
@@ -678,14 +789,55 @@ app.post('/api/gm/dashboard/snapshot', async (req,res)=>{
 });
 
 
+function normalizeKeywordForStat(v){
+  return cleanText(v || '').toLowerCase().replace(/\s+/g, '');
+}
 function currentYyyymm(){
   const d = new Date();
   const m = String(d.getMonth()+1).padStart(2,'0');
   return String(d.getFullYear()) + m;
 }
+async function findCategoryKeywordMatch(keywordNormalized, langCode){
+  if(!(await tableExists('gm_category_keyword'))) return null;
+  const kw = normalizeKeywordForStat(keywordNormalized);
+  if(!kw) return null;
+  const r = await dbQuery(`
+    SELECT *
+    FROM gm_category_keyword
+    WHERE keyword_normalized = $1
+      AND status IN ('active','confirmed','auto')
+      AND ($2 = '' OR lang_code = '' OR lang_code IS NULL OR lang_code = $2)
+    ORDER BY
+      CASE WHEN lang_code = $2 THEN 0 ELSE 1 END,
+      confidence_score DESC NULLS LAST,
+      updated_at DESC NULLS LAST
+    LIMIT 1
+  `, [kw, cleanText(langCode || '')]);
+  return r.rows[0] || null;
+}
+
+const GM_LANG_COUNT_COLUMNS = ['ko', 'en', 'zh', 'vi', 'ja', 'tw', 'th', 'uz', 'ne', 'km', 'id', 'tl', 'mn', 'my', 'kk', 'si', 'ru', 'bn', 'ur', 'lo', 'hi', 'tr', 'fa', 'es', 'fr'];
+function gmCountColumnFromLang(v){
+  const s = cleanText(v || '').toLowerCase();
+  if(GM_LANG_COUNT_COLUMNS.includes(s)) return s + '_count';
+  return 'total_count';
+}
 function currentYyyy(){ return new Date().getFullYear().toString(); }
-// Search log moved to existing services/search_log.js; preserve registration order.
-require('./services/search_log').installServerSearchLog({app,dbQuery,tableExists,cleanText,toInt,ok,fail});
+async function incrementCategoryPeriodCounter(table, periodCol, periodVal, row, client){
+  if(!row.category_no) return;
+  const q = client || { query: dbQuery };
+  if(!(await tableExists(table))) return;
+  const countCol = gmCountColumnFromLang(row.lang_code || row.ui_lang_code || row.country_code);
+  const categoryNo = cleanText(row.category_no);
+  const mallCode = cleanText(row.mall_code || '');
+  const params = [periodVal, categoryNo, cleanText(row.category_code), cleanText(row.category_name), mallCode];
+  const updateSql = `UPDATE ${table} SET category_code=$3, category_name=$4, mall_code=$5, total_count=COALESCE(total_count,0)+1, ${countCol}=COALESCE(${countCol},0)+1, last_search_at=now(), updated_at=now() WHERE ${periodCol}=$1 AND category_no=$2 AND COALESCE(mall_code,'')=COALESCE($5,'')`;
+  const r = await q.query(updateSql, params);
+  if(!r.rowCount){
+    const insertSql = `INSERT INTO ${table} (${periodCol}, category_no, category_code, category_name, mall_code, total_count, ${countCol}, first_search_at, last_search_at, updated_at) VALUES ($1,$2,$3,$4,$5,1,1,now(),now(),now())`;
+    await q.query(insertSql, params);
+  }
+}
 
 async function incrementProductOperationalMetric(q, item, inc){
   if(!(await tableExists('gm_product'))) return;
@@ -807,6 +959,247 @@ async function upsertSalesAggregate(client, order, item){
   await incrementProductOperationalMetric(q, item, { sales_qty:qty, sales_amount:salesAmount, purchase_amount:purchaseAmount, is_ad:isAd });
   await incrementCategoryOperationalMetric(q, item, order, { sales_qty:qty, sales_amount:salesAmount, purchase_amount:purchaseAmount, is_ad:isAd });
 }
+
+async function upsertSearchStats(row){
+  if(await tableExists('gm_search_keyword_stat')){
+    await dbQuery(`
+      INSERT INTO gm_search_keyword_stat (
+        keyword_original, keyword_normalized, keyword_canonical,
+        country_code, lang_code, member_country_code,
+        category_no, category_code, category_name,
+        mall_code, search_count, cache_used_count, cache_miss_count,
+        result_count_sum, db_insert_count_sum, queue_send_count_sum,
+        first_search_at, last_search_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,$15,now(),now(),now()
+      )
+      ON CONFLICT (keyword_normalized, country_code, lang_code, category_no, mall_code) DO UPDATE SET
+        keyword_original=EXCLUDED.keyword_original,
+        keyword_canonical=EXCLUDED.keyword_canonical,
+        member_country_code=EXCLUDED.member_country_code,
+        category_code=EXCLUDED.category_code,
+        category_name=EXCLUDED.category_name,
+        search_count=gm_search_keyword_stat.search_count+1,
+        cache_used_count=gm_search_keyword_stat.cache_used_count+EXCLUDED.cache_used_count,
+        cache_miss_count=gm_search_keyword_stat.cache_miss_count+EXCLUDED.cache_miss_count,
+        result_count_sum=gm_search_keyword_stat.result_count_sum+EXCLUDED.result_count_sum,
+        db_insert_count_sum=gm_search_keyword_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
+        queue_send_count_sum=gm_search_keyword_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
+        last_search_at=now(),
+        updated_at=now()
+    `, [
+      row.keyword_original, row.keyword_normalized, row.keyword_canonical,
+      row.country_code, row.lang_code, row.member_country_code,
+      row.category_no, row.category_code, row.category_name,
+      row.mall_code, row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
+      row.result_count, row.db_insert_count, row.queue_send_count
+    ]);
+  }
+  if(row.category_no && await tableExists('gm_category_search_stat')){
+    await dbQuery(`
+      INSERT INTO gm_category_search_stat (
+        category_no, category_code, category_name,
+        country_code, lang_code, member_country_code, mall_code,
+        search_count, cache_used_count, cache_miss_count,
+        result_count_sum, db_insert_count_sum, queue_send_count_sum,
+        first_search_at, last_search_at, updated_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$11,$12,now(),now(),now()
+      )
+      ON CONFLICT (category_no, country_code, lang_code, mall_code) DO UPDATE SET
+        category_code=EXCLUDED.category_code,
+        category_name=EXCLUDED.category_name,
+        member_country_code=EXCLUDED.member_country_code,
+        search_count=gm_category_search_stat.search_count+1,
+        cache_used_count=gm_category_search_stat.cache_used_count+EXCLUDED.cache_used_count,
+        cache_miss_count=gm_category_search_stat.cache_miss_count+EXCLUDED.cache_miss_count,
+        result_count_sum=gm_category_search_stat.result_count_sum+EXCLUDED.result_count_sum,
+        db_insert_count_sum=gm_category_search_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
+        queue_send_count_sum=gm_category_search_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
+        last_search_at=now(),
+        updated_at=now()
+    `, [
+      row.category_no, row.category_code, row.category_name,
+      row.country_code, row.lang_code, row.member_country_code, row.mall_code,
+      row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
+      row.result_count, row.db_insert_count, row.queue_send_count
+    ]);
+  }
+
+  if(row.category_no){
+    const yyyymm = cleanText(row.yyyymm || currentYyyymm());
+    await incrementCategoryPeriodCounter('gm_category_search_monthly','yyyymm',yyyymm,row);
+    await incrementCategoryPeriodCounter('gm_category_search_yearly','yyyy',cleanText(row.yyyy || currentYyyy()),row);
+    if(await tableExists('gm_category')){
+      await dbQuery(`UPDATE gm_category SET search_count=COALESCE(search_count,0)+1, last_search_at=now(), updated_at=now() WHERE category_no=$1`, [cleanText(row.category_no)]);
+    }
+  }
+  if(row.product_uid && await tableExists('gm_product')){
+    await dbQuery(`UPDATE gm_product SET search_count=COALESCE(search_count,0)+1, last_search_at=now(), updated_at=now() WHERE product_uid=$1`, [cleanText(row.product_uid)]);
+  }
+}
+
+// GM_SEARCH_ROUTE_RECOVERY_V001
+// Search read/upsert-policy recovery only. Keep collection/queue/save logic unchanged.
+app.get('/api/gm/search/upsert-policy', async (req,res)=>{
+  try{
+    const normalized = normalizeKeywordForStat(cleanText(req.query.keyword_normalized || req.query.keyword || ''));
+    if(!normalized) return fail(res, 400, 'keyword_normalized is required');
+    const r = await dbQuery(`SELECT COUNT(*)::int AS today_search_count FROM (
+      SELECT 1 FROM gm_search_log
+      WHERE keyword_normalized=$1
+        AND search_at >= timezone(current_setting('TIMEZONE'), date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
+        AND search_at <  timezone(current_setting('TIMEZONE'), (date_trunc('day', timezone('Asia/Seoul', now())) + interval '1 day') AT TIME ZONE 'Asia/Seoul')
+      ORDER BY search_at DESC
+      LIMIT 3
+    ) q`, [normalized]);
+    const count = toInt(r.rows[0] && r.rows[0].today_search_count, 0);
+    ok(res, { action:'search.upsert-policy', keyword_normalized:normalized, today_search_count:count, limit:3, search_result_upsert_allowed:count<3, timezone:'Asia/Seoul' });
+  }catch(e){
+    fail(res, 500, 'search upsert policy failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.post('/api/gm/search/log', async (req,res)=>{
+  try{
+    if(!(await tableExists('gm_search_log'))) return fail(res, 500, 'gm_search_log table not found');
+    const b = req.body || {};
+    const keywordOriginal = cleanText(b.keyword_original || b.keyword || b.origin || '');
+    const keywordNormalized = normalizeKeywordForStat(b.keyword_normalized || keywordOriginal);
+    const uiLangCode = cleanText(b.ui_lang_code || b.uiLangCode || b.gm_lang || b.gmLang || b.lang_code || b.langCode || '');
+    const keywordLangCode = cleanText(b.keyword_lang_code || b.keywordLangCode || uiLangCode);
+    const langCode = uiLangCode;
+    let keywordCanonical = cleanText(b.keyword_canonical || b.keywordCanonical || '');
+    let categoryNo = cleanText(b.category_no || b.categoryNo || '');
+    let categoryCode = cleanText(b.category_code || b.categoryCode || '');
+    let categoryName = cleanText(b.category_name || b.categoryName || '');
+    const match = await findCategoryKeywordMatch(keywordNormalized, langCode);
+    if(match){
+      if(!keywordCanonical) keywordCanonical = cleanText(match.keyword_canonical || match.keyword_normalized || keywordNormalized);
+      if(!categoryNo) categoryNo = cleanText(match.category_no || '');
+      if(!categoryCode) categoryCode = cleanText(match.category_code || '');
+      if(!categoryName) categoryName = cleanText(match.category_name || '');
+    }
+    if(!keywordCanonical) keywordCanonical = keywordNormalized;
+    const row = {
+      keyword_original: keywordOriginal,
+      keyword_normalized: keywordNormalized,
+      keyword_canonical: keywordCanonical,
+      lang_code: langCode,
+      country_code: cleanText(b.country_code || b.countryCode || ''),
+      member_country_code: cleanText(b.member_country_code || b.memberCountryCode || ''),
+      category_code: categoryCode,
+      category_no: categoryNo,
+      category_name: categoryName,
+      mall_code: cleanText(b.mall_code || b.mallCode || ''),
+      result_count: toInt(b.result_count || b.resultCount, 0),
+      db_insert_count: toInt(b.db_insert_count || b.dbInsertCount, 0),
+      queue_send_count: toInt(b.queue_send_count || b.queueSendCount, 0),
+      cache_used: !!(b.cache_used || b.cacheUsed),
+      yyyymm: cleanText(b.yyyymm || b.year_month || b.yearMonth || '')
+    };
+    const requestId = cleanText(b.request_id || b.requestId || '');
+    const rawJsonText = JSON.stringify({ ...b, ui_lang_code:uiLangCode, keyword_lang_code:keywordLangCode, matched_category_keyword: match || null });
+    let alreadyCountedThisSearch = false;
+    if(requestId && row.keyword_normalized){
+      // search_id는 gm_search_log 레코드 고유번호로 유지한다.
+      // CPKR/ALKR는 각각 별도 row로 저장하되, 같은 request_id + normalized_keyword는 통계/카운터만 1회 처리한다.
+      const ex = await dbQuery(`
+        SELECT 1 FROM gm_search_log
+        WHERE request_id=$1 AND keyword_normalized=$2
+        LIMIT 1
+      `, [requestId, row.keyword_normalized]);
+      alreadyCountedThisSearch = !!(ex.rows && ex.rows[0]);
+    }
+    const ins = await dbQuery(`
+      INSERT INTO gm_search_log (
+        search_at, keyword_original, keyword_normalized, keyword_canonical,
+        lang_code, ui_lang_code, keyword_lang_code, country_code, member_country_code,
+        category_code, category_no, category_name,
+        mall_code, result_count, db_insert_count, queue_send_count,
+        cache_used, cache_key, search_source,
+        member_id, guest_key, device_type, request_id, raw_json, created_at
+      ) VALUES (
+        now(), $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,now()
+      ) RETURNING search_id
+    `, [
+      row.keyword_original, row.keyword_normalized, row.keyword_canonical,
+      row.lang_code, uiLangCode, keywordLangCode, row.country_code, row.member_country_code,
+      row.category_code, row.category_no, row.category_name,
+      row.mall_code, row.result_count, row.db_insert_count, row.queue_send_count,
+      row.cache_used, cleanText(b.cache_key || b.cacheKey || ''), cleanText(b.search_source || b.searchSource || ''),
+      cleanText(b.member_id || b.memberId || ''), cleanText(b.guest_key || b.guestKey || ''), cleanText(b.device_type || b.deviceType || ''), requestId,
+      rawJsonText
+    ]);
+    if(!alreadyCountedThisSearch) await upsertSearchStats(row);
+    ok(res, { action:'search.log', inserted:true, counted:!alreadyCountedThisSearch, search_id:ins.rows && ins.rows[0] && ins.rows[0].search_id, matched:!!match, keyword_normalized:row.keyword_normalized, keyword_canonical:row.keyword_canonical, category_no:row.category_no, category_code:row.category_code });
+  }catch(e){
+    fail(res, 500, 'search log failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/search/summary', async (req,res)=>{
+  try{
+    const limit = Math.max(1, Math.min(100, toInt(req.query.limit, 20)));
+    const out = {};
+    if(await tableExists('gm_search_keyword_stat')){
+      const r = await dbQuery(`
+        SELECT keyword_canonical, keyword_normalized, country_code, lang_code, category_no, category_code, mall_code, search_count, last_search_at
+        FROM gm_search_keyword_stat
+        ORDER BY search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit]);
+      out.top_keywords = r.rows;
+    }
+    if(await tableExists('gm_category_search_stat')){
+      const r = await dbQuery(`
+        SELECT category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+        FROM gm_category_search_stat
+        ORDER BY search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit]);
+      out.top_categories = r.rows;
+    }
+    if(await tableExists('gm_category_search_monthly')){
+      const ym = cleanText(req.query.yyyymm || req.query.month || '');
+      const r = await dbQuery(`
+        SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+        FROM gm_category_search_monthly
+        WHERE ($2 = '' OR yyyymm = $2)
+        ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit, ym]);
+      out.monthly_categories = r.rows;
+    }
+    ok(res, { action:'search.summary', ...out });
+  }catch(e){
+    fail(res, 500, 'search summary failed', { detail:String(e && e.message || e) });
+  }
+});
+
+app.get('/api/gm/search/monthly', async (req,res)=>{
+  try{
+    if(!(await tableExists('gm_category_search_monthly'))) return fail(res, 500, 'gm_category_search_monthly table not found');
+    const limit = Math.max(1, Math.min(500, toInt(req.query.limit, 100)));
+    const yyyymm = cleanText(req.query.yyyymm || req.query.month || '');
+    const country = cleanText(req.query.country_code || req.query.countryCode || '');
+    const lang = cleanText(req.query.lang_code || req.query.langCode || '');
+    const r = await dbQuery(`
+      SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code,
+             search_count, cache_used_count, cache_miss_count, result_count_sum, db_insert_count_sum, queue_send_count_sum,
+             first_search_at, last_search_at
+      FROM gm_category_search_monthly
+      WHERE ($2 = '' OR yyyymm = $2)
+        AND ($3 = '' OR country_code = $3)
+        AND ($4 = '' OR lang_code = $4)
+      ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+      LIMIT $1
+    `, [limit, yyyymm, country, lang]);
+    ok(res, { action:'search.monthly', rows:r.rows });
+  }catch(e){
+    fail(res, 500, 'search monthly failed', { detail:String(e && e.message || e) });
+  }
+});
 
 app.get('/api/gm/sales/summary', async (req,res)=>{
   try{
