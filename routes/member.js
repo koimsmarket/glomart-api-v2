@@ -588,13 +588,27 @@ function memberMeResponse(row, addressRows){
   return flat;
 }
 
+router.get(['/api/gm/member/diag','/api/member/diag'], async (req, res) => {
+  res.json({
+    ok: true,
+    source: 'server_direct_v023',
+    entry: 'server.js',
+    version: req.app.locals.gmServerVersion || '',
+    hasPool: !!db(req),
+    dbReady: !!(req.app.locals.gmDbState && req.app.locals.gmDbState.ready),
+    dbError: (req.app.locals.gmDbState && req.app.locals.gmDbState.error) || ''
+  });
+});
+
+
 router.get(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const memberId=s(req.query.member_id || req.query.memberId || req.query.id);
   if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
   try{
-    const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1',[memberId]);
-    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC',[memberId]);
+    const m=await pool.query('SELECT * FROM gm_member WHERE member_id=$1 OR cafe24_member_id=$1 LIMIT 1',[memberId]);
+    const resolvedId=s(m.rows[0] && m.rows[0].member_id) || memberId;
+    const a=await pool.query('SELECT * FROM gm_member_address WHERE member_id=$1 ORDER BY is_default DESC, last_used_at DESC NULLS LAST, updated_at DESC, created_at DESC',[resolvedId]);
     res.json(memberMeResponse(m.rows[0]||null, a.rows));
   }catch(e){ console.error('[GM_MEMBER_API_ERROR]', {code:e&&e.code, message:e&&e.message}); res.status(500).json({ok:false,error:'회원 정보를 불러오지 못했습니다. 다시 시도해 주세요.'}); }
 });
