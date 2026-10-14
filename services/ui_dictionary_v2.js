@@ -37,9 +37,6 @@ function appLikeGuppyDynamic(input,locator){
 function dynamicNonUiReason(input,norm){
   input=input||{};
   const explicit=s(input.gm_code||input.gmCode).toUpperCase();
-  // Explicit GM_CODE is authored/static UI and is allowed to update its own dictionary row.
-  if(/^GM_\d{4,}$/.test(explicit)) return '';
-
   const raw=s((norm&&norm.raw)||input.source_text_ko||input.text||input.kr||input.value||'');
   if(!raw) return '';
   const page=s(input.page_name||input.page||input.pathname||'').toLowerCase();
@@ -48,6 +45,20 @@ function dynamicNonUiReason(input,norm){
   const meta=[input.source_type,input.sourceType,input.kind,input.role,input.field,input.field_name,input.fieldName,input.semantic,input.value_type,input.valueType].map(s).join(' ').toLowerCase();
   const context=[page,surface,locator,meta].join(' ');
 
+  // V012: A GM_CODE is NOT proof that rendered content is static.
+  // Smartfit space/category titles are data even inside button/label elements.
+  // Keep this rule ahead of the explicit-code allowance and ahead of every DB write.
+  // Unknown Smartfit runtime phrases fail closed; vetted immutable UI labels remain capturable.
+  const smartfitContext=/(?:^|[\s/#._-])smartfit(?:[\s/#._-]|$)/.test(context);
+  if(smartfitContext){
+    const fixedSmartfitLabels=new Set([
+      '상품 목록 펼치기', '상품 목록 접기', '공간 없음',
+      '조회', '취소', '확인', '저장', '삭제', '수정', '닫기', '뒤로가기'
+    ]);
+    if(!fixedSmartfitLabels.has(raw)) return 'DYNAMIC_SMARTFIT_UNVERIFIED';
+  }
+
+  // Explicit code may select a dictionary row only AFTER dynamic-data screening.
   // If the capture producer already identifies the semantic value, trust that strong signal.
   if(/(?:^|[\s_.:-])(product[_ -]?name|mall[_ -]?product[_ -]?name|option[_ -]?name|option[_ -]?value|search[_ -]?keyword|keyword[_ -]?value|seller[_ -]?name|vendor[_ -]?name)(?:$|[\s_.:-])/.test(meta)){
     return 'DYNAMIC_SEMANTIC_VALUE';
