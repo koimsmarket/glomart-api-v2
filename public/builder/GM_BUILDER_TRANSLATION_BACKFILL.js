@@ -1,4 +1,4 @@
-// GM_BUILDER_TRANSLATION_BACKFILL_V001
+// GM_BUILDER_TRANSLATION_BACKFILL_V003
 (function(){'use strict';
 const root='/api/gm/builder/translation-backfill/';
 function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));}
@@ -9,10 +9,8 @@ window.gmBackfillBatch=async function(){
  const btn=document.getElementById('gmBackfillBatchBtn');if(btn.disabled)return;
  const domain=document.getElementById('gmBackfillDomain').value;
  const limit=Number(document.getElementById('gmBackfillLimit').value)||50;
- const token=document.getElementById('gmBackfillToken').value.trim();
- if(!token){state('서버 관리자 토큰을 입력해야 실행할 수 있습니다.');return;}
  btn.disabled=true;state(domain+' 누락 번역 '+limit+'건 순차 처리 시작');
- try{const data=await json(root+'batch',{method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-translation-token':token},body:JSON.stringify({domain,limit})});
+ try{const data=await json(root+'batch',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain,limit})});
  state('작업 종료: 성공 '+data.completed+' · 건너뜀 '+data.skipped+' · 실패 '+data.failed+(data.halted?' · 중지 사유 '+data.halted:''));
  await window.gmBackfillLoad();
  }catch(e){state('작업 중단: '+e.message);}finally{btn.disabled=false;}

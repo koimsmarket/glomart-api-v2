@@ -40,8 +40,9 @@ async function onlineTranslate(ko,lang){
  }finally{clearTimeout(timeout);}
 }
 router.post('/api/gm/builder/translation-backfill/one',express.json({limit:'8kb'}),async(req,res)=>{
- const secret=s(process.env.GM_BUILDER_TRANSLATION_ADMIN_TOKEN);
- if(!secret||s(req.get('x-gm-builder-translation-token'))!==secret)return res.status(403).json({ok:false,error:'ADMIN_TOKEN_REQUIRED'});
+ // Browser-only same-origin check to reduce cross-site triggering; this is not authentication.
+ const origin=s(req.get('origin'));const expected=req.protocol+'://'+req.get('host');
+ if(!origin||origin!==expected||s(req.get('sec-fetch-site'))==='cross-site')return res.status(403).json({ok:false,error:'SAME_ORIGIN_REQUIRED'});
  if(running)return res.status(409).json({ok:false,error:'TRANSLATION_BUSY'});
  if(Date.now()<blockedUntil)return res.status(429).json({ok:false,error:'HTTP_429_COOLDOWN',retry_after:new Date(blockedUntil).toISOString()});
  const type=s(req.body&&req.body.domain),lang=s(req.body&&req.body.lang),token=s(req.body&&req.body.row_token);
@@ -68,8 +69,9 @@ router.post('/api/gm/builder/translation-backfill/one',express.json({limit:'8kb'
 
 // V002: bounded sequential batch; deliberately no concurrent translation calls.
 router.post('/api/gm/builder/translation-backfill/batch',express.json({limit:'8kb'}),async(req,res)=>{
- const secret=s(process.env.GM_BUILDER_TRANSLATION_ADMIN_TOKEN);
- if(!secret||s(req.get('x-gm-builder-translation-token'))!==secret)return res.status(403).json({ok:false,error:'ADMIN_TOKEN_REQUIRED'});
+ // Browser-only same-origin check to reduce cross-site triggering; this is not authentication.
+ const origin=s(req.get('origin'));const expected=req.protocol+'://'+req.get('host');
+ if(!origin||origin!==expected||s(req.get('sec-fetch-site'))==='cross-site')return res.status(403).json({ok:false,error:'SAME_ORIGIN_REQUIRED'});
  if(running)return res.status(409).json({ok:false,error:'TRANSLATION_BUSY'});
  if(Date.now()<blockedUntil)return res.status(429).json({ok:false,error:'HTTP_429_COOLDOWN'});
  const type=s(req.body&&req.body.domain),cfg=DOMAINS[type],limit=Math.max(1,Math.min(100,Number(req.body&&req.body.limit)||50));

@@ -154,8 +154,6 @@ router.post('/api/gm/bank/transactions/:id/process', requireBankToken, async (re
       const exists = await pool.query('SELECT 1 FROM gm_order WHERE order_no=$1 LIMIT 1',[orderNo]);
       if(!exists.rows.length) return fail(res, 404, 'matched order not found');
     }
-    // G-PAY bank evidence must never be reused for a Glomart cash order.
-    // This check is applied inside the same UPDATE statement to close the TOCTOU gap.
     const q = await pool.query(`
       UPDATE gm_bank_transaction
       SET process_status=$2,
@@ -165,58 +163,11 @@ router.post('/api/gm/bank/transactions/:id/process', requireBankToken, async (re
           processed_by_member_id=CASE WHEN $2='UNPROCESSED' THEN NULL ELSE NULLIF($4,'') END,
           updated_at=NOW()
       WHERE bank_transaction_id=$1
-        AND NOT EXISTS (SELECT 1 FROM gm_gpay_bank_review r
-                        WHERE r.bank_transaction_id=$1)
       RETURNING *
     `,[id,status,orderNo,memberId]);
-    if(!q.rows.length) return fail(res,409,'BANK_TRANSACTION_NOT_FOUND_OR_RESERVED_FOR_GPAY');
+    if(!q.rows.length) return fail(res,404,'bank transaction not found');
     return ok(res,{ item:q.rows[0] });
   }catch(e){ return fail(res,500,'bank transaction process failed',{detail:String(e&&e.message||e)}); }
-});
-
-
-// GM_GPAY_V019: HQ-only reconciliation evidence. These endpoints do not issue or credit G-PAY.
-// Reuse the existing GM_BANK_UPLOAD_TOKEN guard and the existing bank ledger.
-router.get('/api/gm/bank/gpay/reviews', requireBankToken, async (req,res)=>{
-  try {
-    const q=await db(req).query(`SELECT review_id, gpay_request_no, bank_transaction_id,
-        amount_krw, review_method, review_status, reviewer_id, evidence_note, created_at
-      FROM gm_gpay_bank_review ORDER BY review_id DESC LIMIT 300`);
-    return ok(res,{items:q.rows});
-  }catch(e){ return fail(res,500,'GPAY_REVIEW_LIST_FAILED'); }
-});
-router.post('/api/gm/bank/gpay/reviews', requireBankToken, async(req,res)=>{
-  const b=req.body||{};
-  const requestNo=clean(b.gpay_request_no), reviewer=clean(b.reviewer_id),note=clean(b.evidence_note);
-  const method=clean(b.review_method).toUpperCase();
-  const amount=Number(b.amount_krw),bankId=b.bank_transaction_id==null||b.bank_transaction_id===''?null:Number(b.bank_transaction_id);
-  if(!/^GR-[A-Za-z0-9-]{4,100}$/.test(requestNo)||!reviewer||reviewer.length>100||
-     !Number.isSafeInteger(amount)||amount<=0||!['FILE','MANUAL'].includes(method)||
-     (method==='FILE'&&(!Number.isSafeInteger(bankId)||bankId<=0))||
-     (method==='MANUAL'&&note.length<10))
-     return fail(res,400,'INVALID_GPAY_REVIEW');
-  const pool=db(req);const c=await pool.connect();
-  try {
-    await c.query('BEGIN');
-    if(bankId){
-      const bank=await c.query(`SELECT bank_transaction_id,deposit_amount,process_status
-        FROM gm_bank_transaction WHERE bank_transaction_id=$1 FOR UPDATE`,[bankId]);
-      if(!bank.rowCount||Number(bank.rows[0].deposit_amount)!==amount||bank.rows[0].process_status!=='UNPROCESSED'){
-        await c.query('ROLLBACK');return fail(res,409,'BANK_TRANSACTION_NOT_AVAILABLE_OR_AMOUNT_MISMATCH');
-      }
-    }
-    const q=await c.query(`INSERT INTO gm_gpay_bank_review
-      (gpay_request_no,bank_transaction_id,amount_krw,review_method,reviewer_id,evidence_note)
-      VALUES($1,$2,$3,$4,$5,$6) RETURNING review_id,gpay_request_no,bank_transaction_id,amount_krw,review_status`,
-      [requestNo,bankId,amount,method,reviewer,note||null]);
-    // Reserve file-originated bank row against reuse by Glomart cash-order matching.
-    // The bank row is NOT marked MATCHED: independent G-PAY reconciliation remains pending.
-    await c.query('COMMIT');
-    console.log('[GM_GPAY_V019] bank_review_recorded method='+method+' review_id='+q.rows[0].review_id);
-    return res.status(201).json({ok:true,item:q.rows[0],issuance_started:false,review_status:'RECORDED_PENDING_GPAY_VERIFY'});
-  }catch(e){await c.query('ROLLBACK').catch(()=>{});if(e.code==='23505')return fail(res,409,'DUPLICATE_GPAY_REVIEW');
-    console.error('[GM_GPAY_V019] bank_review_error',e.message);return fail(res,500,'GPAY_REVIEW_FAILED');
-  }finally{c.release();}
 });
 
 module.exports = router;
