@@ -26,8 +26,10 @@
 <div class="small">키워드 · 카테고리 · UI의 미완료 언어를 조회하고, 기존 정상 번역을 보존하며 누락분을 온라인으로 순차 보완합니다. 429 발생 시 즉시 중단합니다.</div>
 <p><button type="button" onclick="gmBackfillLoad()">미완료 조회</button> <a href="/builder/ui_dictionary_auto.html">기존 UI 사전 승인/점검</a></p>
 <p><label>대상 <select id="gmBackfillDomain"><option value="keyword">키워드</option><option value="category">카테고리</option><option value="ui">UI</option></select></label>
-<label>한 번에 <select id="gmBackfillLimit"><option value="20">20건</option><option value="50" selected>50건</option><option value="100">100건</option></select></label>
-<button type="button" id="gmBackfillBatchBtn" onclick="gmBackfillBatch()">누락분 일괄 보완 시작</button></p>
+<label>언어 <select id="gmBackfillLanguage"><option value="auto">전체 언어 순서대로</option></select></label>
+<label>최대 건수 <select id="gmBackfillLimit"><option value="20">20건</option><option value="100" selected>100건</option><option value="500">500건</option><option value="0">미완료 전체</option></select></label></p>
+<p><label>번역 완료 후 대기(ms) <input id="gmBackfillInterval" type="number" min="100" max="60000" step="100" value="100" style="width:130px"></label> <span class="small">동시 요청 1건 · 실행 중 변경 즉시 다음 대기부터 반영 · Google 응답시간 별도</span></p>
+<p><button type="button" id="gmBackfillBatchBtn" onclick="gmBackfillStart()">시작</button> <button type="button" onclick="gmBackfillPause()">일시정지</button> <button type="button" onclick="gmBackfillResume()">재개</button> <button type="button" onclick="gmBackfillStop()">중지</button></p>
 <div id="gmBackfillState" class="status">조회 전</div>
 <div id="gmBackfillRows"></div>
 </div>

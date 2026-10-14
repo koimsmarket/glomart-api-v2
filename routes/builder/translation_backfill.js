@@ -39,6 +39,17 @@ async function onlineTranslate(ko,lang){
  return t;
  }finally{clearTimeout(timeout);}
 }
+// V005: one missing cell lookup, no translation requests here. Preserves existing DB schema.
+router.get('/api/gm/builder/translation-backfill/next',async(req,res)=>{
+ const type=s(req.query.domain),lang=s(req.query.lang),cfg=DOMAINS[type];
+ if(!cfg||!LANGS.includes(lang))return res.status(400).json({ok:false,error:'INVALID_SELECTION'});
+ try{
+  const db=dbFrom(req),cols=await columns(db,cfg.table),src=cfg.source.find(c=>cols.has(c)),target=cfg.prefix+lang;
+  if(!src||!cols.has(target))return res.status(400).json({ok:false,error:'COLUMN_NOT_PRESENT',domain:type,lang});
+  const q=await db.query(`SELECT ctid::text AS row_token, ${quote(src)} AS source_text FROM ${quote(cfg.table)} WHERE NULLIF(BTRIM(${quote(src)}::text),'') IS NOT NULL AND ${quote(src)} ~ '[가-힣]' AND NULLIF(BTRIM(${quote(target)}::text),'') IS NULL ${type==='ui'&&cols.has('active_yn')?"AND active_yn='Y'":''} LIMIT 1`);
+  return res.json({ok:true,domain:type,lang,item:q.rows[0]||null});
+ }catch(e){return res.status(500).json({ok:false,error:String(e.message||e)});}
+});
 router.post('/api/gm/builder/translation-backfill/one',express.json({limit:'8kb'}),async(req,res)=>{
  // Browser-only same-origin check to reduce cross-site triggering; this is not authentication.
  // Cloudtype/reverse proxies may report req.protocol='http' for a public HTTPS page.
@@ -48,7 +59,6 @@ router.post('/api/gm/builder/translation-backfill/one',express.json({limit:'8kb'
  const fetchSite=s(req.get('sec-fetch-site')).toLowerCase();
  if(!originHost||originHost!==host||(fetchSite&&fetchSite!=='same-origin'&&fetchSite!=='none'))return res.status(403).json({ok:false,error:'SAME_ORIGIN_REQUIRED'});
  if(running)return res.status(409).json({ok:false,error:'TRANSLATION_BUSY'});
- if(Date.now()<blockedUntil)return res.status(429).json({ok:false,error:'HTTP_429_COOLDOWN',retry_after:new Date(blockedUntil).toISOString()});
  const type=s(req.body&&req.body.domain),lang=s(req.body&&req.body.lang),token=s(req.body&&req.body.row_token);
  const cfg=DOMAINS[type];if(!cfg||!LANGS.includes(lang)||!/^[0-9]+,[0-9]+$/.test(token))return res.status(400).json({ok:false,error:'INVALID_SELECTION'});
  running=true;const db=dbFrom(req);
@@ -67,7 +77,7 @@ router.post('/api/gm/builder/translation-backfill/one',express.json({limit:'8kb'
   try{require('../../services/ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[BUILDER_TRANSLATION_PUBLISH]',String(e.message||e));}
  }
  res.json({ok:true,domain:type,lang,source:s(row.ko),translated});
- }catch(e){if(e.is429)blockedUntil=Date.now()+15*60*1000;res.status(e.is429?429:500).json({ok:false,error:String(e.message||e),rate_limit_until:blockedUntil>Date.now()?new Date(blockedUntil).toISOString():null});}
+ }catch(e){if(e.is429)console.warn('[GM_BACKFILL_429] source=online_translate domain='+type+' lang='+lang);res.status(e.is429?429:500).json({ok:false,error:String(e.message||e),domain:type,lang:lang});}
  finally{running=false;}
 });
 
