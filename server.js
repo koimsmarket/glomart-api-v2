@@ -511,52 +511,6 @@ const GM_RESET_TARGETS = [
 ];
 
 
-function owner(b){
-  const memberId = cleanText(b.member_id);
-  const guestKey = cleanText(b.guest_key);
-  if(memberId) return { col:'member_id', val:memberId };
-  if(guestKey) return { col:'guest_key', val:guestKey };
-  throw new Error('member_id or guest_key required');
-}
-
-function splitBasketProductUid(uid){
-  const v = cleanText(uid);
-  const p = v.split('_');
-  if(p.length < 4) return { mall_code:'', pi_ii_vi:'' };
-  return { mall_code:p[0], pi_ii_vi:p.slice(1).join('_') };
-}
-function basketKey(b){
-  const fromUid = splitBasketProductUid(b.product_uid || b.productUid || b.uid);
-  const mall = cleanText(b.mall_code || b.mallCode || fromUid.mall_code || 'CPKR') || 'CPKR';
-  const pi = cleanText(b.pi_ii_vi || b.piIiVi || fromUid.pi_ii_vi);
-  return { mall_code:mall, pi_ii_vi:pi };
-}
-function basketPayload(b){
-  const key = basketKey(b || {});
-  const productUrl = normalizeUrl(b.product_url || b.productUrl || b.url || b.pageUrl || '');
-  const thumbUrl = normalizeUrl(b.thumb_url || b.thumbUrl || b.thumb_origin_url || b.thumbOriginUrl || b.image || b.mainImage || b.thumbnail || b.thumbnailUrl || '');
-  return {
-    mall_code:key.mall_code,
-    member_id:cleanText(b.member_id) || null,
-    guest_key:cleanText(b.guest_key) || null,
-    pi_ii_vi:key.pi_ii_vi,
-    product_name:cleanText(b.product_name || b.productName || b.title || b.name || '외부상품'),
-    option_name:cleanText(b.option_name || b.optionName || b.option_text || b.optionText || '옵션'),
-    option_value:cleanText(b.option_value || b.optionValue || ''),
-    quantity:Math.max(1, toInt(b.quantity || b.qty, 1)),
-    amount:toInt(b.amount == null ? b.price : b.amount, 0),
-    amount_type:cleanText(b.amount_type || b.amountType || 'unit'),
-    delivery_type:cleanText(b.delivery_type || b.deliveryType || b.shipping_type || b.shipType || 'seller'),
-    delivery_fee:toInt(b.delivery_fee || b.deliveryFee || b.shipping_fee || b.shippingFee, 0),
-    product_url:productUrl,
-    thumb_url:thumbUrl,
-    thumb_file_name:cleanText(b.thumb_file_name || b.thumbFileName || '')
-  };
-}
-function basketSelectSql(where){
-  return `SELECT *, (mall_code || '_' || pi_ii_vi) AS product_uid FROM gm_basket ${where || ''}`;
-}
-
 app.get('/', (req,res)=>{
   const routes = [
     'GET /health','GET /api/gm/health','POST /api/gm/db/init','POST /api/gm/db/reset','GET /api/gm/db/table-counts',
