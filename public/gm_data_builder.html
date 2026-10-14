@@ -17,20 +17,18 @@
 <button class="builder-tab-btn" data-tab="lang" onclick="openBuilderTab('lang')">언어 / 국가</button>
 <button class="builder-tab-btn" data-tab="asset" onclick="openBuilderTab('asset')">카테고리 / UI 사전</button>
 <button class="builder-tab-btn" data-tab="translation" onclick="openBuilderTab('translation')">다국어 번역 관리</button>
-<button class="builder-tab-btn" data-tab="translation" onclick="openBuilderTab('translation')">다국어 번역 관리</button>
 <button class="builder-tab-btn" data-tab="purchase" onclick="openBuilderTab('purchase')">구매확정</button>
 <span class="tab-spacer"></span>
 <button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V079</span>
 </div>
 <div class="card" data-builder-tab="translation" id="gmTranslationBackfillCard">
-<h2>25개국 미완료 번역 관리</h2><div class="small">키워드 · 카테고리 · UI의 미완료 언어만 온라인으로 보완합니다. 자동 대량 번역 없음. 기존 정상 번역값 보존. 429 발생 시 15분 요청 중단.</div>
+<h2>25개국 미완료 번역 관리</h2>
+<div class="small">키워드 · 카테고리 · UI의 미완료 언어를 조회하고, 기존 정상 번역을 보존하며 누락분을 온라인으로 순차 보완합니다. 429 발생 시 즉시 중단합니다.</div>
 <p><button type="button" onclick="gmBackfillLoad()">미완료 조회</button> <a href="/builder/ui_dictionary_auto.html">기존 UI 사전 승인/점검</a></p>
-<div id="gmBackfillState" class="status">조회 전</div>
-<div id="gmBackfillRows"></div>
-</div>
-<div class="card" data-builder-tab="translation" id="gmTranslationBackfillCard">
-<h2>25개국 미완료 번역 관리</h2><div class="small">키워드 · 카테고리 · UI의 미완료 언어만 온라인으로 보완합니다. 자동 대량 번역 없음. 기존 정상 번역값 보존. 429 발생 시 15분 요청 중단.</div>
-<p><button type="button" onclick="gmBackfillLoad()">미완료 조회</button> <a href="/builder/ui_dictionary_auto.html">기존 UI 사전 승인/점검</a></p>
+<p><label>대상 <select id="gmBackfillDomain"><option value="keyword">키워드</option><option value="category">카테고리</option><option value="ui">UI</option></select></label>
+<label>한 번에 <select id="gmBackfillLimit"><option value="20">20건</option><option value="50" selected>50건</option><option value="100">100건</option></select></label>
+<button type="button" id="gmBackfillBatchBtn" onclick="gmBackfillBatch()">누락분 일괄 보완 시작</button></p>
+<p><label>관리자 토큰 (서버에 설정된 경우에만 실행 가능) <input id="gmBackfillToken" type="password" autocomplete="off" placeholder="1회 입력 · 팝업 없음" style="width:260px"></label></p>
 <div id="gmBackfillState" class="status">조회 전</div>
 <div id="gmBackfillRows"></div>
 </div>
@@ -213,7 +211,6 @@
 <script src="/builder/GM_BUILDER_PRODUCT_GM_CODE.js?v=gm_builder_v016"></script>
 <script src="/builder/GM_BUILDER_AI_USAGE.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_PURCHASE_CONFIRM.js?v=gm_builder_v001"></script>
-<script src="/builder/GM_BUILDER_TRANSLATION_BACKFILL.js?v=gm_translation_v001"></script>
-<script src="/builder/GM_BUILDER_TRANSLATION_BACKFILL.js?v=gm_translation_v001"></script>
+<script src="/builder/GM_BUILDER_TRANSLATION_BACKFILL.js?v=gm_translation_v002"></script>
 <script src="/builder/GM_BUILDER_TABS.js?v=gm_builder_v002"></script>
 </body></html>

@@ -65,4 +65,44 @@ router.post('/api/gm/builder/translation-backfill/one',express.json({limit:'8kb'
  }catch(e){if(e.is429)blockedUntil=Date.now()+15*60*1000;res.status(e.is429?429:500).json({ok:false,error:String(e.message||e),rate_limit_until:blockedUntil>Date.now()?new Date(blockedUntil).toISOString():null});}
  finally{running=false;}
 });
+
+// V002: bounded sequential batch; deliberately no concurrent translation calls.
+router.post('/api/gm/builder/translation-backfill/batch',express.json({limit:'8kb'}),async(req,res)=>{
+ const secret=s(process.env.GM_BUILDER_TRANSLATION_ADMIN_TOKEN);
+ if(!secret||s(req.get('x-gm-builder-translation-token'))!==secret)return res.status(403).json({ok:false,error:'ADMIN_TOKEN_REQUIRED'});
+ if(running)return res.status(409).json({ok:false,error:'TRANSLATION_BUSY'});
+ if(Date.now()<blockedUntil)return res.status(429).json({ok:false,error:'HTTP_429_COOLDOWN'});
+ const type=s(req.body&&req.body.domain),cfg=DOMAINS[type],limit=Math.max(1,Math.min(100,Number(req.body&&req.body.limit)||50));
+ if(!cfg)return res.status(400).json({ok:false,error:'INVALID_DOMAIN'});
+ running=true;const db=dbFrom(req);let completed=0,skipped=0,failed=0,halted='';
+ try{
+  const cols=await columns(db,cfg.table),src=cfg.source.find(c=>cols.has(c));
+  if(!src)throw Error('SOURCE_COLUMN_MISSING');
+  const pairs=LANGS.filter(l=>cols.has(cfg.prefix+l)).map(l=>[l,cfg.prefix+l]);
+  if(pairs.length!==LANGS.length)throw Error('LANGUAGE_COLUMNS_INCOMPLETE: '+pairs.length+'/'+LANGS.length);
+  // Query row+language candidates directly; only cells that remain empty are selected.
+  const predicate=pairs.map(([l,c])=>`NULLIF(BTRIM(${quote(c)}::text),'') IS NULL`).join(' OR ');
+  const query=await db.query(`SELECT ctid::text AS row_token, ${quote(src)} AS source_text, ${pairs.map(([l,c])=>quote(c)+' AS '+quote(l)).join(',')} FROM ${quote(cfg.table)} WHERE NULLIF(BTRIM(${quote(src)}::text),'') IS NOT NULL AND (${predicate}) LIMIT $1`,[Math.max(limit,100)]);
+  let processed=0;
+  outer: for(const row of query.rows){
+   if(Date.now()<blockedUntil){halted='HTTP_429_COOLDOWN';break;}
+   if(!hasKo(row.source_text)){skipped++;continue;}
+   for(const lang of pairs.filter(([l])=>!s(row[l]))){
+   if(processed>=limit)break outer;
+   processed++;
+   const col=lang[1],code=lang[0];
+   try{
+    const trans=await onlineTranslate(s(row.source_text),code);
+    const upd=await db.query(`UPDATE ${quote(cfg.table)} SET ${quote(col)}=$1 WHERE ctid=$2::tid AND ${quote(src)}=$3 AND NULLIF(BTRIM(${quote(col)}::text),'') IS NULL RETURNING ctid`,[trans,row.row_token,row.source_text]);
+    if(upd.rowCount)completed++;else skipped++;
+   }catch(e){failed++;if(e.is429){blockedUntil=Date.now()+15*60*1000;halted='HTTP_429';break outer;}halted=String(e.message||e);break outer;}
+   }
+  }
+  if(type==='ui'&&completed){
+   try{require('../../services/ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[BUILDER_TRANSLATION_PUBLISH]',String(e.message||e));}
+  }
+  res.json({ok:true,domain:type,completed,skipped,failed,halted,examined:processed,rate_limit_until:blockedUntil>Date.now()?new Date(blockedUntil).toISOString():null});
+ }catch(e){res.status(500).json({ok:false,error:String(e.message||e),completed,skipped,failed});}finally{running=false;}
+});
+
 module.exports=router;
