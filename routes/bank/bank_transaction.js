@@ -7,7 +7,8 @@ const path = require('path');
 const { parseWooriXlsx } = require('../../services/bank/bank_woori_xlsx');
 
 const router = express.Router();
-const VERSION = 'GM_BANK_TRANSACTION_ROUTE_V001';
+const VERSION = 'GM_BANK_TRANSACTION_ROUTE_V008';
+console.log('[GM_BANK_ROUTE_V008_LOADED]',JSON.stringify({auth:'member',login:'/api/gm/bank/admin/login'}));
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 12 * 1024 * 1024, files: 1 }
@@ -61,6 +62,7 @@ async function passwordMatches(password,hash){
   return false;
 }
 router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res)=>{
+  console.log('[GM_BANK_LOGIN_V008_ENTER]',JSON.stringify({path:req.originalUrl,method:req.method}));
   if(sessionSecret().length<32) return fail(res,503,'BANK_SESSION_SECRET_NOT_CONFIGURED');
   const address=String(req.socket?.remoteAddress||'unknown');
   const item=failures.get(address);
@@ -86,6 +88,7 @@ router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res
   }catch(err){ console.error('[GM_BANK_MEMBER_LOGIN_ERROR_V007]',String(err.message||err));return fail(res,503,'MEMBER_AUTH_UNAVAILABLE'); }
 });
 router.get('/api/gm/bank/admin/status',(req,res)=>ok(res,{authenticated:validSession(req)}));
+router.get('/api/gm/bank/admin/diag',(req,res)=>ok(res,{route_mounted:true,auth:'member',session_secret_ready:sessionSecret().length>=32}));
 router.post('/api/gm/bank/admin/logout',requireBankSession,(req,res)=>{
   res.setHeader('Set-Cookie',`${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=0`);
   return ok(res,{authenticated:false});

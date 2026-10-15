@@ -14,15 +14,22 @@ $('uploadForm').addEventListener('submit',async e=>{e.preventDefault();try{const
 $('manualForm').addEventListener('submit',async e=>{e.preventDefault();try{const data=Object.fromEntries(new FormData(e.target).entries());if(!confirm('수동 입금 기록을 원장에 등록합니까? (발급 승인 아님)'))return;const r=await api('/api/gm/bank/transactions/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});show('manualResult',r)}catch(err){show('manualResult','오류: '+err.message)}});
 $('refresh').addEventListener('click',async()=>{try{const q=new URLSearchParams({bank_code:$('bankCode').value,status:$('status').value,deposit_only:'1',limit:'200'});const r=await api('/api/gm/bank/transactions?'+q);const body=$('rows');body.replaceChildren();for(const item of r.items||[]){const tr=document.createElement('tr');for(const val of [item.bank_transaction_id,item.transaction_at,item.bank_code+' / '+item.account_no,item.description||'',Number(item.deposit_amount||0).toLocaleString('ko-KR'),item.source_file_name||'수동 기록',item.process_status]){const td=document.createElement('td');td.textContent=String(val??'');tr.appendChild(td)}body.appendChild(tr)}$('recordCount').textContent=(r.items||[]).length+'건';show('recordResult','조회 완료')}catch(err){show('recordResult','오류: '+err.message)}});
 
+async function parseBankJson(r,action){
+ const type=r.headers.get('content-type')||'';
+ if(!type.toLowerCase().includes('application/json')){
+   throw new Error(action+' API가 JSON 대신 '+(type||'미상')+'을 반환했습니다 (HTTP '+r.status+', URL '+new URL(r.url).pathname+'). 은행 라우터 V008 배포 및 /api/gm/bank/admin/diag 확인 필요');
+ }
+ return r.json();
+}
 async function bankAuthStatus(){
- try{const r=await fetch('/api/gm/bank/admin/status',{credentials:'same-origin',cache:'no-store'});const j=await r.json();
+ try{const r=await fetch('/api/gm/bank/admin/status',{credentials:'same-origin',cache:'no-store'});const j=await parseBankJson(r,'인증상태');
  $('bankLogin').classList.toggle('hidden',!!j.authenticated);$('bankLoggedIn').classList.toggle('hidden',!j.authenticated);
  }catch(e){$('loginResult').textContent='인증 상태 확인 실패: '+e.message;}
 }
 $('bankLoginForm').addEventListener('submit',async ev=>{
  ev.preventDefault(); const password=$('adminPassword').value;
  try{const r=await fetch('/api/gm/bank/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({member_id:'derzon',password})});
- const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'인증 실패');
+ const j=await parseBankJson(r,'로그인');if(!r.ok||!j.ok)throw new Error(j.error||'인증 실패');
  $('adminPassword').value='';$('loginResult').textContent='인증 성공';await bankAuthStatus();
  }catch(e){$('loginResult').textContent=e.message;}
 });
