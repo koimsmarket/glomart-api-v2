@@ -19,18 +19,64 @@ function sha256(buf){ return crypto.createHash('sha256').update(buf).digest('hex
 function ok(res, data){ res.json(Object.assign({ ok:true, version:VERSION }, data || {})); }
 function fail(res, status, message, extra){ res.status(status).json(Object.assign({ ok:false, version:VERSION, error:message }, extra || {})); }
 
-function requireBankToken(req, res, next){
-  const expected = clean(process.env.GM_BANK_UPLOAD_TOKEN);
-  if(!expected) return fail(res, 503, 'GM_BANK_UPLOAD_TOKEN is not configured');
-  const given = clean(req.headers['x-gm-bank-token']);
-  if(!given || given.length !== expected.length) return fail(res, 401, 'bank admin token required');
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  if(a.length !== b.length || !crypto.timingSafeEqual(a,b)) return fail(res, 401, 'invalid bank admin token');
+// Bank administrator login: cookie is HttpOnly; never expose server secret to JS.
+const COOKIE_NAME = 'gm_bank_admin';
+const SESSION_MS = 8 * 60 * 60 * 1000;
+const failedLogins = new Map(); // per-process throttling; use upstream WAF for distributed limits
+function configuredSecret(){ return clean(process.env.GM_BANK_UPLOAD_TOKEN); }
+function sign(payload, secret){ return crypto.createHmac('sha256', secret).update(payload).digest('base64url'); }
+function cookieValue(req){
+  const raw = String(req.headers.cookie || '');
+  const entry = raw.split(';').map(v=>v.trim()).find(v=>v.startsWith(COOKIE_NAME+'='));
+  return entry ? entry.slice(COOKIE_NAME.length+1) : '';
+}
+function validSession(req){
+  const secret = configuredSecret();
+  if(!secret || secret.length < 32) return false;
+  const parts=cookieValue(req).split('.');
+  if(parts.length!==2) return false;
+  const [payload,signature]=parts;
+  const expected=sign(payload,secret);
+  const a=Buffer.from(signature), b=Buffer.from(expected);
+  if(a.length!==b.length || !crypto.timingSafeEqual(a,b)) return false;
+  const issued=Number(payload);
+  return Number.isSafeInteger(issued) && issued<=Date.now() && Date.now()-issued<SESSION_MS;
+}
+function requireBankSession(req,res,next){
+  if(!validSession(req)) return fail(res,401,'BANK_ADMIN_LOGIN_REQUIRED');
+  if(!['GET','HEAD','OPTIONS'].includes(req.method)){
+    const origin=clean(req.headers.origin);
+    const host=clean(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0];
+    // Mutation requests from other sites must not be accepted.
+    if(!origin || !host || !['https://'+host,'http://'+host].includes(origin))
+      return fail(res,403,'BANK_ADMIN_ORIGIN_REJECTED');
+  }
   next();
 }
+router.post('/api/gm/bank/admin/login', express.json({limit:'2kb'}), (req,res)=>{
+  const secret=configuredSecret();
+  if(!secret || secret.length<32) return fail(res,503,'GM_BANK_UPLOAD_TOKEN must be configured (32+ characters)');
+  const address=String(req.socket && req.socket.remoteAddress || 'unknown');
+  const attempts=failedLogins.get(address);
+  if(attempts && attempts.until>Date.now() && attempts.count>=5) return fail(res,429,'TOO_MANY_LOGIN_ATTEMPTS');
+  const supplied=clean(req.body && req.body.password);
+  const a=Buffer.from(supplied),b=Buffer.from(secret);
+  if(a.length!==b.length || !crypto.timingSafeEqual(a,b)){
+    const old=attempts && attempts.until>Date.now() ? attempts.count : 0;
+    failedLogins.set(address,{count:old+1,until:Date.now()+15*60*1000});
+    return fail(res,401,'INVALID_ADMIN_CREDENTIAL');
+  }
+  failedLogins.delete(address);
+  const now=Date.now(), value=String(now)+'.'+sign(String(now),secret);
+  res.setHeader('Set-Cookie',COOKIE_NAME+'='+value+'; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=28800');
+  ok(res,{authenticated:true,expires_in_seconds:28800});
+});
+router.get('/api/gm/bank/admin/status',(req,res)=>ok(res,{authenticated:validSession(req)}));
+router.post('/api/gm/bank/admin/logout',requireBankSession,(req,res)=>{
+  res.setHeader('Set-Cookie',COOKIE_NAME+'=; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=0');ok(res,{authenticated:false});
+});
 
-router.post('/api/gm/bank/woori/upload', requireBankToken, upload.single('file'), async (req,res)=>{
+router.post('/api/gm/bank/woori/upload', requireBankSession, upload.single('file'), async (req,res)=>{
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   if(!req.file || !Buffer.isBuffer(req.file.buffer)) return fail(res, 400, 'xlsx file required (field name: file)');
@@ -107,7 +153,7 @@ router.post('/api/gm/bank/woori/upload', requireBankToken, upload.single('file')
   }finally{ client.release(); }
 });
 
-router.get('/api/gm/bank/transactions', requireBankToken, async (req,res)=>{
+router.get('/api/gm/bank/transactions', requireBankSession, async (req,res)=>{
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const bankCode = clean(req.query.bank_code || 'WOORI').toUpperCase();
@@ -138,7 +184,7 @@ router.get('/api/gm/bank/transactions', requireBankToken, async (req,res)=>{
   }catch(e){ return fail(res, 500, 'bank transaction list failed', { detail:String(e && e.message || e) }); }
 });
 
-router.post('/api/gm/bank/transactions/:id/process', requireBankToken, async (req,res)=>{
+router.post('/api/gm/bank/transactions/:id/process', requireBankSession, async (req,res)=>{
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const id = Number(req.params.id);
@@ -172,7 +218,7 @@ router.post('/api/gm/bank/transactions/:id/process', requireBankToken, async (re
 
 
 // GM_BANK_MANUAL_ENTRY_V001: manually asserted deposit, not bank-verified and never auto-approved.
-router.post('/api/gm/bank/transactions/manual', requireBankToken, async (req,res)=>{
+router.post('/api/gm/bank/transactions/manual', requireBankSession, async (req,res)=>{
   const pool=db(req); if(!pool) return fail(res,500,'DB pool is not attached');
   const b=req.body||{};
   const bank=clean(b.bank_code||'WOORI').toUpperCase();
