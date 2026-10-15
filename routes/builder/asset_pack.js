@@ -28,7 +28,7 @@ function packError(res,e,label){
 
 router.get('/api/gm/builder/asset-pack',async(req,res)=>{
   const db=dbFrom(req);
-  try{mgr.ensureStarted(db);ok(res,await state(db));}catch(e){fail(res,500,'asset pack read failed',{detail});}
+  try{mgr.ensureStarted(db);ok(res,await state(db));}catch(e){const detail=String(e&&e.stack||e);console.error('[GM_ASSET_PACK_BUILDER_ERROR] status',detail);fail(res,500,'asset pack read failed',{detail});}
 });
 router.post('/api/gm/builder/asset-pack/schedule',async(req,res)=>{
   const db=dbFrom(req),b=req.body||{};
@@ -38,11 +38,11 @@ router.post('/api/gm/builder/asset-pack/schedule',async(req,res)=>{
     const hhmm=x=>/^([01]\d|2[0-3]):[0-5]\d$/.test(String(x||''));if(!hhmm(b.start)||!hhmm(b.end))return fail(res,400,'invalid time');
     for(const [k,v] of [['asset_pack_background_mode',mode],['asset_pack_auto_start',b.start],['asset_pack_auto_end',b.end]])await db.query(`UPDATE gm_runtime_config SET config_value=$2,updated_at=now() WHERE config_key=$1`,[k,String(v)]);
     ok(res,await state(db));
-  }catch(e){fail(res,500,'schedule save failed',{detail});}
+  }catch(e){const detail=String(e&&e.stack||e);console.error('[GM_ASSET_PACK_BUILDER_ERROR] schedule',detail);fail(res,500,'schedule save failed',{detail});}
 });
 router.post('/api/gm/builder/asset-pack/version/:kind/next',async(req,res)=>{
   const db=dbFrom(req),kind=String(req.params.kind||'');const map={base:'category_pack_base_target',delta:'category_pack_delta_target',ui:'ui_dictionary_target'};const key=map[kind];if(!key)return fail(res,400,'invalid kind');
-  try{await mgr.ensureDefaults(db);const r=await db.query(`UPDATE gm_runtime_config SET config_value=(COALESCE(NULLIF(config_value,''),'0')::bigint+1)::text,updated_at=now() WHERE config_key=$1 RETURNING config_value`,[key]);ok(res,{kind,target:Number(r.rows[0].config_value),state:await state(db)});}catch(e){fail(res,500,'version update failed',{detail});}
+  try{await mgr.ensureDefaults(db);const r=await db.query(`UPDATE gm_runtime_config SET config_value=(COALESCE(NULLIF(config_value,''),'0')::bigint+1)::text,updated_at=now() WHERE config_key=$1 RETURNING config_value`,[key]);ok(res,{kind,target:Number(r.rows[0].config_value),state:await state(db)});}catch(e){const detail=String(e&&e.stack||e);console.error('[GM_ASSET_PACK_BUILDER_ERROR] version',detail);fail(res,500,'version update failed',{detail});}
 });
 
 async function generateBase(req,res){

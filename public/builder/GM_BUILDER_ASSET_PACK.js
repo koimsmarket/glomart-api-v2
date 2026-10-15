@@ -1,9 +1,23 @@
+// Only Builder asset-pack requests: show the actual URL/status instead of an opaque JSON parse error.
+async function assetPackReadJson(response){
+  const type=response.headers.get('content-type')||'';
+  const raw=await response.text();
+  if(!/\bapplication\/json\b|\+json\b/i.test(type)){
+    const preview=raw.slice(0,100).replace(/\s+/g,' ');
+    console.error('[GM_BUILDER_ASSET_PACK_RESPONSE_NOT_JSON]',{url:response.url,status:response.status,contentType:type,preview});
+    throw new Error('JSON 응답 아님: HTTP '+response.status+' · '+response.url+' · Content-Type '+(type||'없음')+' · '+preview);
+  }
+  try{return JSON.parse(raw);}catch(e){
+    console.error('[GM_BUILDER_ASSET_PACK_INVALID_JSON]',{url:response.url,status:response.status,contentType:type,preview:raw.slice(0,100)});
+    throw new Error('JSON 형식 오류: HTTP '+response.status+' · '+response.url+' · '+String(e.message||e));
+  }
+}
 // GM_BUILDER_ASSET_PACK_UI_V005_SHOW_SERVER_DETAIL
 function apEsc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function loadAssetPack(){
   const box=document.getElementById('assetPackStatus');if(!box)return;
   try{
-    const r=await fetch(`${API}/api/gm/builder/asset-pack?t=${Date.now()}`,{cache:'no-store'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    const r=await fetch(`${API}/api/gm/builder/asset-pack?t=${Date.now()}`,{cache:'no-store'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
     const c=j.config||{},g=j.generator||{},m=j.category_meta||{},v=j.version||{},f=j.category_files||{},pending=j.pending||[];
     document.getElementById('assetPackMode').value=c.asset_pack_background_mode||'AUTO';
     document.getElementById('assetPackStart').value=c.asset_pack_auto_start||'00:00';
@@ -25,17 +39,17 @@ async function loadAssetPack(){
 }
 async function saveAssetPackSchedule(){
   const body={mode:document.getElementById('assetPackMode').value,start:document.getElementById('assetPackStart').value,end:document.getElementById('assetPackEnd').value};
-  const r=await fetch(`${API}/api/gm/builder/asset-pack/schedule`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}await loadAssetPack();
+  const r=await fetch(`${API}/api/gm/builder/asset-pack/schedule`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),j=await assetPackReadJson(r);if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}await loadAssetPack();
 }
 async function nextAssetPackVersion(kind){
   const label={base:'카테고리 기준본',delta:'카테고리 누적본',ui:'UI 사전'}[kind]||kind;if(!confirm(`${label} 요청 버전을 +1 할까요?\nAUTO 모드에서는 야간 작업시간에 생성됩니다.`))return;
-  const r=await fetch(`${API}/api/gm/builder/asset-pack/version/${kind}/next`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}await loadAssetPack();
+  const r=await fetch(`${API}/api/gm/builder/asset-pack/version/${kind}/next`,{method:'POST'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}await loadAssetPack();
 }
 async function generateCategoryBaseNow(){
   if(!confirm('현재 gm_category 전체로 원본(BASE) 25개국 JSON을 새로 생성할까요?\n성공한 시각이 새 원본 버전(YYYYMMDD_HHMM)이 되며 기존 클라이언트는 BASE를 다시 받습니다.'))return;
   const b=document.getElementById('assetPackBaseGenerateBtn');if(b)b.disabled=true;
   try{
-    const r=await fetch(`${API}/api/gm/builder/asset-pack/category/base/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    const r=await fetch(`${API}/api/gm/builder/asset-pack/category/base/generate`,{method:'POST'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.base.generate',result:j.result});
     alert(`원본 25개국 JSON 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
     await loadAssetPack();
@@ -45,7 +59,7 @@ async function generateCategoryDeltaNow(){
   if(!confirm('현재 원본(BASE) 이후의 추가/변경분으로 추가본(DELTA) 25개국 JSON을 생성할까요?\n변경이 없으면 버전 시간은 바뀌지 않습니다.'))return;
   const b=document.getElementById('assetPackDeltaGenerateBtn');if(b)b.disabled=true;
   try{
-    const r=await fetch(`${API}/api/gm/builder/asset-pack/category/delta/generate`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
+    const r=await fetch(`${API}/api/gm/builder/asset-pack/category/delta/generate`,{method:'POST'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.delta.generate',result:j.result});
     if(j.result&&j.result.state==='NO_CHANGES')alert('원본 이후 추가/변경 카테고리가 없습니다.\n최종 업데이트 시간은 변경하지 않았습니다.');
     else alert(`추가본 25개국 JSON 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
@@ -56,6 +70,6 @@ async function generateCategoryDeltaNow(){
 async function publishNewBaseNow(){return generateCategoryBaseNow();}
 async function publishAssetPackNow(){
   if(!confirm('기존 AUTO 대기 배포를 지금 실행할까요?'))return;
-  const r=await fetch(`${API}/api/gm/builder/asset-pack/publish-now`,{method:'POST'}),j=await r.json();if(!r.ok||!j.ok){alert(j.error||j.detail||`HTTP ${r.status}`);return;}await loadAssetPack();
+  const r=await fetch(`${API}/api/gm/builder/asset-pack/publish-now`,{method:'POST'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok){alert(j.error||j.detail||`HTTP ${r.status}`);return;}await loadAssetPack();
 }
 window.addEventListener('DOMContentLoaded',loadAssetPack);
