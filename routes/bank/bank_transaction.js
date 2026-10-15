@@ -4,7 +4,7 @@ const express = require('express');
 const multer = require('multer');
 const crypto = require('crypto');
 const path = require('path');
-const { parseWooriXlsx } = require('../services/bank_woori_xlsx');
+const { parseWooriXlsx } = require('../../services/bank/bank_woori_xlsx');
 
 const router = express.Router();
 const VERSION = 'GM_BANK_TRANSACTION_ROUTE_V001';
@@ -168,6 +168,42 @@ router.post('/api/gm/bank/transactions/:id/process', requireBankToken, async (re
     if(!q.rows.length) return fail(res,404,'bank transaction not found');
     return ok(res,{ item:q.rows[0] });
   }catch(e){ return fail(res,500,'bank transaction process failed',{detail:String(e&&e.message||e)}); }
+});
+
+
+// GM_BANK_MANUAL_ENTRY_V001: manually asserted deposit, not bank-verified and never auto-approved.
+router.post('/api/gm/bank/transactions/manual', requireBankToken, async (req,res)=>{
+  const pool=db(req); if(!pool) return fail(res,500,'DB pool is not attached');
+  const b=req.body||{};
+  const bank=clean(b.bank_code||'WOORI').toUpperCase();
+  const account=clean(b.account_no).replace(/[\s-]/g,'');
+  const holder=clean(b.account_holder);
+  const reference=clean(b.reference);
+  const operator=clean(b.operator);
+  const memo=clean(b.bank_memo);
+  const description=clean(b.description);
+  const amount=Number(b.deposit_amount);
+  const datetime=clean(b.transaction_at);
+  if(!/^[A-Z0-9_]{2,20}$/.test(bank) || !/^\d{6,30}$/.test(account)) return fail(res,400,'invalid bank or account');
+  if(!Number.isSafeInteger(amount)||amount<=0) return fail(res,400,'invalid deposit amount');
+  if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?$/.test(datetime) || !Number.isFinite(new Date(datetime+'+09:00').getTime())) return fail(res,400,'invalid KST timestamp');
+  if(reference.length<6 || reference.length>160 || !operator || operator.length>160) return fail(res,400,'reference and operator required');
+  if(memo.length>4000 || description.length>1000) return fail(res,400,'text too long');
+  const normalized=datetime.replace('T',' ')+(datetime.length===16?':00':'');
+  // Manual reference must be uniquely stable on repeat; avoid auto-matching an actual bank row.
+  const transactionHash=sha256(Buffer.from(['MANUAL',bank,account,reference].join('|')));
+  const raw=JSON.stringify({source:'MANUAL_ASSERTION',reference,operator,submitted_at:new Date().toISOString()});
+  try{
+    const q=await pool.query(`INSERT INTO gm_bank_transaction (
+      bank_code,account_no,account_holder,transaction_at,transaction_type,description,
+      withdraw_amount,deposit_amount,balance_amount,bank_memo,source_type,transaction_hash,
+      raw_json,process_status,created_at,updated_at
+    ) VALUES ($1,$2,$3,$4::timestamp,'MANUAL', $5,0,$6,0,$7,'MANUAL',$8,$9::jsonb,'UNPROCESSED',NOW(),NOW())
+    ON CONFLICT(transaction_hash) DO NOTHING RETURNING bank_transaction_id`,
+    [bank,account,holder||null,normalized,description,amount,memo,transactionHash,raw]);
+    if(!q.rowCount) return fail(res,409,'manual reference already registered');
+    return ok(res,{bank_transaction_id:q.rows[0].bank_transaction_id,source_type:'MANUAL',process_status:'UNPROCESSED',bank_verified:false});
+  }catch(e){console.error('[GM_BANK_MANUAL_ERROR]',String(e&&e.message||e));return fail(res,500,'manual record failed');}
 });
 
 module.exports = router;

@@ -1115,7 +1115,7 @@ router.get('/api/order/:order_no', async (req,res)=>{
 // GM_BANK_TRANSACTION_ROUTE_V001
 // Bank payment import is mounted through the existing order router so server.js remains untouched.
 try {
-  router.use(require('../auto-order/routes/bank_transaction'));
+  router.use(require('./bank/bank_transaction'));
   console.log('[GM_BANK_TRANSACTION_ROUTE_V001] mounted via routes/order');
 } catch (e) {
   console.error('[GM_BANK_TRANSACTION_ROUTE_V001] mount failed:', String(e && e.message || e));
