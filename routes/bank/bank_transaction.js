@@ -226,7 +226,7 @@ router.post('/api/gm/bank/transactions/:id/process', requireBankSession, async (
           processed_at=CASE WHEN $2='UNPROCESSED' THEN NULL ELSE NOW() END,
           processed_by_member_id=CASE WHEN $2='UNPROCESSED' THEN NULL ELSE NULLIF($4,'') END,
           updated_at=NOW()
-      WHERE bank_transaction_id=$1
+      WHERE bank_transaction_id=$1 AND COALESCE(matched_order_no,'') NOT LIKE 'GPAY:%'
       RETURNING *
     `,[id,status,orderNo,memberId]);
     if(!q.rows.length) return fail(res,404,'bank transaction not found');
@@ -269,5 +269,52 @@ router.post('/api/gm/bank/transactions/manual', requireBankSession, async (req,r
     return ok(res,{bank_transaction_id:q.rows[0].bank_transaction_id,source_type:'MANUAL',process_status:'UNPROCESSED',bank_verified:false});
   }catch(e){console.error('[GM_BANK_MANUAL_ERROR]',String(e&&e.message||e));return fail(res,500,'manual record failed');}
 });
+
+// INTERNAL G-PAY bridge: distinct from member login; secret is server-to-server only.
+// Fail closed if a shared credential has not been configured on BOTH services.
+function requireGpayServiceAuth(req,res,next){
+ const expected=clean(process.env.GPAY_GLOMART_BANK_TOKEN);
+ const supplied=clean(req.headers['x-gm-bank-token']);
+ if(expected.length<32) return fail(res,503,'GPAY_BANK_BRIDGE_NOT_CONFIGURED');
+ if(!equal(expected,supplied)) return fail(res,401,'GPAY_BANK_BRIDGE_UNAUTHORIZED');
+ return next();
+}
+
+// G-PAY bank claim uses the existing immutable bank transaction row, not a new bank ledger.
+// Authenticated internal calls only; buyer requests never access these endpoints.
+router.post('/api/gm/bank/gpay/claim', requireGpayServiceAuth, async(req,res)=>{
+  const pool=db(req), b=req.body||{};
+  const tx=Number(b.bank_transaction_id), amount=Number(b.amount);
+  const ref=clean(b.request_no), scope=clean(b.collection_scope);
+  if(!Number.isSafeInteger(tx)||tx<=0||!Number.isSafeInteger(amount)||amount<=0||!/^GR-[A-Za-z0-9-]+$/.test(ref)||!['HQ','AGENT'].includes(scope)) return fail(res,400,'INVALID_BANK_CLAIM');
+  const c=await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const q=await c.query('SELECT * FROM gm_bank_transaction WHERE bank_transaction_id=$1 FOR UPDATE',[tx]);
+    if(!q.rowCount){await c.query('ROLLBACK');return fail(res,404,'BANK_TRANSACTION_NOT_FOUND');}
+    const t=q.rows[0];
+    // Keep account ownership verification fail-closed. Map agent_id -> account_no in env.
+    let accounts;
+    try { accounts=JSON.parse(process.env.GPAY_BANK_ACCOUNT_MAP||'{}'); } catch(_) {accounts={};}
+    const ownerKey=scope==='HQ'?'HQ':`AGENT:${Number(b.agent_id)}`;
+    const approvedAccounts=accounts[ownerKey];
+    if(!Array.isArray(approvedAccounts)||!approvedAccounts.map(clean).includes(clean(t.account_no))){
+      await c.query('ROLLBACK');return fail(res,409,'BANK_ACCOUNT_NOT_AUTHORIZED_FOR_RECIPIENT');
+    }
+    if(Number(t.deposit_amount)!==amount){await c.query('ROLLBACK');return fail(res,409,'AMOUNT_MISMATCH');}
+    if(t.process_status==='MATCHED' && t.matched_order_no===`GPAY:${ref}`){await c.query('COMMIT');return ok(res,{already_claimed:true,deposit_amount:Number(t.deposit_amount)});}
+    if(t.process_status!=='UNPROCESSED'){await c.query('ROLLBACK');return fail(res,409,'BANK_TRANSACTION_ALREADY_USED');}
+    const upd=await c.query(`UPDATE gm_bank_transaction SET process_status='MATCHED',matched_order_no=$2,matched_amount=deposit_amount,
+      processed_at=NOW(),processed_by_member_id='GPAY_BRIDGE',updated_at=NOW() WHERE bank_transaction_id=$1 RETURNING deposit_amount`,[tx,`GPAY:${ref}`]);
+    await c.query('COMMIT');return ok(res,{deposit_amount:Number(upd.rows[0].deposit_amount)});
+  }catch(e){await c.query('ROLLBACK').catch(()=>{});return fail(res,500,'BANK_GPAY_CLAIM_FAILED');}finally{c.release();}
+});
+router.post('/api/gm/bank/gpay/lookup', requireGpayServiceAuth, async(req,res)=>{
+  const pool=db(req), ref=clean(req.body?.request_no);
+  if(!/^GR-[A-Za-z0-9-]+$/.test(ref))return fail(res,400,'INVALID_REQUEST_REF');
+  try{const q=await pool.query(`SELECT bank_transaction_id,deposit_amount,process_status,matched_order_no,account_no FROM gm_bank_transaction WHERE matched_order_no=$1`,[`GPAY:${ref}`]);
+    return ok(res,{transactions:q.rows});}catch(e){return fail(res,500,'BANK_LOOKUP_FAILED');}
+});
+
 
 module.exports = router;
