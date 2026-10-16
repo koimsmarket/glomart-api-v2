@@ -270,4 +270,64 @@ router.post('/api/gm/bank/transactions/manual', requireBankSession, async (req,r
   }catch(e){console.error('[GM_BANK_MANUAL_ERROR]',String(e&&e.message||e));return fail(res,500,'manual record failed');}
 });
 
+
+// GM_BANK_GPAY_MATCH_V010: additive reconciliation only. V008 authentication/session code above is unchanged.
+async function gpayMatchCall(path, method='GET', body) {
+  const base = clean(process.env.GPAY_API_BASE || process.env.GPAY_API_BASE_URL || process.env.GUPPY_PAY_API_URL);
+  const key = clean(process.env.GPAY_TRUSTED_CALLER_KEY);
+  if (!/^https:\/\/[^\s]+$/.test(base) || key.length < 32) {const e=new Error('GPAY_BRIDGE_NOT_CONFIGURED');e.status=503;throw e;}
+  const ctrl=new AbortController(), timer=setTimeout(()=>ctrl.abort(),8000);
+  try {
+    const response=await fetch(base.replace(/\/$/,'')+path, {method,signal:ctrl.signal,
+      headers:{'Accept':'application/json','Content-Type':'application/json','x-gpay-trusted-caller':key},
+      body:body===undefined?undefined:JSON.stringify(body)});
+    if (!(response.headers.get('content-type')||'').includes('application/json')) {const e=new Error('GPAY_RESPONSE_NOT_JSON');e.status=502;throw e;}
+    const data=await response.json();
+    if (!response.ok || !data.ok) {const e=new Error(data.error||'GPAY_REQUEST_FAILED');e.status=response.status;throw e;}
+    return data;
+  } finally {clearTimeout(timer);}
+}
+router.get('/api/gm/bank/gpay/pending',requireBankSession,async(req,res)=>{
+  try {
+    const result=await gpayMatchCall('/api/gpay/issue-requests');
+    const candidates=(result.issue_requests||[]).filter(x=>x.request_type==='PURCHASE' && x.status==='SUBMITTED');
+    const items=[];
+    for(const r of candidates.slice(0,80)) {
+      const detail=await gpayMatchCall('/api/gpay/issue-requests/'+encodeURIComponent(r.request_id)+'/process');
+      const p=detail.process;
+      if(!p || !['HQ_DEPOSIT_PENDING','AGENT_DEPOSIT_PENDING'].includes(p.process_state))continue;
+      items.push({request_id:r.request_id,request_no:r.issue_request_id,member_id:r.buyer_id,
+        amount:Number(r.total_amount),collection_mode:p.collection_mode,process_state:p.process_state});
+    }
+    console.info('[GM_BANK_GPAY_PENDING_V010]',JSON.stringify({count:items.length}));
+    return ok(res,{items});
+  }catch(e){console.error('[GM_BANK_GPAY_PENDING_ERROR_V010]',e.message);return fail(res,e.status||502,e.message);}
+});
+router.post('/api/gm/bank/gpay/verify-selected',requireBankSession,express.json({limit:'4kb'}),async(req,res)=>{
+  const rid=Number(req.body?.request_id),method=clean(req.body?.method).toUpperCase();
+  const bid=Number(req.body?.bank_transaction_id),proof=clean(req.body?.proof_ref);
+  if(!Number.isSafeInteger(rid)||rid<=0||!['MANUAL','BANK_FILE'].includes(method))return fail(res,400,'INVALID_REQUEST');
+  if(method==='BANK_FILE'&&(!Number.isSafeInteger(bid)||bid<=0))return fail(res,400,'BANK_ID_REQUIRED');
+  if(method==='MANUAL'&&(proof.length<5||proof.length>160))return fail(res,400,'PROOF_REF_REQUIRED');
+  try {
+    const [requestResult,state]=await Promise.all([
+      gpayMatchCall('/api/gpay/issue-requests'),
+      gpayMatchCall('/api/gpay/issue-requests/'+rid+'/process')]);
+    const request=(requestResult.issue_requests||[]).find(r=>Number(r.request_id)===rid);
+    const p=state.process;
+    if(!request||request.request_type!=='PURCHASE'||request.status!=='SUBMITTED'||!p ||
+       !['HQ_DEPOSIT_PENDING','AGENT_DEPOSIT_PENDING'].includes(p.process_state)) return fail(res,409,'PURCHASE_NOT_PENDING');
+    if(method==='BANK_FILE') {
+      const pool=db(req);if(!pool)return fail(res,503,'DB_NOT_AVAILABLE');
+      const q=await pool.query(`SELECT deposit_amount,process_status FROM gm_bank_transaction WHERE bank_transaction_id=$1`,[bid]);
+      if(!q.rowCount||q.rows[0].process_status!=='UNPROCESSED'|| Number(q.rows[0].deposit_amount)!==Number(request.total_amount))return fail(res,409,'BANK_TRANSACTION_NOT_MATCHED');
+    }
+    const verified=await gpayMatchCall('/api/gpay/issue-requests/'+rid+'/verify-payment','POST',{
+      method,actor_id:req.bankAdminId,bank_transaction_id:method==='BANK_FILE'?bid:undefined,
+      proof_ref:method==='MANUAL'?proof:undefined});
+    console.info('[GM_BANK_GPAY_VERIFY_V010]',JSON.stringify({request_id:rid,method,actor:req.bankAdminId,state:verified.state}));
+    return ok(res,{request_id:rid,state:verified.state,already_verified:!!verified.already_verified});
+  }catch(e){console.error('[GM_BANK_GPAY_VERIFY_ERROR_V010]',JSON.stringify({request_id:rid,error:e.message}));return fail(res,e.status||502,e.message);}
+});
+
 module.exports = router;
