@@ -349,6 +349,13 @@ async function gpayBridge(path,method,body){
     return data;
   }finally{clearTimeout(timer);}
 }
+router.get('/api/gm/bank/gpay/pending-requests',requireBankSession,async(req,res)=>{
+ const member=clean(req.query.member_id);
+ if(!member||member.length>100)return fail(res,400,'MEMBER_ID_REQUIRED');
+ try{const data=await gpayBridge('/api/gpay/issue-requests/lookup/pending-purchases?member_id='+encodeURIComponent(member),'GET');
+   return ok(res,{items:data.items||[]});
+ }catch(e){console.error('[GM_BANK_PURCHASE_LIST_FAILED]',e.message);return fail(res,e.status||502,e.message);}
+});
 router.get('/api/gm/bank/gpay/request/:requestNo',requireBankSession,async(req,res)=>{
   const no=clean(req.params.requestNo);
   if(!/^GR-[A-Za-z0-9-]{8,80}$/.test(no))return fail(res,400,'INVALID_REQUEST_NUMBER');
