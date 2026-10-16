@@ -226,7 +226,7 @@ router.post('/api/gm/bank/transactions/:id/process', requireBankSession, async (
           processed_at=CASE WHEN $2='UNPROCESSED' THEN NULL ELSE NOW() END,
           processed_by_member_id=CASE WHEN $2='UNPROCESSED' THEN NULL ELSE NULLIF($4,'') END,
           updated_at=NOW()
-      WHERE bank_transaction_id=$1
+      WHERE bank_transaction_id=$1 AND COALESCE(matched_order_no,'') NOT LIKE 'GPAY:%'
       RETURNING *
     `,[id,status,orderNo,memberId]);
     if(!q.rows.length) return fail(res,404,'bank transaction not found');
@@ -253,10 +253,17 @@ router.post('/api/gm/bank/transactions/manual', requireBankSession, async (req,r
   if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?$/.test(datetime) || !Number.isFinite(new Date(datetime+'+09:00').getTime())) return fail(res,400,'invalid KST timestamp');
   if(reference.length<6 || reference.length>160 || !operator || operator.length>160) return fail(res,400,'reference and operator required');
   if(memo.length>4000 || description.length>1000) return fail(res,400,'text too long');
+  const memberId=clean(b.gpay_member_id),requestNumber=clean(b.gpay_request_no);
+  if(!memberId||!/^GR-[A-Za-z0-9-]{8,80}$/.test(requestNumber)) return fail(res,400,'MEMBER_AND_REQUEST_REQUIRED');
+  let requestData;
+  try{requestData=(await gpayBridge('/api/gpay/issue-requests/lookup/by-request-no/'+encodeURIComponent(requestNumber),'GET')).item;}
+  catch(e){return fail(res,e.status||502,e.message);}
+  if(String(requestData.from_id)!==memberId||Number(requestData.total_amount)!==amount||
+      !['HQ_DEPOSIT_PENDING','AGENT_DEPOSIT_PENDING'].includes(requestData.process_state))return fail(res,409,'PURCHASE_MEMBER_AMOUNT_OR_STATE_MISMATCH');
   const normalized=datetime.replace('T',' ')+(datetime.length===16?':00':'');
   // Manual reference must be uniquely stable on repeat; avoid auto-matching an actual bank row.
   const transactionHash=sha256(Buffer.from(['MANUAL',bank,account,reference].join('|')));
-  const raw=JSON.stringify({source:'MANUAL_ASSERTION',reference,operator,submitted_at:new Date().toISOString()});
+  const raw=JSON.stringify({source:'MANUAL_ASSERTION',reference,operator,submitted_at:new Date().toISOString(),gpay_member_id:memberId,gpay_request_no:requestNumber,gpay_request_verified:true});
   try{
     const q=await pool.query(`INSERT INTO gm_bank_transaction (
       bank_code,account_no,account_holder,transaction_at,transaction_type,description,
@@ -270,64 +277,104 @@ router.post('/api/gm/bank/transactions/manual', requireBankSession, async (req,r
   }catch(e){console.error('[GM_BANK_MANUAL_ERROR]',String(e&&e.message||e));return fail(res,500,'manual record failed');}
 });
 
-
-// GM_BANK_GPAY_MATCH_V010: additive reconciliation only. V008 authentication/session code above is unchanged.
-async function gpayMatchCall(path, method='GET', body) {
-  const base = clean(process.env.GPAY_API_BASE || process.env.GPAY_API_BASE_URL || process.env.GUPPY_PAY_API_URL);
-  const key = clean(process.env.GPAY_TRUSTED_CALLER_KEY);
-  if (!/^https:\/\/[^\s]+$/.test(base) || key.length < 32) {const e=new Error('GPAY_BRIDGE_NOT_CONFIGURED');e.status=503;throw e;}
-  const ctrl=new AbortController(), timer=setTimeout(()=>ctrl.abort(),8000);
-  try {
-    const response=await fetch(base.replace(/\/$/,'')+path, {method,signal:ctrl.signal,
-      headers:{'Accept':'application/json','Content-Type':'application/json','x-gpay-trusted-caller':key},
-      body:body===undefined?undefined:JSON.stringify(body)});
-    if (!(response.headers.get('content-type')||'').includes('application/json')) {const e=new Error('GPAY_RESPONSE_NOT_JSON');e.status=502;throw e;}
-    const data=await response.json();
-    if (!response.ok || !data.ok) {const e=new Error(data.error||'GPAY_REQUEST_FAILED');e.status=response.status;throw e;}
-    return data;
-  } finally {clearTimeout(timer);}
+// INTERNAL G-PAY bridge: distinct from member login; secret is server-to-server only.
+// Fail closed if a shared credential has not been configured on BOTH services.
+function requireGpayServiceAuth(req,res,next){
+ const expected=clean(process.env.GPAY_GLOMART_BANK_TOKEN);
+ const supplied=clean(req.headers['x-gm-bank-token']);
+ if(expected.length<32) return fail(res,503,'GPAY_BANK_BRIDGE_NOT_CONFIGURED');
+ if(!equal(expected,supplied)) return fail(res,401,'GPAY_BANK_BRIDGE_UNAUTHORIZED');
+ return next();
 }
-router.get('/api/gm/bank/gpay/pending',requireBankSession,async(req,res)=>{
+
+// G-PAY bank claim uses the existing immutable bank transaction row, not a new bank ledger.
+// Authenticated internal calls only; buyer requests never access these endpoints.
+router.post('/api/gm/bank/gpay/claim', requireGpayServiceAuth, async(req,res)=>{
+  const pool=db(req), b=req.body||{};
+  const tx=Number(b.bank_transaction_id), amount=Number(b.amount);
+  const ref=clean(b.request_no), scope=clean(b.collection_scope);
+  if(!Number.isSafeInteger(tx)||tx<=0||!Number.isSafeInteger(amount)||amount<=0||!/^GR-[A-Za-z0-9-]+$/.test(ref)||!['HQ','AGENT'].includes(scope)) return fail(res,400,'INVALID_BANK_CLAIM');
+  const c=await pool.connect();
   try {
-    const result=await gpayMatchCall('/api/gpay/issue-requests');
-    const candidates=(result.issue_requests||[]).filter(x=>x.request_type==='PURCHASE' && x.status==='SUBMITTED');
-    const items=[];
-    for(const r of candidates.slice(0,80)) {
-      const detail=await gpayMatchCall('/api/gpay/issue-requests/'+encodeURIComponent(r.request_id)+'/process');
-      const p=detail.process;
-      if(!p || !['HQ_DEPOSIT_PENDING','AGENT_DEPOSIT_PENDING'].includes(p.process_state))continue;
-      items.push({request_id:r.request_id,request_no:r.issue_request_id,member_id:r.buyer_id,
-        amount:Number(r.total_amount),collection_mode:p.collection_mode,process_state:p.process_state});
+    await c.query('BEGIN');
+    const q=await c.query('SELECT * FROM gm_bank_transaction WHERE bank_transaction_id=$1 FOR UPDATE',[tx]);
+    if(!q.rowCount){await c.query('ROLLBACK');return fail(res,404,'BANK_TRANSACTION_NOT_FOUND');}
+    const t=q.rows[0];
+    // Keep account ownership verification fail-closed. Map agent_id -> account_no in env.
+    let accounts;
+    try { accounts=JSON.parse(process.env.GPAY_BANK_ACCOUNT_MAP||'{}'); } catch(_) {accounts={};}
+    const ownerKey=scope==='HQ'?'HQ':`AGENT:${Number(b.agent_id)}`;
+    const approvedAccounts=accounts[ownerKey];
+    if(!Array.isArray(approvedAccounts)||!approvedAccounts.map(clean).includes(clean(t.account_no))){
+      await c.query('ROLLBACK');return fail(res,409,'BANK_ACCOUNT_NOT_AUTHORIZED_FOR_RECIPIENT');
     }
-    console.info('[GM_BANK_GPAY_PENDING_V010]',JSON.stringify({count:items.length}));
-    return ok(res,{items});
-  }catch(e){console.error('[GM_BANK_GPAY_PENDING_ERROR_V010]',e.message);return fail(res,e.status||502,e.message);}
+    if(Number(t.deposit_amount)!==amount){await c.query('ROLLBACK');return fail(res,409,'AMOUNT_MISMATCH');}
+    if(t.process_status==='MATCHED' && t.matched_order_no===`GPAY:${ref}`){await c.query('COMMIT');return ok(res,{already_claimed:true,deposit_amount:Number(t.deposit_amount)});}
+    if(t.process_status!=='UNPROCESSED'){await c.query('ROLLBACK');return fail(res,409,'BANK_TRANSACTION_ALREADY_USED');}
+    const upd=await c.query(`UPDATE gm_bank_transaction SET process_status='MATCHED',matched_order_no=$2,matched_amount=deposit_amount,
+      processed_at=NOW(),processed_by_member_id='GPAY_BRIDGE',updated_at=NOW() WHERE bank_transaction_id=$1 RETURNING deposit_amount`,[tx,`GPAY:${ref}`]);
+    await c.query('COMMIT');return ok(res,{deposit_amount:Number(upd.rows[0].deposit_amount)});
+  }catch(e){await c.query('ROLLBACK').catch(()=>{});return fail(res,500,'BANK_GPAY_CLAIM_FAILED');}finally{c.release();}
 });
-router.post('/api/gm/bank/gpay/verify-selected',requireBankSession,express.json({limit:'4kb'}),async(req,res)=>{
-  const rid=Number(req.body?.request_id),method=clean(req.body?.method).toUpperCase();
-  const bid=Number(req.body?.bank_transaction_id),proof=clean(req.body?.proof_ref);
-  if(!Number.isSafeInteger(rid)||rid<=0||!['MANUAL','BANK_FILE'].includes(method))return fail(res,400,'INVALID_REQUEST');
-  if(method==='BANK_FILE'&&(!Number.isSafeInteger(bid)||bid<=0))return fail(res,400,'BANK_ID_REQUIRED');
-  if(method==='MANUAL'&&(proof.length<5||proof.length>160))return fail(res,400,'PROOF_REF_REQUIRED');
-  try {
-    const [requestResult,state]=await Promise.all([
-      gpayMatchCall('/api/gpay/issue-requests'),
-      gpayMatchCall('/api/gpay/issue-requests/'+rid+'/process')]);
-    const request=(requestResult.issue_requests||[]).find(r=>Number(r.request_id)===rid);
-    const p=state.process;
-    if(!request||request.request_type!=='PURCHASE'||request.status!=='SUBMITTED'||!p ||
-       !['HQ_DEPOSIT_PENDING','AGENT_DEPOSIT_PENDING'].includes(p.process_state)) return fail(res,409,'PURCHASE_NOT_PENDING');
-    if(method==='BANK_FILE') {
-      const pool=db(req);if(!pool)return fail(res,503,'DB_NOT_AVAILABLE');
-      const q=await pool.query(`SELECT deposit_amount,process_status FROM gm_bank_transaction WHERE bank_transaction_id=$1`,[bid]);
-      if(!q.rowCount||q.rows[0].process_status!=='UNPROCESSED'|| Number(q.rows[0].deposit_amount)!==Number(request.total_amount))return fail(res,409,'BANK_TRANSACTION_NOT_MATCHED');
+router.post('/api/gm/bank/gpay/lookup', requireGpayServiceAuth, async(req,res)=>{
+  const pool=db(req), ref=clean(req.body?.request_no);
+  if(!/^GR-[A-Za-z0-9-]+$/.test(ref))return fail(res,400,'INVALID_REQUEST_REF');
+  try{const q=await pool.query(`SELECT bank_transaction_id,deposit_amount,process_status,matched_order_no,account_no FROM gm_bank_transaction WHERE matched_order_no=$1`,[`GPAY:${ref}`]);
+    return ok(res,{transactions:q.rows});}catch(e){return fail(res,500,'BANK_LOOKUP_FAILED');}
+});
+
+
+
+// GM_GPAY_BANK_V013: master-session-only proxy to G-PAY. Authentication above is V008 unchanged.
+const GPAY_REQUEST_BASE=()=>clean(process.env.GPAY_API_BASE_URL||process.env.GPAY_SERVER_URL).replace(/\/$/,'');
+async function gpayBridge(path,method,body){
+  const base=GPAY_REQUEST_BASE(),secret=clean(process.env.GPAY_TRUSTED_CALLER_KEY);
+  if(!base||secret.length<32){const e=Error('GPAY_BRIDGE_NOT_CONFIGURED');e.status=503;throw e;}
+  const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),8000);
+  try{
+    const u=new URL(path,base+'/');
+    if(u.origin!==new URL(base).origin)throw Error('INVALID_BRIDGE_URL');
+    const response=await fetch(u,{method,headers:{'x-gpay-trusted-caller':secret,...(body?{'content-type':'application/json'}:{})},
+      ...(body?{body:JSON.stringify(body)}:{}),signal:abort.signal});
+    const type=response.headers.get('content-type')||'';
+    if(!type.includes('application/json')){const e=Error('GPAY_NON_JSON_RESPONSE');e.status=502;throw e;}
+    const data=await response.json();
+    if(!response.ok||!data.ok){const e=Error(data.error||'GPAY_UPSTREAM_FAILED');e.status=response.status;throw e;}
+    return data;
+  }finally{clearTimeout(timer);}
+}
+router.get('/api/gm/bank/gpay/request/:requestNo',requireBankSession,async(req,res)=>{
+  const no=clean(req.params.requestNo);
+  if(!/^GR-[A-Za-z0-9-]{8,80}$/.test(no))return fail(res,400,'INVALID_REQUEST_NUMBER');
+  try{const info=await gpayBridge('/api/gpay/issue-requests/lookup/by-request-no/'+encodeURIComponent(no),'GET');
+    return ok(res,{item:info.item});
+  }catch(e){console.error('[GM_BANK_V013_LOOKUP_FAILED]',e.message);return fail(res,e.status||502,e.message);}
+});
+router.post('/api/gm/bank/gpay/verify-manual',requireBankSession,async(req,res)=>{
+  const no=clean(req.body?.request_no),member=clean(req.body?.member_id),tx=Number(req.body?.bank_transaction_id);
+  if(!/^GR-[A-Za-z0-9-]{8,80}$/.test(no)||!member||!Number.isSafeInteger(tx)||tx<=0)return fail(res,400,'INVALID_CONFIRMATION_INPUT');
+  try{
+    const record=await db(req).query(`SELECT bank_transaction_id,deposit_amount,process_status,source_type,raw_json FROM gm_bank_transaction WHERE bank_transaction_id=$1`,[tx]);
+    if(!record.rowCount)return fail(res,404,'BANK_TRANSACTION_NOT_FOUND');
+    const t=record.rows[0];
+    if(t.process_status!=='UNPROCESSED')return fail(res,409,'BANK_TRANSACTION_ALREADY_PROCESSED');
+    const lookup=await gpayBridge('/api/gpay/issue-requests/lookup/by-request-no/'+encodeURIComponent(no),'GET');
+    const r=lookup.item;
+    if(r.from_id!==member||Number(r.total_amount)!==Number(t.deposit_amount))return fail(res,409,'MEMBER_OR_AMOUNT_MISMATCH');
+    if(!['HQ_DEPOSIT_PENDING','AGENT_DEPOSIT_PENDING'].includes(r.process_state))return fail(res,409,'PURCHASE_NOT_PENDING');
+    // For a manually registered transaction require previously validated pair in source metadata.
+    if(t.source_type==='MANUAL'){
+      const raw=typeof t.raw_json==='string'?JSON.parse(t.raw_json):t.raw_json||{};
+      if(raw.gpay_member_id!==member||raw.gpay_request_no!==no||raw.gpay_request_verified!==true) return fail(res,409,'MANUAL_RECORD_NOT_LINKED_TO_REQUEST');
+      const result=await gpayBridge('/api/gpay/issue-requests/'+r.id+'/verify-payment','POST',
+        {method:'MANUAL',actor_id:req.bankAdminId,proof_ref:'BANK_MANUAL:'+tx});
+      return ok(res,{verified:true,state:result.state,request_no:no,request_id:r.id});
     }
-    const verified=await gpayMatchCall('/api/gpay/issue-requests/'+rid+'/verify-payment','POST',{
-      method,actor_id:req.bankAdminId,bank_transaction_id:method==='BANK_FILE'?bid:undefined,
-      proof_ref:method==='MANUAL'?proof:undefined});
-    console.info('[GM_BANK_GPAY_VERIFY_V010]',JSON.stringify({request_id:rid,method,actor:req.bankAdminId,state:verified.state}));
-    return ok(res,{request_id:rid,state:verified.state,already_verified:!!verified.already_verified});
-  }catch(e){console.error('[GM_BANK_GPAY_VERIFY_ERROR_V010]',JSON.stringify({request_id:rid,error:e.message}));return fail(res,e.status||502,e.message);}
+    // File-based transactions are claimed through G-PAY -> bank service; no manual override.
+    const result=await gpayBridge('/api/gpay/issue-requests/'+r.id+'/verify-payment','POST',
+      {method:'BANK_FILE',actor_id:req.bankAdminId,bank_transaction_id:tx});
+    return ok(res,{verified:true,state:result.state,request_no:no,request_id:r.id});
+  }catch(e){console.error('[GM_BANK_V013_VERIFY_FAILED]',e.message);return fail(res,e.status||502,e.message);}
 });
 
 module.exports = router;
