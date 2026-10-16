@@ -27,7 +27,13 @@ const failures = new Map();
 const MASTER_ID = 'derzon';
 let argon2 = null;
 try { argon2 = require('argon2'); } catch (_) { /* PBKDF2 fallback supported */ }
-function sessionSecret(){ return clean(process.env.AUTH_SESSION_SECRET || process.env.SESSION_SECRET); }
+// Bank-session fallback: per-process random secret. No additional Cloudtype setting is needed.
+// Sessions intentionally expire on restart; never use a static or predictable fallback.
+const bankEphemeralSessionSecret = crypto.randomBytes(48).toString('hex');
+function sessionSecret(){
+  const configured = clean(process.env.AUTH_SESSION_SECRET || process.env.SESSION_SECRET);
+  return configured.length >= 32 ? configured : bankEphemeralSessionSecret;
+}
 function sign(body){ return crypto.createHmac('sha256',sessionSecret()).update(body).digest('base64url'); }
 function equal(a,b){ const x=Buffer.from(String(a)),y=Buffer.from(String(b)); return x.length===y.length && crypto.timingSafeEqual(x,y); }
 function cookies(req){ const entry=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(COOKIE_NAME+'=')); return entry ? entry.slice(COOKIE_NAME.length+1) : ''; }
