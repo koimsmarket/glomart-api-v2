@@ -7,6 +7,9 @@ const path = require('path');
 const { parseWooriXlsx } = require('../../services/bank/bank_woori_xlsx');
 
 const router = express.Router();
+// GM_GPAY_BANK_AUTH_V018: mounted existing Cafe24 administrator OAuth; never trust member ID alone.
+const cafe24AdminAuth = require('../cafe24_auth');
+router.use(cafe24AdminAuth);
 const VERSION = 'GM_BANK_TRANSACTION_ROUTE_V008';
 console.log('[GM_BANK_ROUTE_V008_LOADED]',JSON.stringify({auth:'member',login:'/api/gm/bank/admin/login'}));
 const upload = multer({
@@ -74,6 +77,25 @@ router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res
   const address=String(req.socket?.remoteAddress||'unknown');
   const item=failures.get(address);
   if(item && item.until>Date.now() && item.count>=5) return fail(res,429,'TOO_MANY_LOGIN_ATTEMPTS');
+  const origin=clean(req.headers.origin), host=clean(req.headers['x-forwarded-host']||req.headers.host).split(',')[0];
+  if(!origin || !host || !['https://'+host,'http://'+host].includes(origin)) return fail(res,403,'BANK_ADMIN_ORIGIN_REJECTED');
+  // Cafe24 administrator OAuth callback signed session, independently authorized for bank management.
+  // This is an ADMIN login, not a Cafe24 storefront-member password check.
+  const user = cafe24AdminAuth.currentUser(req);
+  if(user){
+    const boundId=clean(process.env.GPAY_BANK_CAFE24_ADMIN_ID || MASTER_ID).toLowerCase();
+    const adminId=clean(user.admin_id).toLowerCase();
+    const role=clean(user.role).toUpperCase();
+    if(user.login_type!=='CAFE24_ADMIN' || adminId!==boundId || role!=='MASTER'){
+      console.warn('[GM_BANK_AUTH_V018]',JSON.stringify({stage:'REJECT',reason:'CAFE24_ADMIN_NOT_AUTHORIZED'}));
+      return fail(res,403,'BANK_CAFE24_ADMIN_NOT_AUTHORIZED');
+    }
+    failures.delete(address);
+    const now=Date.now();const payload=Buffer.from(JSON.stringify({id:MASTER_ID,iat:now,exp:now+SESSION_MS})).toString('base64url');
+    res.setHeader('Set-Cookie',`${COOKIE_NAME}=${payload}.${sign(payload)}; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=28800`);
+    console.log('[GM_BANK_AUTH_V018]',JSON.stringify({stage:'SUCCESS',source:'CAFE24_ADMIN_OAUTH',admin_id:adminId}));
+    return ok(res,{authenticated:true,member_id:MASTER_ID,expires_in_seconds:28800,method:'CAFE24_ADMIN_OAUTH'});
+  }
   const memberId=clean(req.body?.member_id).toLowerCase();
   const password=typeof req.body?.password==='string' ? req.body.password : '';
   if(memberId!==MASTER_ID || !password || password.length>1024) return fail(res,401,'INVALID_MEMBER_CREDENTIAL');
