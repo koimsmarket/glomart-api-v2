@@ -265,12 +265,12 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   // Password enrolment/change must use a separately verified member session.
   const submittedPassword = !!pickPasswordPlain(b);
   if(submittedPassword){
-    console.warn('[GM_MEMBER_PASSWORD_GUARD_V001]', JSON.stringify({stage:'BLOCK_UNVERIFIED_PROFILE_PASSWORD', sync_mode:s(b.sync_mode).slice(0,32)}));
+    console.warn('[GM_MEMBER_AUTH_V002]', JSON.stringify({stage:'BLOCK_UNVERIFIED_PROFILE_PASSWORD', sync_mode:s(b.sync_mode).slice(0,32), reason:'NO_SERVER_VERIFIED_IDENTITY'}));
     return res.status(403).json({ok:false,error:'PASSWORD_REQUIRES_VERIFIED_MEMBER_SESSION'});
   }
-  let passwordMeta=null;
-  try{ passwordMeta = await hashPasswordIfPresent(b); }
-  catch(e){ return res.status(400).json({ok:false,error:'비밀번호 정보를 처리하지 못했습니다.'}); }
+  // GM_MEMBER_AUTH_V002: Public profile upsert cannot write a password hash.
+  // Future verified enrollment must use a distinct authenticated endpoint.
+  const passwordMeta=null;
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
