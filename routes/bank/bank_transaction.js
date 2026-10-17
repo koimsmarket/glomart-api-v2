@@ -390,4 +390,32 @@ router.post('/api/gm/bank/gpay/verify-manual',requireBankSession,async(req,res)=
   }catch(e){console.error('[GM_BANK_V013_VERIFY_FAILED]',e.message);return fail(res,e.status||502,e.message);}
 });
 
+
+// GM_GPAY_BUILDER_V016: read-only HQ overview. Existing bank approval and G-PAY issuance untouched.
+router.get('/api/gm/bank/gpay/admin-requests',requireBankSession,async(req,res)=>{
+ try{
+   const data=await gpayBridge('/api/gpay/issue-requests','GET');
+   const raw=Array.isArray(data.issue_requests)?data.issue_requests:[];
+   const requests=raw.filter(x=>String(x.request_type||'').toUpperCase()==='PURCHASE'&&String(x.from_type||'').toUpperCase()==='MEMBER');
+   const ids=[...new Set(requests.map(x=>clean(x.from_id)).filter(Boolean))].slice(0,500);
+   let profile=new Map();
+   if(ids.length){
+     const p=db(req); if(!p)return fail(res,503,'DB_NOT_AVAILABLE');
+     const q=await p.query(`SELECT member_id,member_name,member_name_en,phone FROM gm_member WHERE member_id = ANY($1::text[])`,[ids]);
+     profile=new Map(q.rows.map(x=>[x.member_id,x]));
+   }
+   const items=requests.map(x=>{
+     const m=profile.get(clean(x.from_id))||{};
+     return {request_no:x.issue_request_id||x.request_no||'',request_id:x.request_id,
+       from_id:clean(x.from_id),customer_name:clean(m.member_name||m.member_name_en),
+       phone_masked:(()=>{const digits=clean(m.phone);return digits?digits.replace(/\d(?=\d{3}$)/g,'*').replace(/\d{3}$/,'***'):'';})(),
+       to_type:x.to_type,to_id:x.to_id,request_type:x.request_type,
+       total_amount:Number(x.total_amount||x.amount_g||0),status:x.status||'',
+       submitted_at:x.submitted_at||'',completed_at:x.completed_at||''};
+   });
+   console.log('[GM_GPAY_BUILDER_V016] list',JSON.stringify({requests:items.length,profiles:profile.size}));
+   return ok(res,{items,scope:'GPAY_API_LAST_500',total_loaded:items.length,full_ledger:false});
+ }catch(e){console.error('[GM_GPAY_BUILDER_V016] list_failed',String(e.message||e));return fail(res,e.status||502,e.message||'GPAY_LIST_FAILED');}
+});
+
 module.exports = router;
