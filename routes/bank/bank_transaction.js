@@ -26,7 +26,8 @@ const SESSION_MS = 8 * 60 * 60 * 1000;
 const failures = new Map();
 const MASTER_ID = 'derzon';
 let argon2 = null;
-try { argon2 = require('argon2'); } catch (_) { /* PBKDF2 fallback supported */ }
+try { argon2 = require('argon2'); } catch (_) { /* PBKDF2 supported; Argon2 requires its dependency */ }
+console.log('[GM_BANK_AUTH_DIAG_V017]', JSON.stringify({argon2_available:!!argon2}));
 // Bank-session fallback: per-process random secret. No additional Cloudtype setting is needed.
 // Sessions intentionally expire on restart; never use a static or predictable fallback.
 const bankEphemeralSessionSecret = crypto.randomBytes(48).toString('hex');
@@ -80,10 +81,26 @@ router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res
     const pool=db(req); if(!pool) return fail(res,503,'DB_NOT_AVAILABLE');
     const result=await pool.query('SELECT member_id,password_hash FROM gm_member WHERE LOWER(member_id)=LOWER($1) LIMIT 1',[MASTER_ID]);
     const member=result.rows[0];
-    const valid=member && typeof member.password_hash==='string' && await passwordMatches(password,member.password_hash);
+    // V017: expose only non-secret failure categories; never log hashes/passwords.
+    const hash = member && typeof member.password_hash === 'string' ? member.password_hash : '';
+    const hashKind = hash.startsWith('$argon2') ? 'ARGON2' : hash.startsWith('pbkdf2_sha512$') ? 'PBKDF2_SHA512' : hash ? 'OTHER' : 'NONE';
+    if (!member || hashKind === 'NONE') {
+      console.warn('[GM_BANK_AUTH_V017]',JSON.stringify({stage:'REJECT',reason:'MEMBER_PASSWORD_HASH_NOT_REGISTERED',member_found:!!member}));
+      return fail(res,409,'BANK_MEMBER_PASSWORD_NOT_REGISTERED');
+    }
+    if (hashKind === 'ARGON2' && (!argon2 || typeof argon2.verify !== 'function')) {
+      console.error('[GM_BANK_AUTH_V017]',JSON.stringify({stage:'REJECT',reason:'ARGON2_DEPENDENCY_MISSING'}));
+      return fail(res,503,'BANK_ARGON2_DEPENDENCY_MISSING');
+    }
+    if (hashKind === 'OTHER') {
+      console.error('[GM_BANK_AUTH_V017]',JSON.stringify({stage:'REJECT',reason:'UNSUPPORTED_PASSWORD_HASH_FORMAT'}));
+      return fail(res,503,'BANK_UNSUPPORTED_PASSWORD_HASH_FORMAT');
+    }
+    const valid=await passwordMatches(password,hash);
     if(!valid){
       const count=item && item.until>Date.now()?item.count:0;
       failures.set(address,{count:count+1,until:Date.now()+15*60*1000});
+      console.warn('[GM_BANK_AUTH_V017]',JSON.stringify({stage:'REJECT',reason:'PASSWORD_MISMATCH',hash_kind:hashKind}));
       return fail(res,401,'INVALID_MEMBER_CREDENTIAL');
     }
     failures.delete(address);
