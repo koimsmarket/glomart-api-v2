@@ -260,6 +260,14 @@ router.get(['/api/gm/member/recommender/check','/api/member/recommender/check'],
 router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
   const pool=db(req), b=req.body||{}; if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const p=memberPayload(b); if(!p.member_id) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
+  // GM_MEMBER_PASSWORD_GUARD_V001: Never accept a password change from a public
+  // profile upsert. A client-supplied member_id or sync_mode is not an identity proof.
+  // Password enrolment/change must use a separately verified member session.
+  const submittedPassword = !!pickPasswordPlain(b);
+  if(submittedPassword){
+    console.warn('[GM_MEMBER_PASSWORD_GUARD_V001]', JSON.stringify({stage:'BLOCK_UNVERIFIED_PROFILE_PASSWORD', sync_mode:s(b.sync_mode).slice(0,32)}));
+    return res.status(403).json({ok:false,error:'PASSWORD_REQUIRES_VERIFIED_MEMBER_SESSION'});
+  }
   let passwordMeta=null;
   try{ passwordMeta = await hashPasswordIfPresent(b); }
   catch(e){ return res.status(400).json({ok:false,error:'비밀번호 정보를 처리하지 못했습니다.'}); }
