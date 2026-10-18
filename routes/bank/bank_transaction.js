@@ -81,7 +81,9 @@ router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res
   if(!origin || !host || !['https://'+host,'http://'+host].includes(origin)) return fail(res,403,'BANK_ADMIN_ORIGIN_REJECTED');
   // Cafe24 administrator OAuth callback signed session, independently authorized for bank management.
   // This is an ADMIN login, not a Cafe24 storefront-member password check.
-  const user = cafe24AdminAuth.currentUser(req);
+  // Explicit member credentials MUST take the gm_member hash path, even with an active Cafe24 OAuth session.
+  const requestedMemberAuth = Object.prototype.hasOwnProperty.call(req.body || {}, 'password') || Object.prototype.hasOwnProperty.call(req.body || {}, 'member_id');
+  const user = requestedMemberAuth ? null : cafe24AdminAuth.currentUser(req);
   if(user){
     const boundId=clean(process.env.GPAY_BANK_CAFE24_ADMIN_ID || MASTER_ID).toLowerCase();
     const adminId=clean(user.admin_id).toLowerCase();
@@ -129,7 +131,7 @@ router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res
     const now=Date.now();const payload=Buffer.from(JSON.stringify({id:MASTER_ID,iat:now,exp:now+SESSION_MS})).toString('base64url');
     res.setHeader('Set-Cookie',`${COOKIE_NAME}=${payload}.${sign(payload)}; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=28800`);
     console.log('[GM_BANK_MEMBER_LOGIN_V007]',JSON.stringify({member_id:MASTER_ID}));
-    return ok(res,{authenticated:true,member_id:MASTER_ID,expires_in_seconds:28800});
+    return ok(res,{authenticated:true,member_id:MASTER_ID,expires_in_seconds:28800,method:'GM_MEMBER_PASSWORD_HASH'});
   }catch(err){ console.error('[GM_BANK_MEMBER_LOGIN_ERROR_V007]',String(err.message||err));return fail(res,503,'MEMBER_AUTH_UNAVAILABLE'); }
 });
 router.get('/api/gm/bank/admin/status',(req,res)=>ok(res,{authenticated:validSession(req)}));
