@@ -832,7 +832,7 @@ function gmPrelaunchExistingAllowed(id){
 }
 router.post('/api/gm/member/auth/enroll',async(req,res)=>{
   // Explicit stage-1 bootstrap switch. Never enable on an untrusted public deployment.
-  if(!gmPrelaunchEnabled()) return gmAuthError(res,404,'NOT_ENABLED');
+  if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_V018] stage=ENROLL_DENIED reason=PRELAUNCH_DISABLED route='+req.path); return gmAuthError(res,404,'NOT_ENABLED'); }
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x))return gmAuthError(res,400,'INVALID_INPUT');
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
@@ -842,21 +842,21 @@ router.post('/api/gm/member/auth/enroll',async(req,res)=>{
     client=await pool.connect();await client.query('BEGIN');
     const result=await client.query(`UPDATE gm_member SET password_hash=$2,password_algo=$3,password_updated_at=NOW(),password_migrated='Y',updated_at=NOW()
       WHERE member_id=$1 AND NULLIF(password_hash,'') IS NULL AND created_at > NOW() - INTERVAL '10 minutes' RETURNING member_id,password_hash`,[x.memberId,meta.password_hash,meta.password_algo]);
-    if(result.rowCount!==1){await client.query('ROLLBACK');return gmAuthError(res,409,'MEMBER_MISSING_OR_HASH_EXISTS');}
+    if(result.rowCount!==1){await client.query('ROLLBACK');console.info('[GM_MEMBER_AUTH_V018] stage=ENROLL_DENIED reason=MEMBER_MISSING_OR_HASH_EXISTS_OR_AGE');return gmAuthError(res,409,'MEMBER_MISSING_OR_HASH_EXISTS');}
     const recheck=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
     if(!recheck.rows[0] || !(await gmVerifyHash(x.password,recheck.rows[0].password_hash))){throw Error('HASH_RECHECK_FAILED');}
-    await client.query('COMMIT');return res.json({ok:true,member_id:x.memberId,hash_saved:true,verified:true});
+    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V018] stage=ENROLL_COMMITTED verified=true');return res.json({ok:true,member_id:x.memberId,hash_saved:true,verified:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'ENROLL_FAILED');}
   finally{if(client)client.release();}
 });
 // GM_MEMBER_AUTH_V015: prelaunch bootstrap for explicitly allowlisted existing members.
 // Caveat: browser-reported Cafe24 login is NOT server-side identity proof.
 router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
-  if(!gmPrelaunchEnabled()) return gmAuthError(res,404,'NOT_ENABLED');
+  if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_V018] stage=BOOTSTRAP_DENIED reason=PRELAUNCH_DISABLED'); return gmAuthError(res,404,'NOT_ENABLED'); }
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x))return gmAuthError(res,400,'INVALID_INPUT');
   // Prelaunch rollout is restricted to the explicitly listed existing accounts.
-  if(!gmPrelaunchExistingAllowed(x.memberId))return gmAuthError(res,403,'MEMBER_NOT_ALLOWLISTED');
+  if(!gmPrelaunchExistingAllowed(x.memberId)){console.info('[GM_MEMBER_AUTH_V018] stage=BOOTSTRAP_DENIED reason=MEMBER_NOT_ALLOWLISTED');return gmAuthError(res,403,'MEMBER_NOT_ALLOWLISTED');}
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
   let client;
   try{
@@ -871,7 +871,7 @@ router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
     const check=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
     if(!check.rows[0]||!(await gmVerifyHash(x.password,check.rows[0].password_hash)))throw Error('HASH_RECHECK_FAILED');
     await client.query('COMMIT');
-    console.info('[GM_MEMBER_AUTH_V014] bootstrap_saved member_id='+x.memberId);
+    console.info('[GM_MEMBER_AUTH_V018] stage=BOOTSTRAP_COMMITTED verified=true');
     return res.json({ok:true,hash_saved:true,verified:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});
     console.error('[GM_MEMBER_AUTH_V014] bootstrap_failed code='+(e.code||'DB_ERROR'));
@@ -903,7 +903,7 @@ router.post('/api/gm/member/auth/change-password',async(req,res)=>{
     await client.query(`UPDATE gm_member SET password_hash=$2,password_algo=$3,password_updated_at=NOW(),password_migrated='Y',updated_at=NOW() WHERE member_id=$1`,[x.memberId,meta.password_hash,meta.password_algo]);
     const recheck=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
     if(!recheck.rows[0]||!(await gmVerifyHash(x.password,recheck.rows[0].password_hash)))throw Error('HASH_RECHECK_FAILED');
-    await client.query('COMMIT');return res.json({ok:true,updated:true,verified:true});
+    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V018] stage=CHANGE_COMMITTED verified=true');return res.json({ok:true,updated:true,verified:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'CHANGE_FAILED');}
   finally{if(client)client.release();}
 });
