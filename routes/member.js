@@ -813,6 +813,7 @@ router.post('/api/gm/member/auth/enroll',async(req,res)=>{
 // GM_MEMBER_AUTH_V015: prelaunch bootstrap for explicitly allowlisted existing members.
 // Caveat: browser-reported Cafe24 login is NOT server-side identity proof.
 router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
+  console.info('[GM_MEMBER_AUTH_TRACE_V022] stage=06_BOOTSTRAP_API_ENTER');
   if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_V018] stage=BOOTSTRAP_DENIED reason=PRELAUNCH_DISABLED'); return gmAuthError(res,404,'NOT_ENABLED'); }
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x))return gmAuthError(res,400,'INVALID_INPUT');
@@ -841,6 +842,7 @@ router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
 });
 
 router.post('/api/gm/member/auth/verify',async(req,res)=>{
+  console.info('[GM_MEMBER_AUTH_TRACE_V022] stage=05_VERIFY_API_ENTER');
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x))return gmAuthError(res,400,'INVALID_INPUT');
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
@@ -852,6 +854,7 @@ router.post('/api/gm/member/auth/verify',async(req,res)=>{
   }catch(e){console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'VERIFY_FAILED');}
 });
 router.post('/api/gm/member/auth/change-password',async(req,res)=>{
+  console.info('[GM_MEMBER_AUTH_TRACE_V022] stage=06_CHANGE_API_ENTER');
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x)||!x.oldPassword)return gmAuthError(res,400,'INVALID_INPUT');
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
