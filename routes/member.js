@@ -813,12 +813,12 @@ router.post('/api/gm/member/auth/enroll',async(req,res)=>{
 // GM_MEMBER_AUTH_V015: prelaunch bootstrap for explicitly allowlisted existing members.
 // Caveat: browser-reported Cafe24 login is NOT server-side identity proof.
 router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
-  console.info('[GM_MEMBER_AUTH_TRACE_V022] stage=06_BOOTSTRAP_API_ENTER');
-  if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_V018] stage=BOOTSTRAP_DENIED reason=PRELAUNCH_DISABLED'); return gmAuthError(res,404,'NOT_ENABLED'); }
+  console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=06_BOOTSTRAP_API_ENTER');
+  if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=06_BOOTSTRAP_BLOCKED reason=PRELAUNCH_DISABLED'); return gmAuthError(res,404,'NOT_ENABLED'); }
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x))return gmAuthError(res,400,'INVALID_INPUT');
   // Prelaunch rollout is restricted to the explicitly listed existing accounts.
-  if(!gmPrelaunchExistingAllowed(x.memberId)){console.info('[GM_MEMBER_AUTH_V018] stage=BOOTSTRAP_DENIED reason=MEMBER_NOT_ALLOWLISTED');return gmAuthError(res,403,'MEMBER_NOT_ALLOWLISTED');}
+  if(!gmPrelaunchExistingAllowed(x.memberId)){console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=06_BOOTSTRAP_BLOCKED reason=MEMBER_NOT_ALLOWLISTED');return gmAuthError(res,403,'MEMBER_NOT_ALLOWLISTED');}
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
   let client;
   try{
@@ -833,7 +833,7 @@ router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
     const check=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
     if(!check.rows[0]||!(await gmVerifyHash(x.password,check.rows[0].password_hash)))throw Error('HASH_RECHECK_FAILED');
     await client.query('COMMIT');
-    console.info('[GM_MEMBER_AUTH_V018] stage=BOOTSTRAP_COMMITTED verified=true');
+    console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=07_BOOTSTRAP_COMMITTED verified=true');
     return res.json({ok:true,hash_saved:true,verified:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});
     console.error('[GM_MEMBER_AUTH_V014] bootstrap_failed code='+(e.code||'DB_ERROR'));
@@ -848,8 +848,9 @@ router.post('/api/gm/member/auth/verify',async(req,res)=>{
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
   try{
     const q=await pool.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
-    if(!q.rows[0]||!q.rows[0].password_hash)return gmAuthError(res,404,'HASH_NOT_REGISTERED');
+    if(!q.rows[0]||!q.rows[0].password_hash){console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=05_VERIFY_RESULT result=HASH_NOT_REGISTERED member_found='+Boolean(q.rows[0]));return gmAuthError(res,404,'HASH_NOT_REGISTERED');}
     const valid=await gmVerifyHash(x.password,q.rows[0].password_hash);
+    console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=05_VERIFY_RESULT result='+(valid?'VERIFIED':'INVALID_CREDENTIALS'));
     return res.status(valid?200:401).json({ok:valid,authenticated:valid,error:valid?undefined:'INVALID_CREDENTIALS'});
   }catch(e){console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'VERIFY_FAILED');}
 });
