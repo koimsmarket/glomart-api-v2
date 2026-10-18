@@ -24,8 +24,7 @@ GLOMART MEMBER SERVER POLICY: LOGIN / JOIN / MODIFY / RECOMMENDER
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
-let argon2 = null;
-try { argon2 = require('argon2'); } catch (e) { argon2 = null; }
+const {pickPasswordPlain,hashPasswordIfPresent,gmVerifyHash}=require('./GM_MEMBER_PASSWORD');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=''){ return v===undefined||v===null ? d : String(v).trim(); }
 function yn(v){ return String(v || '').toUpperCase() === 'Y' || v === true ? 'Y' : 'N'; }
@@ -49,30 +48,6 @@ function pick(b, names, d=''){
   return d;
 }
 
-function pickPasswordPlain(b){
-  // Accept only transient password fields from HTTPS request body.
-  // Never store these values in raw_json, session storage, logs, or exports.
-  const names = [
-    'password_plain','plain_password','member_password','passwd','user_passwd','password',
-    'new_passwd','new_password','newPassword'
-  ];
-  for(const n of names){
-    if(b[n] !== undefined && b[n] !== null && String(b[n]).trim() !== '') return String(b[n]);
-  }
-  return '';
-}
-async function hashPasswordIfPresent(b){
-  const plain = pickPasswordPlain(b);
-  if(!plain) return null;
-  if(!argon2 || !argon2.hash) {
-    const crypto = require('crypto');
-    const salt = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.pbkdf2Sync(plain, salt, 120000, 64, 'sha512').toString('hex');
-    return { password_hash: `pbkdf2_sha512$120000$${salt}$${hash}`, password_algo: 'pbkdf2_sha512', password_updated_at: new Date(), password_migrated: 'Y' };
-  }
-  const hash = await argon2.hash(plain, { type: argon2.argon2id });
-  return { password_hash: hash, password_algo: 'argon2id', password_updated_at: new Date(), password_migrated: 'Y' };
-}
 function redactMember(row){
   if(!row) return row;
   const x = Object.assign({}, row);
@@ -268,9 +243,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
     console.warn('[GM_MEMBER_PASSWORD_GUARD_V001]', JSON.stringify({stage:'BLOCK_UNVERIFIED_PROFILE_PASSWORD', sync_mode:s(b.sync_mode).slice(0,32)}));
     return res.status(403).json({ok:false,error:'PASSWORD_REQUIRES_VERIFIED_MEMBER_SESSION'});
   }
-  let passwordMeta=null;
-  try{ passwordMeta = await hashPasswordIfPresent(b); }
-  catch(e){ return res.status(400).json({ok:false,error:'비밀번호 정보를 처리하지 못했습니다.'}); }
+  const passwordMeta=null; // PASSWORD_V019: profile upsert cannot write password hash.
   const client=await pool.connect().catch(()=>null); if(!client) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   try{
     await client.query('BEGIN');
@@ -802,18 +775,6 @@ router.get(['/api/gm/member/address/default','/api/member/address/default'], asy
 
 // GM_MEMBER_AUTH_V011: independently testable hash enrolment / verification.
 // Bootstrap is OFF by default because Cafe24 completion pages cannot attest to this API.
-async function gmVerifyHash(plain, stored){
-  if(!plain || !stored) return false;
-  if(stored.startsWith('$argon2')) return !!(argon2 && await argon2.verify(stored,plain));
-  const a=stored.split('$');
-  if(a.length!==4 || a[0]!=='pbkdf2_sha512') return false;
-  const rounds=Number(a[1]);
-  if(!Number.isInteger(rounds)||rounds<100000||rounds>2000000||!/^[0-9a-f]{32}$/i.test(a[2])||!/^[0-9a-f]{128}$/i.test(a[3])) return false;
-  // Earlier GM_MEMBER used the hex salt STRING as the KDF salt. Preserve that contract.
-  const expected=Buffer.from(a[3],'hex');
-  const derived=crypto.pbkdf2Sync(plain,a[2],rounds,expected.length,'sha512');
-  return crypto.timingSafeEqual(expected,derived);
-}
 function gmAuthError(res,status,code){return res.status(status).json({ok:false,error:code});}
 function gmAuthInput(b){return {memberId:s(b.member_id),password:typeof b.password==='string'?b.password:'',oldPassword:typeof b.old_password==='string'?b.old_password:''};}
 function gmValidMemberInput(x){return /^[A-Za-z0-9._@-]{2,80}$/.test(x.memberId)&&x.password.length>=8&&x.password.length<=256;}
@@ -898,6 +859,7 @@ router.post('/api/gm/member/auth/change-password',async(req,res)=>{
   try{
     client=await pool.connect();await client.query('BEGIN');
     const q=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1 FOR UPDATE',[x.memberId]);
+    if(q.rows[0] && !q.rows[0].password_hash) console.info('[GM_MEMBER_AUTH_V019] stage=CHANGE_BLOCKED reason=HASH_NOT_REGISTERED');
     if(!q.rows[0]||!q.rows[0].password_hash || !(await gmVerifyHash(x.oldPassword,q.rows[0].password_hash))){await client.query('ROLLBACK');return gmAuthError(res,401,'INVALID_OLD_PASSWORD');}
     const meta=await hashPasswordIfPresent({password:x.password});
     await client.query(`UPDATE gm_member SET password_hash=$2,password_algo=$3,password_updated_at=NOW(),password_migrated='Y',updated_at=NOW() WHERE member_id=$1`,[x.memberId,meta.password_hash,meta.password_algo]);
