@@ -814,7 +814,7 @@ router.post('/api/gm/member/auth/enroll',async(req,res)=>{
 // Caveat: browser-reported Cafe24 login is NOT server-side identity proof.
 router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
   console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=06_BOOTSTRAP_API_ENTER');
-  if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=06_BOOTSTRAP_BLOCKED reason=PRELAUNCH_DISABLED'); return gmAuthError(res,404,'NOT_ENABLED'); }
+  if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_TRACE_V028] stage=06_BOOTSTRAP_BLOCKED reason=SERVER_IDENTITY_PROOF_UNAVAILABLE prelaunch_disabled=true'); return gmAuthError(res,404,'NOT_ENABLED'); }
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x))return gmAuthError(res,400,'INVALID_INPUT');
   // Prelaunch rollout is restricted to the explicitly listed existing accounts.
