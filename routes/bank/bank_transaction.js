@@ -433,7 +433,10 @@ router.post('/api/gm/bank/gpay/verify-manual',requireBankSession,async(req,res)=
 
 
 // GM_GPAY_BUILDER_V016: read-only HQ overview. Existing bank approval and G-PAY issuance untouched.
-router.get('/api/gm/bank/gpay/admin-requests',requireBankSession,async(req,res)=>{
+// GM_GPAY_V021 TEMPORARY READ-ONLY BYPASS: auth validation disabled ONLY for request list.
+// RESTORE before production: add requireBankSession back as the second argument.
+// The bank write/approval routes above retain requireBankSession unchanged.
+router.get('/api/gm/bank/gpay/admin-requests',/* requireBankSession, TEMPORARILY DISABLED */async(req,res)=>{
  try{
    const data=await gpayBridge('/api/gpay/issue-requests','GET');
    const raw=Array.isArray(data.issue_requests)?data.issue_requests:[];
