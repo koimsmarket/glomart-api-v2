@@ -376,7 +376,10 @@ router.post('/api/gm/bank/gpay/lookup', requireGpayServiceAuth, async(req,res)=>
 const GPAY_REQUEST_BASE=()=>clean(process.env.GPAY_API_BASE_URL||process.env.GPAY_SERVER_URL).replace(/\/$/,'');
 async function gpayBridge(path,method,body){
   const base=GPAY_REQUEST_BASE(),secret=clean(process.env.GPAY_TRUSTED_CALLER_KEY);
-  if(!base||secret.length<32){const e=Error('GPAY_BRIDGE_NOT_CONFIGURED');e.status=503;throw e;}
+  // GM_GPAY_V022: distinguish missing bridge settings without printing confidential values.
+  if(!base){console.error('[GM_GPAY_BRIDGE_V022] missing=GPAY_API_BASE_URL (or GPAY_SERVER_URL)');const e=Error('GPAY_API_BASE_URL_NOT_CONFIGURED');e.status=503;throw e;}
+  if(secret.length<32){console.error('[GM_GPAY_BRIDGE_V022] missing_or_short=GPAY_TRUSTED_CALLER_KEY');const e=Error('GPAY_TRUSTED_CALLER_KEY_NOT_CONFIGURED');e.status=503;throw e;}
+  try{const u=new URL(base);if(!['http:','https:'].includes(u.protocol))throw Error('invalid protocol');}catch(_){console.error('[GM_GPAY_BRIDGE_V022] invalid=GPAY_API_BASE_URL');const e=Error('GPAY_API_BASE_URL_INVALID');e.status=503;throw e;}
   const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),8000);
   try{
     const u=new URL(path,base+'/');
