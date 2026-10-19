@@ -277,7 +277,7 @@ router.post(['/api/gm/member/upsert','/api/member/upsert'], async (req,res)=>{
       p.recommender_id=requestedRecommender;
     }
     if(!isNewMember && requestedRecommender && !s(existing.recommender_id)){
-      const enforceWindow=String(process.env.GM_RECOMMENDER_ATTACH_WINDOW_ENFORCE || 'N').toUpperCase()==='Y';
+      const enforceWindow=String(process.env.GM_RECOMMENDER_ATTACH_WINDOW_ENFORCE || 'Y').toUpperCase()==='Y';
       const windowDays=Math.max(1,Number(process.env.GM_RECOMMENDER_ATTACH_WINDOW_DAYS || 7));
       if(enforceWindow){
         const ageCheck=await client.query(`SELECT (NOW() <= $1::timestamptz + ($2::text || ' days')::interval) AS allowed`,[existing.created_at,String(windowDays)]);
@@ -809,8 +809,25 @@ router.post('/api/gm/member/auth/trace',(req,res)=>{
   console.info('[GM_MEMBER_AUTH_TRACE_V031] source=CLIENT trace_id='+id+' stage='+stage+' page='+page+' reason='+(allowedReasons.has(reason)?reason:'NONE'));
   return res.json({ok:true});
 });
+// V035: one DB hash-write and recheck implementation for JOIN and CHANGE.
+// Callers retain distinct authorization requirements: JOIN can only fill a new,
+// recently created empty hash during prelaunch; CHANGE needs old-hash proof.
+async function gmSaveAndVerifyPasswordV035(client,x,mode){
+  const meta=await hashPasswordIfPresent({password:x.password});
+  const where=mode==='JOIN'
+    ? "member_id=$1 AND NULLIF(password_hash,'') IS NULL AND created_at > NOW() - INTERVAL '10 minutes'"
+    : 'member_id=$1';
+  const saved=await client.query(`UPDATE gm_member
+    SET password_hash=$2,password_algo=$3,password_updated_at=NOW(),password_migrated='Y',updated_at=NOW()
+    WHERE ${where} RETURNING member_id,password_hash`,[x.memberId,meta.password_hash,meta.password_algo]);
+  if(saved.rowCount!==1)return false;
+  const checked=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
+  if(!checked.rows[0]||!(await gmVerifyHash(x.password,checked.rows[0].password_hash)))throw Error('HASH_RECHECK_FAILED');
+  console.info('[GM_MEMBER_AUTH_V035] stage='+mode+'_HASH_SAVED verified=true');
+  return true;
+}
 router.post('/api/gm/member/auth/enroll',async(req,res)=>{
-  console.info('[GM_MEMBER_AUTH_V033] stage=JOIN_ENROLL_API_ENTER');
+  console.info('[GM_MEMBER_AUTH_V035] stage=JOIN_ENROLL_API_ENTER');
   // Explicit stage-1 bootstrap switch. Never enable on an untrusted public deployment.
   if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_V018] stage=ENROLL_DENIED reason=PRELAUNCH_DISABLED route='+req.path); return gmAuthError(res,404,'NOT_ENABLED'); }
   const x=gmAuthInput(req.body||{});
@@ -818,14 +835,10 @@ router.post('/api/gm/member/auth/enroll',async(req,res)=>{
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
   let client;
   try{
-    const meta=await hashPasswordIfPresent({password:x.password});
     client=await pool.connect();await client.query('BEGIN');
-    const result=await client.query(`UPDATE gm_member SET password_hash=$2,password_algo=$3,password_updated_at=NOW(),password_migrated='Y',updated_at=NOW()
-      WHERE member_id=$1 AND NULLIF(password_hash,'') IS NULL AND created_at > NOW() - INTERVAL '10 minutes' RETURNING member_id,password_hash`,[x.memberId,meta.password_hash,meta.password_algo]);
-    if(result.rowCount!==1){await client.query('ROLLBACK');console.info('[GM_MEMBER_AUTH_V018] stage=ENROLL_DENIED reason=MEMBER_MISSING_OR_HASH_EXISTS_OR_AGE');return gmAuthError(res,409,'MEMBER_MISSING_OR_HASH_EXISTS');}
-    const recheck=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
-    if(!recheck.rows[0] || !(await gmVerifyHash(x.password,recheck.rows[0].password_hash))){throw Error('HASH_RECHECK_FAILED');}
-    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V033] stage=ENROLL_COMMITTED verified=true');return res.json({ok:true,member_id:x.memberId,hash_saved:true,verified:true});
+    const saved=await gmSaveAndVerifyPasswordV035(client,x,'JOIN');
+    if(!saved){await client.query('ROLLBACK');console.info('[GM_MEMBER_AUTH_V035] stage=ENROLL_DENIED reason=MEMBER_MISSING_OR_HASH_EXISTS_OR_AGE');return gmAuthError(res,409,'MEMBER_MISSING_OR_HASH_EXISTS');}
+    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V035] stage=ENROLL_COMMITTED verified=true');return res.json({ok:true,member_id:x.memberId,hash_saved:true,verified:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'ENROLL_FAILED');}
   finally{if(client)client.release();}
 });
@@ -887,11 +900,9 @@ router.post('/api/gm/member/auth/change-password',async(req,res)=>{
     const q=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1 FOR UPDATE',[x.memberId]);
     if(q.rows[0] && !q.rows[0].password_hash) console.info('[GM_MEMBER_AUTH_V019] stage=CHANGE_BLOCKED reason=HASH_NOT_REGISTERED');
     if(!q.rows[0]||!q.rows[0].password_hash || !(await gmVerifyHash(x.oldPassword,q.rows[0].password_hash))){await client.query('ROLLBACK');return gmAuthError(res,401,'INVALID_OLD_PASSWORD');}
-    const meta=await hashPasswordIfPresent({password:x.password});
-    await client.query(`UPDATE gm_member SET password_hash=$2,password_algo=$3,password_updated_at=NOW(),password_migrated='Y',updated_at=NOW() WHERE member_id=$1`,[x.memberId,meta.password_hash,meta.password_algo]);
-    const recheck=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
-    if(!recheck.rows[0]||!(await gmVerifyHash(x.password,recheck.rows[0].password_hash)))throw Error('HASH_RECHECK_FAILED');
-    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V034] stage=CHANGE_COMMITTED verified=true');return res.json({ok:true,updated:true,verified:true});
+    const saved=await gmSaveAndVerifyPasswordV035(client,x,'CHANGE');
+    if(!saved)throw Error('CHANGE_MEMBER_MISSING');
+    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V035] stage=CHANGE_COMMITTED verified=true');return res.json({ok:true,updated:true,verified:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'CHANGE_FAILED');}
   finally{if(client)client.release();}
 });
