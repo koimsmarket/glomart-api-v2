@@ -7,11 +7,9 @@ const path = require('path');
 const { parseWooriXlsx } = require('../../services/bank/bank_woori_xlsx');
 
 const router = express.Router();
-// GM_GPAY_BANK_AUTH_V018: mounted existing Cafe24 administrator OAuth; never trust member ID alone.
-const cafe24AdminAuth = require('../cafe24_auth');
-router.use(cafe24AdminAuth);
+// V019: bank auth is independent; do not mount unconfigured Cafe24 OAuth routes here.
 const VERSION = 'GM_BANK_TRANSACTION_ROUTE_V008';
-console.log('[GM_BANK_ROUTE_V008_LOADED]',JSON.stringify({auth:'member',login:'/api/gm/bank/admin/login'}));
+console.log('[GM_BANK_ROUTE_V019_LOADED]',JSON.stringify({auth:'PBKDF2_OR_MEMBER_HASH',login:'/api/gm/bank/admin/login',env_hash_ready:!!process.env.GPAY_BANK_ADMIN_PASSWORD_HASH}));
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 12 * 1024 * 1024, files: 1 }
@@ -79,47 +77,25 @@ router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res
   if(item && item.until>Date.now() && item.count>=5) return fail(res,429,'TOO_MANY_LOGIN_ATTEMPTS');
   const origin=clean(req.headers.origin), host=clean(req.headers['x-forwarded-host']||req.headers.host).split(',')[0];
   if(!origin || !host || !['https://'+host,'http://'+host].includes(origin)) return fail(res,403,'BANK_ADMIN_ORIGIN_REJECTED');
-  // Cafe24 administrator OAuth callback signed session, independently authorized for bank management.
-  // This is an ADMIN login, not a Cafe24 storefront-member password check.
-  // Explicit member credentials MUST take the gm_member hash path, even with an active Cafe24 OAuth session.
-  const requestedMemberAuth = Object.prototype.hasOwnProperty.call(req.body || {}, 'password') || Object.prototype.hasOwnProperty.call(req.body || {}, 'member_id');
-  const user = requestedMemberAuth ? null : cafe24AdminAuth.currentUser(req);
-  if(user){
-    const boundId=clean(process.env.GPAY_BANK_CAFE24_ADMIN_ID || MASTER_ID).toLowerCase();
-    const adminId=clean(user.admin_id).toLowerCase();
-    const role=clean(user.role).toUpperCase();
-    if(user.login_type!=='CAFE24_ADMIN' || adminId!==boundId || role!=='MASTER'){
-      console.warn('[GM_BANK_AUTH_V018]',JSON.stringify({stage:'REJECT',reason:'CAFE24_ADMIN_NOT_AUTHORIZED'}));
-      return fail(res,403,'BANK_CAFE24_ADMIN_NOT_AUTHORIZED');
-    }
-    failures.delete(address);
-    const now=Date.now();const payload=Buffer.from(JSON.stringify({id:MASTER_ID,iat:now,exp:now+SESSION_MS})).toString('base64url');
-    res.setHeader('Set-Cookie',`${COOKIE_NAME}=${payload}.${sign(payload)}; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=28800`);
-    console.log('[GM_BANK_AUTH_V018]',JSON.stringify({stage:'SUCCESS',source:'CAFE24_ADMIN_OAUTH',admin_id:adminId}));
-    return ok(res,{authenticated:true,member_id:MASTER_ID,expires_in_seconds:28800,method:'CAFE24_ADMIN_OAUTH'});
-  }
   const memberId=clean(req.body?.member_id).toLowerCase();
   const password=typeof req.body?.password==='string' ? req.body.password : '';
   if(memberId!==MASTER_ID || !password || password.length>1024) return fail(res,401,'INVALID_MEMBER_CREDENTIAL');
   try{
     const pool=db(req); if(!pool) return fail(res,503,'DB_NOT_AVAILABLE');
+    // V019: allow a separately provisioned PBKDF2 hash of the existing administrator password.
+    // This does not change gm_member or introduce a plaintext server-side secret.
+    const configuredHash=clean(process.env.GPAY_BANK_ADMIN_PASSWORD_HASH);
     const result=await pool.query('SELECT member_id,password_hash FROM gm_member WHERE LOWER(member_id)=LOWER($1) LIMIT 1',[MASTER_ID]);
     const member=result.rows[0];
-    // V017: expose only non-secret failure categories; never log hashes/passwords.
-    const hash = member && typeof member.password_hash === 'string' ? member.password_hash : '';
-    const hashKind = hash.startsWith('$argon2') ? 'ARGON2' : hash.startsWith('pbkdf2_sha512$') ? 'PBKDF2_SHA512' : hash ? 'OTHER' : 'NONE';
-    if (!member || hashKind === 'NONE') {
-      console.warn('[GM_BANK_AUTH_V017]',JSON.stringify({stage:'REJECT',reason:'MEMBER_PASSWORD_HASH_NOT_REGISTERED',member_found:!!member}));
-      return fail(res,409,'BANK_MEMBER_PASSWORD_NOT_REGISTERED');
+    if(!member) return fail(res,401,'INVALID_MEMBER_CREDENTIAL');
+    const hash=configuredHash || (typeof member.password_hash==='string' ? member.password_hash : '');
+    const hashKind=hash.startsWith('$argon2') ? 'ARGON2' : hash.startsWith('pbkdf2_sha512$') ? 'PBKDF2_SHA512' : hash ? 'OTHER' : 'NONE';
+    if(hashKind==='NONE') {
+      console.error('[GM_BANK_AUTH_V019]',JSON.stringify({stage:'CONFIG_REQUIRED',reason:'NO_VERIFIABLE_ADMIN_HASH'}));
+      return fail(res,503,'BANK_ADMIN_PASSWORD_HASH_NOT_CONFIGURED');
     }
-    if (hashKind === 'ARGON2' && (!argon2 || typeof argon2.verify !== 'function')) {
-      console.error('[GM_BANK_AUTH_V017]',JSON.stringify({stage:'REJECT',reason:'ARGON2_DEPENDENCY_MISSING'}));
-      return fail(res,503,'BANK_ARGON2_DEPENDENCY_MISSING');
-    }
-    if (hashKind === 'OTHER') {
-      console.error('[GM_BANK_AUTH_V017]',JSON.stringify({stage:'REJECT',reason:'UNSUPPORTED_PASSWORD_HASH_FORMAT'}));
-      return fail(res,503,'BANK_UNSUPPORTED_PASSWORD_HASH_FORMAT');
-    }
+    if(hashKind==='ARGON2' && (!argon2 || typeof argon2.verify!=='function')) return fail(res,503,'BANK_ARGON2_DEPENDENCY_MISSING');
+    if(hashKind==='OTHER') return fail(res,503,'BANK_UNSUPPORTED_PASSWORD_HASH_FORMAT');
     const valid=await passwordMatches(password,hash);
     if(!valid){
       const count=item && item.until>Date.now()?item.count:0;
@@ -131,11 +107,11 @@ router.post('/api/gm/bank/admin/login',express.json({limit:'2kb'}),async(req,res
     const now=Date.now();const payload=Buffer.from(JSON.stringify({id:MASTER_ID,iat:now,exp:now+SESSION_MS})).toString('base64url');
     res.setHeader('Set-Cookie',`${COOKIE_NAME}=${payload}.${sign(payload)}; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=28800`);
     console.log('[GM_BANK_MEMBER_LOGIN_V007]',JSON.stringify({member_id:MASTER_ID}));
-    return ok(res,{authenticated:true,member_id:MASTER_ID,expires_in_seconds:28800,method:'GM_MEMBER_PASSWORD_HASH'});
+    return ok(res,{authenticated:true,member_id:MASTER_ID,expires_in_seconds:28800});
   }catch(err){ console.error('[GM_BANK_MEMBER_LOGIN_ERROR_V007]',String(err.message||err));return fail(res,503,'MEMBER_AUTH_UNAVAILABLE'); }
 });
 router.get('/api/gm/bank/admin/status',(req,res)=>ok(res,{authenticated:validSession(req)}));
-router.get('/api/gm/bank/admin/diag',(req,res)=>ok(res,{route_mounted:true,auth:'member',session_secret_ready:sessionSecret().length>=32}));
+router.get('/api/gm/bank/admin/diag',(req,res)=>ok(res,{route_mounted:true,auth:'PBKDF2_OR_MEMBER_HASH',session_secret_ready:sessionSecret().length>=32,admin_hash_env_ready:!!process.env.GPAY_BANK_ADMIN_PASSWORD_HASH}));
 router.post('/api/gm/bank/admin/logout',requireBankSession,(req,res)=>{
   res.setHeader('Set-Cookie',`${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/api/gm/bank; Max-Age=0`);
   return ok(res,{authenticated:false});
@@ -376,10 +352,7 @@ router.post('/api/gm/bank/gpay/lookup', requireGpayServiceAuth, async(req,res)=>
 const GPAY_REQUEST_BASE=()=>clean(process.env.GPAY_API_BASE_URL||process.env.GPAY_SERVER_URL).replace(/\/$/,'');
 async function gpayBridge(path,method,body){
   const base=GPAY_REQUEST_BASE(),secret=clean(process.env.GPAY_TRUSTED_CALLER_KEY);
-  // GM_GPAY_V022: distinguish missing bridge settings without printing confidential values.
-  if(!base){console.error('[GM_GPAY_BRIDGE_V022] missing=GPAY_API_BASE_URL (or GPAY_SERVER_URL)');const e=Error('GPAY_API_BASE_URL_NOT_CONFIGURED');e.status=503;throw e;}
-  if(secret.length<32){console.error('[GM_GPAY_BRIDGE_V022] missing_or_short=GPAY_TRUSTED_CALLER_KEY');const e=Error('GPAY_TRUSTED_CALLER_KEY_NOT_CONFIGURED');e.status=503;throw e;}
-  try{const u=new URL(base);if(!['http:','https:'].includes(u.protocol))throw Error('invalid protocol');}catch(_){console.error('[GM_GPAY_BRIDGE_V022] invalid=GPAY_API_BASE_URL');const e=Error('GPAY_API_BASE_URL_INVALID');e.status=503;throw e;}
+  if(!base||secret.length<32){const e=Error('GPAY_BRIDGE_NOT_CONFIGURED');e.status=503;throw e;}
   const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),8000);
   try{
     const u=new URL(path,base+'/');
@@ -436,10 +409,7 @@ router.post('/api/gm/bank/gpay/verify-manual',requireBankSession,async(req,res)=
 
 
 // GM_GPAY_BUILDER_V016: read-only HQ overview. Existing bank approval and G-PAY issuance untouched.
-// GM_GPAY_V021 TEMPORARY READ-ONLY BYPASS: auth validation disabled ONLY for request list.
-// RESTORE before production: add requireBankSession back as the second argument.
-// The bank write/approval routes above retain requireBankSession unchanged.
-router.get('/api/gm/bank/gpay/admin-requests',/* requireBankSession, TEMPORARILY DISABLED */async(req,res)=>{
+router.get('/api/gm/bank/gpay/admin-requests',requireBankSession,async(req,res)=>{
  try{
    const data=await gpayBridge('/api/gpay/issue-requests','GET');
    const raw=Array.isArray(data.issue_requests)?data.issue_requests:[];
