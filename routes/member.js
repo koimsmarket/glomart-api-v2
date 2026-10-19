@@ -791,6 +791,9 @@ function gmPrelaunchExistingAllowed(id){
   const ids=String(process.env.GM_MEMBER_AUTH_PRELAUNCH_IDS||'').split(',').map(x=>x.trim()).filter(Boolean);
   return ids.length>0&&ids.includes(String(id));
 }
+// V032: deliberate, temporary enrollment; original prelaunch flags and allowlist
+// remain mandatory. Do not print member IDs or passwords.
+console.info('[GM_MEMBER_AUTH_V032] prelaunch_enabled='+gmPrelaunchEnabled()+' allowlist_configured='+Boolean(String(process.env.GM_MEMBER_AUTH_PRELAUNCH_IDS||'').trim())+' profile_probe_required=false');
 // V030 stage beacon: diagnostic only; never changes membership or authentication.
 const gmAuthTraceStagesV030=/^(?:0[1-9]_|10_|V029_|V030_)[A-Z0-9_]{1,60}$/;
 const gmAuthTraceRateV030=new Map();
@@ -828,7 +831,7 @@ router.post('/api/gm/member/auth/enroll',async(req,res)=>{
 // GM_MEMBER_AUTH_V015: prelaunch bootstrap for explicitly allowlisted existing members.
 // Caveat: browser-reported Cafe24 login is NOT server-side identity proof.
 router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
-  console.info('[GM_MEMBER_AUTH_TRACE_V030] source=SERVER stage=06_BOOTSTRAP_API_ENTER');
+  console.info('[GM_MEMBER_AUTH_TRACE_V032] source=SERVER stage=06_BOOTSTRAP_API_ENTER');
   if(!gmPrelaunchEnabled()){ console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=06_BOOTSTRAP_BLOCKED reason=PRELAUNCH_DISABLED'); return gmAuthError(res,404,'NOT_ENABLED'); }
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x)){console.info('[GM_MEMBER_AUTH_TRACE_V030] source=SERVER stage=06_BOOTSTRAP_BLOCKED reason=INVALID_INPUT');return gmAuthError(res,400,'INVALID_INPUT');}
