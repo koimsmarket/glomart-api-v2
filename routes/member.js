@@ -877,7 +877,7 @@ router.post('/api/gm/member/auth/verify',async(req,res)=>{
   }catch(e){console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'VERIFY_FAILED');}
 });
 router.post('/api/gm/member/auth/change-password',async(req,res)=>{
-  console.info('[GM_MEMBER_AUTH_V033] stage=CHANGE_API_ENTER');
+  console.info('[GM_MEMBER_AUTH_V034] stage=CHANGE_API_ENTER');
   const x=gmAuthInput(req.body||{});
   if(!gmValidMemberInput(x)||!x.oldPassword)return gmAuthError(res,400,'INVALID_INPUT');
   const pool=db(req);if(!pool)return gmAuthError(res,503,'DB_UNAVAILABLE');
@@ -891,7 +891,7 @@ router.post('/api/gm/member/auth/change-password',async(req,res)=>{
     await client.query(`UPDATE gm_member SET password_hash=$2,password_algo=$3,password_updated_at=NOW(),password_migrated='Y',updated_at=NOW() WHERE member_id=$1`,[x.memberId,meta.password_hash,meta.password_algo]);
     const recheck=await client.query('SELECT password_hash FROM gm_member WHERE member_id=$1',[x.memberId]);
     if(!recheck.rows[0]||!(await gmVerifyHash(x.password,recheck.rows[0].password_hash)))throw Error('HASH_RECHECK_FAILED');
-    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V033] stage=CHANGE_COMMITTED verified=true');return res.json({ok:true,updated:true,verified:true});
+    await client.query('COMMIT');console.info('[GM_MEMBER_AUTH_V034] stage=CHANGE_COMMITTED verified=true');return res.json({ok:true,updated:true,verified:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'CHANGE_FAILED');}
   finally{if(client)client.release();}
 });
