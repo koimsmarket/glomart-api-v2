@@ -796,12 +796,14 @@ const gmAuthTraceStagesV030=/^(?:0[1-9]_|10_|V029_|V030_)[A-Z0-9_]{1,60}$/;
 const gmAuthTraceRateV030=new Map();
 router.post('/api/gm/member/auth/trace',(req,res)=>{
   const body=req.body||{},stage=typeof body.stage==='string'?body.stage:'',id=typeof body.trace_id==='string'?body.trace_id:'',page=body.page;
+  const reason=typeof body.reason==='string'?body.reason:'';
+  const allowedReasons=new Set(['CANDIDATE_INVALID_OR_EXPIRED','PASSWORD_CHANGE_PENDING','CAFE24_PROFILE_UNAVAILABLE','MEMBER_ID_MISMATCH','PROBE_NETWORK_ERROR','PROBE_HTTP_ERROR','CAFE24_LOGGED_OUT','SESSION_UNCONFIRMED','PROFILE_ID_MISSING','PROFILE_ID_MATCH','LOGIN_OR_SERVER_UNAVAILABLE','NO_PENDING']);
   if(!gmAuthTraceStagesV030.test(stage)|| !/^[a-z0-9-]{8,64}$/.test(id)||!['login','other'].includes(page))return res.status(400).json({ok:false});
   const now=Date.now(),key=id,entry=gmAuthTraceRateV030.get(key)||{at:now,n:0};
   if(now-entry.at>60000){entry.at=now;entry.n=0;}entry.n++;gmAuthTraceRateV030.set(key,entry);
   if(gmAuthTraceRateV030.size>1000){for(const [k,v] of gmAuthTraceRateV030){if(now-v.at>60000)gmAuthTraceRateV030.delete(k);}}
   if(entry.n>60)return res.status(429).json({ok:false});
-  console.info('[GM_MEMBER_AUTH_TRACE_V030] source=CLIENT trace_id='+id+' stage='+stage+' page='+page);
+  console.info('[GM_MEMBER_AUTH_TRACE_V031] source=CLIENT trace_id='+id+' stage='+stage+' page='+page+' reason='+(allowedReasons.has(reason)?reason:'NONE'));
   return res.json({ok:true});
 });
 router.post('/api/gm/member/auth/enroll',async(req,res)=>{
