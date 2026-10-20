@@ -111,6 +111,10 @@ function normalizeTemplate(raw){
   text=text.replace(/(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일/g,function(){changed=true;return '%d년 %d월 %d일';});
   text=text.replace(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/g,function(){changed=true;return '%d월 %d일';});
 
+  // Korean weekday abbreviations/full names are variable, never literal (금)/(수).
+  // %s denotes one complete weekday token for the existing template matcher.
+  text=text.replace(/\((월|화|수|목|금|토|일)(?:요일)?\)/g,function(){changed=true;return '(%s)';});
+
   // Time with a real minute field. 1:1 is intentionally not matched.
   text=text.replace(/\b(?:[01]?\d|2[0-3]):[0-5]\d\b/g,function(){changed=true;return '%s';});
 
