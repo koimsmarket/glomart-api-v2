@@ -206,7 +206,7 @@ async function upsertOne(pool,b){
   if(!p.amount || p.amount <= 0) throw new Error('amount is required');
   const sql=`INSERT INTO gm_basket (
       mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,cart_item_key,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,jeju_delivery_yn,jeju_extra_delivery_fee,island_delivery_yn,island_extra_delivery_fee,product_url,thumb_url,thumb_file_name,delivery_eta_text,delivery_day_min,delivery_day_max,free_delivery_threshold,eta_source_updated_at,eta_snapshot_saved_at,added_at,updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30::timestamptz,CASE WHEN $26 IS NOT NULL THEN NOW() ELSE NULL END,NOW(),NOW())
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30::timestamptz,CASE WHEN $26::text IS NOT NULL THEN NOW() ELSE NULL END,NOW(),NOW())
     ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
       quantity=gm_basket.quantity + EXCLUDED.quantity,
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''),gm_basket.source_mall),
