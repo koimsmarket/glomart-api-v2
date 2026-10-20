@@ -1777,6 +1777,8 @@ try{
 }catch(e){
   console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
 }
+// GM_GPAY_CHECKOUT_BALANCE_V001: authenticated read-only proxy; no bank integration.
+app.use(require('./routes/bank/gpay_checkout_balance'));
 app.use(require('./routes/health'));
 app.use(require('./routes/search_keyword'));
 app.use(require('./routes/search_local'));
