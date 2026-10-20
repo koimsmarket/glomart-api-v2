@@ -42,7 +42,13 @@ router.post('/api/gm/gpay/checkout-owner-auth', async (req,res) => {
       headers:{'Content-Type':'application/json','Accept':'application/json','x-gpay-trusted-caller':keySecret},
       body:JSON.stringify({owner_type:'MEMBER',owner_id:row.member_id,ttl_seconds:300})
     }); }finally{clearTimeout(timeout)}
-    if(!upstream.ok) {console.error('[GM_GPAY_OWNER_AUTH_V057] TOKEN_UPSTREAM status='+upstream.status);return fail(res,'GPAY_TOKEN_UPSTREAM_FAILED',502);}
+    if(!upstream.ok) {
+      // Upstream error only. Never record passwords, signing keys or owner tokens.
+      let upstreamCode='UNKNOWN';
+      try { const problem=await upstream.json(); upstreamCode=s(problem && problem.error).slice(0,80)||'UNKNOWN'; }catch(_e){}
+      console.error('[GM_GPAY_OWNER_AUTH_V058] TOKEN_UPSTREAM status='+upstream.status+' code='+upstreamCode);
+      return fail(res, upstreamCode==='GPAY_CERT_ACCESS_KEY_NOT_READY' ? 'GPAY_TOKEN_SIGNING_NOT_READY' : 'GPAY_TOKEN_UPSTREAM_FAILED',upstream.status===503?503:502);
+    }
     const data=await upstream.json();
     if(data.ok!==true || data.owner_id!==row.member_id || !data.certificate_owner_token)return fail(res,'GPAY_TOKEN_INVALID_RESPONSE',502);
     attempts.delete(key);
