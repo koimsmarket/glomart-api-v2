@@ -118,7 +118,13 @@ function rowPayload(b){
     amount:n(b.amount??b.price,0),
     amount_type:s(b.amount_type||b.amountType,'unit'),
     delivery_type:s(b.delivery_type||b.deliveryType),
-    delivery_fee:n(b.delivery_fee||b.deliveryFee,0),
+    delivery_fee:n(b.delivery_fee??b.deliveryFee,0),
+    // ETA snapshot only; never treat it as a guaranteed delivery date.
+    delivery_eta_text:s(b.delivery_eta_text||b.deliveryEtaText||b.deliveryDateText||b.deliveryRangeText),
+    delivery_day_min:(b.delivery_day_min!=null||b.deliveryDayMin!=null)?n(b.delivery_day_min??b.deliveryDayMin,0):null,
+    delivery_day_max:(b.delivery_day_max!=null||b.deliveryDayMax!=null)?n(b.delivery_day_max??b.deliveryDayMax,0):null,
+    free_delivery_threshold:(b.free_delivery_threshold!=null||b.freeDeliveryThreshold!=null)?n(b.free_delivery_threshold??b.freeDeliveryThreshold,0):null,
+    eta_source_updated_at:(()=>{const v=s(b.eta_source_updated_at||b.etaSourceUpdatedAt||b.delivery_eta_updated_at||b.deliveryEtaUpdatedAt);return v && /^\d{4}-\d{2}-\d{2}T/.test(v) && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : null;})(),
     jeju_delivery_yn:s(b.jeju_delivery_yn||b.jejuDeliveryYn),
     jeju_extra_delivery_fee:(b.jeju_extra_delivery_fee!=null||b.jejuExtraDeliveryFee!=null)?n(b.jeju_extra_delivery_fee!=null?b.jeju_extra_delivery_fee:b.jejuExtraDeliveryFee,0):null,
     island_delivery_yn:s(b.island_delivery_yn||b.islandDeliveryYn),
@@ -175,6 +181,12 @@ async function ensureBasketSchema(pool){
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS jeju_extra_delivery_fee INTEGER`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS island_delivery_yn TEXT`);
   await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS island_extra_delivery_fee INTEGER`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS delivery_eta_text TEXT`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS delivery_day_min INTEGER`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS delivery_day_max INTEGER`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS free_delivery_threshold INTEGER`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS eta_source_updated_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE gm_basket ADD COLUMN IF NOT EXISTS eta_snapshot_saved_at TIMESTAMPTZ`);
   /* 기존 장바구니 식별 기준을 유지한다.
    * UNIQUE: mall_code + pi_ii_vi + owner(member_id/guest_key)
    * cart_item_key 전용 UNIQUE/index는 생성하거나 기존 제약을 삭제하지 않는다. */
@@ -193,8 +205,8 @@ async function upsertOne(pool,b){
   if(!p.thumb_url) throw new Error('thumb_url is required');
   if(!p.amount || p.amount <= 0) throw new Error('amount is required');
   const sql=`INSERT INTO gm_basket (
-      mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,cart_item_key,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,jeju_delivery_yn,jeju_extra_delivery_fee,island_delivery_yn,island_extra_delivery_fee,product_url,thumb_url,thumb_file_name,added_at,updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,NOW(),NOW())
+      mall_code,source_mall,source_uid,internal_product_code,cafe24_product_no,gm_internal_link,member_id,guest_key,pi_ii_vi,cart_item_key,product_name,option_name,option_value,quantity,amount,amount_type,delivery_type,delivery_fee,jeju_delivery_yn,jeju_extra_delivery_fee,island_delivery_yn,island_extra_delivery_fee,product_url,thumb_url,thumb_file_name,delivery_eta_text,delivery_day_min,delivery_day_max,free_delivery_threshold,eta_source_updated_at,eta_snapshot_saved_at,added_at,updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30::timestamptz,CASE WHEN $26 IS NOT NULL THEN NOW() ELSE NULL END,NOW(),NOW())
     ON CONFLICT (mall_code, pi_ii_vi, (COALESCE(member_id, '')), (COALESCE(guest_key, ''))) DO UPDATE SET
       quantity=gm_basket.quantity + EXCLUDED.quantity,
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''),gm_basket.source_mall),
@@ -213,12 +225,18 @@ async function upsertOne(pool,b){
       jeju_extra_delivery_fee=COALESCE(EXCLUDED.jeju_extra_delivery_fee,gm_basket.jeju_extra_delivery_fee),
       island_delivery_yn=COALESCE(NULLIF(EXCLUDED.island_delivery_yn,''),gm_basket.island_delivery_yn),
       island_extra_delivery_fee=COALESCE(EXCLUDED.island_extra_delivery_fee,gm_basket.island_extra_delivery_fee),
+      delivery_eta_text=COALESCE(EXCLUDED.delivery_eta_text,gm_basket.delivery_eta_text),
+      delivery_day_min=COALESCE(EXCLUDED.delivery_day_min,gm_basket.delivery_day_min),
+      delivery_day_max=COALESCE(EXCLUDED.delivery_day_max,gm_basket.delivery_day_max),
+      free_delivery_threshold=COALESCE(EXCLUDED.free_delivery_threshold,gm_basket.free_delivery_threshold),
+      eta_source_updated_at=COALESCE(EXCLUDED.eta_source_updated_at,gm_basket.eta_source_updated_at),
+      eta_snapshot_saved_at=CASE WHEN EXCLUDED.delivery_eta_text IS NOT NULL THEN NOW() ELSE gm_basket.eta_snapshot_saved_at END,
       product_url=EXCLUDED.product_url,
       thumb_url=EXCLUDED.thumb_url,
       thumb_file_name=EXCLUDED.thumb_file_name,
       updated_at=NOW()
     RETURNING *, (mall_code || '_' || pi_ii_vi) AS product_uid, (xmax = 0) AS __gm_inserted`;
-  const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.cart_item_key,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.jeju_delivery_yn,p.jeju_extra_delivery_fee,p.island_delivery_yn,p.island_extra_delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name];
+  const params=[p.mall_code,p.source_mall,p.source_uid,p.internal_product_code,p.cafe24_product_no,p.gm_internal_link,p.member_id,p.guest_key,p.pi_ii_vi,p.cart_item_key,p.product_name,p.option_name,p.option_value,p.quantity,p.amount,p.amount_type,p.delivery_type,p.delivery_fee,p.jeju_delivery_yn,p.jeju_extra_delivery_fee,p.island_delivery_yn,p.island_extra_delivery_fee,p.product_url,p.thumb_url,p.thumb_file_name,p.delivery_eta_text,p.delivery_day_min,p.delivery_day_max,p.free_delivery_threshold,p.eta_source_updated_at];
   const r=await pool.query(sql,params);
   const row=r.rows[0];
   const inserted=!!row.__gm_inserted;
