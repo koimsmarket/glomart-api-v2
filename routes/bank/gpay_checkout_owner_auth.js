@@ -1,9 +1,10 @@
  'use strict';
-// GM_GPAY_OWNER_AUTH_V057
+// GM_GPAY_OWNER_AUTH_V060_DIAG: distinguish malformed hash / missing argon2 / invalid credentials; no bypass
 // Explicit password verification only; member ID or Cafe24 admin cookie is NOT authentication.
 // TODO: replace manual password challenge with independently validated member session.
 const router = require('express').Router();
 const { gmVerifyHash } = require('../GM_MEMBER_PASSWORD');
+let argon2Ready=false;try{argon2Ready=!!require('argon2').verify;}catch(_e){}
 const BASE_DEFAULT = 'https://port-0-guppy-pay-api-mss6kcqn688f1333.sel3.cloudtype.app';
 const attempts = new Map();
 const s = x => String(x == null ? '' : x).trim();
@@ -28,10 +29,23 @@ router.post('/api/gm/gpay/checkout-owner-auth', async (req,res) => {
     const q = await db.query('SELECT member_id,password_hash FROM gm_member WHERE member_id=$1 LIMIT 1',[mid]);
     const row = q.rows[0];
     if(!row || !row.password_hash) return fail(res,'MEMBER_PASSWORD_NOT_READY',403);
-    if(!(await gmVerifyHash(pw,row.password_hash))) {
-      console.warn('[GM_GPAY_OWNER_AUTH_V057] INVALID_PASSWORD');
+    // Only metadata, never plaintext password, complete hash, token, or member ID.
+    const stored=String(row.password_hash);
+    const hashKind=stored.startsWith('$argon2')?'ARGON2':stored.startsWith('pbkdf2_sha512$')?'PBKDF2_SHA512':'OTHER';
+    if(hashKind==='OTHER'){
+      console.error('[GM_GPAY_OWNER_AUTH_V060] VERIFY_BLOCKED reason=HASH_FORMAT_UNSUPPORTED');
+      return fail(res,'MEMBER_HASH_FORMAT_UNSUPPORTED',503);
+    }
+    if(hashKind==='ARGON2' && !argon2Ready){
+      console.error('[GM_GPAY_OWNER_AUTH_V060] VERIFY_BLOCKED reason=ARGON2_MODULE_MISSING');
+      return fail(res,'MEMBER_HASH_VERIFIER_UNAVAILABLE',503);
+    }
+    const passwordValid=await gmVerifyHash(pw,stored);
+    if(!passwordValid){
+      console.warn('[GM_GPAY_OWNER_AUTH_V060] VERIFY_REJECTED reason=CREDENTIALS_NOT_MATCHED hash_kind='+hashKind);
       return fail(res,'INVALID_CREDENTIALS',401);
     }
+    console.info('[GM_GPAY_OWNER_AUTH_V060] PASSWORD_VERIFIED hash_kind='+hashKind);
     const keySecret=s(process.env.GPAY_TRUSTED_CALLER_KEY);
     if(keySecret.length<32)return fail(res,'GPAY_SERVER_AUTH_NOT_READY',503);
     const base=s(process.env.GPAY_API_BASE||BASE_DEFAULT).replace(/\/+$/,'');
