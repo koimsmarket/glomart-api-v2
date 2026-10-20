@@ -68,14 +68,22 @@ async function applyOrderPoint(pool,input){
     if(!memberId)throw new Error('member_order_required');
     if(memberId!==requestedMember)throw new Error('member_mismatch');
     const old=await client.query(`SELECT * FROM gm_point_transaction WHERE order_no=$1 AND member_id=$2 AND transaction_type='ORDER_USE' LIMIT 1`,[orderNo,memberId]);
-    if(old.rows.length){await client.query('COMMIT');return {ok:true,idempotent:true,order_no:orderNo,member_id:memberId,point_used_amount:money(old.rows[0].use_amount),point_balance_after:money(old.rows[0].balance_after),max_point_use:maxUseForProduct(order.total_product_price)};}
+    if(old.rows.length){if(Number(input.point_used_amount ?? input.use_amount ?? input.requested_point_amount)!==money(old.rows[0].use_amount))throw new Error('point_amount_idempotency_mismatch');await client.query('COMMIT');return {ok:true,idempotent:true,order_no:orderNo,member_id:memberId,point_used_amount:money(old.rows[0].use_amount),point_balance_after:money(old.rows[0].balance_after),max_point_use:maxUseForProduct(order.total_product_price)};}
     const mq=await client.query('SELECT member_id,point_balance FROM gm_member WHERE member_id=$1 FOR UPDATE',[memberId]);
     if(!mq.rows.length)throw new Error('member_not_found');
     const balance=await ensureBalance(client,memberId,mq.rows[0].point_balance);
     const productAmount=money(order.total_product_price);
     if(productAmount<=0)throw new Error('product_amount_required');
     const maxUse=maxUseForProduct(productAmount);
-    const use=floor10(Math.min(balance,maxUse));
+    // V062: preserve the customer's explicit point-use choice. Never auto-consume the maximum.
+    // This service runs only against an existing order, with its ledger and order row locked.
+    const requestedRaw=input.point_used_amount ?? input.use_amount ?? input.requested_point_amount;
+    if(requestedRaw===undefined || requestedRaw===null || String(requestedRaw).trim()==='')throw new Error('point_amount_required');
+    const requested=Number(requestedRaw);
+    if(!Number.isSafeInteger(requested)||requested<0||requested%10!==0)throw new Error('point_amount_invalid');
+    if(requested>maxUse)throw new Error('point_amount_exceeds_order_limit');
+    if(requested>balance)throw new Error('point_balance_insufficient');
+    const use=requested;
     const after=balance-use;
     if(use>0){
       await client.query('UPDATE gm_point_balance SET balance_amount=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);

@@ -1797,6 +1797,9 @@ app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
 app.use(require('./routes/account'));
+// GM_POINT_ROUTE_V062: point read and server-only debit, separate from G-PAY ledger.
+app.use(require('./routes/point'));
+console.log('[GM_POINT_ROUTE_V062] registered');
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
