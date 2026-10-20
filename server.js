@@ -1800,6 +1800,9 @@ app.use(require('./routes/account'));
 // GM_POINT_ROUTE_V062: point read and server-only debit, separate from G-PAY ledger.
 app.use(require('./routes/point'));
 console.log('[GM_POINT_ROUTE_V062] registered');
+// GM_GPAY_V065 quote calculator only; actual payment approval remains disabled here.
+app.use(require('./routes/bank/gpay_settlement_quote'));
+console.log('[GM_GPAY_SETTLEMENT_V065] quote route registered');
 app.use(require('./routes/order'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
