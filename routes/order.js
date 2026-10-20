@@ -909,6 +909,35 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
   }finally{client.release();}
 });
 
+// GM_GPAY_V070: payment-first server verification for explicitly marked G-PAY orders.
+// Server-to-server credentials must never be sent to the browser.
+async function gmVerifyGpayPaidBeforeOrder(raw,orderNo,memberId,orderRow){
+  const method=String(raw.payment_method||'').trim().toUpperCase();
+  const gpayMarked=method==='GPAY'||method==='G-PAY'||String(raw.gpay_payment_key||'').trim()!=='';
+  if(!gpayMarked)return {applicable:false};
+  const key=String(raw.gpay_payment_key||'').trim();
+  if(!orderNo||!memberId||!key)throw new Error('GPAY_PAYMENT_REFERENCE_REQUIRED');
+  const base=String(process.env.GPAY_API_BASE_URL||'').replace(/\/$/,'');
+  const secret=String(process.env.GPAY_TRUSTED_CALLER_KEY||'');
+  if(!/^https:\/\//.test(base)||secret.length<32)throw new Error('GPAY_VERIFY_SERVER_NOT_CONFIGURED');
+  const url=base+'/api/gpay/ledger/payment/verify?'+new URLSearchParams({order_no:orderNo,member_id:memberId,idempotency_key:key});
+  const abort=new AbortController();const timeout=setTimeout(()=>abort.abort(),6500);
+  let response,body;
+  try{
+    response=await fetch(url,{method:'GET',headers:{'x-gpay-trusted-caller':secret,'Accept':'application/json'},signal:abort.signal});
+    body=await response.json();
+  }catch(e){throw new Error('GPAY_PAYMENT_VERIFICATION_UNAVAILABLE')}
+  finally{clearTimeout(timeout)}
+  if(!response.ok||!body||body.ok!==true||body.verified!==true)throw new Error('GPAY_PAYMENT_NOT_VERIFIED');
+  const p=body.payment||{};
+  if(p.order_no!==orderNo||p.member_id!==memberId||p.idempotency_key!==key||p.status!=='PAID')throw new Error('GPAY_PAYMENT_IDENTITY_MISMATCH');
+  const original=Number(orderRow.total_product_price)+Number(orderRow.total_delivery_fee)+Number(orderRow.extra_area_delivery_fee);
+  const pointUsed=Number(raw.point_used_amount ?? raw.point_used_amount_krw ?? 0);
+  if(!Number.isSafeInteger(pointUsed)||pointUsed<0||pointUsed%10!==0||pointUsed>Math.floor(Number(orderRow.total_product_price)*0.2/10)*10)throw new Error('GPAY_POINT_AMOUNT_INVALID');
+  if(Number(orderRow.total_payment_price)!==original||Number(p.order_amount_krw)!==original||Number(p.discount_amount_krw)!==pointUsed||Number(p.pay_amount_g)!==original-pointUsed)throw new Error('GPAY_PAYMENT_AMOUNT_MISMATCH');
+  return {applicable:true,pointUsed,paymentId:p.id};
+}
+
 router.post('/api/gm/order/create', async (req, res) => {
   try{
     const body=req.body||{};
@@ -954,6 +983,17 @@ router.post('/api/gm/order/create', async (req, res) => {
     }
 
     const orderRow = buildOrderRow(raw, inputItems);
+    // GM_GPAY_V070: G-PAY ledger must have committed before an order is stored.
+    // IMPORTANT: this does not itself debit points; paid-order point atomicity is pending.
+    const gmGpayVerification=await gmVerifyGpayPaidBeforeOrder(raw,orderRow.order_no,clean(orderRow.member_id),orderRow);
+    if(gmGpayVerification.applicable){
+      orderRow.payment_method='GPAY';
+      orderRow.payment_status='paid';
+      orderRow.actual_payment_amount=Number(orderRow.total_payment_price)-gmGpayVerification.pointUsed;
+      orderRow.point_used_amount=gmGpayVerification.pointUsed;
+      console.info('[GM_GPAY_V070] PAYMENT_VERIFIED_BEFORE_ORDER',{order_no:orderRow.order_no,payment_present:true});
+    }
+
 
     /* 기존 완료 주문 덮어쓰기는 금지하고, 서버가 만든 PENDING_DETAIL row만 완성한다. */
     const existingCreate=await client.query('SELECT order_status,cafe24_order_no FROM gm_order WHERE order_no=$1 FOR UPDATE',[orderRow.order_no]);
