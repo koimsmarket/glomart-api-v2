@@ -1779,6 +1779,14 @@ try{
 }
 // GM_GPAY_CHECKOUT_BALANCE_V001: authenticated read-only proxy; no bank integration.
 app.use(require('./routes/bank/gpay_checkout_balance'));
+// GM_GPAY_OWNER_AUTH_V057: independent MEMBER password proof, never admin OAuth.
+try {
+  app.use(require('./routes/bank/gpay_checkout_owner_auth'));
+  console.log('[GM_GPAY_OWNER_AUTH_V057] ROUTE_READY');
+} catch (e) {
+  console.error('[GM_GPAY_OWNER_AUTH_V057] ROUTE_FAILED', String(e && e.message || e));
+}
+
 app.use(require('./routes/health'));
 app.use(require('./routes/search_keyword'));
 app.use(require('./routes/search_local'));
