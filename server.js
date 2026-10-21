@@ -1789,6 +1789,12 @@ try {
   console.error('[GM_GPAY_OWNER_AUTH_V057] ROUTE_FAILED', String(e && e.message || e));
 }
 
+// GM_AUTO_ORDER_V004: register existing auto-order APIs only.
+app.use(require('./auto-order/routes/auto_order_dashboard'));
+app.use(require('./auto-order/routes/auto_order_orders'));
+app.use(require('./auto-order/routes/auto_order_account'));
+app.use(require('./auto-order/routes/auto_order_client_runtime'));
+
 app.use(require('./routes/health'));
 app.use(require('./routes/search_keyword'));
 app.use(require('./routes/search_local'));
