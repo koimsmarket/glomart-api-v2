@@ -790,6 +790,62 @@ async function allocateServerOrderNo(client, cafeNo, memberId, guestKey){
   throw new Error('order_no_allocate_conflict');
 }
 
+// GM_GPAY_V080: durable external-order PREPARATION only. NO payment/debit/auto-order here.
+// Repeated snapshot_id must return the same order and amounts; never mint a second payable order.
+router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const b=req.body||{},memberId=clean(b.member_id),snapshotId=clean(b.snapshot_id);
+  if(!/^[A-Za-z0-9._@-]{2,80}$/.test(memberId)||!/^GPS-[A-Za-z0-9-]{8,100}$/.test(snapshotId))
+    return res.status(400).json({ok:false,code:'INVALID_PREPARE_REFERENCE'});
+  if(String(b.order_mode||'external').toLowerCase()!=='external')
+    return res.status(409).json({ok:false,code:'MIXED_ORDER_PREPARE_NOT_SUPPORTED'});
+  const pool=db(req);
+  if(!pool)return res.status(503).json({ok:false,code:'DB_UNAVAILABLE'});
+  const pointService=require('../services/member_point_service');
+  const quoteContract=require('../services/bank/gpay_settlement_contract');
+  let client;
+  try{
+    // This quote does not validate actual basket prices; no payment authorization is issued.
+    const summary=await pointService.getSummary(pool,memberId);
+    if(!summary.found)return res.status(404).json({ok:false,code:'MEMBER_NOT_FOUND'});
+    const amounts=quoteContract.quote({product_amount_krw:b.product_amount_krw,
+      shipping_amount_krw:b.shipping_amount_krw,point_use_krw:b.point_use_krw,
+      available_point_krw:summary.point.available_point});
+    const crypto=require('crypto');
+    const txId='GPSAGA-'+crypto.createHash('sha256').update(memberId+'|'+snapshotId).digest('hex');
+    client=await pool.connect();await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[txId]);
+    let existing=await client.query('SELECT * FROM gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[txId]);
+    let orderNo;
+    if(existing.rowCount){
+      const x=existing.rows[0];orderNo=x.order_no;
+      if(x.member_id!==memberId || Number(x.product_amount_krw)!==amounts.product_amount_krw ||
+         Number(x.shipping_amount_krw)!==amounts.shipping_amount_krw ||
+         Number(x.point_used_krw)!==amounts.point_used_amount_krw ||
+         Number(x.gpay_amount)!==amounts.pay_amount_g)
+        {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_REPLAY_CONTRACT_MISMATCH'});}
+    }else{
+      const alloc=await allocateServerOrderNo(client,'',memberId,'');orderNo=alloc.order_no;
+      await client.query(`INSERT INTO gm_purchase_saga(tx_id,order_no,member_id,product_amount_krw,
+        shipping_amount_krw,point_used_krw,gpay_amount,status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,'ORDER_PENDING')`,
+        [txId,orderNo,memberId,amounts.product_amount_krw,amounts.shipping_amount_krw,
+         amounts.point_used_amount_krw,amounts.pay_amount_g]);
+      await client.query(`INSERT INTO gm_purchase_saga_event(tx_id,event_key,step,result,details)
+        VALUES($1,'ORDER_PREPARED','ORDER_PREPARE','COMMITTED',$2::jsonb)
+        ON CONFLICT(tx_id,event_key) DO NOTHING`,
+        [txId,JSON.stringify({snapshot_id:snapshotId,checkout_state:'NOT_PAID'})]);
+    }
+    await client.query('COMMIT');
+    console.info('[GM_GPAY_V080] ORDER_PREPARED',{order_no:orderNo,replay:!!existing.rowCount,payment_committed:false});
+    return res.json({ok:true,order_no:orderNo,tx_id:txId,idempotency_key:txId,
+      settlement:amounts,payment_committed:false,ready_for_payment:false});
+  }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});
+    console.error('[GM_GPAY_V080] PREPARE_FAILED',String(e&&e.message||e));
+    return res.status(500).json({ok:false,code:'PREPARE_FAILED'});
+  }finally{if(client)client.release();}
+});
+
 router.post('/api/gm/order/allocate-no', async (req,res)=>{
   const pool=db(req);
   if(!pool)return fail(res,500,'DB pool is not attached');
