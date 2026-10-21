@@ -74,6 +74,8 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(express.static('public'));
 app.use('/public', express.static(path.join(__dirname, 'public')));
+// GM_AUTO_ORDER_LINK_V001: serve existing auto-order dashboard assets without altering auth or API logic.
+app.use('/auto-order', express.static(path.join(__dirname, 'auto-order'), { index: 'index.html' }));
 
 /* GM_HEALTH_V004_DB_RUNTIME
  * Cloudtype / UptimeRobot 운영용 health endpoint.
