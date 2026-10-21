@@ -1,8 +1,8 @@
 'use strict';
 // GM_BUILDER_PURCHASE_CONFIRM_V001
 const router=require('express').Router();
-const point=require('../../services/order/member_point_service');
-const svc=require('../../services/order/purchase_confirm_service');
+const point=require('../../services/member_point_service');
+const svc=require('../../services/purchase_confirm_service');
 function db(req){return req.app.locals.db||req.app.locals.pool;}
 function clean(v){return String(v==null?'':v).trim();}
 function lim(v,d,max){const n=Number(v);return Number.isFinite(n)?Math.min(max,Math.max(1,Math.trunc(n))):d;}

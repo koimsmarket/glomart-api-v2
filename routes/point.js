@@ -1,7 +1,7 @@
 'use strict';
 // GM_POINT_ROUTE_V001
 const router=require('express').Router();
-const point=require('../../services/order/member_point_service');
+const point=require('../services/member_point_service');
 function clean(v){return String(v==null?'':v).trim();}
 function lim(v,d,max){const n=Number(v);return Number.isFinite(n)?Math.min(max,Math.max(1,Math.trunc(n))):d;}
 function db(req){return req.app.locals.db||req.app.locals.pool;}

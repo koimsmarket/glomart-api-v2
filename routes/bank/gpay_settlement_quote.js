@@ -1,8 +1,8 @@
 'use strict';
 // GM_GPAY_V065 server settlement quote: READ/CALCULATE ONLY. No debit, no order completion.
 const router=require('express').Router();
-const point=require('../../services/order/member_point_service');
-const {quote}=require('../../services/order/gpay_settlement_contract');
+const point=require('../../services/member_point_service');
+const {quote}=require('../../services/bank/gpay_settlement_contract');
 router.post('/api/gm/gpay/settlement/quote',async(req,res)=>{
   res.set('Cache-Control','no-store');
   try{

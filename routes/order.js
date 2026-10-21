@@ -1,8 +1,8 @@
-const gmGpayTransactionV072=require('../../services/order/gpay_transaction');
-const gmGpayPointV072=require('../../services/order/member_point_service');
+const gmGpayTransactionV072=require('../services/bank/gpay_transaction');
+const gmGpayPointV072=require('../services/member_point_service');
 /* routes/order.js
  * server.js에서 분리한 주문 저장 라우터.
- * server.js 하단의 app.use(require('../routes/order')) 방식으로 로드된다.
+ * server.js 하단의 app.use(require('./routes/order')) 방식으로 로드된다.
  * - POST /api/gm/order/allocate-no : Cafe24 주문결과 기준 서버 주문번호 발급 + gm_order 즉시 예약 (기존 gm_order만 사용)
  * - POST /api/gm/order/create : gm_order 1건 + gm_order_item N건 저장
  * - GET  /api/gm/order/get    : order_no 기준 조회
@@ -12,7 +12,7 @@ const gmGpayPointV072=require('../../services/order/member_point_service');
 
 const express = require('express');
 const router = express.Router();
-const paymentConfirm=require('../../auto-order/services/payment_confirm_service');
+const paymentConfirm=require('../auto-order/services/payment_confirm_service');
 
 function enqueueAfterResponse(label, task){
   const run=()=>{
@@ -1185,7 +1185,7 @@ router.get('/api/order/:order_no', async (req,res)=>{
 // GM_BANK_TRANSACTION_ROUTE_V001
 // Bank payment import is mounted through the existing order router so server.js remains untouched.
 try {
-  router.use(require('../bank/bank_transaction'));
+  router.use(require('./bank/bank_transaction'));
   console.log('[GM_BANK_TRANSACTION_ROUTE_V001] mounted via routes/order');
 } catch (e) {
   console.error('[GM_BANK_TRANSACTION_ROUTE_V001] mount failed:', String(e && e.message || e));
