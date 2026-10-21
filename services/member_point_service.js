@@ -109,7 +109,8 @@ async function confirmPurchaseReward(pool,orderNo){
     if(!memberId)throw new Error('member_order_required');
     const sellerStatus=clean(order.seller_status).toUpperCase(),shippingStatus=clean(order.shipping_status).toUpperCase();
     if(!(order.delivered_at || sellerStatus==='DELIVERED' || ['DELIVERED','COMPLETE','COMPLETED'].includes(shippingStatus)))throw new Error('order_not_delivered');
-    if(['CANCELLED','CANCELED'].includes(sellerStatus) || /^CANCEL_/.test(clean(order.customer_status).toUpperCase()))throw new Error('order_cancelled');
+    const cancelStatus=clean(order.cancel_status).toUpperCase(),orderStatus=clean(order.order_status).toUpperCase();
+    if(['CANCELLED','CANCELED'].includes(sellerStatus) || ['CANCELLED','CANCELED'].includes(orderStatus) || ['CANCELLED','CANCELED'].includes(cancelStatus) || /^CANCEL_/.test(cancelStatus) || /^CANCEL_/.test(clean(order.customer_status).toUpperCase()))throw new Error('order_cancelled');
     const old=await client.query(`SELECT * FROM gm_point_transaction WHERE order_no=$1 AND transaction_type='PURCHASE_CONFIRM_GRANT' LIMIT 1`,[orderNo]);
     if(old.rows.length){
       await client.query(`UPDATE gm_order SET customer_status='PURCHASE_CONFIRMED',purchase_confirmed_yn='Y',purchase_confirmed_at=COALESCE(purchase_confirmed_at,NOW()),point_granted_amount=$2,updated_at=NOW() WHERE order_no=$1`,[orderNo,money(old.rows[0].grant_amount)]);
@@ -145,6 +146,8 @@ async function applyOrderPointInTransaction(client,input){
   if(!oq.rows.length)throw new Error('order_not_found');
   const order=oq.rows[0],memberId=clean(order.member_id);
   if(memberId!==requestedMember)throw new Error('member_mismatch');
+  // The order was persisted from the server-verified G-PAY quote. A different point amount is never allowed.
+  if(money(order.point_used_amount)!==amount)throw new Error('point_order_contract_mismatch');
   const product=money(order.total_product_price);
   if(amount>maxUseForProduct(product))throw new Error('point_amount_exceeds_order_limit');
   const old=await client.query("SELECT use_amount,balance_after FROM gm_point_transaction WHERE order_no=$1 AND member_id=$2 AND transaction_type='ORDER_USE' LIMIT 1",[orderNo,memberId]);
