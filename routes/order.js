@@ -790,40 +790,73 @@ async function allocateServerOrderNo(client, cafeNo, memberId, guestKey){
   throw new Error('order_no_allocate_conflict');
 }
 
-// GM_GPAY_V080: durable external-order PREPARATION only. NO payment/debit/auto-order here.
-// Repeated snapshot_id must return the same order and amounts; never mint a second payable order.
+// GM_GPAY_V081: fail-closed PREPARATION: password verification, selected server basket
+// snapshot and replay are checked before any persistent reservation. NO debit here.
 router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
   res.set('Cache-Control','no-store');
   const b=req.body||{},memberId=clean(b.member_id),snapshotId=clean(b.snapshot_id);
+  const selected=Array.isArray(b.cart_item_keys)?b.cart_item_keys:[];
+  const password=typeof b.password==='string'?b.password:'';
   if(!/^[A-Za-z0-9._@-]{2,80}$/.test(memberId)||!/^GPS-[A-Za-z0-9-]{8,100}$/.test(snapshotId))
     return res.status(400).json({ok:false,code:'INVALID_PREPARE_REFERENCE'});
   if(String(b.order_mode||'external').toLowerCase()!=='external')
     return res.status(409).json({ok:false,code:'MIXED_ORDER_PREPARE_NOT_SUPPORTED'});
+  // This version accepts one selected external basket row only. Avoid silently
+  // undercharging mixed delivery groups or aggregated delivery fees.
+  if(selected.length!==1||typeof selected[0]!=='string'||selected[0].length>250)
+    return res.status(409).json({ok:false,code:'PREPARE_SINGLE_BASKET_ITEM_REQUIRED'});
+  if(password.length<8||password.length>256)
+    return res.status(401).json({ok:false,code:'PREPARE_PASSWORD_REQUIRED'});
   const pool=db(req);
   if(!pool)return res.status(503).json({ok:false,code:'DB_UNAVAILABLE'});
   const pointService=require('../services/member_point_service');
   const quoteContract=require('../services/bank/gpay_settlement_contract');
+  const {gmVerifyHash}=require('./GM_MEMBER_PASSWORD');
   let client;
   try{
-    // This quote does not validate actual basket prices; no payment authorization is issued.
+    client=await pool.connect();await client.query('BEGIN');
+    const m=await client.query('SELECT member_id,password_hash FROM gm_member WHERE member_id=$1 LIMIT 1',[memberId]);
+    if(!m.rowCount||!m.rows[0].password_hash||!await gmVerifyHash(password,String(m.rows[0].password_hash))){
+      await client.query('ROLLBACK');return res.status(401).json({ok:false,code:'PREPARE_AUTH_FAILED'});
+    }
+    const basket=await client.query(`SELECT cart_item_key, quantity, amount, amount_type,
+      delivery_fee, delivery_type, mall_code, pi_ii_vi
+      FROM gm_basket WHERE member_id=$1 AND cart_item_key=$2 FOR UPDATE`,[memberId,selected[0]]);
+    if(basket.rowCount!==1){await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_BASKET_NOT_FOUND'});}
+    const item=basket.rows[0], qty=Number(item.quantity),price=Number(item.amount),fee=Number(item.delivery_fee||0);
+    if(!Number.isSafeInteger(qty)||qty<1||!Number.isSafeInteger(price)||price<=0||!Number.isSafeInteger(fee)||fee<0){
+      await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_BASKET_INVALID'});
+    }
+    const priceMode=String(item.amount_type||'unit').toLowerCase();
+    if(!['unit','total'].includes(priceMode)){
+      await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_PRICE_MODE_UNSUPPORTED'});
+    }
+    const product=priceMode==='total'?price:qty*price;
+    if(!Number.isSafeInteger(product)){
+      await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_PRODUCT_OVERFLOW'});
+    }
+    // The browser must not override pricing. Basket is checked against the
+    // submitted snapshot; payment remains disabled until authoritative source
+    // price / delivery verification is integrated.
+    if(Number(b.product_amount_krw)!==product||Number(b.shipping_amount_krw)!==fee){
+      await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_BASKET_AMOUNT_MISMATCH'});
+    }
     const summary=await pointService.getSummary(pool,memberId);
-    if(!summary.found)return res.status(404).json({ok:false,code:'MEMBER_NOT_FOUND'});
-    const amounts=quoteContract.quote({product_amount_krw:b.product_amount_krw,
-      shipping_amount_krw:b.shipping_amount_krw,point_use_krw:b.point_use_krw,
-      available_point_krw:summary.point.available_point});
+    if(!summary.found){await client.query('ROLLBACK');return res.status(404).json({ok:false,code:'MEMBER_NOT_FOUND'});}
+    const amounts=quoteContract.quote({product_amount_krw:product,shipping_amount_krw:fee,
+      point_use_krw:b.point_use_krw,available_point_krw:summary.point.available_point});
     const crypto=require('crypto');
     const txId='GPSAGA-'+crypto.createHash('sha256').update(memberId+'|'+snapshotId).digest('hex');
-    client=await pool.connect();await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[txId]);
-    let existing=await client.query('SELECT * FROM gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[txId]);
+    const existing=await client.query('SELECT * FROM gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[txId]);
     let orderNo;
     if(existing.rowCount){
       const x=existing.rows[0];orderNo=x.order_no;
-      if(x.member_id!==memberId || Number(x.product_amount_krw)!==amounts.product_amount_krw ||
-         Number(x.shipping_amount_krw)!==amounts.shipping_amount_krw ||
-         Number(x.point_used_krw)!==amounts.point_used_amount_krw ||
-         Number(x.gpay_amount)!==amounts.pay_amount_g)
-        {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_REPLAY_CONTRACT_MISMATCH'});}
+      if(x.member_id!==memberId||Number(x.product_amount_krw)!==amounts.product_amount_krw||
+        Number(x.shipping_amount_krw)!==amounts.shipping_amount_krw||
+        Number(x.point_used_krw)!==amounts.point_used_amount_krw||Number(x.gpay_amount)!==amounts.pay_amount_g){
+        await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'PREPARE_REPLAY_CONTRACT_MISMATCH'});
+      }
     }else{
       const alloc=await allocateServerOrderNo(client,'',memberId,'');orderNo=alloc.order_no;
       await client.query(`INSERT INTO gm_purchase_saga(tx_id,order_no,member_id,product_amount_krw,
@@ -834,14 +867,14 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
       await client.query(`INSERT INTO gm_purchase_saga_event(tx_id,event_key,step,result,details)
         VALUES($1,'ORDER_PREPARED','ORDER_PREPARE','COMMITTED',$2::jsonb)
         ON CONFLICT(tx_id,event_key) DO NOTHING`,
-        [txId,JSON.stringify({snapshot_id:snapshotId,checkout_state:'NOT_PAID'})]);
+        [txId,JSON.stringify({snapshot_id:snapshotId,cart_item_key:selected[0],checkout_state:'NOT_PAID'})]);
     }
     await client.query('COMMIT');
-    console.info('[GM_GPAY_V080] ORDER_PREPARED',{order_no:orderNo,replay:!!existing.rowCount,payment_committed:false});
+    console.info('[GM_GPAY_V081] ORDER_PREPARED',{order_no:orderNo,replay:!!existing.rowCount,payment_committed:false});
     return res.json({ok:true,order_no:orderNo,tx_id:txId,idempotency_key:txId,
       settlement:amounts,payment_committed:false,ready_for_payment:false});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});
-    console.error('[GM_GPAY_V080] PREPARE_FAILED',String(e&&e.message||e));
+    console.error('[GM_GPAY_V081] PREPARE_FAILED',String(e&&e.message||e));
     return res.status(500).json({ok:false,code:'PREPARE_FAILED'});
   }finally{if(client)client.release();}
 });
