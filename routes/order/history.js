@@ -5,7 +5,7 @@
 'use strict';
 const express = require('express');
 const router = express.Router();
-const service = require('../services/order_history_service');
+const service = require('../../services/order/order_history_service');
 const VERSION = 'GM_ORDER_HISTORY_ROUTE_V005_REFUND_METHOD';
 function clean(v){ return String(v == null ? '' : v).trim(); }
 function db(req){ return req.app.locals.db || req.app.locals.pool; }

@@ -1,6 +1,8 @@
+const gmGpayTransactionV072=require('../../services/order/gpay_transaction');
+const gmGpayPointV072=require('../../services/order/member_point_service');
 /* routes/order.js
  * server.js에서 분리한 주문 저장 라우터.
- * server.js 하단의 app.use(require('./routes/order')) 방식으로 로드된다.
+ * server.js 하단의 app.use(require('../routes/order')) 방식으로 로드된다.
  * - POST /api/gm/order/allocate-no : Cafe24 주문결과 기준 서버 주문번호 발급 + gm_order 즉시 예약 (기존 gm_order만 사용)
  * - POST /api/gm/order/create : gm_order 1건 + gm_order_item N건 저장
  * - GET  /api/gm/order/get    : order_no 기준 조회
@@ -10,7 +12,7 @@
 
 const express = require('express');
 const router = express.Router();
-const paymentConfirm=require('../auto-order/services/payment_confirm_service');
+const paymentConfirm=require('../../auto-order/services/payment_confirm_service');
 
 function enqueueAfterResponse(label, task){
   const run=()=>{
@@ -956,6 +958,7 @@ router.post('/api/gm/order/create', async (req, res) => {
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const raw = req.body || {};
+  let gpayLedgerRecorded=false;
   const inputItems = normalizeItems(raw);
   if(!inputItems.length) return fail(res, 400, 'items required');
   const client = await pool.connect().catch(()=>null);
@@ -963,6 +966,24 @@ router.post('/api/gm/order/create', async (req, res) => {
   try{
     const orderMode=clean(raw.order_mode||raw.orderMode||'external').toLowerCase();
     let suppliedOrderNo=clean(raw.gm_order_no||raw.order_no);
+    // G-PAY: verify ledger and durably record the debit BEFORE beginning order storage.
+    // A paid G-PAY order must already have an allocated order number.
+    const gpayIntent=String(raw.payment_method||'').toUpperCase()==='GPAY'||String(raw.gpay_payment_key||'').trim()!=='';
+    let gmVerified=null;
+    if(gpayIntent){
+      if(!suppliedOrderNo)throw new Error('GPAY_ORDER_NO_REQUIRED_BEFORE_DEBIT');
+      raw.order_no=suppliedOrderNo;raw.gm_order_no=suppliedOrderNo;
+      const preliminary=buildOrderRow(raw,inputItems);
+      gmVerified=await gmVerifyGpayPaidBeforeOrder(raw,suppliedOrderNo,clean(preliminary.member_id),preliminary);
+      await gmGpayTransactionV072.recordPaid(pool,{
+        tx_id:clean(raw.gpay_tx_id||raw.gpay_payment_key),order_no:suppliedOrderNo,
+        member_id:clean(preliminary.member_id),payment_key:clean(raw.gpay_payment_key),
+        product:Number(preliminary.total_product_price),
+        shipping:Number(preliminary.total_delivery_fee)+Number(preliminary.extra_area_delivery_fee),
+        points:gmVerified.pointUsed,gpay:Number(preliminary.total_payment_price)-gmVerified.pointUsed
+      });
+      gpayLedgerRecorded=true;
+    }
     await client.query('BEGIN');
 
     /* 외부 단독 주문은 이 저장 transaction 안에서 서버가 번호를 발급한다.
@@ -985,7 +1006,7 @@ router.post('/api/gm/order/create', async (req, res) => {
     const orderRow = buildOrderRow(raw, inputItems);
     // GM_GPAY_V070: G-PAY ledger must have committed before an order is stored.
     // IMPORTANT: this does not itself debit points; paid-order point atomicity is pending.
-    const gmGpayVerification=await gmVerifyGpayPaidBeforeOrder(raw,orderRow.order_no,clean(orderRow.member_id),orderRow);
+    const gmGpayVerification=gmVerified||await gmVerifyGpayPaidBeforeOrder(raw,orderRow.order_no,clean(orderRow.member_id),orderRow);
     if(gmGpayVerification.applicable){
       orderRow.payment_method='GPAY';
       orderRow.payment_status='paid';
@@ -1008,6 +1029,14 @@ router.post('/api/gm/order/create', async (req, res) => {
     const orderAction = await upsertOrder(client, orderRow);
     const itemResult = await replaceOrderItems(client, orderRow, inputItems);
     const taxTotals = await updateOrderTaxTotals(client, orderRow.order_no);
+    // Point debit and order write succeed or roll back together on Glomart DB.
+    if(gmGpayVerification.applicable){
+      await gmGpayPointV072.applyOrderPointInTransaction(client,{
+        order_no:orderRow.order_no,member_id:clean(orderRow.member_id),point_used_amount:gmGpayVerification.pointUsed
+      });
+      await gmGpayTransactionV072.completed(client,clean(raw.gpay_tx_id||raw.gpay_payment_key),orderRow.order_no,gmGpayVerification.pointUsed);
+    }
+
 
     /* 외부 단독 주문은 결과 페이지 JavaScript에 의존하지 않고 주문 저장 트랜잭션 안에서
        이번 주문에 실제 저장된 상품만 gm_basket에서 삭제한다. 혼합 주문은 Cafe24 확정 전이므로
@@ -1065,6 +1094,7 @@ router.post('/api/gm/order/create', async (req, res) => {
     }
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
+    if(gpayLedgerRecorded)await gmGpayTransactionV072.reconcile(pool,clean(raw.gpay_tx_id||raw.gpay_payment_key),String(e&&e.message||e));
     console.error('[GM_ORDER_CREATE_ERROR]', String(e && e.message || e));
     fail(res, 500, 'order create failed', { detail:String(e && e.message || e) });
   }finally{
@@ -1155,7 +1185,7 @@ router.get('/api/order/:order_no', async (req,res)=>{
 // GM_BANK_TRANSACTION_ROUTE_V001
 // Bank payment import is mounted through the existing order router so server.js remains untouched.
 try {
-  router.use(require('./bank/bank_transaction'));
+  router.use(require('../bank/bank_transaction'));
   console.log('[GM_BANK_TRANSACTION_ROUTE_V001] mounted via routes/order');
 } catch (e) {
   console.error('[GM_BANK_TRANSACTION_ROUTE_V001] mount failed:', String(e && e.message || e));

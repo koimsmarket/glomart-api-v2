@@ -1635,7 +1635,7 @@ app.post('/api/gm/admin/orders/:order_no/builder/start', async (req,res)=>{
 
 /* GM_ORDER_ROUTE_V034
  * 주문 저장 로직은 routes/order.js로 분리한다.
- * 이 파일에서는 기존 하단 app.use(require('./routes/order')) 등록만 사용한다.
+ * 이 파일에서는 기존 하단 app.use(require('./routes/order/index')) 등록만 사용한다.
  */
 
 /* Existing JSON cache endpoints retained */
@@ -1778,10 +1778,10 @@ try{
   console.error('[GM_PRODUCT_QUEUE_WORKER] start failed:', String(e && e.message || e));
 }
 // GM_GPAY_CHECKOUT_BALANCE_V001: authenticated read-only proxy; no bank integration.
-app.use(require('./routes/bank/gpay_checkout_balance'));
+app.use(require('./routes/order/gpay_checkout_balance'));
 // GM_GPAY_OWNER_AUTH_V057: independent MEMBER password proof, never admin OAuth.
 try {
-  app.use(require('./routes/bank/gpay_checkout_owner_auth'));
+  app.use(require('./routes/order/gpay_checkout_owner_auth'));
   console.log('[GM_GPAY_OWNER_AUTH_V057] ROUTE_READY');
 } catch (e) {
   console.error('[GM_GPAY_OWNER_AUTH_V057] ROUTE_FAILED', String(e && e.message || e));
@@ -1798,12 +1798,12 @@ app.use(require('./routes/interest'));
 // V024: routes/member already registered early above.
 app.use(require('./routes/account'));
 // GM_POINT_ROUTE_V062: point read and server-only debit, separate from G-PAY ledger.
-app.use(require('./routes/point'));
+app.use(require('./routes/order/point'));
 console.log('[GM_POINT_ROUTE_V062] registered');
 // GM_GPAY_V065 quote calculator only; actual payment approval remains disabled here.
-app.use(require('./routes/bank/gpay_settlement_quote'));
+app.use(require('./routes/order/gpay_settlement_quote'));
 console.log('[GM_GPAY_SETTLEMENT_V065] quote route registered');
-app.use(require('./routes/order'));
+app.use(require('./routes/order/index'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));

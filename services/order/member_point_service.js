@@ -134,4 +134,35 @@ async function confirmPurchaseReward(pool,orderNo){
   }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
 }
 
-module.exports={POINT_USE_RATE,REWARD_RATE,floor10,maxUseForProduct,rewardForPaidProduct,getSummary,getTransactions,applyOrderPoint,confirmPurchaseReward};
+
+// V072: called ONLY within the caller's BEGIN/COMMIT transaction after a verified G-PAY debit.
+async function applyOrderPointInTransaction(client,input){
+  const orderNo=clean(input.order_no),requestedMember=clean(input.member_id);
+  const amount=Number(input.point_used_amount);
+  if(!orderNo||!requestedMember||!Number.isSafeInteger(amount)||amount<0||amount%10!==0)throw new Error('point_contract_invalid');
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',['POINT_ORDER_USE:'+orderNo]);
+  const oq=await client.query('SELECT * FROM gm_order WHERE order_no=$1 FOR UPDATE',[orderNo]);
+  if(!oq.rows.length)throw new Error('order_not_found');
+  const order=oq.rows[0],memberId=clean(order.member_id);
+  if(memberId!==requestedMember)throw new Error('member_mismatch');
+  const product=money(order.total_product_price);
+  if(amount>maxUseForProduct(product))throw new Error('point_amount_exceeds_order_limit');
+  const old=await client.query("SELECT use_amount,balance_after FROM gm_point_transaction WHERE order_no=$1 AND member_id=$2 AND transaction_type='ORDER_USE' LIMIT 1",[orderNo,memberId]);
+  if(old.rows.length){
+    if(money(old.rows[0].use_amount)!==amount)throw new Error('point_amount_idempotency_mismatch');
+    return {ok:true,idempotent:true,order_no:orderNo,point_used_amount:amount,balance_after:money(old.rows[0].balance_after)};
+  }
+  if(amount===0){await client.query('UPDATE gm_order SET point_used_amount=0,updated_at=NOW() WHERE order_no=$1',[orderNo]);return {ok:true,skipped:true,point_used_amount:0};}
+  const mq=await client.query('SELECT member_id,point_balance FROM gm_member WHERE member_id=$1 FOR UPDATE',[memberId]);
+  if(!mq.rows.length)throw new Error('member_not_found');
+  const balance=await ensureBalance(client,memberId,mq.rows[0].point_balance);
+  if(balance<amount)throw new Error('point_balance_insufficient');
+  const after=balance-amount;
+  await client.query('UPDATE gm_point_balance SET balance_amount=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);
+  await client.query("INSERT INTO gm_point_transaction(member_id,order_no,transaction_at,transaction_type,grant_amount,use_amount,balance_after,description,created_at) VALUES($1,$2,NOW(),'ORDER_USE',0,$3,$4,$5,NOW())",[memberId,orderNo,amount,after,'G-PAY 주문 적립금 사용']);
+  await client.query('UPDATE gm_member SET point_balance=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);
+  await client.query('UPDATE gm_order SET point_used_amount=$2,updated_at=NOW() WHERE order_no=$1',[orderNo,amount]);
+  return {ok:true,order_no:orderNo,point_used_amount:amount,balance_after:after};
+}
+
+module.exports={applyOrderPointInTransaction,POINT_USE_RATE,REWARD_RATE,floor10,maxUseForProduct,rewardForPaidProduct,getSummary,getTransactions,applyOrderPoint,confirmPurchaseReward};
