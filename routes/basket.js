@@ -285,7 +285,27 @@ router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
   const pool=db(req), owner=ownerWhere(req.query||{});
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
   if(!owner) return res.status(400).json({ok:false,error:'member_id is required'});
-  try{ const r=await pool.query(selectSql(`WHERE ${owner.col}=$1 ORDER BY added_at DESC`),[owner.val]); const external_count=r.rows.reduce((sum,row)=>sum+Math.max(0,n(row.quantity,1)),0); res.json({ok:true,items:r.rows,external_count}); }
+  // GM_CART_SERVER_V001: list query diagnostics only. SQL and JSON contract unchanged.
+  const startedAt=process.hrtime.bigint();
+  let dbMs=null, rowCount=null, responseMs=null;
+  res.once('finish',()=>{
+    const totalMs=Number(process.hrtime.bigint()-startedAt)/1e6;
+    console.log('[GM_BASKET_LIST_PERF_V001]',JSON.stringify({
+      status:res.statusCode, db_ms:dbMs===null?null:Number(dbMs.toFixed(1)),
+      rows:rowCount, json_ms:responseMs===null?null:Number(responseMs.toFixed(1)),
+      total_ms:Number(totalMs.toFixed(1))
+    }));
+  });
+  try{
+    const queryStarted=process.hrtime.bigint();
+    const r=await pool.query(selectSql(`WHERE ${owner.col}=$1 ORDER BY added_at DESC`),[owner.val]);
+    dbMs=Number(process.hrtime.bigint()-queryStarted)/1e6;
+    rowCount=r.rows.length;
+    const external_count=r.rows.reduce((sum,row)=>sum+Math.max(0,n(row.quantity,1)),0);
+    const jsonStarted=process.hrtime.bigint();
+    res.json({ok:true,items:r.rows,external_count});
+    responseMs=Number(process.hrtime.bigint()-jsonStarted)/1e6;
+  }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
