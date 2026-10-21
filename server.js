@@ -1804,6 +1804,8 @@ console.log('[GM_POINT_ROUTE_V062] registered');
 app.use(require('./routes/bank/gpay_settlement_quote'));
 console.log('[GM_GPAY_SETTLEMENT_V065] quote route registered');
 app.use(require('./routes/order'));
+// GM_ORDER_HISTORY_ROUTE_V005: existing order list/detail/CS endpoints.
+app.use(require('./routes/order_history'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
