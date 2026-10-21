@@ -12,46 +12,55 @@ function csvCell(v){
   return /[",\r\n]/.test(x) ? '"' + x.replace(/"/g,'""') + '"' : x;
 }
 
-async function streamProductUidCsv(db,res,table,cols,limit){
-  res.setHeader('Content-Type','text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition',`attachment; filename="${table}_${Date.now()}.csv"`);
-  res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
-  res.setHeader('X-Content-Type-Options','nosniff');
-
-  const writeChunk=async chunk=>{if(res.write(chunk))return;if(res.destroyed)throw new Error('client disconnected');await new Promise(resolve=>res.once('drain',resolve));};
-  await writeChunk('\ufeff' + cols.map(csvCell).join(',') + '\n');
-
-  const pageSize=250;
-  let lastUid='';
+// V001: bounded-memory CSV export for ALL tables, not only product tables.
+// A fixed ORDER BY plus OFFSET pagination preserves configured ordering. Large OFFSETs
+// can be slower than indexed keyset paging, but never load the entire table in Node.
+async function streamTableCsv(db,res,table,cols,order,limit){
+  const pageSize=500;
+  let offset=0;
   let sent=0;
-
-  while(true){
-    if(limit && sent>=limit) break;
-    const take=limit ? Math.min(pageSize,limit-sent) : pageSize;
+  let opened=false;
+  const write=async data=>{
+    if(res.destroyed) throw new Error('client disconnected');
+    if(res.write(data)) return;
+    await new Promise((resolve,reject)=>{
+      const done=()=>{res.off('close',closed);resolve();};
+      const closed=()=>{res.off('drain',done);reject(new Error('client disconnected'));};
+      res.once('drain',done);res.once('close',closed);
+    });
+  };
+  while(!res.destroyed){
+    if(limit!==null && sent>=limit)break;
+    const take=limit!==null?Math.min(pageSize,limit-sent):pageSize;
     const r=await db.query(
-      `SELECT ${cols.map(qIdent).join(', ')}
-         FROM ${qIdent(table)}
-        WHERE product_uid > $1
-        ORDER BY product_uid ASC
-        LIMIT $2`,
-      [lastUid,take]
+      `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(table)} ORDER BY ${order} LIMIT $1 OFFSET $2`,
+      [take,offset]
     );
-    if(!r.rows.length) break;
-
-    for(const row of r.rows){
-      await writeChunk(cols.map(c=>csvCell(row[c])).join(',') + '\n');
+    if(!opened){
+      res.setHeader('Content-Type','text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition',`attachment; filename="${table}_${Date.now()}.csv"`);
+      res.setHeader('Cache-Control','no-store, no-cache, must-revalidate');
+      res.setHeader('X-Content-Type-Options','nosniff');
+      await write('\ufeff'+cols.map(csvCell).join(',')+'\n');
+      opened=true;
     }
-
-    sent+=r.rows.length;
-    lastUid=String(r.rows[r.rows.length-1].product_uid||'');
-    if(r.rows.length<take) break;
+    for(const row of r.rows) await write(cols.map(c=>csvCell(row[c])).join(',')+'\n');
+    offset+=r.rows.length;sent+=r.rows.length;
+    if(r.rows.length<take)break;
   }
+  if(!res.destroyed)res.end();
+  console.info('[GM_BUILDER_REWORK_V001] export',table,'rows='+sent,'mode=stream');
+}
 
-  res.end();
+function exportTableSpec(raw){
+  const spec=tableSpec(raw);
+  if(spec)return spec;
+  const m=/^readonly:(gm_[a-z0-9_]+)$/.exec(String(raw||''));
+  return m?{table:m[1],order:null,readOnly:true}:null;
 }
 
 router.get('/api/gm/builder/export', async (req,res)=>{
-  const spec = tableSpec(req.query.table);
+  const spec = exportTableSpec(req.query.table);
   if (!spec) return fail(res, 400, 'invalid table');
 
   const format = String(req.query.format || 'csv').toLowerCase();
@@ -62,27 +71,26 @@ router.get('/api/gm/builder/export', async (req,res)=>{
   const rawLimit = req.query.limit;
   const limit = rawLimit === undefined || rawLimit === null || String(rawLimit).trim() === ''
     ? null
-    : Math.max(Number(rawLimit), 1);
+    : Math.min(Math.max(Math.floor(Number(rawLimit)||1), 1), 1000000000);
 
   try {
     let cols = await getColumns(db, spec.table);
+    if (!cols.length) return fail(res,404,'table not found');
     if (spec.table === 'gm_member') cols = cols.filter(c => !/^password_/i.test(c));
 
-    // Large-file tables: stream by product_uid in small DB pages.
-    // gm_product can be too large for one-shot Node memory loading, so CSV is streamed incrementally.
-    // JSON behavior stays unchanged.
-    if ((spec.table === 'gm_product' || spec.table === 'gm_product_image_vector') && format !== 'json') {
-      return await streamProductUidCsv(db,res,spec.table,cols,limit);
+    // Metadata-derived tables must be verified against pg_catalog: no arbitrary SQL identifiers.
+    if(spec.readOnly){
+      const found=await db.query(`SELECT 1 FROM pg_catalog.pg_tables WHERE schemaname='public' AND tablename=$1`,[spec.table]);
+      if(!found.rows.length)return fail(res,404,'table not found');
     }
-
-    const sql = `SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${spec.order}` + (limit ? ' LIMIT $1' : '');
-    const r = await db.query(sql, limit ? [limit] : []);
-    if (format === 'json') return ok(res, { table:spec.table, count:r.rows.length, limit:limit || 'ALL', columns:cols, rows:r.rows });
-
-    const csv = toCsv(r.rows, cols);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${spec.table}_${Date.now()}.csv"`);
-    res.end(csv);
+    // Unregistered tables use physical tuple id for bounded scan ordering.
+    // ctid is a snapshot-local pagination convenience, not a stable record identity.
+    const order=spec.order||'ctid ASC';
+    if(format!=='json')return await streamTableCsv(db,res,spec.table,cols,order,limit);
+    // JSON is restricted to small diagnostic previews; full exports must use CSV streaming.
+    if(limit===null||limit>5000)return fail(res,400,'JSON export requires limit <= 5000; use CSV for full export');
+    const r=await db.query(`SELECT ${cols.map(qIdent).join(', ')} FROM ${qIdent(spec.table)} ORDER BY ${order} LIMIT $1`,[limit]);
+    return ok(res,{table:spec.table,count:r.rows.length,limit,columns:cols,rows:r.rows});
   } catch(e) {
     fail(res, 500, 'export failed', { detail:String(e && e.message || e) });
   }

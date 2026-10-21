@@ -120,14 +120,14 @@ async function fillSelect(id){
   const el=document.getElementById(id); if(!el)return;
   try{
     const specs=await loadBuilderTableSpecs();
-    el.innerHTML=groupedBuilderSpecs(specs).map(g=>`<optgroup label="${g.label}">${g.specs.map(x=>`<option value="${x.key}">${tables[x.key]||x.table}</option>`).join('')}</optgroup>`).join('');
+    el.innerHTML=groupedBuilderSpecs(specs).map(g=>`<optgroup label="${g.label}">${g.specs.map(x=>`<option value="${x.key}">${tables[x.key]||x.table}${x.readOnly?" [조회·다운로드 전용]":""}</option>`).join('')}</optgroup>`).join('');
   }catch(e){ el.innerHTML='<option value="">테이블 목록 조회 실패</option>'; log(String(e&&e.message||e)); }
 }
 async function fillChecks(id){
   const el=document.getElementById(id); if(!el)return;
   try{
     const specs=await loadBuilderTableSpecs();
-    el.innerHTML=groupedBuilderSpecs(specs).map(g=>`<details class="builderTableGroup" open><summary><b>${g.label}</b> <span class="small">${g.specs.length}개</span></summary><div class="checks">${g.specs.map(x=>`<label class="check"><input type="checkbox" class="exportTableCheck" data-group="${g.key}" value="${x.key}" checked><span>${tables[x.key]||x.table}</span></label>`).join('')}</div></details>`).join('');
+    el.innerHTML=groupedBuilderSpecs(specs).map(g=>`<details class="builderTableGroup" open><summary><b>${g.label}</b> <span class="small">${g.specs.length}개</span></summary><div class="checks">${g.specs.map(x=>`<label class="check"><input type="checkbox" class="exportTableCheck" data-group="${g.key}" value="${x.key}" checked><span>${tables[x.key]||x.table}${x.readOnly?" [조회·다운로드 전용]":""}</span></label>`).join('')}</div></details>`).join('');
   }catch(e){ el.innerHTML='<div class="small">테이블 목록 조회 실패</div>'; log(String(e&&e.message||e)); }
 }
 function setExportGroupChecks(groupKey,checked){ document.querySelectorAll(`.exportTableCheck[data-group="${groupKey}"]`).forEach(x=>x.checked=!!checked); }

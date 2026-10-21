@@ -65,7 +65,7 @@ async function saveCsvStream(table,filename,directoryHandle){
       if(directoryHandle){
         return await writeResponseToDirectory(response,filename,directoryHandle);
       }
-      if((table==='products' || table==='product_image_vector') && window.showSaveFilePicker && response.body && typeof response.body.getReader==='function'){
+      if(window.showSaveFilePicker && response.body && typeof response.body.getReader==='function'){
         const handle=await window.showSaveFilePicker({
           suggestedName:filename,
           types:[{description:'CSV',accept:{'text/csv':['.csv']}}]
@@ -107,7 +107,7 @@ async function exportTableToFile(table,format,directoryHandle){
   // Large product/vector tables: browser-side XLSX conversion duplicates large CSV data
   // in memory. Save as streamed CSV instead; Excel opens it normally.
   // Every other table keeps the existing behavior unchanged.
-  const actualFormat=((table==='products' || table==='product_image_vector') && format==='xlsx') ? 'csv' : format;
+  const actualFormat=(format==='xlsx') ? 'csv' : format; // all tables: reliable streaming instead of memory-bound XLSX conversion
   if(actualFormat==='csv'){
     const filename=`${table}_${stamp}.csv`;
     const saved=await saveCsvStream(table,filename,directoryHandle);
@@ -217,7 +217,7 @@ async function runExportGroup(group,gi,totalGroups,format,timed,shared,directory
       const row={group:gi+1,table,ok:true,bytes:saved.bytes,file:saved.filename,requested_format:format,actual_format:actualFormat,verified:saved.verified,streamed:saved.streamed};
       groupResult.push(row);
       shared.results.push(row);
-      log(`${gi+1}/${totalGroups}조 ${shared.completed}/${shared.total} 완료: ${saved.filename}`+(actualFormat!==format?' (상품은 안정성을 위해 CSV)':''));
+      log(`${gi+1}/${totalGroups}조 ${shared.completed}/${shared.total} 완료: ${saved.filename}`+(actualFormat!==format?' (대용량 안정성을 위해 CSV)':''));
     }catch(e){
       shared.completed++;
       const msg=String(e&&e.message||e);
