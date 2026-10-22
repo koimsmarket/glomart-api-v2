@@ -85,27 +85,28 @@
     window.filterBuilderInventory();
     if(el)el.textContent='기준본 등록 '+currentTables.length+'개 먼저 표시 · 운영 DB 전체 테이블 확인 중…';
     const url='/api/gm/builder/tables?t='+Date.now();
-    // The registered inventory is available without waiting for a potentially slow DB catalog query.
+    // Step 1: obtain live names first; statistics are deliberately a separate DB request.
+    // Keep the locally displayed list if either request fails.
     try{
-      const quick=await inventoryGet(url+'&configured_only=1',10000);
+      const names=await inventoryGet(url+'&phase=names',14000);
       if(request!==inventoryRequestSerial)return;
-      currentTables=mergeInventory(currentTables,quick.tables);
+      currentTables=mergeInventory(currentTables,names.tables);
       window.filterBuilderInventory();
-      if(el)el.textContent='기존 등록 '+currentTables.length+'개 표시 · DB 전체 테이블 추가 조회 중…';
+      if(el)el.textContent='운영 DB 테이블 '+currentTables.length+'개 확인 · 레코드 수·용량 조회 중…';
     }catch(e){
       if(request!==inventoryRequestSerial)return;
-      if(el)el.textContent='기존 등록 목록 조회 실패 ('+String(e.message||e)+') · DB 전체 조회 시도 중…';
+      if(el)el.textContent='운영 DB 테이블명 조회 실패: '+String(e.message||e)+' · 기존 등록 '+currentTables.length+'개 유지';
+      return; // Do not start costly statistics until name discovery succeeds.
     }
     try{
-      const data=await inventoryGet(url+'&all=1',20000);
+      const stats=await inventoryGet(url+'&phase=stats',14000);
       if(request!==inventoryRequestSerial)return;
-      currentTables=mergeInventory(currentTables,data.tables);
+      currentTables=mergeInventory(currentTables,stats.tables);
       window.filterBuilderInventory();
-      if(el)el.textContent='전체 '+currentTables.length+'개 / 기존 등록 '+(data.configured||0)+'개 / DB 자동 발견 '+(data.discovered||0)+'개'+(data.discoveryError?' · DB 검색 실패: '+data.discoveryError:'');
+      if(el)el.textContent='운영 DB 전체 '+currentTables.length+'개 · 건수는 통계 추정치 · 용량은 인덱스 포함';
     }catch(e){
       if(request!==inventoryRequestSerial)return;
-      // Keep previously rendered list if live discovery times out.
-      if(el)el.textContent='DB 전체 목록 조회 실패: '+String(e.message||e)+(currentTables.length?' · 기존 등록 '+currentTables.length+'개는 표시 중':'');
+      if(el)el.textContent='운영 DB 테이블 '+currentTables.length+'개 표시 중 · 건수/용량 조회 실패: '+String(e.message||e);
     }
   };
   window.addEventListener('DOMContentLoaded',()=>{

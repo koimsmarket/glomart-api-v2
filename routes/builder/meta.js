@@ -6,28 +6,62 @@ const { TABLES, dbFrom, ok, fail, keySets } = require('./core');
 // Unregistered tables are NOT added to TABLES (write/edit allowlist).
 router.get('/api/gm/builder/tables', async (req,res)=>{
   const configured=Object.keys(TABLES).map(k=>({key:k,table:TABLES[k].table,keys:keySets(TABLES[k]),readOnly:false,source:'configured'}));
+  const phase=String(req.query.phase||'full');
   if(req.query.configured_only==='1')return ok(res,{tables:configured,configured:configured.length,discovered:0,partial:true});
+  if(!['names','stats','full'].includes(phase))return fail(res,400,'invalid table inventory phase');
+  const started=Date.now();
+  console.info('[GM_BUILDER_TABLES_V004] START',phase);
   try{
     const db=dbFrom(req);
     if(!db || typeof db.query!=='function')throw new Error('DB connection unavailable');
-    // pg_class.reltuples is a cheap estimate, NOT COUNT(*); pg_total_relation_size includes indexes/TOAST.
-    const r=await db.query({
-      text:`SELECT c.relname AS tablename, GREATEST(c.reltuples,0)::bigint AS row_estimate,
-                   pg_total_relation_size(c.oid)::bigint AS total_bytes
+    // Names can be fetched quickly without computing sizes for every relation.
+    const names=await db.query({
+      text:`SELECT c.relname AS tablename
             FROM pg_catalog.pg_class c
             JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relkind IN ('r','p')
             ORDER BY c.relname`,
-      query_timeout:12000
+      query_timeout:8000
     });
-    const details=new Map(r.rows.map(x=>[String(x.tablename),{rowEstimate:x.row_estimate==null?null:Number(x.row_estimate),totalBytes:x.total_bytes==null?null:Number(x.total_bytes)}]));
+    console.info('[GM_BUILDER_TABLES_V004] NAMES_OK',phase,'count='+names.rows.length,'ms='+(Date.now()-started));
     const registered=new Set(configured.map(x=>x.table));
-    const discovered=r.rows.map(x=>String(x.tablename||'')).filter(x=>/^[a-z_][a-z0-9_]*$/.test(x)&&!registered.has(x))
-      .map(table=>({key:'readonly:'+table,table,keys:[],readOnly:true,source:'database',...details.get(table)}));
-    ok(res,{tables:configured.map(x=>({...x,...(details.get(x.table)||{})})).concat(discovered),configured:configured.length,discovered:discovered.length});
+    const live=names.rows.map(x=>String(x.tablename||'')).filter(x=>/^[a-z_][a-z0-9_]*$/.test(x));
+    const result=live.map(table=>{
+      const found=configured.find(x=>x.table===table);
+      return found||{key:'readonly:'+table,table,keys:[],readOnly:true,source:'database'};
+    });
+    // Preserve configured entries whose underlying table is missing, but distinguish them.
+    for(const entry of configured){if(!live.includes(entry.table))result.push({...entry,source:'configured_unverified'});}
+    if(phase==='names'){
+      console.info('[GM_BUILDER_TABLES_V004] DONE',phase,'ms='+(Date.now()-started));
+      return ok(res,{tables:result,configured:configured.length,discovered:result.filter(x=>x.readOnly).length});
+    }
+    let details;
+    try{
+      // row_estimate is approximate; size includes TOAST and indexes.
+      const stats=await db.query({
+        text:`SELECT c.relname AS tablename,
+                     GREATEST(c.reltuples,0)::bigint AS row_estimate,
+                     pg_total_relation_size(c.oid)::bigint AS total_bytes
+              FROM pg_catalog.pg_class c
+              JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+              WHERE n.nspname='public' AND c.relkind IN ('r','p')
+              ORDER BY c.relname`,
+        query_timeout:8000
+      });
+      details=new Map(stats.rows.map(x=>[String(x.tablename),{rowEstimate:x.row_estimate==null?null:Number(x.row_estimate),totalBytes:x.total_bytes==null?null:Number(x.total_bytes)}]));
+      console.info('[GM_BUILDER_TABLES_V004] STATS_OK',phase,'count='+stats.rows.length,'ms='+(Date.now()-started));
+    }catch(err){
+      console.warn('[GM_BUILDER_TABLES_V004] STATS_FAIL',phase,'ms='+(Date.now()-started),String(err&&err.message||err));
+      return ok(res,{tables:result,configured:configured.length,discovered:result.filter(x=>x.readOnly).length,statsError:String(err&&err.message||err)});
+    }
+    const combined=result.map(x=>({...x,...(details.get(x.table)||{})}));
+    console.info('[GM_BUILDER_TABLES_V004] DONE',phase,'ms='+(Date.now()-started));
+    return ok(res,{tables:combined,configured:configured.length,discovered:result.filter(x=>x.readOnly).length});
   }catch(e){
-    // Existing management tables must remain usable if metadata discovery is unavailable.
-    ok(res,{tables:configured,discoveryError:String(e&&e.message||e)});
+    console.error('[GM_BUILDER_TABLES_V004] FAIL',phase,'ms='+(Date.now()-started),String(e&&e.stack||e));
+    // A failed DB discovery MUST NOT be represented as a successful whole-DB inventory.
+    return fail(res,503,'builder table discovery unavailable',{detail:String(e&&e.message||e)});
   }
 });
 
