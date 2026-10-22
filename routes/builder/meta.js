@@ -6,11 +6,14 @@ const { TABLES, dbFrom, ok, fail, keySets } = require('./core');
 // Unregistered tables are NOT added to TABLES (write/edit allowlist).
 router.get('/api/gm/builder/tables', async (req,res)=>{
   const configured=Object.keys(TABLES).map(k=>({key:k,table:TABLES[k].table,keys:keySets(TABLES[k]),readOnly:false,source:'configured'}));
+  if(req.query.configured_only==='1')return ok(res,{tables:configured,configured:configured.length,discovered:0,partial:true});
   try{
     const db=dbFrom(req);
-    const r=await db.query(`SELECT tablename FROM pg_catalog.pg_tables
-      WHERE schemaname='public'
-      ORDER BY tablename`);
+    if(!db || typeof db.query!=='function')throw new Error('DB connection unavailable');
+    const r=await db.query({
+      text:`SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public' ORDER BY tablename`,
+      query_timeout:8000
+    });
     const registered=new Set(configured.map(x=>x.table));
     const discovered=r.rows.map(x=>String(x.tablename||'')).filter(x=>/^[a-z_][a-z0-9_]*$/.test(x)&&!registered.has(x))
       .map(table=>({key:'readonly:'+table,table,keys:[],readOnly:true,source:'database'}));

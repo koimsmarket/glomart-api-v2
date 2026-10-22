@@ -56,17 +56,48 @@
     }
     if(!filtered.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=3;td.textContent='해당 테이블 없음';tr.appendChild(td);rows.appendChild(tr);}
   };
-  window.loadBuilderInventory=async function(){
-    const el=document.getElementById('builderInventorySummary');
-    if(el)el.textContent='운영 DB 조회 중';
+  let inventoryRequestSerial=0;
+  async function inventoryGet(url,timeoutMs){
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
     try{
-      const resp=await fetch('/api/gm/builder/tables?t='+Date.now(),{cache:'no-store'});
+      const resp=await fetch(url,{cache:'no-store',signal:controller.signal});
       if(!resp.ok)throw new Error('HTTP '+resp.status);
-      const data=await resp.json();if(!data.ok||!Array.isArray(data.tables))throw new Error('테이블 목록 응답 오류');
-      currentTables=data.tables;
-      if(el)el.textContent='목록 '+currentTables.length+'개 / 기존 등록 '+(data.configured||0)+'개 / 자동 발견 '+(data.discovered||0)+'개'+(data.discoveryError?' · DB 검색 실패: '+data.discoveryError:'');
+      const body=await resp.json();
+      if(!body.ok||!Array.isArray(body.tables))throw new Error('테이블 목록 응답 오류');
+      return body;
+    }finally{clearTimeout(timer);}
+  }
+  window.loadBuilderInventory=async function(){
+    const request=++inventoryRequestSerial;
+    const el=document.getElementById('builderInventorySummary');
+    const rows=document.getElementById('builderInventoryRows');
+    currentTables=[];
+    if(rows){rows.textContent='';const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=3;td.textContent='등록 테이블 목록을 불러오는 중…';tr.appendChild(td);rows.appendChild(tr);}
+    if(el)el.textContent='전체 테이블 목록을 불러오는 중…';
+    const url='/api/gm/builder/tables?t='+Date.now();
+    // The registered inventory is available without waiting for a potentially slow DB catalog query.
+    try{
+      const quick=await inventoryGet(url+'&configured_only=1',6000);
+      if(request!==inventoryRequestSerial)return;
+      currentTables=quick.tables;
       window.filterBuilderInventory();
-    }catch(e){if(el)el.textContent='조회 실패: '+String(e.message||e);}
+      if(el)el.textContent='기존 등록 '+currentTables.length+'개 표시 · DB 전체 테이블 추가 조회 중…';
+    }catch(e){
+      if(request!==inventoryRequestSerial)return;
+      if(el)el.textContent='기존 등록 목록 조회 실패 ('+String(e.message||e)+') · DB 전체 조회 시도 중…';
+    }
+    try{
+      const data=await inventoryGet(url+'&all=1',12000);
+      if(request!==inventoryRequestSerial)return;
+      currentTables=data.tables;
+      window.filterBuilderInventory();
+      if(el)el.textContent='전체 '+currentTables.length+'개 / 기존 등록 '+(data.configured||0)+'개 / DB 자동 발견 '+(data.discovered||0)+'개'+(data.discoveryError?' · DB 검색 실패: '+data.discoveryError:'');
+    }catch(e){
+      if(request!==inventoryRequestSerial)return;
+      if(!currentTables.length && rows){rows.textContent='';const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=3;td.textContent='테이블 목록을 가져오지 못했습니다. 새로고침을 눌러 다시 시도하세요.';tr.appendChild(td);rows.appendChild(tr);}
+      if(el)el.textContent='DB 전체 목록 조회 실패: '+String(e.message||e)+(currentTables.length?' · 기존 등록 '+currentTables.length+'개는 표시 중':'');
+    }
   };
   window.addEventListener('DOMContentLoaded',()=>{
     const tab=remembered(KEY,'status');group=remembered(GROUP_KEY,groupOf(tab));
