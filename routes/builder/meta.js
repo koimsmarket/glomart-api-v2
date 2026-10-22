@@ -2,17 +2,17 @@ const express = require('express');
 const router = express.Router();
 const { TABLES, dbFrom, ok, fail, keySets } = require('./core');
 
-// GM_BUILDER_REWORK_V001: live DB discovery for backup ONLY.
-// Unregistered tables are deliberately NOT added to TABLES (write/edit allowlist).
+// GM_BUILDER_MENU_V001: live public-schema inventory; this endpoint grants no write/export permissions.
+// Unregistered tables are NOT added to TABLES (write/edit allowlist).
 router.get('/api/gm/builder/tables', async (req,res)=>{
   const configured=Object.keys(TABLES).map(k=>({key:k,table:TABLES[k].table,keys:keySets(TABLES[k]),readOnly:false,source:'configured'}));
   try{
     const db=dbFrom(req);
     const r=await db.query(`SELECT tablename FROM pg_catalog.pg_tables
-      WHERE schemaname='public' AND left(tablename,3)='gm_'
+      WHERE schemaname='public'
       ORDER BY tablename`);
     const registered=new Set(configured.map(x=>x.table));
-    const discovered=r.rows.map(x=>String(x.tablename||'')).filter(x=>/^gm_[a-z0-9_]+$/.test(x)&&!registered.has(x))
+    const discovered=r.rows.map(x=>String(x.tablename||'')).filter(x=>/^[a-z_][a-z0-9_]*$/.test(x)&&!registered.has(x))
       .map(table=>({key:'readonly:'+table,table,keys:[],readOnly:true,source:'database'}));
     ok(res,{tables:configured.concat(discovered),configured:configured.length,discovered:discovered.length});
   }catch(e){
