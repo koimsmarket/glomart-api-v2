@@ -62,11 +62,28 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
   const b=req.body||{};
   const mid=member(b.member_id),order=member(b.order_no),key=member(b.idempotency_key);
   const token=member(b.certificate_owner_token);
-  const amount=Number(b.order_amount_krw),discount=Number(b.discount_amount_krw),pay=Number(b.pay_amount_g);
+  const pay=Number(b.pay_amount_g);
   if(!mid||!token||!order||!key||order.length>80||key.length>160||
-     !Number.isSafeInteger(amount)||amount<=0||!Number.isSafeInteger(discount)||discount<0||
-     !Number.isSafeInteger(pay)||pay<=0||pay!==amount-discount)
+     !Number.isSafeInteger(pay)||pay<=0)
      return res.status(400).json({ok:false,error:'INVALID_CHECKOUT_PAYMENT'});
+  // Glomart alone determines the payable amount. Check its prepared transaction
+  // before allowing any G-PAY debit; never accept an arbitrary browser amount.
+  const db=req.app.locals.db||req.app.locals.pool;
+  if(!db)return res.status(503).json({ok:false,error:'GLOMART_DB_UNAVAILABLE'});
+  try{
+    const prepared=await db.query(`SELECT member_id,gpay_amount,status,gpay_payment_ref
+       FROM gm_purchase_saga WHERE order_no=$1 LIMIT 1`,[order]);
+    const row=prepared.rows[0];
+    if(!row||row.member_id!==mid||Number(row.gpay_amount)!==pay)
+      return res.status(409).json({ok:false,error:'GLOMART_PREPARED_PAYMENT_MISMATCH'});
+    if(!['ORDER_PENDING','GPAY_PAID','RECONCILE_REQUIRED','ORDER_PAID','PURCHASE_CONFIRMED'].includes(row.status))
+      return res.status(409).json({ok:false,error:'GLOMART_PREPARED_PAYMENT_INVALID_STATUS'});
+    if(row.gpay_payment_ref&&row.gpay_payment_ref!==key)
+      return res.status(409).json({ok:false,error:'GLOMART_PAYMENT_REFERENCE_CONFLICT'});
+  }catch(err){
+    console.error('[GM_GPAY_V092] PREPARED_PAYMENT_LOOKUP_FAILED',String(err&&err.code||err&&err.message||err));
+    return res.status(503).json({ok:false,error:'GLOMART_PREPARED_PAYMENT_UNAVAILABLE'});
+  }
   const trusted=member(process.env.GPAY_TRUSTED_CALLER_KEY);
   if(trusted.length<32)return res.status(503).json({ok:false,error:'GPAY_TRUST_NOT_CONFIGURED'});
   const url=base(), trustedHeaders={'Content-Type':'application/json','Accept':'application/json','x-gpay-trusted-caller':trusted};
@@ -92,8 +109,7 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
     });
     const paid=await upstream('/api/gpay/ledger/payment',{
       member_id:mid,merchant_id:member(process.env.GPAY_MERCHANT_ID)||'GLOMART',
-      order_no:order,idempotency_key:key,order_amount_krw:amount,discount_amount_krw:discount,
-      pay_amount_g:pay,security_nonce:nonce.nonce
+      order_no:order,idempotency_key:key,pay_amount_g:pay,security_nonce:nonce.nonce
     });
     if(!paid.payment||paid.payment.status!=='PAID'||paid.payment.order_no!==order||
        paid.payment.member_id!==mid||paid.payment.idempotency_key!==key)throw new Error('GPAY_COMMIT_RESPONSE_MISMATCH');
