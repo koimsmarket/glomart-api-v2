@@ -69,7 +69,7 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
   // Glomart alone determines the payable amount. Check its prepared transaction
   // before allowing any G-PAY debit; never accept an arbitrary browser amount.
   const db=req.app.locals.db||req.app.locals.pool;
-  if(!db)return res.status(503).json({ok:false,error:'GLOMART_DB_UNAVAILABLE'});
+  if(!db){console.error('[GM_GPAY_V097_DIAG] CHECKOUT_STOP reason=GLOMART_DB_UNAVAILABLE order='+order);return res.status(503).json({ok:false,error:'GLOMART_DB_UNAVAILABLE'});}
   try{
     const prepared=await db.query(`SELECT member_id,gpay_amount,status,gpay_payment_ref
        FROM gm_purchase_saga WHERE order_no=$1 LIMIT 1`,[order]);
@@ -81,11 +81,11 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
     if(row.gpay_payment_ref&&row.gpay_payment_ref!==key)
       return res.status(409).json({ok:false,error:'GLOMART_PAYMENT_REFERENCE_CONFLICT'});
   }catch(err){
-    console.error('[GM_GPAY_V092] PREPARED_PAYMENT_LOOKUP_FAILED',String(err&&err.code||err&&err.message||err));
+    console.error('[GM_GPAY_V092] PREPARED_PAYMENT_LOOKUP_FAILED',String(err&&err.code||err&&err.message||err),'order='+order);
     return res.status(503).json({ok:false,error:'GLOMART_PREPARED_PAYMENT_UNAVAILABLE'});
   }
   const trusted=member(process.env.GPAY_TRUSTED_CALLER_KEY);
-  if(trusted.length<32)return res.status(503).json({ok:false,error:'GPAY_TRUST_NOT_CONFIGURED'});
+  if(trusted.length<32){console.error('[GM_GPAY_V097_DIAG] CHECKOUT_STOP reason=GPAY_TRUST_NOT_CONFIGURED order='+order);return res.status(503).json({ok:false,error:'GPAY_TRUST_NOT_CONFIGURED'});}
   const url=base(), trustedHeaders={'Content-Type':'application/json','Accept':'application/json','x-gpay-trusted-caller':trusted};
   const ac=new AbortController(), timer=setTimeout(()=>ac.abort(),12000);
   const upstream=async(path,body,headers)=>{
@@ -100,8 +100,10 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
       order_no:'GM_PRECHECK_NONEXISTENT',member_id:mid,idempotency_key:'GM_PRECHECK_NONEXISTENT'
     }),{headers:{'x-gpay-trusted-caller':trusted,'Accept':'application/json'},signal:ac.signal});
     const probeJson=await probe.json().catch(()=>({}));
-    if(probe.status!==404||probeJson.error!=='PAYMENT_NOT_FOUND')
+    if(probe.status!==404||probeJson.error!=='PAYMENT_NOT_FOUND'){
+      console.error('[GM_GPAY_V097_DIAG] CHECKOUT_STOP reason=GPAY_VERIFY_ROUTE_NOT_READY order='+order+' upstream_status='+probe.status+' upstream_error='+String(probeJson.error||'').slice(0,100));
       return res.status(503).json({ok:false,error:'GPAY_VERIFY_ROUTE_NOT_READY'});
+    }
     // This token was created only after member-password verification in checkout-owner-auth.
     await upstream('/api/gpay/security/owner-token/verify',{member_id:mid,certificate_owner_token:token});
     const nonce=await upstream('/api/gpay/security/nonces',{
