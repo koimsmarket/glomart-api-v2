@@ -992,7 +992,10 @@ async function gmVerifyGpayPaidBeforeOrder(raw,orderNo,memberId,orderRow){
   const original=Number(orderRow.total_payment_price); // Glomart's finalized order amount, not recomputed by G-PAY
   const pointUsed=Number(raw.point_used_amount ?? raw.point_used_amount_krw ?? 0);
   if(!Number.isSafeInteger(pointUsed)||pointUsed<0||pointUsed%10!==0||pointUsed>Math.floor(Number(orderRow.total_product_price)*0.2/10)*10)throw new Error('GPAY_POINT_AMOUNT_INVALID');
-  if(Number(orderRow.total_payment_price)!==original||Number(p.order_amount_krw)!==original||Number(p.discount_amount_krw)!==pointUsed||Number(p.pay_amount_g)!==original-pointUsed)throw new Error('GPAY_PAYMENT_AMOUNT_MISMATCH');
+  // G-PAY is a payment processor, not the authority for product prices or Glomart points.
+  // Compare only the amount actually debited with Glomart's approved payable amount.
+  if(!Number.isSafeInteger(original)||original<=0||!Number.isSafeInteger(Number(p.pay_amount_g))||
+     Number(p.pay_amount_g)!==original-pointUsed)throw new Error('GPAY_PAYMENT_AMOUNT_MISMATCH');
   return {applicable:true,pointUsed,paymentId:p.id};
 }
 
