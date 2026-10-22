@@ -41,7 +41,10 @@
     if(tab==='inventory' && typeof window.loadBuilderInventory==='function')window.loadBuilderInventory();
     window.scrollTo({top:0,behavior:'smooth'});
   };
+  // Registered table names are a local fallback only; live database discovery supersedes them.
+  const registeredFallback=["gm_product", "gm_product_option", "gm_product_image_vector", "gm_image_vector_pending", "gm_smartfit_template_vector", "gm_smartfit_space_vector", "gm_basket", "gm_order", "gm_order_item", "gm_cs", "gm_cs_message", "gm_member", "gm_member_address", "gm_supplier", "gm_product_archive", "gm_category", "gm_category_keyword", "gm_search_keyword_stat", "gm_category_search_stat", "gm_category_search_monthly", "gm_category_search_yearly", "gm_product_sales_monthly", "gm_product_sales_yearly", "gm_product_country_sales_monthly", "gm_product_country_sales_yearly", "gm_category_sales_monthly", "gm_category_sales_yearly", "gm_category_country_sales_monthly", "gm_category_country_sales_yearly", "gm_ui_dictionary", "gm_keyword_translate", "gm_keyword_relation", "gm_search_log", "gm_dashboard_snapshot"];
   let currentTables=[];
+  function prettyBytes(n){const v=Number(n);if(!Number.isFinite(v))return "—";if(v<1024)return v+" B";const units=["KB","MB","GB","TB"];let x=v,i=-1;do{x/=1024;i++;}while(x>=1024&&i<units.length-1);return x.toFixed(x>=100?0:x>=10?1:2)+" "+units[i];}
   window.filterBuilderInventory=function(){
     const value=String(document.getElementById('builderInventoryFilter')?.value||'').trim().toLowerCase();
     const rows=document.getElementById('builderInventoryRows');if(!rows)return;
@@ -49,13 +52,18 @@
     const filtered=currentTables.filter(x=>String(x.table||'').toLowerCase().includes(value));
     for(const spec of filtered){
       const tr=document.createElement('tr');
-      for(const value of [spec.table,spec.readOnly?'자동 발견':'기존 등록',spec.readOnly?'미등록: 백업/수정 권한 별도 검토':'기존 관리 정책 유지']){
+      for(const value of [spec.table,spec.readOnly?'자동 발견':(spec.source==='fallback'?'기준본 등록':'기존 등록'),spec.rowEstimate==null?'—':Number(spec.rowEstimate).toLocaleString()+' (추정)',spec.totalBytes==null?'—':prettyBytes(spec.totalBytes),spec.readOnly?'미등록: 권한 별도 검토':'기존 관리 정책 유지']){
         const td=document.createElement('td');td.textContent=value;tr.appendChild(td);
       }
       rows.appendChild(tr);
     }
-    if(!filtered.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=3;td.textContent='해당 테이블 없음';tr.appendChild(td);rows.appendChild(tr);}
+    if(!filtered.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=5;td.textContent='해당 테이블 없음';tr.appendChild(td);rows.appendChild(tr);}
   };
+  function mergeInventory(before,after){
+    const index=new Map(before.map(x=>[x.table,x]));
+    for(const entry of after){index.set(entry.table,{...(index.get(entry.table)||{}),...entry});}
+    return [...index.values()].sort((a,b)=>a.table.localeCompare(b.table));
+  }
   let inventoryRequestSerial=0;
   async function inventoryGet(url,timeoutMs){
     const controller=new AbortController();
@@ -72,15 +80,16 @@
     const request=++inventoryRequestSerial;
     const el=document.getElementById('builderInventorySummary');
     const rows=document.getElementById('builderInventoryRows');
-    currentTables=[];
-    if(rows){rows.textContent='';const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=3;td.textContent='등록 테이블 목록을 불러오는 중…';tr.appendChild(td);rows.appendChild(tr);}
-    if(el)el.textContent='전체 테이블 목록을 불러오는 중…';
+    // Never remove the last visible inventory on refresh or slow/failing network.
+    if(!currentTables.length){currentTables=registeredFallback.map(table=>({table,readOnly:false,source:'fallback',rowEstimate:null,totalBytes:null}));}
+    window.filterBuilderInventory();
+    if(el)el.textContent='기준본 등록 '+currentTables.length+'개 먼저 표시 · 운영 DB 전체 테이블 확인 중…';
     const url='/api/gm/builder/tables?t='+Date.now();
     // The registered inventory is available without waiting for a potentially slow DB catalog query.
     try{
-      const quick=await inventoryGet(url+'&configured_only=1',6000);
+      const quick=await inventoryGet(url+'&configured_only=1',10000);
       if(request!==inventoryRequestSerial)return;
-      currentTables=quick.tables;
+      currentTables=mergeInventory(currentTables,quick.tables);
       window.filterBuilderInventory();
       if(el)el.textContent='기존 등록 '+currentTables.length+'개 표시 · DB 전체 테이블 추가 조회 중…';
     }catch(e){
@@ -88,14 +97,14 @@
       if(el)el.textContent='기존 등록 목록 조회 실패 ('+String(e.message||e)+') · DB 전체 조회 시도 중…';
     }
     try{
-      const data=await inventoryGet(url+'&all=1',12000);
+      const data=await inventoryGet(url+'&all=1',20000);
       if(request!==inventoryRequestSerial)return;
-      currentTables=data.tables;
+      currentTables=mergeInventory(currentTables,data.tables);
       window.filterBuilderInventory();
       if(el)el.textContent='전체 '+currentTables.length+'개 / 기존 등록 '+(data.configured||0)+'개 / DB 자동 발견 '+(data.discovered||0)+'개'+(data.discoveryError?' · DB 검색 실패: '+data.discoveryError:'');
     }catch(e){
       if(request!==inventoryRequestSerial)return;
-      if(!currentTables.length && rows){rows.textContent='';const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=3;td.textContent='테이블 목록을 가져오지 못했습니다. 새로고침을 눌러 다시 시도하세요.';tr.appendChild(td);rows.appendChild(tr);}
+      // Keep previously rendered list if live discovery times out.
       if(el)el.textContent='DB 전체 목록 조회 실패: '+String(e.message||e)+(currentTables.length?' · 기존 등록 '+currentTables.length+'개는 표시 중':'');
     }
   };

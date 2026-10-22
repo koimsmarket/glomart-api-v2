@@ -10,14 +10,21 @@ router.get('/api/gm/builder/tables', async (req,res)=>{
   try{
     const db=dbFrom(req);
     if(!db || typeof db.query!=='function')throw new Error('DB connection unavailable');
+    // pg_class.reltuples is a cheap estimate, NOT COUNT(*); pg_total_relation_size includes indexes/TOAST.
     const r=await db.query({
-      text:`SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public' ORDER BY tablename`,
-      query_timeout:8000
+      text:`SELECT c.relname AS tablename, GREATEST(c.reltuples,0)::bigint AS row_estimate,
+                   pg_total_relation_size(c.oid)::bigint AS total_bytes
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relkind IN ('r','p')
+            ORDER BY c.relname`,
+      query_timeout:12000
     });
+    const details=new Map(r.rows.map(x=>[String(x.tablename),{rowEstimate:x.row_estimate==null?null:Number(x.row_estimate),totalBytes:x.total_bytes==null?null:Number(x.total_bytes)}]));
     const registered=new Set(configured.map(x=>x.table));
     const discovered=r.rows.map(x=>String(x.tablename||'')).filter(x=>/^[a-z_][a-z0-9_]*$/.test(x)&&!registered.has(x))
-      .map(table=>({key:'readonly:'+table,table,keys:[],readOnly:true,source:'database'}));
-    ok(res,{tables:configured.concat(discovered),configured:configured.length,discovered:discovered.length});
+      .map(table=>({key:'readonly:'+table,table,keys:[],readOnly:true,source:'database',...details.get(table)}));
+    ok(res,{tables:configured.map(x=>({...x,...(details.get(x.table)||{})})).concat(discovered),configured:configured.length,discovered:discovered.length});
   }catch(e){
     // Existing management tables must remain usable if metadata discovery is unavailable.
     ok(res,{tables:configured,discoveryError:String(e&&e.message||e)});
