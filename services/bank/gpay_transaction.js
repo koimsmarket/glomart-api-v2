@@ -7,23 +7,31 @@ async function event(c,tx,key,step,result,ref,err,details){
   [tx,key,step,result,ref||null,err||null,JSON.stringify(details||{})]);
 }
 async function recordPaid(pool,data){
-  const tx=clean(data.tx_id),order=clean(data.order_no),member=clean(data.member_id),key=clean(data.payment_key);
-  if(!tx||!order||!member||!key||tx.length>160)throw new Error('transaction_reference_required');
+  // The prepare endpoint already reserved this order_no in gm_purchase_saga.
+  // Never INSERT another saga row for a different payment transaction id.
+  const order=clean(data.order_no),member=clean(data.member_id),key=clean(data.payment_key);
+  if(!order||!member||!key)throw new Error('transaction_reference_required');
   const c=await pool.connect();
   try{
     await c.query('BEGIN');
-    const v=[tx,order,member,Number(data.product),Number(data.shipping),Number(data.points),Number(data.gpay),key];
-    await c.query(`INSERT INTO gm_purchase_saga(tx_id,order_no,member_id,product_amount_krw,shipping_amount_krw,point_used_krw,gpay_amount,status,gpay_payment_ref)
-    VALUES($1,$2,$3,$4,$5,$6,$7,'GPAY_PAID',$8)
-    ON CONFLICT(tx_id) DO NOTHING`,v);
-    const q=await c.query('SELECT * FROM gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[tx]);
+    const q=await c.query('SELECT * FROM gm_purchase_saga WHERE order_no=$1 FOR UPDATE',[order]);
     const x=q.rows[0];
-    if(!x||x.order_no!==order||x.member_id!==member||x.gpay_payment_ref!==key||
-      Number(x.product_amount_krw)!==data.product||Number(x.shipping_amount_krw)!==data.shipping||
-      Number(x.point_used_krw)!==data.points||Number(x.gpay_amount)!==data.gpay)
+    if(!x)throw new Error('prepared_order_not_found');
+    if(x.member_id!==member||Number(x.product_amount_krw)!==Number(data.product)||
+       Number(x.shipping_amount_krw)!==Number(data.shipping)||
+       Number(x.point_used_krw)!==Number(data.points)||Number(x.gpay_amount)!==Number(data.gpay))
       throw new Error('transaction_replay_contract_mismatch');
-    await event(c,tx,'GPAY_PAID','GPAY_DEBIT','COMMITTED',key,null,{verified_by:'gpay_ledger'});
-    await c.query('COMMIT');return {tx_id:tx,order_no:order,status:x.status};
+    if(x.gpay_payment_ref&&x.gpay_payment_ref!==key)throw new Error('payment_reference_conflict');
+    if(!['ORDER_PENDING','GPAY_PAID','RECONCILE_REQUIRED','ORDER_PAID','PURCHASE_CONFIRMED'].includes(x.status))
+      throw new Error('prepared_order_invalid_status');
+    if(!x.gpay_payment_ref){
+      await c.query(`UPDATE gm_purchase_saga SET gpay_payment_ref=$2,
+        status=CASE WHEN status='ORDER_PENDING' THEN 'GPAY_PAID' ELSE status END,
+        version=version+1,updated_at=NOW() WHERE tx_id=$1`,[x.tx_id,key]);
+    }
+    await event(c,x.tx_id,'GPAY_PAID','GPAY_DEBIT','COMMITTED',key,null,{verified_by:'gpay_ledger'});
+    await c.query('COMMIT');
+    return {tx_id:x.tx_id,order_no:order,status:x.status};
   }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }
 async function completed(c,tx,order,points){

@@ -989,7 +989,7 @@ async function gmVerifyGpayPaidBeforeOrder(raw,orderNo,memberId,orderRow){
   if(!response.ok||!body||body.ok!==true||body.verified!==true)throw new Error('GPAY_PAYMENT_NOT_VERIFIED');
   const p=body.payment||{};
   if(p.order_no!==orderNo||p.member_id!==memberId||p.idempotency_key!==key||p.status!=='PAID')throw new Error('GPAY_PAYMENT_IDENTITY_MISMATCH');
-  const original=Number(orderRow.total_product_price)+Number(orderRow.total_delivery_fee)+Number(orderRow.extra_area_delivery_fee);
+  const original=Number(orderRow.total_payment_price); // Glomart's finalized order amount, not recomputed by G-PAY
   const pointUsed=Number(raw.point_used_amount ?? raw.point_used_amount_krw ?? 0);
   if(!Number.isSafeInteger(pointUsed)||pointUsed<0||pointUsed%10!==0||pointUsed>Math.floor(Number(orderRow.total_product_price)*0.2/10)*10)throw new Error('GPAY_POINT_AMOUNT_INVALID');
   if(Number(orderRow.total_payment_price)!==original||Number(p.order_amount_krw)!==original||Number(p.discount_amount_krw)!==pointUsed||Number(p.pay_amount_g)!==original-pointUsed)throw new Error('GPAY_PAYMENT_AMOUNT_MISMATCH');
@@ -1015,6 +1015,7 @@ router.post('/api/gm/order/create', async (req, res) => {
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   const raw = req.body || {};
   let gpayLedgerRecorded=false;
+  let gpaySagaTxId='';
   const inputItems = normalizeItems(raw);
   if(!inputItems.length) return fail(res, 400, 'items required');
   const client = await pool.connect().catch(()=>null);
@@ -1031,13 +1032,14 @@ router.post('/api/gm/order/create', async (req, res) => {
       raw.order_no=suppliedOrderNo;raw.gm_order_no=suppliedOrderNo;
       const preliminary=buildOrderRow(raw,inputItems);
       gmVerified=await gmVerifyGpayPaidBeforeOrder(raw,suppliedOrderNo,clean(preliminary.member_id),preliminary);
-      await gmGpayTransactionV072.recordPaid(pool,{
+      const recordedGpay=await gmGpayTransactionV072.recordPaid(pool,{
         tx_id:clean(raw.gpay_tx_id||raw.gpay_payment_key),order_no:suppliedOrderNo,
         member_id:clean(preliminary.member_id),payment_key:clean(raw.gpay_payment_key),
         product:Number(preliminary.total_product_price),
-        shipping:Number(preliminary.total_delivery_fee)+Number(preliminary.extra_area_delivery_fee),
+        shipping:Number(preliminary.total_delivery_fee),
         points:gmVerified.pointUsed,gpay:Number(preliminary.total_payment_price)-gmVerified.pointUsed
       });
+      gpaySagaTxId=recordedGpay.tx_id;
       gpayLedgerRecorded=true;
     }
     await client.query('BEGIN');
@@ -1090,7 +1092,7 @@ router.post('/api/gm/order/create', async (req, res) => {
       await gmGpayPointV072.applyOrderPointInTransaction(client,{
         order_no:orderRow.order_no,member_id:clean(orderRow.member_id),point_used_amount:gmGpayVerification.pointUsed
       });
-      await gmGpayTransactionV072.completed(client,clean(raw.gpay_tx_id||raw.gpay_payment_key),orderRow.order_no,gmGpayVerification.pointUsed);
+      await gmGpayTransactionV072.completed(client,gpaySagaTxId,orderRow.order_no,gmGpayVerification.pointUsed);
     }
 
 
@@ -1150,7 +1152,7 @@ router.post('/api/gm/order/create', async (req, res) => {
     }
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
-    if(gpayLedgerRecorded)await gmGpayTransactionV072.reconcile(pool,clean(raw.gpay_tx_id||raw.gpay_payment_key),String(e&&e.message||e));
+    if(gpayLedgerRecorded)await gmGpayTransactionV072.reconcile(pool,gpaySagaTxId,String(e&&e.message||e));
     console.error('[GM_ORDER_CREATE_ERROR]', String(e && e.message || e));
     fail(res, 500, 'order create failed', { detail:String(e && e.message || e) });
   }finally{
