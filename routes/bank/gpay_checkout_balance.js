@@ -97,35 +97,27 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
   let paymentStage='VERIFY_ROUTE';
   let paymentCommitted=false;
   let paymentRef='';
-  try{
-    // Fail BEFORE debiting if the required V079 server-side verifier is absent.
-    const probe=await fetch(url+'/api/gpay/ledger/payment/verify?'+new URLSearchParams({
-      order_no:'GM_PRECHECK_NONEXISTENT',member_id:mid,idempotency_key:'GM_PRECHECK_NONEXISTENT'
-    }),{headers:{'x-gpay-trusted-caller':trusted,'Accept':'application/json'},signal:ac.signal});
-    const probeJson=await probe.json().catch(()=>({}));
-    if(probe.status!==404||probeJson.error!=='PAYMENT_NOT_FOUND'){
-      console.error('[GM_GPAY_V097_DIAG] CHECKOUT_STOP reason=GPAY_VERIFY_ROUTE_NOT_READY order='+order+' upstream_status='+probe.status+' upstream_error='+String(probeJson.error||'').slice(0,100));
-      return res.status(503).json({ok:false,error:'GPAY_VERIFY_ROUTE_NOT_READY'});
-    }
-    // This token was created only after member-password verification in checkout-owner-auth.
-    paymentStage='OWNER_AUTH';
-    await upstream('/api/gpay/security/owner-token/verify',{member_id:mid,certificate_owner_token:token});
-    paymentStage='NONCE';
-    const nonce=await upstream('/api/gpay/security/nonces',{
-      actor_type:'MEMBER',actor_id:mid,action_type:'PAYMENT',target_ref:order,amount:pay
-    });
-    paymentStage='GPAY_DEBIT_REQUESTED';
-    const paid=await upstream('/api/gpay/ledger/payment',{
-      member_id:mid,merchant_id:member(process.env.GPAY_MERCHANT_ID)||'GLOMART',
-      order_no:order,idempotency_key:key,pay_amount_g:pay,security_nonce:nonce.nonce
-    });
-    if(!paid.payment||paid.payment.status!=='PAID'||paid.payment.order_no!==order||
-       paid.payment.member_id!==mid||paid.payment.idempotency_key!==key)throw new Error('GPAY_COMMIT_RESPONSE_MISMATCH');
-    paymentCommitted=true;
-    paymentRef=String(paid.payment.id||paid.transaction_id||'');
+  let debitRequested=false;
+  let paymentKey='';
+  // Read-only G-PAY ledger verification. Never trigger a second debit while uncertain.
+  async function ledgerStatus(){
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);
+    try{
+      const r=await fetch(url+'/api/gpay/ledger/payment/verify?'+new URLSearchParams({
+        order_no:order,member_id:mid,idempotency_key:key
+      }),{headers:{'x-gpay-trusted-caller':trusted,'Accept':'application/json'},signal:controller.signal});
+      const j=await r.json().catch(()=>({}));
+      if(r.status===404&&j.error==='PAYMENT_NOT_FOUND')return {state:'NOT_FOUND'};
+      const p=j.payment||{};
+      if(r.ok&&j.ok===true&&j.verified===true&&p.status==='PAID'&&
+         p.order_no===order&&p.member_id===mid&&p.idempotency_key===key&&Number(p.pay_amount_g)===pay)
+        return {state:'PAID',payment:p,transaction_id:j.transaction_id||null};
+      return {state:'UNKNOWN',http_status:r.status};
+    }catch(e){return {state:'UNKNOWN',cause:String(e&&e.name||'ERROR')};}
+    finally{clearTimeout(timer);}
+  }
+  async function recordSagaPaid(p){
     paymentStage='SAGA_PAID_JOURNAL';
-    // V101: durable journal entry for the already committed G-PAY debit.
-    // Any database failure here must NOT attempt another debit or invent a success.
     const journal=await db.connect();
     try{
       await journal.query('BEGIN');
@@ -133,24 +125,100 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
       if(intent.rowCount!==1)throw new Error('GPAY_SAGA_AFTER_DEBIT_MISSING');
       const tx=intent.rows[0];
       if(tx.gpay_payment_ref&&tx.gpay_payment_ref!==key)throw new Error('GPAY_SAGA_PAYMENT_KEY_CONFLICT');
-      if(tx.status==='ORDER_PENDING'||tx.status==='GPAY_UNKNOWN'){
+      if(tx.status==='ORDER_PENDING'||tx.status==='GPAY_UNKNOWN'||tx.status==='RECONCILE_REQUIRED'){
         await journal.query(`UPDATE public.gm_purchase_saga SET status='GPAY_PAID',gpay_payment_ref=$2,version=version+1,updated_at=NOW() WHERE tx_id=$1`,[tx.tx_id,key]);
       }else if(!['GPAY_PAID','ORDER_PAID','PURCHASE_CONFIRMED'].includes(tx.status))throw new Error('GPAY_SAGA_STATUS_CONFLICT');
       await journal.query(`INSERT INTO public.gm_purchase_saga_event(tx_id,event_key,step,result,remote_ref,details)
-        VALUES($1,$2,'GPAY_PAID','RECORDED',$2,$3::jsonb) ON CONFLICT(tx_id,event_key) DO NOTHING`,
-        [tx.tx_id,'GPAY_PAID:'+key,JSON.stringify({order_no:order,payment_id:paid.payment.id||null})]);
+        VALUES($1,$2,'GPAY_PAID','RECORDED',$3,$4::jsonb) ON CONFLICT(tx_id,event_key) DO NOTHING`,
+        [tx.tx_id,'GPAY_PAID:'+key,key,JSON.stringify({order_no:order,payment_id:p.id||null})]);
       await journal.query('COMMIT');
-    }catch(journalError){await journal.query('ROLLBACK').catch(()=>{});throw journalError;}
+    }catch(e){await journal.query('ROLLBACK').catch(()=>{});throw e;}
     finally{journal.release();}
+  }
+  try{
+    // Fail BEFORE debiting if the required server-side verifier is absent.
+    const probe=await fetch(url+'/api/gpay/ledger/payment/verify?'+new URLSearchParams({
+      order_no:'GM_PRECHECK_NONEXISTENT',member_id:mid,idempotency_key:'GM_PRECHECK_NONEXISTENT'
+    }),{headers:{'x-gpay-trusted-caller':trusted,'Accept':'application/json'},signal:ac.signal});
+    const probeJson=await probe.json().catch(()=>({}));
+    if(probe.status!==404||probeJson.error!=='PAYMENT_NOT_FOUND'){
+      console.error('[GM_GPAY_V103] CHECKOUT_STOP',JSON.stringify({order_no:order,stage:paymentStage,reason:'GPAY_VERIFY_ROUTE_NOT_READY'}));
+      return res.status(503).json({ok:false,error:'GPAY_VERIFY_ROUTE_NOT_READY',stage:paymentStage});
+    }
+    paymentStage='OWNER_AUTH';
+    await upstream('/api/gpay/security/owner-token/verify',{member_id:mid,certificate_owner_token:token});
+    // Existing paid transaction is always verified first; never re-debit a paid order.
+    paymentStage='PREDEBIT_LEDGER_CHECK';
+    const previous=await ledgerStatus();
+    if(previous.state==='PAID'){
+      paymentCommitted=true;
+      paymentRef=String(previous.payment.id||'');
+      await recordSagaPaid(previous.payment);
+      console.info('[GM_GPAY_V103] VERIFIED_ALREADY_PAID',JSON.stringify({order_no:order}));
+      return res.json({ok:true,status:'PAID',order_no:order,idempotency_key:key,transaction_id:previous.transaction_id,replayed:true});
+    }
+    if(previous.state!=='NOT_FOUND')throw new Error('GPAY_PREDEBIT_LEDGER_UNAVAILABLE');
+    // Lock this payment reference durably before the remote call, preventing a competing request
+    // with a different key from attempting to debit the same order.
+    paymentStage='PAYMENT_INTENT_LOCK';
+    const intentClient=await db.connect();
+    try{
+      await intentClient.query('BEGIN');
+      const intent=await intentClient.query('SELECT status,gpay_payment_ref FROM public.gm_purchase_saga WHERE order_no=$1 FOR UPDATE',[order]);
+      if(intent.rowCount!==1||!['ORDER_PENDING','GPAY_UNKNOWN'].includes(intent.rows[0].status))throw new Error('GPAY_INTENT_NOT_PAYABLE');
+      if(intent.rows[0].gpay_payment_ref&&intent.rows[0].gpay_payment_ref!==key)throw new Error('GPAY_INTENT_KEY_CONFLICT');
+      // A prior uncertain debit must be reconciled, never automatically attempted again.
+      if(intent.rows[0].status==='GPAY_UNKNOWN')throw new Error('GPAY_PREVIOUS_DEBIT_UNCERTAIN');
+      await intentClient.query("UPDATE public.gm_purchase_saga SET status='GPAY_UNKNOWN',gpay_payment_ref=$2,version=version+1,updated_at=NOW() WHERE order_no=$1",[order,key]);
+      await intentClient.query('COMMIT');paymentKey=key;
+    }catch(e){await intentClient.query('ROLLBACK').catch(()=>{});throw e;}
+    finally{intentClient.release();}
+    paymentStage='NONCE';
+    const nonce=await upstream('/api/gpay/security/nonces',{
+      actor_type:'MEMBER',actor_id:mid,action_type:'PAYMENT',target_ref:order,amount:pay
+    });
+    paymentStage='GPAY_DEBIT_REQUESTED';
+    debitRequested=true;
+    const paid=await upstream('/api/gpay/ledger/payment',{
+      member_id:mid,merchant_id:member(process.env.GPAY_MERCHANT_ID)||'GLOMART',
+      order_no:order,idempotency_key:key,pay_amount_g:pay,security_nonce:nonce.nonce
+    });
+    if(!paid.payment||paid.payment.status!=='PAID'||paid.payment.order_no!==order||
+       paid.payment.member_id!==mid||paid.payment.idempotency_key!==key||Number(paid.payment.pay_amount_g)!==pay)
+      throw new Error('GPAY_COMMIT_RESPONSE_MISMATCH');
+    paymentCommitted=true;
+    paymentRef=String(paid.payment.id||paid.transaction_id||'');
+    await recordSagaPaid(paid.payment);
     paymentStage='COMPLETE';
-    console.info('[GM_GPAY_V084] GPAY_PAYMENT_COMMITTED',{order_no:order,transaction_id:paid.transaction_id});
+    console.info('[GM_GPAY_V103] GPAY_PAYMENT_COMMITTED',JSON.stringify({order_no:order,stage:paymentStage}));
     return res.json({ok:true,status:'PAID',order_no:order,idempotency_key:key,transaction_id:paid.transaction_id});
   }catch(e){
-    console.error('[GM_GPAY_V084] CHECKOUT_PAYMENT_STOP',{order_no:order,error:String(e.message||e)});
-    return res.status(e.status>=400&&e.status<500?409:502).json({ok:false,error:String(e.message||e),order_no:order,
-      // A transport failure can occur AFTER the debit; do not create a new transaction on retry.
-      status:'CHECK_LEDGER_BEFORE_RETRY'});
+    const failedStage=paymentStage;
+    let ledger='NOT_REQUESTED';
+    if(debitRequested||paymentCommitted||paymentKey){
+      const v=await ledgerStatus();ledger=v.state;
+      if(v.state==='PAID'){
+        paymentCommitted=true;
+        if(failedStage!=='SAGA_PAID_JOURNAL'){
+          try{
+            await recordSagaPaid(v.payment);
+            console.warn('[GM_GPAY_V103] RECOVERED_BY_LEDGER',JSON.stringify({order_no:order,failed_stage:failedStage}));
+            return res.json({ok:true,status:'PAID',order_no:order,idempotency_key:key,transaction_id:v.transaction_id,recovered:true});
+          }catch(re){console.error('[GM_GPAY_V103] JOURNAL_RECOVERY_FAILED',JSON.stringify({order_no:order,error_code:String(re.code||re.message).slice(0,100)}));}
+        }
+      }
+      // If debit is definitively absent after nonce failure, leave UNKNOWN until
+      // a separate operator reconciliation; absence during an in-flight call isn't proof.
+    }
+    console.error('[GM_GPAY_V103] CHECKOUT_STAGE_FAILURE',JSON.stringify({order_no:order,stage:failedStage,ledger_status:ledger,debited_confirmed:paymentCommitted,error_code:String(e&&e.code||e&&e.message||'ERROR').slice(0,100)}));
+    return res.status(ledger==='PAID'?503:debitRequested||paymentKey?503:e.status>=400&&e.status<500?409:502).json({
+      ok:false,error:ledger==='PAID'?'GPAY_PAID_SAGA_RECOVERY_REQUIRED':
+        debitRequested||paymentKey?'GPAY_LEDGER_RECONCILIATION_REQUIRED':'GPAY_PREDEBIT_STOP',
+      order_no:order,stage:failedStage,ledger_status:ledger,
+      payment_committed:ledger==='PAID',auto_debit_retry:false,status:'CHECK_LEDGER_BEFORE_RETRY'
+    });
   }finally{clearTimeout(timer);}
+
 });
 
 module.exports=router;
