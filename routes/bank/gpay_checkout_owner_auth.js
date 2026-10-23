@@ -3,8 +3,8 @@
 // Explicit password verification only; member ID or Cafe24 admin cookie is NOT authentication.
 // TODO: replace manual password challenge with independently validated member session.
 const router = require('express').Router();
-const { gmVerifyHash } = require('../GM_MEMBER_PASSWORD');
-let argon2Ready=false;try{argon2Ready=!!require('argon2').verify;}catch(_e){}
+const Credential = require('../../services/bank/gm_transaction_credential');
+
 const BASE_DEFAULT = 'https://port-0-guppy-pay-api-mss6kcqn688f1333.sel3.cloudtype.app';
 const attempts = new Map();
 const s = x => String(x == null ? '' : x).trim();
@@ -13,7 +13,7 @@ router.post('/api/gm/gpay/checkout-owner-auth', async (req,res) => {
   res.set('Cache-Control','no-store');
   const mid = s(req.body && req.body.member_id);
   const pw = req.body && typeof req.body.password==='string' ? req.body.password : '';
-  if (!/^[A-Za-z0-9._@-]{2,80}$/.test(mid) || pw.length<8 || pw.length>256) return fail(res,'INVALID_INPUT',400);
+  if (!/^[A-Za-z0-9._@-]{2,80}$/.test(mid)) return fail(res,'INVALID_INPUT',400);
   const ip = s(req.ip).slice(0,120);
   const key = ip + '|' + mid.toLowerCase();
   const now = Date.now();
@@ -29,23 +29,13 @@ router.post('/api/gm/gpay/checkout-owner-auth', async (req,res) => {
     const q = await db.query('SELECT member_id,password_hash FROM gm_member WHERE member_id=$1 LIMIT 1',[mid]);
     const row = q.rows[0];
     if(!row || !row.password_hash) return fail(res,'MEMBER_PASSWORD_NOT_READY',403);
-    // Only metadata, never plaintext password, complete hash, token, or member ID.
-    const stored=String(row.password_hash);
-    const hashKind=stored.startsWith('$argon2')?'ARGON2':stored.startsWith('pbkdf2_sha512$')?'PBKDF2_SHA512':'OTHER';
-    if(hashKind==='OTHER'){
-      console.error('[GM_GPAY_OWNER_AUTH_V060] VERIFY_BLOCKED reason=HASH_FORMAT_UNSUPPORTED');
-      return fail(res,'MEMBER_HASH_FORMAT_UNSUPPORTED',503);
-    }
-    if(hashKind==='ARGON2' && !argon2Ready){
-      console.error('[GM_GPAY_OWNER_AUTH_V060] VERIFY_BLOCKED reason=ARGON2_MODULE_MISSING');
-      return fail(res,'MEMBER_HASH_VERIFIER_UNAVAILABLE',503);
-    }
-    const passwordValid=await gmVerifyHash(pw,stored);
-    if(!passwordValid){
-      console.warn('[GM_GPAY_OWNER_AUTH_V060] VERIFY_REJECTED reason=CREDENTIALS_NOT_MATCHED hash_kind='+hashKind);
-      return fail(res,'INVALID_CREDENTIALS',401);
-    }
-    console.info('[GM_GPAY_OWNER_AUTH_V060] PASSWORD_VERIFIED hash_kind='+hashKind);
+    // Shared member credential verification for payment AND transfer. No credential logging.
+    const method=s(req.body&&req.body.auth_method||'PASSWORD').toUpperCase();
+    const purpose=s(req.body&&req.body.purpose||'PAYMENT').toUpperCase();
+    const secret=method==='PIN'?req.body.pin:pw;
+    const valid=await Credential.verify(db,{member_id:mid,method,secret,purpose});
+    if(!valid)return fail(res,'INVALID_CREDENTIALS',401);
+    console.info('[GM_GPAY_OWNER_AUTH_V114] CREDENTIAL_VERIFIED purpose='+purpose+' method='+method);
     const keySecret=s(process.env.GPAY_TRUSTED_CALLER_KEY);
     if(keySecret.length<32)return fail(res,'GPAY_SERVER_AUTH_NOT_READY',503);
     const base=s(process.env.GPAY_API_BASE||BASE_DEFAULT).replace(/\/+$/,'');
@@ -68,6 +58,15 @@ router.post('/api/gm/gpay/checkout-owner-auth', async (req,res) => {
     attempts.delete(key);
     console.info('[GM_GPAY_OWNER_AUTH_V057] OWNER_VERIFIED');
     return res.json({ok:true,member_id:row.member_id,certificate_owner_token:data.certificate_owner_token,expires_in:300});
-  }catch(e){console.error('[GM_GPAY_OWNER_AUTH_V057] ERROR type='+s(e.name));return fail(res,'GPAY_OWNER_AUTH_UNAVAILABLE',502);}
+  }catch(e){console.error('[GM_GPAY_OWNER_AUTH_V114] ERROR type='+s(e.name));return fail(res,e.message==='PIN_HASH_PROVIDER_UNAVAILABLE'?'PIN_HASH_PROVIDER_UNAVAILABLE':e.message==='PIN_LOCKED'?'PIN_LOCKED':'GPAY_OWNER_AUTH_UNAVAILABLE',e.status||502);}
+});
+// V114: registration requires existing member password; no logged-in session alone can register a PIN.
+router.post('/api/gm/gpay/transaction-pin/register',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try{
+    const db=req.app.locals.pool;if(!db)return fail(res,'MEMBER_DB_UNAVAILABLE',503);
+    const v=await Credential.register(db,req.body||{});
+    res.json({ok:true,registered:v.registered,pin_version:v.pin_version});
+  }catch(e){return fail(res,e.message==='PIN_HASH_PROVIDER_UNAVAILABLE'?'PIN_HASH_PROVIDER_UNAVAILABLE':e.message==='INVALID_CREDENTIALS'?'INVALID_CREDENTIALS':'PIN_REGISTER_FAILED',e.status||500);}
 });
 module.exports=router;
