@@ -16,7 +16,8 @@ const router = express.Router();
 router.use(require('./admin_reauth').requireBuilderReauth);
 
 // ---- Generic Builder modules -------------------------------------------------
-router.use(require('./meta'));          // metadata / status lists
+router.use(require('./meta'));
+router.use(require('./stats_snapshot')); // snapshot-only central statistics read          // metadata / status lists
 router.use(require('./download'));      // backup / download
 router.use(require('./safe_update'));   // generic CSV safe update only
 router.use(require('./members'));       // Cafe24 member import/export

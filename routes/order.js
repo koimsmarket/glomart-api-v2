@@ -65,6 +65,7 @@ function orderCompletedAfterResponse(req,orderNo,meta){
 
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
+function gpayIntentForError(raw){return String(raw&&raw.payment_method||'').toUpperCase()==='GPAY'||!!String(raw&&raw.gpay_payment_key||'').trim();}
 
 async function gmOrderDiagnostic(pool){
   async function tableInfo(table){
@@ -1184,8 +1185,19 @@ router.post('/api/gm/order/create', async (req, res) => {
     }
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
-    if(gpayLedgerRecorded)await gmGpayTransactionV072.reconcile(pool,gpaySagaTxId,String(e&&e.message||e));
+    if(gpayLedgerRecorded){try{await gmGpayTransactionV072.reconcile(pool,gpaySagaTxId,String(e&&e.message||e));}catch(re){console.error('[GM_GPAY_V102] RECONCILE_ENQUEUE_FAILED',String(re&&re.message||re));}}
+    const errorCode=String(e&&e.code||e&&e.message||'UNKNOWN').slice(0,100);
+    const stage=gpayLedgerRecorded?'ORDER_SAVE_AFTER_PAID':
+      (gpayIntentForError(raw)?'GPAY_LEDGER_VERIFY_OR_RECORD':'ORDER_SAVE');
+    console.error('[GM_GPAY_V102] ORDER_STAGE_FAILURE',JSON.stringify({
+      order_no:clean(raw.order_no||raw.gm_order_no),stage,
+      debited_or_verified:gpayLedgerRecorded,error_code:errorCode
+    }));
     console.error('[GM_ORDER_CREATE_ERROR]', String(e && e.message || e));
+    // A committed G-PAY debit must never be exposed as a plain unpaid order failure.
+    if(gpayLedgerRecorded)return res.status(503).json({ok:false,
+      error:'GPAY_PAID_ORDER_RECOVERY_REQUIRED',stage,order_no:clean(raw.order_no||raw.gm_order_no),
+      auto_debit_retry:false,order_retry_allowed:true});
     fail(res, 500, 'order create failed', { detail:String(e && e.message || e) });
   }finally{
     client.release();

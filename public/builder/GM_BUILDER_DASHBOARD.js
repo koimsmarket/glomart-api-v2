@@ -5,34 +5,36 @@
 function fmt(n){ if(n===null||n===undefined) return '-'; return Number(n).toLocaleString(); }
 function diffHtml(v){ if(v===null||v===undefined||v==='') return ''; const n=Number(v)||0; if(n>0) return `<span class="plus">+${fmt(n)}</span>`; if(n<0) return `<span class="minus">${fmt(n)}</span>`; return '0'; }
 function badge(level){ level=String(level||'normal'); const txt={normal:'정상',prepare:'증설 준비',warning:'증설 진행',danger:'긴급 조치',unknown:'확인불가'}[level]||level; return `<span class="badge ${level}">${txt}</span>`; }
-async function loadDashboard(save){
+// Snapshot-only dashboard. Deprecated expensive realtime requests are NEVER performed here.
+async function gmStatsLoadCachedV007(){
+  const state=document.getElementById('gmStatsCachedStateV007');
+  const rows=document.getElementById('gmStatsCachedRowsV007');
   try{
-    const r=await fetch(`${API}/api/gm/dashboard/realtime?save=${save?'1':'0'}&t=${Date.now()}`);
+    const r=await fetch(`${API}/api/gm/builder/stats/snapshot`,{cache:'no-store'});
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
     const j=await r.json();
-    if(!j.ok){ log(j); return; }
-    const cur=j.current||{}, counts=cur.counts||{}, diff=cur.diff_from_previous||{}, q=cur.queue||{}, db=cur.db_size||{};
-    document.getElementById('statusTime').textContent = `현재 조회: ${cur.server_time||cur.snapshot_at||''}` + (j.previous&&j.previous.snapshot_at ? ` / 직전 스냅샷: ${j.previous.snapshot_at}` : '');
-    const order=['gm_smartfit_space','gm_smartfit_space_vector','gm_smartfit_template','gm_smartfit_template_vector','gm_smartfit_item','gm_smartfit_collection','gm_smartfit_category','gm_product','gm_product_image_vector','gm_product_option','gm_product_archive','gm_category','gm_category_keyword','gm_search_keyword_stat','gm_category_search_stat','gm_category_search_monthly','gm_category_search_yearly','gm_product_sales_monthly','gm_product_sales_yearly','gm_product_country_sales_monthly','gm_product_country_sales_yearly','gm_category_sales_monthly','gm_category_sales_yearly','gm_category_country_sales_monthly','gm_category_country_sales_yearly','gm_basket','gm_order','gm_order_item','gm_supplier','gm_cs','gm_cs_message','gm_member','gm_member_address','gm_product_upsert_queue','gm_keyword_relation','gm_keyword_translate','gm_search_log','gm_dashboard_snapshot'];
-    document.getElementById('tableStatus').innerHTML = order.map(t=>`<tr><td>${t}</td><td class="num">${fmt(counts[t])}</td><td class="num">${diffHtml(diff[t])}</td></tr>`).join('');
-    document.getElementById('queueStatus').innerHTML = `
-      <tr><th>pending</th><td class="num">${fmt(q.pending)}</td></tr>
-      <tr><th>processing</th><td class="num">${fmt(q.processing)}</td></tr>
-      <tr><th>done</th><td class="num">${fmt(q.done)}</td></tr>
-      <tr><th>failed</th><td class="num">${fmt(q.failed)}</td></tr>
-      <tr><th>total</th><td class="num">${fmt(q.total)}</td></tr>
-      <tr><th>last processed</th><td>${q.last_processed_at||'-'}</td></tr>`;
-    document.getElementById('dbStatus').innerHTML = `
-      <p>DB 사용량: <b>${db.mb==null?'-':fmt(db.mb)+' MB'}</b></p>
-      <p>기준 용량: <b>${db.limit_mb==null?'-':fmt(db.limit_mb)+' MB'}</b></p>
-      <p>사용률: <b>${db.percent==null?'-':db.percent+'%'}</b> ${badge(db.level)}</p>
-      <p>Queue 경고: ${badge((cur.warning||{}).queue)}</p>
-      <p>API 응답: ${fmt(cur.api_response_ms)} ms</p>`;
-    log({action:'dashboard.loaded', saved:j.saved, current:cur.warning||{}, counts, queue:q, db_size:db});
-  }catch(e){ log('dashboard error: '+(e&&e.message||e)); }
+    if(!j.ok) throw new Error(j.code||'snapshot unavailable');
+    const list=Array.isArray(j.items)?j.items:[];
+    if(state) state.textContent=j.setup_required?`통합 통계 테이블 준비 전 · 기존 스냅샷 ${list.length}개 표시`:`저장된 통계 ${list.length}개 (자동 계산 없음)`;
+    if(rows){
+      rows.replaceChildren();
+      if(!list.length){const tr=rows.insertRow();const td=tr.insertCell();td.colSpan=5;td.textContent='저장된 통계가 없습니다.';}
+      for(const v of list){
+        const tr=rows.insertRow();
+        for(const value of [v.service_code,v.major_category,v.table_name,v.row_count==null?'미확인':Number(v.row_count).toLocaleString(),v.calculated_at?new Date(v.calculated_at).toLocaleString('ko-KR'):'-']){
+          const td=tr.insertCell();td.textContent=value==null?'':String(value);
+        }
+      }
+    }
+    const statusTime=document.getElementById('statusTime');
+    if(statusTime) statusTime.textContent='실시간 전체 통계 조회 중단 · 저장 통계만 사용';
+    const oldTable=document.getElementById('tableStatus');if(oldTable)oldTable.innerHTML='<tr><td>상단 저장 통계에서 확인</td></tr>';
+    const oldQueue=document.getElementById('queueStatus');if(oldQueue)oldQueue.innerHTML='<tr><td>실시간 Queue 조회 비활성 (DB 부하 방지)</td></tr>';
+    const oldDb=document.getElementById('dbStatus');if(oldDb)oldDb.textContent='저장된 통계만 표시합니다.';
+  }catch(e){if(state)state.textContent='저장 통계 조회 실패: '+String(e.message||e);}
 }
-async function saveSnapshot(){
-  const r=await fetch(`${API}/api/gm/dashboard/snapshot`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});
-  const j=await r.json(); log(j); await loadDashboard(false);
-}
+async function loadDashboard(save){return gmStatsLoadCachedV007();}
 
-loadDashboard(false); setInterval(()=>loadDashboard(false),60000);
+async function saveSnapshot(){ throw new Error('갱신 작업 미연결'); }
+
+loadDashboard(false); // no periodic statistics refresh

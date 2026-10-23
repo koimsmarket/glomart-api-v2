@@ -94,6 +94,9 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
     if(!r.ok||json.ok!==true){const e=new Error(String(json.error||'GPAY_UPSTREAM_FAILED'));e.status=r.status;throw e;}
     return json;
   };
+  let paymentStage='VERIFY_ROUTE';
+  let paymentCommitted=false;
+  let paymentRef='';
   try{
     // Fail BEFORE debiting if the required V079 server-side verifier is absent.
     const probe=await fetch(url+'/api/gpay/ledger/payment/verify?'+new URLSearchParams({
@@ -105,16 +108,22 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
       return res.status(503).json({ok:false,error:'GPAY_VERIFY_ROUTE_NOT_READY'});
     }
     // This token was created only after member-password verification in checkout-owner-auth.
+    paymentStage='OWNER_AUTH';
     await upstream('/api/gpay/security/owner-token/verify',{member_id:mid,certificate_owner_token:token});
+    paymentStage='NONCE';
     const nonce=await upstream('/api/gpay/security/nonces',{
       actor_type:'MEMBER',actor_id:mid,action_type:'PAYMENT',target_ref:order,amount:pay
     });
+    paymentStage='GPAY_DEBIT_REQUESTED';
     const paid=await upstream('/api/gpay/ledger/payment',{
       member_id:mid,merchant_id:member(process.env.GPAY_MERCHANT_ID)||'GLOMART',
       order_no:order,idempotency_key:key,pay_amount_g:pay,security_nonce:nonce.nonce
     });
     if(!paid.payment||paid.payment.status!=='PAID'||paid.payment.order_no!==order||
        paid.payment.member_id!==mid||paid.payment.idempotency_key!==key)throw new Error('GPAY_COMMIT_RESPONSE_MISMATCH');
+    paymentCommitted=true;
+    paymentRef=String(paid.payment.id||paid.transaction_id||'');
+    paymentStage='SAGA_PAID_JOURNAL';
     // V101: durable journal entry for the already committed G-PAY debit.
     // Any database failure here must NOT attempt another debit or invent a success.
     const journal=await db.connect();
@@ -133,6 +142,7 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
       await journal.query('COMMIT');
     }catch(journalError){await journal.query('ROLLBACK').catch(()=>{});throw journalError;}
     finally{journal.release();}
+    paymentStage='COMPLETE';
     console.info('[GM_GPAY_V084] GPAY_PAYMENT_COMMITTED',{order_no:order,transaction_id:paid.transaction_id});
     return res.json({ok:true,status:'PAID',order_no:order,idempotency_key:key,transaction_id:paid.transaction_id});
   }catch(e){
