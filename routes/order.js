@@ -819,26 +819,19 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
     const txId='GPSAGA-'+crypto.createHash('sha256').update(memberId+'|'+snapshotId).digest('hex');
     prepareStage='DB_CONNECT';
     client=await pool.connect();prepareStage='DB_BEGIN';await client.query('BEGIN');
-    // V101: release payment only for an exact, server-persisted single-line basket snapshot.
-    // All other carts stay blocked until their delivery/price contract is verified.
-    prepareStage='BASKET_SNAPSHOT_CHECK';
+    // V110: Glomart owns catalog prices, delivery, discounts and the payable amount.
+    // G-PAY does NOT reprice or compare against old basket contents.
+    // Only validate order-item structure needed for durable recovery / duplicate protection.
+    prepareStage='ORDER_IDENTITY_CHECK';
     const requested=Array.isArray(b.items)?b.items:[];
-    if(requested.length!==1||Number(amounts.shipping_amount_krw)!==0)
-      {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_APPROVED_BASKET_REQUIRED'});}
-    const item=requested[0]||{};
-    const mall=clean(item.mall_code).toUpperCase(),pi=clean(item.pi_ii_vi);
-    const qty=Number(item.quantity),line=Number(item.product_amount);
-    if(!/^[A-Z0-9_-]{2,16}$/.test(mall)||!pi||pi.length>160||
-       !Number.isSafeInteger(qty)||qty<=0||!Number.isSafeInteger(line)||line<=0||
-       line!==Number(amounts.product_amount_krw))
-      {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_BASKET_ITEM_INVALID'});}
-    const basket=await client.query(`SELECT mall_code,pi_ii_vi,quantity,amount,amount_type,delivery_fee
-      FROM gm_basket WHERE member_id=$1 AND mall_code=$2 AND pi_ii_vi=$3 FOR SHARE`,[memberId,mall,pi]);
-    const row=basket.rows[0], bAmount=Number(row&&row.amount), bQty=Number(row&&row.quantity);
-    const lineFromBasket=String(row&&row.amount_type||'unit').toLowerCase()==='total'?bAmount:bAmount*bQty;
-    if(basket.rowCount!==1||bQty!==qty||!Number.isSafeInteger(bAmount)||bAmount<=0||
-       lineFromBasket!==line||Number(row.delivery_fee)!==0)
-      {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_BASKET_SNAPSHOT_MISMATCH'});}
+    if(requested.length<1||requested.length>100){await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_ORDER_ITEMS_INVALID'});}
+    for(const item of requested){
+      if(!/^[A-Z0-9_-]{2,16}$/.test(clean(item.mall_code).toUpperCase())||
+         !clean(item.pi_ii_vi)||clean(item.pi_ii_vi).length>160||
+         !Number.isSafeInteger(Number(item.quantity))||Number(item.quantity)<=0){
+        await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_ORDER_ITEM_IDENTITY_INVALID'});
+      }
+    }
     prepareStage='SAGA_LOCK';await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[txId]);
     prepareStage='SAGA_SELECT';let existing=await client.query('SELECT * FROM public.gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[txId]);
     let orderNo;
@@ -870,12 +863,11 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
     const snapshot=b.order_payload;
     if(!snapshot||typeof snapshot!=='object'||Array.isArray(snapshot)||
        clean(snapshot.member_id)!==memberId||
-       !Array.isArray(snapshot.items)||snapshot.items.length!==1||
-       clean(snapshot.items[0].mall_code).toUpperCase()!==mall||
-       clean(snapshot.items[0].pi_ii_vi)!==pi||
-       Number(snapshot.items[0].quantity)!==qty||
-       Number(snapshot.items[0].product_amount)!==line||
-       Number(snapshot.total_product_price)!==Number(amounts.product_amount_krw)||
+       !Array.isArray(snapshot.items)||snapshot.items.length!==requested.length||
+       !requested.every((it,i)=>clean(snapshot.items[i]&&snapshot.items[i].mall_code).toUpperCase()===clean(it.mall_code).toUpperCase()&&
+          clean(snapshot.items[i]&&snapshot.items[i].pi_ii_vi)===clean(it.pi_ii_vi)&&
+          Number(snapshot.items[i]&&snapshot.items[i].quantity)===Number(it.quantity))||
+       !Number.isSafeInteger(Number(snapshot.total_payment_price))||
        Number(snapshot.total_payment_price)!==Number(amounts.order_amount_krw)){
       await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_RECOVERY_SNAPSHOT_INVALID'});
     }
