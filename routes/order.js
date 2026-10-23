@@ -800,6 +800,7 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
     return res.status(400).json({ok:false,code:'INVALID_PREPARE_REFERENCE'});
   if(String(b.order_mode||'external').toLowerCase()!=='external')
     return res.status(409).json({ok:false,code:'MIXED_ORDER_PREPARE_NOT_SUPPORTED'});
+  gmGpayRecoveryStart(req);
   const pool=db(req);
   if(!pool)return res.status(503).json({ok:false,code:'DB_UNAVAILABLE'});
   const pointService=require('../services/member_point_service');
@@ -862,6 +863,38 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
         VALUES($1,'ORDER_PREPARED','ORDER_PREPARE','COMMITTED',$2::jsonb)
         ON CONFLICT(tx_id,event_key) DO NOTHING`,
         [txId,JSON.stringify({snapshot_id:snapshotId,checkout_state:'NOT_PAID'})]);
+    }
+    // V108: a recovery snapshot must be committed BEFORE any G-PAY debit.
+    // It is tied to the validated basket, member, settlement and server order number.
+    prepareStage='RECOVERY_SNAPSHOT';
+    const snapshot=b.order_payload;
+    if(!snapshot||typeof snapshot!=='object'||Array.isArray(snapshot)||
+       clean(snapshot.member_id)!==memberId||
+       !Array.isArray(snapshot.items)||snapshot.items.length!==1||
+       clean(snapshot.items[0].mall_code).toUpperCase()!==mall||
+       clean(snapshot.items[0].pi_ii_vi)!==pi||
+       Number(snapshot.items[0].quantity)!==qty||
+       Number(snapshot.items[0].product_amount)!==line||
+       Number(snapshot.total_product_price)!==Number(amounts.product_amount_krw)||
+       Number(snapshot.total_payment_price)!==Number(amounts.order_amount_krw)){
+      await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_RECOVERY_SNAPSHOT_INVALID'});
+    }
+    const safeSnapshot=JSON.parse(JSON.stringify(snapshot));
+    safeSnapshot.order_no=orderNo;safeSnapshot.gm_order_no=orderNo;
+    delete safeSnapshot.gpay_payment_key;delete safeSnapshot.gpay_tx_id;
+    const snapshotJson=JSON.stringify(safeSnapshot);
+    if(snapshotJson.length>120000){await client.query('ROLLBACK');return res.status(413).json({ok:false,code:'GPAY_RECOVERY_SNAPSHOT_TOO_LARGE'});}
+    const saved=await client.query(`INSERT INTO public.gm_purchase_saga_event(tx_id,event_key,step,result,details)
+      VALUES($1,'RECOVERY_SNAPSHOT','ORDER_SNAPSHOT','COMMITTED',$2::jsonb)
+      ON CONFLICT(tx_id,event_key) DO NOTHING RETURNING event_id`,[txId,JSON.stringify({payload:safeSnapshot})]);
+    if(!saved.rowCount){
+      const old=await client.query(`SELECT details->'payload' AS payload FROM public.gm_purchase_saga_event
+        WHERE tx_id=$1 AND event_key='RECOVERY_SNAPSHOT'`,[txId]);
+      const p=old.rows[0]&&old.rows[0].payload;
+      if(!p||clean(p.order_no)!==orderNo||clean(p.member_id)!==memberId||
+         Number(p.total_payment_price)!==Number(amounts.order_amount_krw)){
+        await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_RECOVERY_SNAPSHOT_CONFLICT'});
+      }
     }
     prepareStage='DB_COMMIT';await client.query('COMMIT');
     console.info('[GM_GPAY_V080] ORDER_PREPARED',{order_no:orderNo,replay:!!existing.rowCount,payment_committed:false});
@@ -1029,7 +1062,7 @@ async function gmVerifyGpayPaidBeforeOrder(raw,orderNo,memberId,orderRow){
   return {applicable:true,pointUsed,paymentId:p.id};
 }
 
-router.post('/api/gm/order/create', async (req, res) => {
+async function gmOrderCreateHandler(req, res) {
   try{
     const body=req.body||{};
     const items=normalizeItems(body);
@@ -1046,6 +1079,7 @@ router.post('/api/gm/order/create', async (req, res) => {
   }
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
+  gmGpayRecoveryStart(req);
   const raw = req.body || {};
   let gpayLedgerRecorded=false;
   let gpayRemoteVerified=false;
@@ -1206,6 +1240,7 @@ router.post('/api/gm/order/create', async (req, res) => {
     }));
     console.error('[GM_ORDER_CREATE_ERROR]', String(e && e.message || e));
     // A committed G-PAY debit must never be exposed as a plain unpaid order failure.
+    if(gpayRemoteVerified&&gpaySagaTxId)gmGpayRecoveryV108.enqueue(gpaySagaTxId);
     if(gpayRemoteVerified)return res.status(503).json({ok:false,
       error:'GPAY_PAID_ORDER_RECOVERY_REQUIRED',stage,order_no:clean(raw.order_no||raw.gm_order_no),
       auto_debit_retry:false,order_retry_allowed:true});
@@ -1213,7 +1248,29 @@ router.post('/api/gm/order/create', async (req, res) => {
   }finally{
     client.release();
   }
-});
+}
+
+router.post('/api/gm/order/create',gmOrderCreateHandler);
+
+// V108: event-driven recovery. No periodic Saga table scan.
+const gmGpayRecoveryV108=require('../services/bank/gpay_recovery_worker');
+let gmGpayRecoveryInit=false;
+function gmGpayRecoveryStart(req){
+  if(gmGpayRecoveryInit)return;
+  gmGpayRecoveryInit=true;
+  gmGpayRecoveryV108.initialize({
+    getPool:()=>db(req),
+    replay:async(payload)=>{
+      const fakeReq={body:payload,app:req.app};
+      let result;
+      const fakeRes={status(code){this.statusCode=code;return this;},json(body){result={status:this.statusCode||200,body};return this;}};
+      await gmOrderCreateHandler(fakeReq,fakeRes);
+      if(!result)throw Error('RECOVERY_NO_RESPONSE');
+      if(result.status!==200||!result.body||result.body.ok!==true)throw Error('RECOVERY_ORDER_CREATE_'+result.status+':'+String(result.body&&result.body.error||''));
+      return result.body;
+    }
+  });
+}
 
 router.get('/api/gm/order/diagnostic', async (req,res)=>{
   const pool=db(req);
