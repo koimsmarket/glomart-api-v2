@@ -1773,6 +1773,19 @@ try {
   setImmediate(restoreUiPack);
 }catch(e){console.error('[GM_UI_PACK_BOOT_ERROR]',String(e&&e.message||e));}
 
+/* GM_CATEGORY_PACK_BOOT_V411: restore existing category JSON/HNSW files in temp after deployment. */
+try {
+  const categoryPackManager = require('./services/asset_pack_manager');
+  setImmediate(() => {
+    console.log('[GM_CATEGORY_PACK_BOOT_V411] START');
+    categoryPackManager.ensureStarted(pool).catch(e => {
+      console.error('[GM_CATEGORY_PACK_BOOT_V411] ERROR', String(e && e.message || e));
+    });
+  });
+} catch (e) {
+  console.error('[GM_CATEGORY_PACK_BOOT_V411] LOAD_ERROR', String(e && e.message || e));
+}
+
 // Start queue worker from server.js as package entry may not load index.js.
 try{
   require('./workers/product_queue_worker').startProductQueueWorker(pool);
