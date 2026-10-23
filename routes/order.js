@@ -1212,6 +1212,11 @@ async function gmOrderCreateHandler(req, res) {
     }));
     console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price, tax_complete:taxTotals.complete, supply_amount:taxTotals.supply_amount, vat_amount:taxTotals.vat_amount, basket_deleted:basketDeleted, basket_remain:basketRemain }));
     ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price, basket_deleted:basketDeleted, basket_before:basketBefore, basket_remain:basketRemain });
+    // Clean normal paid G-PAY event rows; retain main Saga row and all exceptional histories.
+    if(gmGpayVerification.applicable && gpaySagaTxId){
+      enqueueAfterResponse('[GM_GPAY_V109] CLEANUP_FAILED',()=>
+        gmGpayCleanCompletedEvents(pool,gpaySagaTxId,orderRow.order_no));
+    }
     // 혼합 주문은 Cafe24 내부상품이 합쳐지기 전이므로 여기서 집계하지 않는다.
     // 외부 전용 주문만 저장 완료 직후 직접 집계하고, 실패할 때만 큐로 넘긴다.
     if(orderMode!=='mixed'){
@@ -1248,6 +1253,34 @@ async function gmOrderCreateHandler(req, res) {
   }finally{
     client.release();
   }
+}
+
+// V109: compact ONLY cleanly completed G-PAY transactions.
+// Runs after COMMIT/response. Never makes order/payment contingent on cleanup.
+// Any failed, uncertain, or recovery-attempt history is retained for the Builder.
+async function gmGpayCleanCompletedEvents(pool,txId,orderNo){
+  if(!pool||!txId||!orderNo)return;
+  const r=await pool.query(`
+    DELETE FROM public.gm_purchase_saga_event e
+     USING public.gm_purchase_saga s
+     WHERE s.tx_id=$1 AND s.order_no=$2 AND e.tx_id=s.tx_id
+       AND s.status='ORDER_PAID' AND s.last_error_code IS NULL
+       AND s.gpay_payment_ref IS NOT NULL
+       AND s.point_use_ref IS NOT NULL
+       AND EXISTS (SELECT 1 FROM gm_order o WHERE o.order_no=s.order_no
+                     AND UPPER(COALESCE(o.payment_method,''))='GPAY'
+                     AND LOWER(COALESCE(o.payment_status,''))='paid')
+       AND EXISTS (SELECT 1 FROM gm_order_item i WHERE i.order_no=s.order_no)
+       AND NOT EXISTS (
+         SELECT 1 FROM public.gm_purchase_saga_event x
+          WHERE x.tx_id=s.tx_id AND (
+            UPPER(COALESCE(x.result,'')) IN ('FAILED','ERROR','UNKNOWN')
+            OR x.event_key LIKE 'ORDER_FAILED:%'
+            OR (x.event_key LIKE 'RECOVERY_%' AND x.event_key<>'RECOVERY_SNAPSHOT')
+          )
+       )
+  `,[txId,orderNo]);
+  console.info('[GM_GPAY_V109] CLEAN_COMPLETED_EVENTS',JSON.stringify({order_no:orderNo,deleted:r.rowCount||0}));
 }
 
 router.post('/api/gm/order/create',gmOrderCreateHandler);
