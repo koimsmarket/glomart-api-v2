@@ -12,6 +12,8 @@
 
 const express = require('express');
 const router = express.Router();
+// Human-initiated table changes/exports are protected before any leaf router.
+router.use(require('./admin_reauth').requireBuilderReauth);
 
 // ---- Generic Builder modules -------------------------------------------------
 router.use(require('./meta'));          // metadata / status lists

@@ -1,4 +1,51 @@
 const API = location.origin;
+// GM_BUILDER_ADMIN_REAUTH_V001: password is collected for a single operation,
+// sent only to same-origin Builder endpoints over HTTPS, and never persisted.
+(function(){
+  'use strict';
+  const originalFetch=window.fetch.bind(window);
+  function needsPassword(url,options){
+    let u;
+    try{u=new URL(typeof url==='string'?url:url.url,location.href);}catch(_){return false;}
+    if(u.origin!==location.origin)return false;
+    const p=u.pathname,m=String((options&&options.method)||'GET').toUpperCase();
+    if(m==='GET')return p==='/api/gm/builder/export'||p==='/api/gm/builder/export-all'||p==='/api/gm/builder/cafe24-member-export';
+    if(m!=='POST')return false;
+    if(p==='/api/gm/builder/safe-update')return u.searchParams.get('apply')==='YES';
+    return p==='/api/gm/builder/cafe24-member-import'||p==='/api/gm/builder/record/update'||p==='/api/gm/builder/record/delete-selected';
+  }
+  function askPassword(){
+    return new Promise(resolve=>{
+      const cover=document.createElement('div');
+      cover.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483646;display:flex;align-items:center;justify-content:center;padding:20px';
+      const pane=document.createElement('div');
+      pane.style.cssText='background:#fff;color:#222;border-radius:10px;padding:20px;width:100%;max-width:360px;box-shadow:0 10px 40px #0005;font-size:14px';
+      const heading=document.createElement('h3');heading.textContent='Glomart 빌더 관리자 재인증';heading.style.margin='0 0 12px';
+      const identity=document.createElement('p');identity.textContent='승인 계정: derzon';
+      const input=document.createElement('input');input.type='password';input.autocomplete='off';input.placeholder='서버 해시 인증용 비밀번호';input.style.cssText='box-sizing:border-box;width:100%;padding:12px;border:1px solid #bbb;border-radius:5px';
+      const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;margin-top:14px;justify-content:flex-end';
+      const cancel=document.createElement('button');cancel.type='button';cancel.textContent='취소';
+      const approve=document.createElement('button');approve.type='button';approve.textContent='인증 후 실행';
+      row.append(cancel,approve);pane.append(heading,identity,input,row);cover.append(pane);document.body.append(cover);
+      let done=false;const finish=(v)=>{if(done)return;done=true;input.value='';cover.remove();resolve(v);};
+      cancel.onclick=()=>finish(null);
+      approve.onclick=()=>finish(input.value||null);
+      input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();approve.click();}else if(e.key==='Escape'){e.preventDefault();cancel.click();}};
+      input.focus();
+    });
+  }
+  window.fetch=async function(input,options){
+    if(!needsPassword(input,options))return originalFetch(input,options);
+    const password=await askPassword();
+    if(!password)throw new Error('관리자 재인증 취소');
+    const updated=Object.assign({},options||{});
+    const headers=new Headers(updated.headers||(input instanceof Request?input.headers:undefined));
+    headers.set('x-gm-builder-admin-password',password);
+    updated.headers=headers;
+    return originalFetch(input,updated);
+  };
+})();
+
 const tables = {
   products:'상품 gm_product',
   product_options:'상품 옵션 gm_product_option',

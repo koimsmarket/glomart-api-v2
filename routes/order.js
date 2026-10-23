@@ -818,7 +818,7 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
     prepareStage='DB_CONNECT';
     client=await pool.connect();prepareStage='DB_BEGIN';await client.query('BEGIN');
     prepareStage='SAGA_LOCK';await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[txId]);
-    prepareStage='SAGA_SELECT';let existing=await client.query('SELECT * FROM gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[txId]);
+    prepareStage='SAGA_SELECT';let existing=await client.query('SELECT * FROM public.gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[txId]);
     let orderNo;
     if(existing.rowCount){
       const x=existing.rows[0];orderNo=x.order_no;
@@ -831,13 +831,13 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
       prepareStage='ORDER_NO_ALLOCATE';
       const alloc=await allocateServerOrderNo(client,'',memberId,'');orderNo=alloc.order_no;
       prepareStage='SAGA_INSERT';
-      await client.query(`INSERT INTO gm_purchase_saga(tx_id,order_no,member_id,product_amount_krw,
+      await client.query(`INSERT INTO public.gm_purchase_saga(tx_id,order_no,member_id,product_amount_krw,
         shipping_amount_krw,point_used_krw,gpay_amount,status)
         VALUES($1,$2,$3,$4,$5,$6,$7,'ORDER_PENDING')`,
         [txId,orderNo,memberId,amounts.product_amount_krw,amounts.shipping_amount_krw,
          amounts.point_used_amount_krw,amounts.pay_amount_g]);
       prepareStage='SAGA_EVENT_INSERT';
-      await client.query(`INSERT INTO gm_purchase_saga_event(tx_id,event_key,step,result,details)
+      await client.query(`INSERT INTO public.gm_purchase_saga_event(tx_id,event_key,step,result,details)
         VALUES($1,'ORDER_PREPARED','ORDER_PREPARE','COMMITTED',$2::jsonb)
         ON CONFLICT(tx_id,event_key) DO NOTHING`,
         [txId,JSON.stringify({snapshot_id:snapshotId,checkout_state:'NOT_PAID'})]);
