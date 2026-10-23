@@ -135,7 +135,7 @@ async function download(button){
   const timed=startButtonTimer(button,`${f==='xlsx'?'Excel':'CSV'} 준비 중`);
   log(`개별 다운로드 준비 중: ${t} / ${f==='xlsx'?'Excel':'CSV'}`);
   try{
-    const saved=await exportTableToFile(t,f,null);
+    const saved=await GMBuilderWithReauth(()=>exportTableToFile(t,f,null));
     log(`다운로드 시작: ${saved.filename} / ${timed?timed.seconds:0}초 / ${saved.bytes.toLocaleString()} bytes`);
   }catch(e){ log(`다운로드 오류: ${String(e&&e.message||e)}`); }
   finally{ stopButtonTimer(timed); }
@@ -245,12 +245,14 @@ async function downloadAll(button){
 
   try{
     directoryHandle=await chooseDownloadDirectory();
+    // Exactly one password prompt for the entire selected multi-table export.
     if(directoryHandle){
       log(`저장 폴더가 선택되었습니다. 종류별 하위폴더를 자동 생성하고, 각 파일은 디스크 기록과 크기 확인이 끝난 뒤 다음 파일을 시작합니다.`);
     }else{
       log(`이 브라우저는 폴더 직접 저장을 지원하지 않습니다. 브라우저의 '여러 파일 다운로드 허용'이 필요합니다.`);
     }
     log(`${total}개 테이블을 ${groups.length}개 조로 실행합니다. gm_product는 다른 다운로드와 겹치지 않게 단독 실행하고, 저장 완료가 확인된 뒤 다음 조를 시작합니다.`+(f==='xlsx'&&selected.includes('products')?' 상품은 메모리 멈춤 방지를 위해 CSV로 저장됩니다.':''));
+    async function runAllSelectedExports(){
     const groupStatus=[];
     // 중요: gm_product가 포함된 1번 조부터 시작하며, 각 조를 반드시 await합니다.
     // 따라서 상품 다운로드 중에는 다른 테이블 요청이 한 건도 실행되지 않습니다.
@@ -267,6 +269,8 @@ async function downloadAll(button){
     const fail=shared.results.filter(x=>!x.ok);
     log({action:'selected-export-product-standalone-stream-save-v041',selected:total,processed:shared.results.length,groups:groups.length,success:okCount,failed:fail.length,seconds:timed?timed.seconds:0,group_status:groupStatus,failures:fail});
     if(fail.length) alert(`다운로드 종료: 성공 ${okCount}개, 실패 ${fail.length}개\n실패한 테이블만 다시 선택해 재실행하세요.`);
+    }
+    await GMBuilderWithReauth(runAllSelectedExports);
   }finally{
     downloadAllRunning=false;
     stopButtonTimer(timed);

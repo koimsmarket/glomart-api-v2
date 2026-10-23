@@ -4,6 +4,7 @@ const API = location.origin;
 (function(){
   'use strict';
   const originalFetch=window.fetch.bind(window);
+  let activeOperation=null;
   function needsPassword(url,options){
     let u;
     try{u=new URL(typeof url==='string'?url:url.url,location.href);}catch(_){return false;}
@@ -18,7 +19,7 @@ const API = location.origin;
     return new Promise(resolve=>{
       const cover=document.createElement('div');
       cover.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483646;display:flex;align-items:center;justify-content:center;padding:20px';
-      const pane=document.createElement('div');
+      const pane=document.createElement('form');pane.onsubmit=e=>e.preventDefault();
       pane.style.cssText='background:#fff;color:#222;border-radius:10px;padding:20px;width:100%;max-width:360px;box-shadow:0 10px 40px #0005;font-size:14px';
       const heading=document.createElement('h3');heading.textContent='Glomart 빌더 관리자 재인증';heading.style.margin='0 0 12px';
       const identity=document.createElement('p');identity.textContent='승인 계정: derzon';
@@ -36,13 +37,22 @@ const API = location.origin;
   }
   window.fetch=async function(input,options){
     if(!needsPassword(input,options))return originalFetch(input,options);
-    const password=await askPassword();
+    const password=activeOperation ? activeOperation.password : await askPassword();
     if(!password)throw new Error('관리자 재인증 취소');
     const updated=Object.assign({},options||{});
     const headers=new Headers(updated.headers||(input instanceof Request?input.headers:undefined));
     headers.set('x-gm-builder-admin-password',password);
     updated.headers=headers;
     return originalFetch(input,updated);
+  };
+  // One prompt for one explicit export operation; never save it outside this tab or operation.
+  window.GMBuilderWithReauth=async function(callback){
+    if(activeOperation) throw new Error('다른 관리자 작업이 실행 중입니다.');
+    const password=await askPassword();
+    if(!password)throw new Error('관리자 재인증 취소');
+    const op={password};
+    activeOperation=op;
+    try{return await callback();}finally{if(activeOperation===op)activeOperation=null;op.password='';}
   };
 })();
 
