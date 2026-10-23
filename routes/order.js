@@ -817,6 +817,26 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
     const txId='GPSAGA-'+crypto.createHash('sha256').update(memberId+'|'+snapshotId).digest('hex');
     prepareStage='DB_CONNECT';
     client=await pool.connect();prepareStage='DB_BEGIN';await client.query('BEGIN');
+    // V101: release payment only for an exact, server-persisted single-line basket snapshot.
+    // All other carts stay blocked until their delivery/price contract is verified.
+    prepareStage='BASKET_SNAPSHOT_CHECK';
+    const requested=Array.isArray(b.items)?b.items:[];
+    if(requested.length!==1||Number(amounts.shipping_amount_krw)!==0)
+      {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_APPROVED_BASKET_REQUIRED'});}
+    const item=requested[0]||{};
+    const mall=clean(item.mall_code).toUpperCase(),pi=clean(item.pi_ii_vi);
+    const qty=Number(item.quantity),line=Number(item.product_amount);
+    if(!/^[A-Z0-9_-]{2,16}$/.test(mall)||!pi||pi.length>160||
+       !Number.isSafeInteger(qty)||qty<=0||!Number.isSafeInteger(line)||line<=0||
+       line!==Number(amounts.product_amount_krw))
+      {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_BASKET_ITEM_INVALID'});}
+    const basket=await client.query(`SELECT mall_code,pi_ii_vi,quantity,amount,amount_type,delivery_fee
+      FROM gm_basket WHERE member_id=$1 AND mall_code=$2 AND pi_ii_vi=$3 FOR SHARE`,[memberId,mall,pi]);
+    const row=basket.rows[0], bAmount=Number(row&&row.amount), bQty=Number(row&&row.quantity);
+    const lineFromBasket=String(row&&row.amount_type||'unit').toLowerCase()==='total'?bAmount:bAmount*bQty;
+    if(basket.rowCount!==1||bQty!==qty||!Number.isSafeInteger(bAmount)||bAmount<=0||
+       lineFromBasket!==line||Number(row.delivery_fee)!==0)
+      {await client.query('ROLLBACK');return res.status(409).json({ok:false,code:'GPAY_BASKET_SNAPSHOT_MISMATCH'});}
     prepareStage='SAGA_LOCK';await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[txId]);
     prepareStage='SAGA_SELECT';let existing=await client.query('SELECT * FROM public.gm_purchase_saga WHERE tx_id=$1 FOR UPDATE',[txId]);
     let orderNo;
@@ -845,7 +865,7 @@ router.post('/api/gm/order/gpay/prepare',async(req,res)=>{
     prepareStage='DB_COMMIT';await client.query('COMMIT');
     console.info('[GM_GPAY_V080] ORDER_PREPARED',{order_no:orderNo,replay:!!existing.rowCount,payment_committed:false});
     return res.json({ok:true,order_no:orderNo,tx_id:txId,idempotency_key:txId,
-      settlement:amounts,payment_committed:false,ready_for_payment:false});
+      settlement:amounts,payment_committed:false,ready_for_payment:true});
   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});
     console.error('[GM_GPAY_V099] PREPARE_FAILED',JSON.stringify({
       stage:prepareStage,pg_code:String(e&&e.code||''),constraint:String(e&&e.constraint||''),

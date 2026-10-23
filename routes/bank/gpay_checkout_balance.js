@@ -115,6 +115,24 @@ router.post('/api/gm/gpay/checkout-pay',async(req,res)=>{
     });
     if(!paid.payment||paid.payment.status!=='PAID'||paid.payment.order_no!==order||
        paid.payment.member_id!==mid||paid.payment.idempotency_key!==key)throw new Error('GPAY_COMMIT_RESPONSE_MISMATCH');
+    // V101: durable journal entry for the already committed G-PAY debit.
+    // Any database failure here must NOT attempt another debit or invent a success.
+    const journal=await db.connect();
+    try{
+      await journal.query('BEGIN');
+      const intent=await journal.query('SELECT tx_id,status,gpay_payment_ref FROM public.gm_purchase_saga WHERE order_no=$1 FOR UPDATE',[order]);
+      if(intent.rowCount!==1)throw new Error('GPAY_SAGA_AFTER_DEBIT_MISSING');
+      const tx=intent.rows[0];
+      if(tx.gpay_payment_ref&&tx.gpay_payment_ref!==key)throw new Error('GPAY_SAGA_PAYMENT_KEY_CONFLICT');
+      if(tx.status==='ORDER_PENDING'||tx.status==='GPAY_UNKNOWN'){
+        await journal.query(`UPDATE public.gm_purchase_saga SET status='GPAY_PAID',gpay_payment_ref=$2,version=version+1,updated_at=NOW() WHERE tx_id=$1`,[tx.tx_id,key]);
+      }else if(!['GPAY_PAID','ORDER_PAID','PURCHASE_CONFIRMED'].includes(tx.status))throw new Error('GPAY_SAGA_STATUS_CONFLICT');
+      await journal.query(`INSERT INTO public.gm_purchase_saga_event(tx_id,event_key,step,result,remote_ref,details)
+        VALUES($1,$2,'GPAY_PAID','RECORDED',$2,$3::jsonb) ON CONFLICT(tx_id,event_key) DO NOTHING`,
+        [tx.tx_id,'GPAY_PAID:'+key,JSON.stringify({order_no:order,payment_id:paid.payment.id||null})]);
+      await journal.query('COMMIT');
+    }catch(journalError){await journal.query('ROLLBACK').catch(()=>{});throw journalError;}
+    finally{journal.release();}
     console.info('[GM_GPAY_V084] GPAY_PAYMENT_COMMITTED',{order_no:order,transaction_id:paid.transaction_id});
     return res.json({ok:true,status:'PAID',order_no:order,idempotency_key:key,transaction_id:paid.transaction_id});
   }catch(e){
