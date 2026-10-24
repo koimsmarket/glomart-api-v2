@@ -1,5 +1,5 @@
  'use strict';
-// GM_GPAY_TRANSACTION_CREDENTIAL_V001. Shared proof for PAYMENT and TRANSFER.
+// GM_GPAY_TRANSACTION_CREDENTIAL_V121. Shared proof for PAYMENT and TRANSFER.
 // Never authorize a transaction by member_id alone. Caller must bind issued owner token to transaction.
 const {gmVerifyHash}=require('../../routes/GM_MEMBER_PASSWORD');
 let argon2;try{argon2=require('argon2');}catch(_){argon2=null;}
@@ -29,7 +29,7 @@ async function register(db,{member_id,password,pin,pin_confirm}){
    SET pin_hash=excluded.pin_hash,pin_version=public.gm_member_payment_pin.pin_version+1,
        failed_attempts=0,locked_until=NULL,updated_at=NOW() RETURNING pin_version`;
   const r=await db.query(q,[mid,hashed]);
-  return {registered:true,pin_version:String(r.rows[0].pin_version)};
+  return {registered:true,pin_version:String(r.rows[0].pin_version),remaining_attempts:5,lock_cleared:true};
 }
 async function verify(db,{member_id,method,secret,purpose}){
   const mid=s(member_id);const m=s(method).toUpperCase(),p=s(purpose).toUpperCase();
@@ -45,8 +45,11 @@ async function verify(db,{member_id,method,secret,purpose}){
     const row=r.rows[0];
     if(!row){await client.query('COMMIT');return false;}
     if(row.locked_until&&new Date(row.locked_until).getTime()>Date.now()){
-      await client.query('COMMIT');throw Object.assign(Error('PIN_LOCKED'),{status:429});
+      const retry_after_seconds=Math.max(1,Math.ceil((new Date(row.locked_until).getTime()-Date.now())/1000));
+      await client.query('COMMIT');throw Object.assign(Error('PIN_LOCKED'),{status:429,retry_after_seconds});
     }
+    // Expired lock begins a fresh five-attempt window.
+    if(row.locked_until&&new Date(row.locked_until).getTime()<=Date.now())row.failed_attempts=0;
     let valid=false;
     try{valid=!!await argon2.verify(row.pin_hash,secret);}catch(_){valid=false;}
     if(valid){await client.query('UPDATE public.gm_member_payment_pin SET failed_attempts=0,locked_until=NULL WHERE member_id=$1',[mid]);}
@@ -54,7 +57,13 @@ async function verify(db,{member_id,method,secret,purpose}){
       const count=Number(row.failed_attempts||0)+1;
       await client.query('UPDATE public.gm_member_payment_pin SET failed_attempts=$2,locked_until=CASE WHEN $2>=5 THEN NOW()+INTERVAL \'15 minutes\' ELSE NULL END WHERE member_id=$1',[mid,count]);
     }
-    await client.query('COMMIT');return valid;
+    await client.query('COMMIT');
+    if(!valid){
+      const failures=Number(row.failed_attempts||0)+1;
+      if(failures>=5)throw Object.assign(Error('PIN_LOCKED'),{status:429,retry_after_seconds:900,remaining_attempts:0});
+      throw Object.assign(Error('PIN_INVALID'),{status:401,remaining_attempts:Math.max(0,5-failures)});
+    }
+    return true;
   }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}
   finally{client.release();}
 }
