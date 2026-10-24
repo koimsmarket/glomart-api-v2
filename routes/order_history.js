@@ -6,12 +6,13 @@
 const express = require('express');
 const router = express.Router();
 const service = require('../services/order_history_service');
+const cancelShipping = require('../services/GM_ORDER_CANCEL_SHIPPING');
 const VERSION = 'GM_ORDER_HISTORY_ROUTE_V005_REFUND_METHOD';
 function clean(v){ return String(v == null ? '' : v).trim(); }
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function statusFor(error){
   const m = clean(error && error.message || error);
-  if(['member_id_required','order_no_required','action_required','unsupported_action','refund_method_required','refund_amount_required'].includes(m)) return 400;
+  if(['member_id_required','order_no_required','action_required','unsupported_action','refund_method_required','refund_amount_required','shipping_fee_confirmation_required','shipping_quote_changed'].includes(m)) return 400;
   if(m === 'order_not_found') return 404;
   if(['action_not_allowed_for_current_status','cafe24_action_must_use_cafe24_bridge','mixed_order_requires_item_selection','deposit_refund_already_applied'].includes(m)) return 409;
   if(['refund_account_not_registered','member_not_found','deposit_balance_not_found'].includes(m)) return 422;
@@ -48,6 +49,20 @@ router.get('/api/gm/order-history/detail', async (req, res) => {
   }
 });
 
+router.get('/api/gm/order-cs/shipping-quote', async(req,res)=>{
+  const mid=clean(req.query.member_id||req.query.memberId),no=clean(req.query.order_no||req.query.orderNo);
+  if(!mid||!no)return res.status(400).json({ok:false,error:'order_identity_required'});
+  try{
+    const pool=db(req);
+    const oq=await pool.query('SELECT * FROM gm_order WHERE order_no=$1 AND member_id=$2',[no,mid]);
+    if(!oq.rows.length)return res.status(404).json({ok:false,error:'order_not_found'});
+    const iq=await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC',[no]);
+    const quote=cancelShipping.quote(oq.rows[0],iq.rows,req.query.reason_code);
+    console.log('[GM_CANCEL_SHIPPING_QUOTE]',JSON.stringify({order_no:no,reason_code:quote.reason_code,shipping_fee:quote.customer_shipping_fee,group_count:quote.groups.length}));
+    return res.json({ok:true,order_no:no,quote});
+  }catch(e){console.error('[GM_CANCEL_SHIPPING_QUOTE_ERROR]',String(e&&e.message||e));return res.status(500).json({ok:false,error:'shipping_quote_failed'});}
+});
+
 router.post('/api/gm/order-cs/action', async (req, res) => {
   const body = req.body || {};
   try{
@@ -57,7 +72,9 @@ router.post('/api/gm/order-cs/action', async (req, res) => {
       action:body.action,
       reason_code:body.reason_code || body.reasonCode,
       reason_text:body.reason_text || body.reasonText,
-      refund_method:body.refund_method || body.refundMethod
+      refund_method:body.refund_method || body.refundMethod,
+      shipping_fee_ack:body.shipping_fee_ack===true,
+      shipping_fee_confirmed:body.shipping_fee_confirmed
     });
     console.log('[GM_ORDER_CS_ACTION_OK]', JSON.stringify({ member_id:clean(body.member_id||body.memberId), order_no:clean(body.order_no||body.orderNo), action:clean(body.action) }));
     return res.json({ ok:true, version:VERSION, ...result });

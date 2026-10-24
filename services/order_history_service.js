@@ -8,6 +8,7 @@
 const refundBank=require('./GM_ORDER_REFUND_BANK');
 const refundDeposit=require('./GM_ORDER_REFUND_DEPOSIT');
 const orderMessageEvent=require('./order_message_event_service');
+const cancelShipping=require('./GM_ORDER_CANCEL_SHIPPING');
 
 const VERSION = 'GM_ORDER_HISTORY_SERVICE_V009_ORDER_EVENT_MESSAGE';
 
@@ -260,7 +261,8 @@ async function action(pool, options){
   if(!pool) throw new Error('DB pool is not attached');
   const memberId = text(options && options.member_id);
   const orderNo = text(options && options.order_no);
-  const actionName = text(options && options.action);
+  const requestedAction = text(options && options.action);
+  const actionName = requestedAction==='direct_cancel'?'cancel_request':requestedAction;
   const reasonCode = text(options && options.reason_code);
   const reasonText = text(options && options.reason_text);
   const refundMethod = upper(options && options.refund_method);
@@ -278,7 +280,14 @@ async function action(pool, options){
     const normalized = normalizeOrder(rows[0], itemRows);
     if(normalized.source_type === 'CAFE24') throw new Error('cafe24_action_must_use_cafe24_bridge');
     if(normalized.source_type === 'MIXED') throw new Error('mixed_order_requires_item_selection');
-    assertAllowed(normalized, actionName);
+    // Initial operations are manual: legacy direct_cancel becomes request-only.
+    if(requestedAction==='direct_cancel') assertAllowed(normalized,'direct_cancel');
+    else assertAllowed(normalized,actionName);
+    if(['cancel_request','exchange_request','return_request'].includes(actionName)){
+      if(options.shipping_fee_ack!==true) throw new Error('shipping_fee_confirmation_required');
+      const q=cancelShipping.quote(rows[0],itemRows,reasonCode);
+      if(!Number.isSafeInteger(Number(options.shipping_fee_confirmed)) || Number(options.shipping_fee_confirmed)!==q.customer_shipping_fee) throw new Error('shipping_quote_changed');
+    }
 
     if(actionName === 'shipping_trace'){
       const tracking = normalized.items.find((x) => text(x.tracking_number)) || {};
