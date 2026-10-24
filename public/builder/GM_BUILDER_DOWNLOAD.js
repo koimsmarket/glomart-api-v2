@@ -6,7 +6,13 @@ async function requestCsvExport(table){
   const r = await fetch(url,{method:'GET',cache:'no-store'});
   if(r.ok) return r;
   const txt = await r.text().catch(()=>String(r.status));
-  const err = new Error(`HTTP ${r.status} ${txt.slice(0,500)}`);
+  // Distinguish authentication denial from a broken CSV download; no password is logged.
+  let authCode='';
+  if(r.status===401 || r.status===403 || r.status===429){
+    try{ authCode=String(JSON.parse(txt).error||''); }catch(_e){}
+  }
+  const authHint=authCode==='BUILDER_REAUTH_REQUIRED'?' (인증정보 미전달)':authCode==='BUILDER_AUTH_INVALID'?' (관리자 비밀번호 불일치)':authCode==='BUILDER_AUTH_RATE_LIMIT'?' (재시도 제한)':authCode?` (${authCode})`:'';
+  const err = new Error(`HTTP ${r.status}${authHint} ${txt.slice(0,500)}`);
   err.httpStatus = r.status;
   throw err;
 }

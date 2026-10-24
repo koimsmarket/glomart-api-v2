@@ -14,7 +14,7 @@ function protectedOperation(req) {
     path === '/api/gm/builder/cafe24-member-export'
   );
   if (method !== 'POST') return false;
-  if (path === '/api/gm/builder/safe-update') return String(req.query.apply||'').toUpperCase() === 'YES';
+  if (path === '/api/gm/builder/safe-update') return true; // DRY_RUN also uploads data; authenticate all uploads
   return (
     path === '/api/gm/builder/cafe24-member-import' ||
     path === '/api/gm/builder/record/update' ||
