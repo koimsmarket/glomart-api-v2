@@ -286,6 +286,11 @@ async function action(pool, options){
     if(['cancel_request','exchange_request','return_request'].includes(actionName)){
       if(options.shipping_fee_ack!==true) throw new Error('shipping_fee_confirmation_required');
       const q=cancelShipping.quote(rows[0],itemRows,reasonCode);
+      if(q.manual_shipping_review){
+        console.warn('[GM_CS_SHIPPING_REVIEW_REQUIRED]', JSON.stringify({order_no:orderNo,action:actionName,reason_code:reasonCode}));
+        throw new Error('shipping_status_manual_review_required');
+      }
+      console.log('[GM_CS_SHIPPING_VERIFIED]', JSON.stringify({order_no:orderNo,action:actionName,fee:q.customer_shipping_fee,groups:q.groups.map(g=>({key:g.key,shipped:g.shipped,fee:g.customer_shipping_fee}))}));
       if(!Number.isSafeInteger(Number(options.shipping_fee_confirmed)) || Number(options.shipping_fee_confirmed)!==q.customer_shipping_fee) throw new Error('shipping_quote_changed');
       console.log('[GM_CS_QUOTE_CONFIRMED]',JSON.stringify({order_no:orderNo,action:actionName,reason_code:reasonCode,shipping_fee:q.customer_shipping_fee,groups:q.groups.map(g=>({key:g.key,fee:g.customer_shipping_fee,shipped:g.shipped}))}));
     }

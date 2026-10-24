@@ -9,6 +9,7 @@ function quote(order,items,reasonCode){
   const shippedStatuses=new Set(['SHIPPING','SHIPPED','IN_TRANSIT','DELIVERED','COMPLETE','COMPLETED']);
   const preShipStatuses=new Set(['PENDING','PREPARING','READY','READY_TO_ORDER','ORDERED','NOT_SHIPPED']);
   const orderShipped=shippedStatuses.has(upper(order.seller_status)) || shippedStatuses.has(upper(order.shipping_status)) || Boolean(order.delivered_at);
+  const orderPreShip=preShipStatuses.has(upper(order.seller_status)) && !orderShipped && !upper(order.shipping_status).match(/SHIPPING|SHIPPED|TRANSIT|DELIVERED|COMPLETE/);
   let uncertain=false;
   function itemShipped(item){
     const own=upper(item.item_shipping_status);
@@ -17,6 +18,7 @@ function quote(order,items,reasonCode){
     if(own){uncertain=true;return false;}
     // Without a recorded per-item shipment state, never assert that all items shipped.
     // For single-item orders the order status is sufficient; multi-item orders require manual review.
+    if(orderPreShip)return false; // Order-wide confirmed pre-shipment is sufficient even for multiple items.
     if((items||[]).length===1)return orderShipped;
     uncertain=true;return false;
   }

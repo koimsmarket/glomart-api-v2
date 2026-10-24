@@ -305,7 +305,7 @@ async function readyList(pool, data) {
     AND upper(w.work_type)='ORDER'
     AND upper(o.mall_code)=$1
     /* [CANCEL GUARD] 고객 취소 주문은 READY 목록에도 다시 노출하지 않는다. */
-    AND upper(COALESCE(g.customer_status,'')) NOT IN ('CANCEL_COMPLETED','CANCEL_REQUESTED')
+    AND upper(COALESCE(g.customer_status,'')) NOT IN ('CANCEL_COMPLETED','CANCEL_REQUESTED','CANCEL_WITHDRAWN')
     AND upper(COALESCE(g.seller_status,'')) <> 'CANCELLED'
     AND upper(COALESCE(g.order_status,'')) <> 'CANCELLED'
   `;
@@ -396,7 +396,7 @@ async function claim(pool, data) {
          ON g.order_no=o.order_no
        WHERE upper(w.work_status)='READY'
          /* [CANCEL GUARD] claim 직전에도 gm_order 취소 여부를 다시 확인한다. */
-         AND upper(COALESCE(g.customer_status,'')) NOT IN ('CANCEL_COMPLETED','CANCEL_REQUESTED')
+         AND upper(COALESCE(g.customer_status,'')) NOT IN ('CANCEL_COMPLETED','CANCEL_REQUESTED','CANCEL_WITHDRAWN')
          AND upper(COALESCE(g.seller_status,'')) <> 'CANCELLED'
          AND upper(COALESCE(g.order_status,'')) <> 'CANCELLED'
          AND upper(w.work_type)='ORDER'
@@ -516,7 +516,7 @@ async function heartbeat(pool, workId, data) {
       upper(current.gm_order_status) === 'CANCELLED';
 
     // Manual cancellation request pauses authorization only; NEVER completes/cancels the order or work.
-    if (upper(current.gm_customer_status) === 'CANCEL_REQUESTED') {
+    if (['CANCEL_REQUESTED','CANCEL_WITHDRAWN'].includes(upper(current.gm_customer_status))) {
       console.warn('[GM_AUTO_ORDER_CS_HOLD]', JSON.stringify({work_id:Number(workId),reason:'CANCEL_REQUESTED'}));
       await db.query('COMMIT');
       throw new Error('work_on_hold_customer_cancel_request');
@@ -582,7 +582,16 @@ async function release(pool, workId, data) {
     ).rows[0];
 
     if (!current) throw new Error('work_not_found');
-    if (clean(current.lock_token) !== token) {
+    // Releasing a claim must not requeue a customer-cancelled/withdrawn order.
+    const cs = (await db.query(
+      `SELECT g.customer_status FROM gm_order g JOIN gm_auto_order a ON a.order_no=g.order_no WHERE a.auto_order_no=$1 LIMIT 1`,
+      [current.auto_order_no]
+    )).rows[0];
+    if(['CANCEL_REQUESTED','CANCEL_COMPLETED','CANCEL_WITHDRAWN'].includes(upper(cs&&cs.customer_status))){
+      console.warn('[GM_AUTO_ORDER_RELEASE_BLOCKED_CS]', JSON.stringify({work_id:Number(workId),status:upper(cs.customer_status)}));
+      throw new Error('work_on_hold_customer_cancel_request');
+    }
+    if (clean(current.lock_token) !== clean(data.lock_token)) {
       throw new Error('work_lock_invalid');
     }
     if (upper(current.work_status) !== 'RUNNING') {
@@ -657,6 +666,16 @@ async function updateState(pool, workId, data) {
     ).rows[0];
 
     if (!current) throw new Error('work_not_found');
+    // Server-side gate: a stale Runner cannot report new progress or COMPLETED after a cancellation request.
+    const cs = (await db.query(
+      `SELECT g.customer_status,g.seller_status,g.order_status FROM gm_order g JOIN gm_auto_order a ON a.order_no=g.order_no WHERE a.auto_order_no=$1 LIMIT 1`,
+      [current.auto_order_no]
+    )).rows[0];
+    const csStatus=upper(cs&&cs.customer_status);
+    if(['CANCEL_REQUESTED','CANCEL_COMPLETED','CANCEL_WITHDRAWN'].includes(csStatus) || upper(cs&&cs.seller_status)==='CANCELLED' || upper(cs&&cs.order_status)==='CANCELLED'){
+      console.warn('[GM_AUTO_ORDER_UPDATE_BLOCKED_CS]', JSON.stringify({work_id:Number(workId),requested_status:status,customer_status:csStatus}));
+      throw new Error('work_on_hold_customer_cancel_request');
+    }
     if (clean(current.lock_token) !== clean(data.lock_token)) {
       throw new Error('work_lock_invalid');
     }
