@@ -14,6 +14,7 @@ function protectedOperation(req) {
     path === '/api/gm/builder/cafe24-member-export'
   );
   if (method !== 'POST') return false;
+  if (path === '/api/gm/background/image-vector/mode' || path === '/api/gm/background/image-vector/pending/import') return true;
   if (path === '/api/gm/builder/safe-update') return true; // DRY_RUN also uploads data; authenticate all uploads
   return (
     path === '/api/gm/builder/cafe24-member-import' ||

@@ -14,6 +14,17 @@ const express = require('express');
 const router = express.Router();
 // Human-initiated table changes/exports are protected before any leaf router.
 router.use(require('./admin_reauth').requireBuilderReauth);
+// GM_BUILDER_VECTOR_ROUTE_CONNECT_V001: reuse existing background module, no new worker algorithm.
+// Activation is scoped to a deliberate Builder vector API request, never ordinary Builder page loading.
+const gmVectorBackground = require('../../background/image-vector');
+router.use((req,res,next)=>{
+  if (!req.path.startsWith('/api/gm/background/image-vector/')) return next();
+  const db=req.app&&req.app.locals&&req.app.locals.pool;
+  if (!db) return res.status(503).json({ok:false,error:'BACKGROUND_DB_NOT_READY'});
+  gmVectorBackground.init(db);
+  return gmVectorBackground.router(req,res,next);
+});
+
 
 // ---- Generic Builder modules -------------------------------------------------
 router.use(require('./meta'));

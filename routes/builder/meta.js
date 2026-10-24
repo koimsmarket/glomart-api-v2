@@ -47,7 +47,7 @@ router.get('/api/gm/builder/tables', async (req,res)=>{
               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
               WHERE n.nspname='public' AND c.relkind IN ('r','p')
               ORDER BY c.relname`,
-        query_timeout:8000
+        query_timeout:30000
       });
       details=new Map(stats.rows.map(x=>[String(x.tablename),{rowEstimate:x.row_estimate==null?null:Number(x.row_estimate),totalBytes:x.total_bytes==null?null:Number(x.total_bytes)}]));
       console.info('[GM_BUILDER_TABLES_V004] STATS_OK',phase,'count='+stats.rows.length,'ms='+(Date.now()-started));

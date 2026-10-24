@@ -12,6 +12,7 @@ const API = location.origin;
     const p=u.pathname,m=String((options&&options.method)||'GET').toUpperCase();
     if(m==='GET')return p==='/api/gm/builder/export'||p==='/api/gm/builder/export-all'||p==='/api/gm/builder/cafe24-member-export';
     if(m!=='POST')return false;
+    if(p==='/api/gm/background/image-vector/mode'||p==='/api/gm/background/image-vector/pending/import')return true;
     if(p==='/api/gm/builder/safe-update')return true; // authenticate DRY_RUN and APPLY equally
     return p==='/api/gm/builder/cafe24-member-import'||p==='/api/gm/builder/record/update'||p==='/api/gm/builder/record/delete-selected';
   }

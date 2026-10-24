@@ -99,11 +99,11 @@
       return; // Do not start costly statistics until name discovery succeeds.
     }
     try{
-      const stats=await inventoryGet(url+'&phase=stats',14000);
+      const stats=await inventoryGet(url+'&phase=stats',45000);
       if(request!==inventoryRequestSerial)return;
       currentTables=mergeInventory(currentTables,stats.tables);
       window.filterBuilderInventory();
-      if(el)el.textContent='운영 DB 전체 '+currentTables.length+'개 · 건수는 통계 추정치 · 용량은 인덱스 포함';
+      if(el)el.textContent=stats.statsError?'운영 DB 테이블 '+currentTables.length+'개 표시 · 건수/용량 서버 통계 오류: '+stats.statsError:'운영 DB 전체 '+currentTables.length+'개 · 건수는 통계 추정치 · 용량은 인덱스 포함';
     }catch(e){
       if(request!==inventoryRequestSerial)return;
       if(el)el.textContent='운영 DB 테이블 '+currentTables.length+'개 표시 중 · 건수/용량 조회 실패: '+String(e.message||e);
