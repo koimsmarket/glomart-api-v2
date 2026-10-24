@@ -107,6 +107,8 @@ async function confirmPurchaseReward(pool,orderNo){
     if(!oq.rows.length)throw new Error('order_not_found');
     const order=oq.rows[0],memberId=clean(order.member_id);
     if(!memberId)throw new Error('member_order_required');
+    // V125: hard authorization boundary; no non-GPAY order can receive this 3% reward.
+    if(clean(order.payment_method).toUpperCase()!=='GPAY')throw new Error('gpay_reward_only');
     const sellerStatus=clean(order.seller_status).toUpperCase(),shippingStatus=clean(order.shipping_status).toUpperCase();
     if(!(order.delivered_at || sellerStatus==='DELIVERED' || ['DELIVERED','COMPLETE','COMPLETED'].includes(shippingStatus)))throw new Error('order_not_delivered');
     const cancelStatus=clean(order.cancel_status).toUpperCase(),orderStatus=clean(order.order_status).toUpperCase();
@@ -123,9 +125,9 @@ async function confirmPurchaseReward(pool,orderNo){
     const product=money(order.total_product_price),used=money(order.point_used_amount);
     const paidProduct=Math.max(0,product-used);
     // V124: For G-PAY, award the orderform's SAVED reward; never re-rate at confirmation.
-    const isGpay=clean(order.payment_method).toUpperCase()==='GPAY';
-    if(isGpay && clean(order.point_reward_status)!=='PENDING')throw new Error('order_reward_pending_required');
-    const grant=isGpay?money(order.point_reward_pending_amount):rewardForPaidProduct(paidProduct),after=balance+grant;
+    if(clean(order.point_reward_status).toUpperCase()!=='PENDING')throw new Error('order_reward_pending_required');
+    if(order.point_reward_pending_amount===null||order.point_reward_pending_amount===undefined)throw new Error('order_reward_amount_missing');
+    const grant=money(order.point_reward_pending_amount),after=balance+grant;
     if(grant>0){
       await client.query('UPDATE gm_point_balance SET balance_amount=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);
       await client.query(`INSERT INTO gm_point_transaction(member_id,order_no,transaction_at,transaction_type,grant_amount,use_amount,balance_after,description,created_at)

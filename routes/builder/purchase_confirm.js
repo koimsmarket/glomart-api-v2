@@ -17,7 +17,7 @@ router.get('/api/gm/builder/purchase-confirm/candidates',async(req,res)=>{
         AND UPPER(COALESCE(seller_status,'')) NOT IN ('CANCELLED','CANCELED')
         AND UPPER(COALESCE(customer_status,'')) NOT LIKE 'CANCEL_%'
       ORDER BY COALESCE(delivered_at,ordered_at) ASC NULLS LAST,order_no ASC LIMIT $1`,[limit]);
-    const items=q.rows.map(o=>{const product=Number(o.total_product_price||0),used=Number(o.point_used_amount||0),paid=Math.max(0,product-used);return {...o,product_paid_amount:paid,reward_expected:clean(o.payment_method).toUpperCase()==='GPAY'?Number(o.point_reward_pending_amount||0):point.rewardForPaidProduct(paid)};});
+    const items=q.rows.map(o=>{const product=Number(o.total_product_price||0),used=Number(o.point_used_amount||0),paid=Math.max(0,product-used);return {...o,product_paid_amount:paid,reward_expected:clean(o.payment_method).toUpperCase()==='GPAY'?Number(o.point_reward_pending_amount||0):0};});
     res.json({ok:true,count:items.length,items,gpay_api:svc.gpayBase()});
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
