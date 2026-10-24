@@ -6,8 +6,20 @@ const upper=v=>str(v).toUpperCase();
 const sellerFault=new Set(['B','J','F','K']); // delay, wrong delivery, description mismatch, defect
 function quote(order,items,reasonCode){
   const buyerPays=!sellerFault.has(upper(reasonCode));
-  const shipped=['SHIPPING','SHIPPED','IN_TRANSIT','DELIVERED','COMPLETE','COMPLETED'].includes(upper(order.seller_status)) ||
-    ['SHIPPING','SHIPPED','IN_TRANSIT','DELIVERED','COMPLETE','COMPLETED'].includes(upper(order.shipping_status)) || Boolean(order.delivered_at);
+  const shippedStatuses=new Set(['SHIPPING','SHIPPED','IN_TRANSIT','DELIVERED','COMPLETE','COMPLETED']);
+  const preShipStatuses=new Set(['PENDING','PREPARING','READY','READY_TO_ORDER','ORDERED','NOT_SHIPPED']);
+  const orderShipped=shippedStatuses.has(upper(order.seller_status)) || shippedStatuses.has(upper(order.shipping_status)) || Boolean(order.delivered_at);
+  let uncertain=false;
+  function itemShipped(item){
+    const own=upper(item.item_shipping_status);
+    if(shippedStatuses.has(own))return true;
+    if(preShipStatuses.has(own))return false;
+    if(own){uncertain=true;return false;}
+    // Without a recorded per-item shipment state, never assert that all items shipped.
+    // For single-item orders the order status is sufficient; multi-item orders require manual review.
+    if((items||[]).length===1)return orderShipped;
+    uncertain=true;return false;
+  }
   const groups=new Map();
   for(const [index,item] of (items||[]).entries()){
     const t=upper(item.delivery_type||item.shipping_type||'');
@@ -15,17 +27,18 @@ function quote(order,items,reasonCode){
     // Seller delivery: each product kind, not seller account and not ordered quantity.
     const key=type==='SELLER'?'SELLER_ITEM|'+str(item.source_mall||item.mall_code||'')+'|'+str(item.pi_ii_vi||item.product_uid||item.source_uid||'ROW_'+index):type;
     const base=num(item.delivery_fee),remote=num(item.extra_area_delivery_fee);
+    const shipped=itemShipped(item);
     const prev=groups.get(key);
-    if(prev){prev.base=Math.max(prev.base,base);prev.remote=Math.max(prev.remote,remote);prev.count+=1;}
-    else groups.set(key,{key,type,name:type==='SELLER'?str(item.product_name||'판매자배송 상품'):type==='BUNDLE'?'묶음배송':type==='FRESH'?'신선배송':'무료배송',base,remote,count:1});
+    if(prev){prev.base=Math.max(prev.base,base);prev.remote=Math.max(prev.remote,remote);prev.count+=1;prev.shipped=prev.shipped||shipped;}
+    else groups.set(key,{key,type,name:type==='SELLER'?str(item.product_name||'판매자배송 상품'):type==='BUNDLE'?'묶음배송':type==='FRESH'?'신선배송':'무료배송',base,remote,count:1,shipped});
   }
   const rows=Array.from(groups.values()).map(g=>{
     const appliedBase=g.base>0?g.base:3000;
-    const shippingFee=buyerPays&&shipped?2*(appliedBase+g.remote):0;
-    return {key:g.key,type:g.type,name:g.name,base_delivery_fee:appliedBase,extra_area_delivery_fee:g.remote,customer_shipping_fee:shippingFee,items_in_group:g.count};
+    const shippingFee=buyerPays&&g.shipped?2*(appliedBase+g.remote):0;
+    return {key:g.key,type:g.type,name:g.name,base_delivery_fee:appliedBase,extra_area_delivery_fee:g.remote,customer_shipping_fee:shippingFee,items_in_group:g.count,shipped:g.shipped};
   });
   const amount=rows.reduce((s,g)=>s+g.customer_shipping_fee,0);
-  return {reason_code:upper(reasonCode),buyer_fault:buyerPays,shipped,groups:rows,customer_shipping_fee:amount,policy:'(배송비+도서산간배송비)*2 / 기본 배송비 없으면 3000원 / 출고 전 0원',quote_only:true};
+  return {reason_code:upper(reasonCode),buyer_fault:buyerPays,shipped:rows.some(g=>g.shipped),manual_shipping_review:uncertain,groups:rows,customer_shipping_fee:amount,policy:'(배송비+도서산간배송비)*2 / 기본 배송비 없으면 3000원 / 출고 전 0원',quote_only:true};
 }
 // Informational only. This is NOT a payout approval, and does not alter existing refund modules.
 function refundPreview(order,shippingFee,depositUsed){
