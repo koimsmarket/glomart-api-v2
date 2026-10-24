@@ -58,6 +58,8 @@ router.get('/api/gm/order-cs/shipping-quote', async(req,res)=>{
     if(!oq.rows.length)return res.status(404).json({ok:false,error:'order_not_found'});
     const iq=await pool.query('SELECT * FROM gm_order_item WHERE order_no=$1 ORDER BY created_at ASC, pi_ii_vi ASC',[no]);
     const quote=cancelShipping.quote(oq.rows[0],iq.rows,req.query.reason_code);
+    const deposit=await pool.query("SELECT COALESCE(withdraw_amount,0) AS used FROM gm_deposit_transaction WHERE order_no=$1 AND member_id=$2 AND transaction_type='ORDER_USE' ORDER BY transaction_id ASC LIMIT 1",[no,mid]);
+    quote.refund_preview=cancelShipping.refundPreview(oq.rows[0],quote.customer_shipping_fee,deposit.rows[0]&&deposit.rows[0].used);
     console.log('[GM_CANCEL_SHIPPING_QUOTE]',JSON.stringify({order_no:no,reason_code:quote.reason_code,shipping_fee:quote.customer_shipping_fee,group_count:quote.groups.length}));
     return res.json({ok:true,order_no:no,quote});
   }catch(e){console.error('[GM_CANCEL_SHIPPING_QUOTE_ERROR]',String(e&&e.message||e));return res.status(500).json({ok:false,error:'shipping_quote_failed'});}
