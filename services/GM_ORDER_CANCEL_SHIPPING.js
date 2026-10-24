@@ -36,11 +36,14 @@ function quote(order,items,reasonCode){
   }
   const rows=Array.from(groups.values()).map(g=>{
     const appliedBase=g.base>0?g.base:3000;
-    const shippingFee=buyerPays&&g.shipped?2*(appliedBase+g.remote):0;
-    return {key:g.key,type:g.type,name:g.name,base_delivery_fee:appliedBase,extra_area_delivery_fee:g.remote,customer_shipping_fee:shippingFee,items_in_group:g.count,shipped:g.shipped};
+    const roundTripFee=g.shipped?2*(appliedBase+g.remote):0;
+    const shippingFee=buyerPays?roundTripFee:0;
+    const sellerShippingFee=buyerPays?0:roundTripFee;
+    return {key:g.key,type:g.type,name:g.name,base_delivery_fee:appliedBase,extra_area_delivery_fee:g.remote,customer_shipping_fee:shippingFee,seller_shipping_fee:sellerShippingFee,round_trip_shipping_fee:roundTripFee,fee_payer:buyerPays?'CUSTOMER':'SELLER',items_in_group:g.count,shipped:g.shipped};
   });
   const amount=rows.reduce((s,g)=>s+g.customer_shipping_fee,0);
-  return {reason_code:upper(reasonCode),buyer_fault:buyerPays,shipped:rows.some(g=>g.shipped),manual_shipping_review:uncertain,groups:rows,customer_shipping_fee:amount,policy:'(배송비+도서산간배송비)*2 / 기본 배송비 없으면 3000원 / 출고 전 0원',quote_only:true};
+  const sellerAmount=rows.reduce((s,g)=>s+g.seller_shipping_fee,0);
+  return {reason_code:upper(reasonCode),buyer_fault:buyerPays,fee_payer:buyerPays?'CUSTOMER':'SELLER',seller_shipping_fee:sellerAmount,shipped:rows.some(g=>g.shipped),manual_shipping_review:uncertain,groups:rows,customer_shipping_fee:amount,policy:'(배송비+도서산간배송비)*2 / 기본 배송비 없으면 3000원 / 출고 전 0원',quote_only:true};
 }
 // Informational only. This is NOT a payout approval, and does not alter existing refund modules.
 function refundPreview(order,shippingFee,depositUsed){
