@@ -1148,6 +1148,16 @@ async function gmOrderCreateHandler(req, res) {
     const orderAction = await upsertOrder(client, orderRow);
     const itemResult = await replaceOrderItems(client, orderRow, inputItems);
     const taxTotals = await updateOrderTaxTotals(client, orderRow.order_no);
+    // V124: Preserve the orderform's locked-in reward for purchase confirmation.
+    if(gmGpayVerification.applicable){
+      const expectedReward=Number(raw.reward_expected);
+      const paidProduct=Number(orderRow.total_product_price)-gmGpayVerification.pointUsed;
+      if(raw.reward_expected===undefined||!Number.isSafeInteger(expectedReward)||expectedReward<0||expectedReward%10!==0||
+         expectedReward!==gmGpayPointV072.rewardForPaidProduct(paidProduct)){
+        throw new Error('GPAY_ORDERFORM_REWARD_MISMATCH');
+      }
+      await client.query(`UPDATE gm_order SET point_reward_pending_amount=$2,point_reward_status='PENDING',updated_at=NOW() WHERE order_no=$1`,[orderRow.order_no,expectedReward]);
+    }
     // Point debit and order write succeed or roll back together on Glomart DB.
     if(gmGpayVerification.applicable){
       await gmGpayPointV072.applyOrderPointInTransaction(client,{

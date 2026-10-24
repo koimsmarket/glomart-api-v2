@@ -113,7 +113,7 @@ async function confirmPurchaseReward(pool,orderNo){
     if(['CANCELLED','CANCELED'].includes(sellerStatus) || ['CANCELLED','CANCELED'].includes(orderStatus) || ['CANCELLED','CANCELED'].includes(cancelStatus) || /^CANCEL_/.test(cancelStatus) || /^CANCEL_/.test(clean(order.customer_status).toUpperCase()))throw new Error('order_cancelled');
     const old=await client.query(`SELECT * FROM gm_point_transaction WHERE order_no=$1 AND transaction_type='PURCHASE_CONFIRM_GRANT' LIMIT 1`,[orderNo]);
     if(old.rows.length){
-      await client.query(`UPDATE gm_order SET customer_status='PURCHASE_CONFIRMED',purchase_confirmed_yn='Y',purchase_confirmed_at=COALESCE(purchase_confirmed_at,NOW()),point_granted_amount=$2,updated_at=NOW() WHERE order_no=$1`,[orderNo,money(old.rows[0].grant_amount)]);
+      await client.query(`UPDATE gm_order SET customer_status='PURCHASE_CONFIRMED',purchase_confirmed_yn='Y',purchase_confirmed_at=COALESCE(purchase_confirmed_at,NOW()),point_granted_amount=$2,point_reward_status=CASE WHEN UPPER(COALESCE(payment_method,''))='GPAY' THEN 'GRANTED' ELSE point_reward_status END,updated_at=NOW() WHERE order_no=$1`,[orderNo,money(old.rows[0].grant_amount)]);
       await client.query('COMMIT');
       return {ok:true,idempotent:true,order_no:orderNo,member_id:memberId,point_granted_amount:money(old.rows[0].grant_amount),point_balance_after:money(old.rows[0].balance_after)};
     }
@@ -122,14 +122,17 @@ async function confirmPurchaseReward(pool,orderNo){
     const balance=await ensureBalance(client,memberId,mq.rows[0].point_balance);
     const product=money(order.total_product_price),used=money(order.point_used_amount);
     const paidProduct=Math.max(0,product-used);
-    const grant=rewardForPaidProduct(paidProduct),after=balance+grant;
+    // V124: For G-PAY, award the orderform's SAVED reward; never re-rate at confirmation.
+    const isGpay=clean(order.payment_method).toUpperCase()==='GPAY';
+    if(isGpay && clean(order.point_reward_status)!=='PENDING')throw new Error('order_reward_pending_required');
+    const grant=isGpay?money(order.point_reward_pending_amount):rewardForPaidProduct(paidProduct),after=balance+grant;
     if(grant>0){
       await client.query('UPDATE gm_point_balance SET balance_amount=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);
       await client.query(`INSERT INTO gm_point_transaction(member_id,order_no,transaction_at,transaction_type,grant_amount,use_amount,balance_after,description,created_at)
         VALUES($1,$2,NOW(),'PURCHASE_CONFIRM_GRANT',$3,0,$4,$5,NOW())`,[memberId,orderNo,grant,after,'구매확정 3% 적립']);
       await client.query('UPDATE gm_member SET point_balance=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);
     }
-    await client.query(`UPDATE gm_order SET customer_status='PURCHASE_CONFIRMED',purchase_confirmed_yn='Y',purchase_confirmed_at=COALESCE(purchase_confirmed_at,NOW()),point_granted_amount=$2,updated_at=NOW() WHERE order_no=$1`,[orderNo,grant]);
+    await client.query(`UPDATE gm_order SET customer_status='PURCHASE_CONFIRMED',purchase_confirmed_yn='Y',purchase_confirmed_at=COALESCE(purchase_confirmed_at,NOW()),point_granted_amount=$2,point_reward_status=CASE WHEN UPPER(COALESCE(payment_method,''))='GPAY' THEN 'GRANTED' ELSE point_reward_status END,updated_at=NOW() WHERE order_no=$1`,[orderNo,grant]);
     await client.query('COMMIT');
     return {ok:true,order_no:orderNo,member_id:memberId,product_amount:product,point_used_amount:used,product_paid_amount:paidProduct,reward_rate:REWARD_RATE,point_granted_amount:grant,point_balance_after:after};
   }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
