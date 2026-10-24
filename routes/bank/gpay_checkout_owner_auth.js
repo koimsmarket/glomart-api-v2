@@ -58,7 +58,7 @@ router.post('/api/gm/gpay/checkout-owner-auth', async (req,res) => {
     attempts.delete(key);
     console.info('[GM_GPAY_OWNER_AUTH_V057] OWNER_VERIFIED');
     return res.json({ok:true,member_id:row.member_id,certificate_owner_token:data.certificate_owner_token,expires_in:300});
-  }catch(e){console.error('[GM_GPAY_OWNER_AUTH_V114] ERROR type='+s(e.name));return fail(res,e.message==='PIN_HASH_PROVIDER_UNAVAILABLE'?'PIN_HASH_PROVIDER_UNAVAILABLE':e.message==='PIN_LOCKED'?'PIN_LOCKED':'GPAY_OWNER_AUTH_UNAVAILABLE',e.status||502);}
+  }catch(e){const code=e.message==='PIN_HASH_PROVIDER_UNAVAILABLE'?'PIN_HASH_PROVIDER_UNAVAILABLE':e.message==='PIN_LOCKED'?'PIN_LOCKED':'GPAY_OWNER_AUTH_UNAVAILABLE';console.error('[GM_GPAY_OWNER_AUTH_V116] VERIFY_ERROR code='+code+' type='+s(e.name));return fail(res,code,e.status||502);}
 });
 // V114: registration requires existing member password; no logged-in session alone can register a PIN.
 router.post('/api/gm/gpay/transaction-pin/register',async(req,res)=>{
@@ -67,6 +67,6 @@ router.post('/api/gm/gpay/transaction-pin/register',async(req,res)=>{
     const db=req.app.locals.pool;if(!db)return fail(res,'MEMBER_DB_UNAVAILABLE',503);
     const v=await Credential.register(db,req.body||{});
     res.json({ok:true,registered:v.registered,pin_version:v.pin_version});
-  }catch(e){return fail(res,e.message==='PIN_HASH_PROVIDER_UNAVAILABLE'?'PIN_HASH_PROVIDER_UNAVAILABLE':e.message==='INVALID_CREDENTIALS'?'INVALID_CREDENTIALS':'PIN_REGISTER_FAILED',e.status||500);}
+  }catch(e){const code=e.message==='PIN_HASH_PROVIDER_UNAVAILABLE'?'PIN_HASH_PROVIDER_UNAVAILABLE':e.message==='INVALID_CREDENTIALS'?'INVALID_CREDENTIALS':'PIN_REGISTER_FAILED';console.error('[GM_GPAY_OWNER_AUTH_V116] PIN_REGISTER_ERROR code='+code+' type='+s(e.name));return fail(res,code,e.status||500);}
 });
 module.exports=router;

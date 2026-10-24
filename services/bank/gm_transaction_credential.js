@@ -7,7 +7,7 @@ const memberRe=/^[A-Za-z0-9._@-]{2,80}$/;
 const pinRe=/^[0-9]{6}$/;
 const allowedPurpose=new Set(['PAYMENT','TRANSFER']);
 const s=v=>String(v==null?'':v).trim();
-function unavailable(){const e=Error('PIN_HASH_PROVIDER_UNAVAILABLE');e.status=503;throw e;}
+function unavailable(){console.error('[GM_TRANSACTION_CREDENTIAL] PIN_PROVIDER_UNAVAILABLE module=argon2 installed=N');const e=Error('PIN_HASH_PROVIDER_UNAVAILABLE');e.status=503;throw e;}
 async function checkMemberPassword(db,mid,pw){
   if(!memberRe.test(mid)||typeof pw!=='string'||pw.length<8||pw.length>256)return false;
   const {rows}=await db.query('SELECT password_hash FROM public.gm_member WHERE member_id=$1 LIMIT 1',[mid]);
