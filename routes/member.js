@@ -876,6 +876,55 @@ router.post('/api/gm/member/auth/bootstrap-login',async(req,res)=>{
   }finally{if(client)client.release();}
 });
 
+
+/* GM_AGENT_LOGIN_V002: attach an agency credential only after existing hash verification succeeds.
+ * The Cafe24 login flow, password hashing, and Guppy lifetime identity are unchanged.
+ * Validation always compares the agency owner against G-PAY's CURRENT ACTIVE assignment.
+ */
+const gmAgentBase=()=>String(process.env.GPAY_API_BASE_URL||'').trim().replace(/\/$/,'');
+const gmAgentCaller=()=>String(process.env.GPAY_TRUSTED_CALLER_KEY||'').trim();
+function gmAgentSessionKey(){const k=gmAgentCaller();return k.length>=32?crypto.createHmac('sha256',k).update('GLOMART_AGENT_SESSION_V002').digest():null;}
+async function gmAgentAssignment(memberId){
+  const base=gmAgentBase(),caller=gmAgentCaller();
+  if(!base||caller.length<32)throw new Error('AGENT_BRIDGE_UNCONFIGURED');
+  const url=base+'/api/gpay/customer-agents/internal/member-assignment?member_id='+encodeURIComponent(memberId);
+  const response=await fetch(url,{headers:{'Accept':'application/json','x-gpay-trusted-caller':caller},signal:AbortSignal.timeout(5000)});
+  if(!response.ok)throw new Error('AGENT_LOOKUP_HTTP_'+response.status);
+  const result=await response.json();
+  if(!result||result.ok!==true)throw new Error('AGENT_LOOKUP_BAD_REPLY');
+  return result;
+}
+function gmAgentSessionCreate(memberId,agencyId){
+  const secret=gmAgentSessionKey();if(!secret)throw new Error('AGENT_SIGNING_KEY_MISSING');
+  const issued=Math.floor(Date.now()/1000);
+  const body=Buffer.from(JSON.stringify({v:2,sub:memberId,agent:String(agencyId),iat:issued,exp:issued+365*86400,jti:crypto.randomBytes(12).toString('hex')})).toString('base64url');
+  const signature=crypto.createHmac('sha256',secret).update(body).digest('base64url');
+  return body+'.'+signature;
+}
+function gmAgentSessionDecode(token){
+  if(typeof token!=='string'||token.length>2048||!/^[-_A-Za-z0-9]+\.[-_A-Za-z0-9]+$/.test(token))return null;
+  const parts=token.split('.'),key=gmAgentSessionKey();if(!key)return null;
+  const expected=crypto.createHmac('sha256',key).update(parts[0]).digest();
+  let supplied;try{supplied=Buffer.from(parts[1],'base64url')}catch(_e){return null}
+  if(expected.length!==supplied.length||!crypto.timingSafeEqual(expected,supplied))return null;
+  try{
+    const obj=JSON.parse(Buffer.from(parts[0],'base64url').toString('utf8'));
+    const now=Math.floor(Date.now()/1000);
+    if(obj.v!==2||!obj.sub||!/^\d+$/.test(String(obj.agent||''))||!obj.iat||obj.iat>now+60||obj.exp<=now)return null;
+    return obj;
+  }catch(_e){return null;}
+}
+router.post('/api/gm/member/agent-session/verify',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const claims=gmAgentSessionDecode(req.body&&req.body.token);
+  if(!claims)return res.status(401).json({ok:false,active:false,error:'AGENT_SESSION_INVALID'});
+  try{
+    const assigned=await gmAgentAssignment(claims.sub);
+    const active=!!assigned.assigned&&String(assigned.agency_id)===String(claims.agent);
+    return res.status(active?200:403).json({ok:active,active,agency_id:active?claims.agent:null,error:active?undefined:'AGENT_PERMISSION_REVOKED'});
+  }catch(_e){return res.status(503).json({ok:false,active:false,error:'AGENT_AUTH_UNAVAILABLE'});}
+});
+
 router.post('/api/gm/member/auth/verify',async(req,res)=>{
   console.info('[GM_MEMBER_AUTH_TRACE_V022] stage=05_VERIFY_API_ENTER');
   const x=gmAuthInput(req.body||{});
@@ -886,7 +935,19 @@ router.post('/api/gm/member/auth/verify',async(req,res)=>{
     if(!q.rows[0]||!q.rows[0].password_hash){console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=05_VERIFY_RESULT result=HASH_NOT_REGISTERED member_found='+Boolean(q.rows[0]));return gmAuthError(res,404,'HASH_NOT_REGISTERED');}
     const valid=await gmVerifyHash(x.password,q.rows[0].password_hash);
     console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=05_VERIFY_RESULT result='+(valid?'VERIFIED':'INVALID_CREDENTIALS'));
-    return res.status(valid?200:401).json({ok:valid,authenticated:valid,error:valid?undefined:'INVALID_CREDENTIALS'});
+    if(!valid)return res.status(401).json({ok:false,authenticated:false,error:'INVALID_CREDENTIALS'});
+    res.set('Cache-Control','no-store');
+    try{
+      const assignment=await gmAgentAssignment(x.memberId);
+      if(!assignment.assigned)return res.json({ok:true,authenticated:true,agent_assigned:false});
+      const token=gmAgentSessionCreate(x.memberId,assignment.agency_id);
+      console.info('[GM_AGENT_LOGIN_V002] stage=ISSUED agency_id='+String(assignment.agency_id));
+      return res.json({ok:true,authenticated:true,agent_assigned:true,agency_id:String(assignment.agency_id),agency_name:String(assignment.agency_name||''),agent_session:token});
+    }catch(err){
+      // Failure of the separate agent service must never reject a verified ordinary member login.
+      console.warn('[GM_AGENT_LOGIN_V002] stage=LOOKUP_UNAVAILABLE type='+String(err&&err.message||'ERROR').slice(0,65));
+      return res.json({ok:true,authenticated:true,agent_assigned:null,agent_error:'AGENT_AUTH_UNAVAILABLE'});
+    }
   }catch(e){console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'VERIFY_FAILED');}
 });
 router.post('/api/gm/member/auth/change-password',async(req,res)=>{
