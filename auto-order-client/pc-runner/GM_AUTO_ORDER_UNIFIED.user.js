@@ -63,7 +63,7 @@ const LEGACY_JOB_KEYS=['gmao_runner_job_v062'];
 const LEGACY_FLOW_KEYS=['gmao_cpkr_flow_v066','gmao_cpkr_flow_v062'];
 const LEGACY_BATCH_KEYS=['gmao_cpkr_batch_v066','gmao_cpkr_batch_v062'];
 const ST={BATCH_SCAN:'BATCH_SCAN',BATCH_CLEAR:'BATCH_CLEAR',ORDER_START:'ORDER_START',SINGLE:'SINGLE',MULTI_PRODUCT:'MULTI_PRODUCT',MULTI_PRODUCT_PENDING:'MULTI_PRODUCT_PENDING',MULTI_SNAPSHOT:'MULTI_SNAPSHOT',MULTI_COMPARE:'MULTI_COMPARE',MULTI_ADJUST:'MULTI_ADJUST',MULTI_REPAIR:'MULTI_REPAIR',MULTI_FINAL_SNAPSHOT:'MULTI_FINAL_SNAPSHOT',MULTI_CHECKOUT:'MULTI_CHECKOUT',CHECKOUT_PENDING:'CHECKOUT_PENDING',CHECKOUT:'CHECKOUT',STOPPED:'STOPPED',FAILED:'FAILED',BLOCKED:'BLOCKED'};
-const STALE=new Set(['work_not_found','work_lock_invalid','work_lock_invalid_or_expired','work_not_running','work_cancelled_by_customer']);
+const STALE=new Set(['work_not_found','work_lock_invalid','work_lock_invalid_or_expired','work_not_running','work_cancelled_by_customer','work_on_hold_customer_cancel_request']);
 function restoreLocalJob(){
   // V062 briefly used a versioned job key. Prefer that key once during
   // migration because it may hold the currently RUNNING server lock.
@@ -363,9 +363,9 @@ async function fail(e){
   const st=flow().stage||'';
 
   if(STALE.has(code)){
-    if(code==='work_cancelled_by_customer'){
+    if(code==='work_cancelled_by_customer'||code==='work_on_hold_customer_cancel_request'){
       clearLocal();
-      render('고객 취소 확인 · 현재 작업 종료\n'+code,true);
+      render('주문취소 확인 · Runner 작업 즉시 중단 · 재발주 금지\n'+code,true);
       return;
     }
 
@@ -452,7 +452,7 @@ async function claim(){
     }catch(e){
       if(!STALE.has(errCode(e)))throw e;
       const stale=errCode(e);
-      if(stale!=='work_cancelled_by_customer' && await reclaimSameWorkAfterStale(stale)){
+      if(stale!=='work_cancelled_by_customer' && stale!=='work_on_hold_customer_cancel_request' && await reclaimSameWorkAfterStale(stale)){
         return job;
       }
       clearLocal();

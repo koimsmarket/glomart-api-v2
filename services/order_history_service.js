@@ -316,7 +316,7 @@ async function action(pool, options){
   const memberId = text(options && options.member_id);
   const orderNo = text(options && options.order_no);
   const requestedAction = text(options && options.action);
-  const actionName = requestedAction==='direct_cancel'?'cancel_request':requestedAction;
+  let actionName = requestedAction; // V002: distinguish confirmed pre-dispatch cancellation from manual requests.
   const reasonCode = text(options && options.reason_code);
   let reasonText = text(options && options.reason_text);
   const refundMethod = upper(options && options.refund_method);
@@ -334,7 +334,30 @@ async function action(pool, options){
     const normalized = normalizeOrder(rows[0], itemRows);
     if(normalized.source_type === 'CAFE24') throw new Error('cafe24_action_must_use_cafe24_bridge');
     if(normalized.source_type === 'MIXED') throw new Error('mixed_order_requires_item_selection');
-    // Initial operations are manual: legacy direct_cancel becomes request-only.
+    // GM_AUTO_ORDER_CANCEL_V002: gm_order row is already locked; order-row locking is
+    // the serialization point for CS cancellation and final pre-payment validation.
+    // Only unclaimed/queued jobs and demonstrably unplaced orders qualify for
+    // immediate cancellation. Active, unknown or already placed orders NEVER do.
+    let preDispatchDecision='NOT_APPLICABLE';
+    if(requestedAction==='direct_cancel'){
+      const ao=(await client.query(`SELECT auto_order_no,order_status,process_status,mall_order_no
+        FROM gm_auto_order WHERE order_no=$1 ORDER BY auto_order_no FOR UPDATE`,[orderNo])).rows;
+      const autoNos=ao.map(x=>x.auto_order_no);
+      const workRows=autoNos.length?(await client.query(`SELECT work_id,work_status
+        FROM gm_auto_order_work WHERE auto_order_no = ANY($1) ORDER BY work_id FOR UPDATE`,[autoNos])).rows:[];
+      const outbound=ao.some(x=>text(x.mall_order_no)||['ORDERED','COMPLETED'].includes(upper(x.order_status)) || upper(x.process_status)==='COMPLETED');
+      // RUNNING and PAYMENT_WAITING may represent a submitted order with delayed reporting.
+      const uncertain=ao.some(x=>!['','WAIT_PAYMENT','READY','PENDING','CANCELLED'].includes(upper(x.process_status)) || !['','NOT_ORDERED','CANCELLED'].includes(upper(x.order_status))) || workRows.some(x=>['RUNNING','PAYMENT_WAITING','COMPLETED'].includes(upper(x.work_status)));
+      const unsafeSeller=!['READY_TO_ORDER','ORDERED'].includes(upper(rows[0].seller_status||'READY_TO_ORDER')) || (!ao.length && upper(rows[0].seller_status)==='ORDERED');
+      if(outbound||uncertain||unsafeSeller){
+        actionName='cancel_request';
+        preDispatchDecision=outbound?'MALL_ORDER_EXISTS':uncertain?'RUNNER_OR_PAYMENT_UNCERTAIN':'SELLER_STATUS_UNCERTAIN';
+      }else{
+        actionName='direct_cancel';
+        preDispatchDecision='CONFIRMED_NOT_DISPATCHED';
+      }
+      console.log('[GM_PRE_DISPATCH_CANCEL_DECISION_V002]',JSON.stringify({order_no:orderNo,decision:preDispatchDecision,auto_orders:ao.length,works:workRows.length}));
+    }
     if(requestedAction==='direct_cancel') assertAllowed(normalized,'direct_cancel');
     else assertAllowed(normalized,actionName);
     let selectedItems=null;
@@ -489,6 +512,20 @@ async function action(pool, options){
       );
     }
 
+    // V002: A cancellation request is already authoritative for stopping
+    // uncompleted Runner operations, even when refund/CS completion is pending.
+    // Do not touch completed jobs or claim a placed Coupang order was cancelled.
+    if(actionName==='cancel_request'){
+      await client.query(`UPDATE gm_auto_order_work w SET
+          work_status='CANCELLED', lock_token=NULL,lock_admin_id=NULL,
+          lock_mall_account_id=NULL,lock_at=NULL,lock_expires_at=NULL,
+          error_code='CUSTOMER_CANCEL_HOLD',
+          error_message='CS 취소 접수: 재발주 금지, 관리자 결제/발주 확인 필요',updated_at=NOW()
+        FROM gm_auto_order a WHERE w.auto_order_no=a.auto_order_no AND a.order_no=$1
+        AND UPPER(COALESCE(w.work_status,'')) NOT IN ('COMPLETED','CANCELLED')`,[orderNo]);
+      console.warn('[GM_PRE_DISPATCH_CANCEL_HOLD_V002]',JSON.stringify({order_no:orderNo,reason:preDispatchDecision}));
+    }
+
     /*
      * [CANCEL REFUND ROUTING]
      * BANK: validate gm_member.refund_* and leave refund_status=PENDING.
@@ -544,7 +581,7 @@ async function action(pool, options){
     }
 
     await client.query('COMMIT');
-    return { action:actionName, order:updated, refund:refundResult, message_event:messageEvent, message_event_error:messageEventError, photo_round:csPhotoRound };
+    return { action:actionName, pre_dispatch_decision:preDispatchDecision, order:updated, refund:refundResult, message_event:messageEvent, message_event_error:messageEventError, photo_round:csPhotoRound };
   }catch(error){
     try{ await client.query('ROLLBACK'); }catch(_){}
     throw error;
