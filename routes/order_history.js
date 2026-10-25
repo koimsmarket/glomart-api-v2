@@ -15,8 +15,8 @@ function statusFor(error){
   const m = clean(error && error.message || error);
   if(['member_id_required','order_no_required','action_required','unsupported_action','refund_method_required','refund_amount_required','shipping_fee_confirmation_required','shipping_quote_changed','cs_selection_required','cs_selection_invalid'].includes(m)) return 400;
   if(m === 'order_not_found') return 404;
-  if(['action_not_allowed_for_current_status','cafe24_action_must_use_cafe24_bridge','mixed_order_requires_item_selection','deposit_refund_already_applied','purchase_already_confirmed','cs_request_deadline_passed'].includes(m)) return 409;
-  if(['refund_account_not_registered','member_not_found','deposit_balance_not_found','fresh_cs_deadline_not_available','delivery_time_unverified'].includes(m)) return 422;
+  if(['action_not_allowed_for_current_status','cafe24_action_must_use_cafe24_bridge','mixed_order_requires_item_selection','deposit_refund_already_applied','purchase_already_confirmed','cs_request_deadline_passed','fresh_cs_reason_manual_inquiry_required'].includes(m)) return 409;
+  if(['refund_account_not_registered','member_not_found','deposit_balance_not_found','fresh_cs_deadline_not_available','fresh_cs_deadline_invalid','delivery_time_unverified'].includes(m)) return 422;
   return 500;
 }
 
@@ -62,7 +62,7 @@ router.get('/api/gm/order-cs/shipping-quote', async(req,res)=>{
     let quotedItems=iq.rows;
     if(['exchange_request','return_request'].includes(csAction)){
       const raw=JSON.parse(clean(req.query.selected_items)||'[]');
-      quotedItems=service.selectCsItemsForQuote(oq.rows[0],iq.rows,raw);
+      quotedItems=service.selectCsItemsForQuote(oq.rows[0],iq.rows,raw,req.query.reason_code);
     }
     const quote=cancelShipping.quote(oq.rows[0],quotedItems,req.query.reason_code);
     const deposit=await pool.query("SELECT COALESCE(withdraw_amount,0) AS used FROM gm_deposit_transaction WHERE order_no=$1 AND member_id=$2 AND transaction_type='ORDER_USE' ORDER BY transaction_id ASC LIMIT 1",[no,mid]);
@@ -72,7 +72,7 @@ router.get('/api/gm/order-cs/shipping-quote', async(req,res)=>{
     quote.refund_preview=cancelShipping.refundPreview(oq.rows[0],quote.customer_shipping_fee,deposit.rows[0]&&deposit.rows[0].used);
     console.log('[GM_CANCEL_SHIPPING_QUOTE]',JSON.stringify({order_no:no,reason_code:quote.reason_code,shipping_fee:quote.customer_shipping_fee,group_count:quote.groups.length}));
     return res.json({ok:true,order_no:no,quote});
-  }catch(e){console.error('[GM_CANCEL_SHIPPING_QUOTE_ERROR]',String(e&&e.message||e));return res.status(500).json({ok:false,error:'shipping_quote_failed'});}
+  }catch(e){console.error('[GM_CANCEL_SHIPPING_QUOTE_ERROR]',String(e&&e.message||e));return res.status(statusFor(e)).json({ok:false,error:String(e&&e.message||e)});}
 });
 
 router.post('/api/gm/order-cs/action', async (req, res) => {

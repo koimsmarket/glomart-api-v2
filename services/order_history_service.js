@@ -267,18 +267,39 @@ function selectCsItems(order, rows, requested){
   }
   return selected;
 }
-function verifyCsDeadline(order,selected){
+// Fresh food: complaint intake is distinct from approval, collection, disposal or refund.
+// Seller-specified deadline is consulted only if it is actually present in the order snapshot.
+function freshComplaintReview(order,selected,reasonCode){
+  const fresh=selected.filter(x=>upper(x.item.delivery_type||x.item.shipping_type).includes('FRESH'));
+  if(!fresh.length)return [];
+  // Pure buyer remorse / subjective dissatisfaction is not automatically eligible for a fresh-food claim.
+  if(!['B','J','F','K'].includes(upper(reasonCode)))throw new Error('fresh_cs_reason_manual_inquiry_required');
+  const now=Date.now(),review=[];
+  for(const x of fresh){
+    const item=x.item;
+    const deadline=item.fresh_cs_deadline_at||item.fresh_return_deadline_at||item.cs_deadline_at||null;
+    if(deadline){
+      const ts=new Date(deadline).getTime();
+      if(!Number.isFinite(ts))throw new Error('fresh_cs_deadline_invalid');
+      if(now>ts)throw new Error('cs_request_deadline_passed');
+      review.push({item:text(item.pi_ii_vi),status:'FRESH_CLAIM_REVIEW',deadline_status:'IN_DEADLINE'});
+    }else{
+      review.push({item:text(item.pi_ii_vi),status:'FRESH_CLAIM_REVIEW',deadline_status:'UNVERIFIED'});
+    }
+  }
+  return review;
+}
+function verifyCsDeadline(order,selected,reasonCode){
   if(upper(order.purchase_confirmed_yn)==='Y'||order.purchase_confirmed_at||upper(order.customer_status)==='PURCHASE_CONFIRMED')throw new Error('purchase_already_confirmed');
-  const now=Date.now();
+  const reviews=freshComplaintReview(order,selected,reasonCode),now=Date.now();
   for(const x of selected){
     const i=x.item,type=upper(i.delivery_type||i.shipping_type);
-    // Existing order item schema has no seller-defined fresh-product CS deadline. Fail closed.
-    if(type.includes('FRESH'))throw new Error('fresh_cs_deadline_not_available');
+    if(type.includes('FRESH'))continue;
     const delivered=i.shipping_completed_at||order.delivered_at;
     if(!delivered||!Number.isFinite(new Date(delivered).getTime()))throw new Error('delivery_time_unverified');
-    const until=new Date(delivered).getTime()+7*24*60*60*1000;
-    if(now>until)throw new Error('cs_request_deadline_passed');
+    if(now>new Date(delivered).getTime()+7*24*60*60*1000)throw new Error('cs_request_deadline_passed');
   }
+  return reviews;
 }
 function csSelectionSummary(selected,reasonText){
   const lines=selected.map(x=>text(x.item.pi_ii_vi)+':'+x.quantity);
@@ -319,8 +340,12 @@ async function action(pool, options){
     let selectedItems=null;
     if(['exchange_request','return_request'].includes(actionName)){
       selectedItems=selectCsItems(rows[0],itemRows,options.selected_items);
-      verifyCsDeadline(rows[0],selectedItems);
+      const freshReviews=verifyCsDeadline(rows[0],selectedItems,reasonCode);
       reasonText=csSelectionSummary(selectedItems,reasonText);
+      if(freshReviews.length){
+        reasonText+='\n[GM_FRESH_CLAIM_REVIEW_V001] '+JSON.stringify(freshReviews);
+        console.log('[GM_FRESH_CLAIM_INTAKE]',JSON.stringify({order_no:orderNo,action:actionName,review:freshReviews}));
+      }
     }
     if(['cancel_request','exchange_request','return_request'].includes(actionName)){
       if(options.shipping_fee_ack!==true) throw new Error('shipping_fee_confirmation_required');
@@ -526,9 +551,9 @@ async function action(pool, options){
   }finally{ release(); }
 }
 
-function selectCsItemsForQuote(order,rows,selection){
+function selectCsItemsForQuote(order,rows,selection,reasonCode){
   const chosen=selectCsItems(order,rows,selection);
-  verifyCsDeadline(order,chosen);
+  verifyCsDeadline(order,chosen,reasonCode);
   return chosen.map(x=>x.item);
 }
 module.exports = { VERSION, list, detail, action, normalizeOrder, actionsFor, selectCsItemsForQuote };
