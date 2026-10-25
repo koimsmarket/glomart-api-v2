@@ -32,6 +32,7 @@ function actionsFor(order, normalizedItems){
   const source = orderSource(normalizedItems);
   const seller = upper(order.seller_status) || 'READY_TO_ORDER';
   const customer = upper(order.customer_status) || 'NONE';
+  const confirmed=upper(order.purchase_confirmed_yn)==='Y'||Boolean(order.purchase_confirmed_at)||customer==='PURCHASE_CONFIRMED';
   const hasTracking = normalizedItems.some((x) => text(x.tracking_number));
   const actions = {
     direct_cancel:false, cancel_request:false, cancel_withdraw:false,
@@ -51,8 +52,8 @@ function actionsFor(order, normalizedItems){
 
   actions.direct_cancel = ['READY_TO_ORDER','ORDERED'].includes(seller);
   actions.cancel_request = ['PREPARING','SHIPPING','SHIPPED','IN_TRANSIT'].includes(seller);
-  actions.exchange_request = seller === 'DELIVERED';
-  actions.return_request = ['SHIPPING','SHIPPED','IN_TRANSIT','DELIVERED'].includes(seller);
+  actions.exchange_request = !confirmed && seller === 'DELIVERED';
+  actions.return_request = !confirmed && ['SHIPPING','SHIPPED','IN_TRANSIT','DELIVERED'].includes(seller);
   actions.purchase_confirm = seller === 'DELIVERED';
   return actions;
 }
@@ -85,6 +86,8 @@ function displayStatus(order, items){
 function normalizeItem(item){
   return {
     order_no: text(item.order_no),
+    pi_ii_vi: text(item.pi_ii_vi),
+    shipping_completed_at: item.shipping_completed_at || null,
     cafe24_order_no: text(item.cafe24_order_no),
     source_type: sourceType(item),
     source_mall: text(item.source_mall || item.mall_code),
@@ -252,6 +255,36 @@ async function detail(pool, options){
   return out;
 }
 
+// Existing gm_order_item primary key (order_no, pi_ii_vi): no additional table.
+function selectCsItems(order, rows, requested){
+  if(!Array.isArray(requested)||!requested.length||requested.length>rows.length)throw new Error('cs_selection_required');
+  const byKey=new Map(rows.map(i=>[text(i.pi_ii_vi),i]));
+  const seen=new Set(),selected=[];
+  for(const v of requested){
+    const key=text(v&&v.pi_ii_vi),qty=Number(v&&v.quantity),i=byKey.get(key);
+    if(!key||seen.has(key)||!i||!Number.isSafeInteger(qty)||qty<1||qty>int(i.quantity,0))throw new Error('cs_selection_invalid');
+    seen.add(key);selected.push({item:i,quantity:qty});
+  }
+  return selected;
+}
+function verifyCsDeadline(order,selected){
+  if(upper(order.purchase_confirmed_yn)==='Y'||order.purchase_confirmed_at||upper(order.customer_status)==='PURCHASE_CONFIRMED')throw new Error('purchase_already_confirmed');
+  const now=Date.now();
+  for(const x of selected){
+    const i=x.item,type=upper(i.delivery_type||i.shipping_type);
+    // Existing order item schema has no seller-defined fresh-product CS deadline. Fail closed.
+    if(type.includes('FRESH'))throw new Error('fresh_cs_deadline_not_available');
+    const delivered=i.shipping_completed_at||order.delivered_at;
+    if(!delivered||!Number.isFinite(new Date(delivered).getTime()))throw new Error('delivery_time_unverified');
+    const until=new Date(delivered).getTime()+7*24*60*60*1000;
+    if(now>until)throw new Error('cs_request_deadline_passed');
+  }
+}
+function csSelectionSummary(selected,reasonText){
+  const lines=selected.map(x=>text(x.item.pi_ii_vi)+':'+x.quantity);
+  // Persist selection in existing gm_order.cs_reason_text, without a schema migration.
+  return [text(reasonText),'[GM_CS_SELECTED_ITEMS_V001] '+JSON.stringify(lines)].filter(Boolean).join('\n');
+}
 function assertAllowed(order, actionName){
   const allowed = order.actions || {};
   if(!Object.prototype.hasOwnProperty.call(allowed, actionName)) throw new Error('unsupported_action');
@@ -264,7 +297,7 @@ async function action(pool, options){
   const requestedAction = text(options && options.action);
   const actionName = requestedAction==='direct_cancel'?'cancel_request':requestedAction;
   const reasonCode = text(options && options.reason_code);
-  const reasonText = text(options && options.reason_text);
+  let reasonText = text(options && options.reason_text);
   const refundMethod = upper(options && options.refund_method);
   if(!memberId) throw new Error('member_id_required');
   if(!orderNo) throw new Error('order_no_required');
@@ -283,9 +316,15 @@ async function action(pool, options){
     // Initial operations are manual: legacy direct_cancel becomes request-only.
     if(requestedAction==='direct_cancel') assertAllowed(normalized,'direct_cancel');
     else assertAllowed(normalized,actionName);
+    let selectedItems=null;
+    if(['exchange_request','return_request'].includes(actionName)){
+      selectedItems=selectCsItems(rows[0],itemRows,options.selected_items);
+      verifyCsDeadline(rows[0],selectedItems);
+      reasonText=csSelectionSummary(selectedItems,reasonText);
+    }
     if(['cancel_request','exchange_request','return_request'].includes(actionName)){
       if(options.shipping_fee_ack!==true) throw new Error('shipping_fee_confirmation_required');
-      const q=cancelShipping.quote(rows[0],itemRows,reasonCode);
+      const q=cancelShipping.quote(rows[0],selectedItems?selectedItems.map(x=>x.item):itemRows,reasonCode);
       if(q.manual_shipping_review){
         console.warn('[GM_CS_SHIPPING_REVIEW_REQUIRED]', JSON.stringify({order_no:orderNo,action:actionName,reason_code:reasonCode}));
         throw new Error('shipping_status_manual_review_required');
@@ -467,4 +506,9 @@ async function action(pool, options){
   }finally{ release(); }
 }
 
-module.exports = { VERSION, list, detail, action, normalizeOrder, actionsFor };
+function selectCsItemsForQuote(order,rows,selection){
+  const chosen=selectCsItems(order,rows,selection);
+  verifyCsDeadline(order,chosen);
+  return chosen.map(x=>x.item);
+}
+module.exports = { VERSION, list, detail, action, normalizeOrder, actionsFor, selectCsItemsForQuote };

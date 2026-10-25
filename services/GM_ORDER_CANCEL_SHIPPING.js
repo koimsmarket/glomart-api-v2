@@ -13,11 +13,13 @@ function quote(order,items,reasonCode){
   let uncertain=false;
   function itemShipped(item){
     const own=upper(item.item_shipping_status);
+    if(item.shipping_completed_at)return true;
     if(shippedStatuses.has(own))return true;
     if(preShipStatuses.has(own))return false;
     if(own){uncertain=true;return false;}
     // Without a recorded per-item shipment state, never assert that all items shipped.
     // For single-item orders the order status is sufficient; multi-item orders require manual review.
+    if(orderShipped && upper(order.seller_status)==='DELIVERED')return true;
     if(orderPreShip)return false; // Order-wide confirmed pre-shipment is sufficient even for multiple items.
     if((items||[]).length===1)return orderShipped;
     uncertain=true;return false;
