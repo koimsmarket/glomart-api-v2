@@ -90,6 +90,15 @@ router.post(
   }
 );
 
+// Last server confirmation before the Runner reaches the payment button.
+router.post('/api/auto-order/runtime/work/:work_id/pre-payment-check', async (req,res) => {
+  try {
+    return ok(res, { gate: await works.prePaymentCheck(pool(req), req.params.work_id, req.body || {}) });
+  } catch(error) {
+    return fail(res, 409, 'pre_payment_check_failed', error);
+  }
+});
+
 router.post(
   '/api/auto-order/runtime/work/:work_id/release',
   async (req, res) => {

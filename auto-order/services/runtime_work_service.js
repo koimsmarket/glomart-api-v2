@@ -565,6 +565,47 @@ async function heartbeat(pool, workId, data) {
   }
 }
 
+// GM_AUTO_ORDER_PAYMENT_GATE_V001: one server validation at the last pre-payment boundary.
+// This is NOT permission to click Coupang's payment button. Manual test mode remains unchanged.
+async function prePaymentCheck(pool, workId, data) {
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    // Lock the customer order first, matching customer CS transactions.
+    const order = (await db.query(`
+      SELECT g.order_no, g.customer_status, g.seller_status, g.order_status,
+             a.auto_order_no, a.order_status AS auto_order_status, a.mall_order_no
+        FROM gm_order g
+        JOIN gm_auto_order a ON a.order_no=g.order_no
+        JOIN gm_auto_order_work w ON w.auto_order_no=a.auto_order_no
+       WHERE w.work_id=$1
+       FOR UPDATE OF g`, [Number(workId)])).rows[0];
+    if (!order) throw new Error('work_not_found');
+    const work = (await db.query(`SELECT * FROM gm_auto_order_work WHERE work_id=$1 FOR UPDATE`,[Number(workId)])).rows[0];
+    if (!work || upper(work.work_status)!=='RUNNING' ||
+        !clean(data.lock_token) || clean(work.lock_token)!==clean(data.lock_token) ||
+        clean(work.lock_admin_id)!==clean(data.admin_id) ||
+        clean(work.lock_mall_account_id)!==clean(data.mall_account_id) ||
+        !work.lock_expires_at || new Date(work.lock_expires_at).getTime()<=Date.now()) {
+      throw new Error('work_session_invalid');
+    }
+    if (['CANCEL_REQUESTED','CANCEL_COMPLETED','CANCEL_WITHDRAWN'].includes(upper(order.customer_status)) ||
+        upper(order.seller_status)==='CANCELLED' || upper(order.order_status)==='CANCELLED') {
+      console.warn('[GM_AUTO_ORDER_PAYMENT_GATE_BLOCK]',JSON.stringify({work_id:Number(workId),order_no:order.order_no,reason:'customer_cs_status'}));
+      throw new Error('order_cancel_or_hold');
+    }
+    if (upper(order.auto_order_status)==='ORDERED' || clean(order.mall_order_no)) {
+      throw new Error('mall_order_already_exists');
+    }
+    await db.query('COMMIT');
+    console.log('[GM_AUTO_ORDER_PAYMENT_GATE_PASS]',JSON.stringify({work_id:Number(workId),order_no:order.order_no,mode:'MANUAL_CHECK_ONLY'}));
+    return {checked:true,session_valid:true,cancel_requested:false,manual_payment_only:true};
+  } catch(error) {
+    await db.query('ROLLBACK').catch(()=>{});
+    throw error;
+  } finally { db.release(); }
+}
+
 async function release(pool, workId, data) {
   const token = clean(data.lock_token);
   if (!token) throw new Error('lock_token_is_required');
@@ -780,6 +821,7 @@ module.exports = {
   readyList,
   claim,
   heartbeat,
+  prePaymentCheck,
   release,
   updateState,
   status,
