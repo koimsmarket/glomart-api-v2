@@ -331,6 +331,12 @@ async function action(pool, options){
       }
       console.log('[GM_CS_SHIPPING_VERIFIED]', JSON.stringify({order_no:orderNo,action:actionName,fee:q.customer_shipping_fee,groups:q.groups.map(g=>({key:g.key,shipped:g.shipped,fee:g.customer_shipping_fee}))}));
       if(!Number.isSafeInteger(Number(options.shipping_fee_confirmed)) || Number(options.shipping_fee_confirmed)!==q.customer_shipping_fee) throw new Error('shipping_quote_changed');
+      if(selectedItems){
+        const fingerprint=cancelShipping.quoteFingerprint(orderNo,actionName,reasonCode,selectedItems.map(x=>({pi_ii_vi:x.item.pi_ii_vi,quantity:x.quantity})),q);
+        if(text(options.quote_fingerprint)!==fingerprint || !Number.isSafeInteger(Number(options.seller_shipping_fee_confirmed)) || Number(options.seller_shipping_fee_confirmed)!==q.seller_shipping_fee){
+          throw new Error('shipping_quote_changed');
+        }
+      }
       console.log('[GM_CS_QUOTE_CONFIRMED]',JSON.stringify({order_no:orderNo,action:actionName,reason_code:reasonCode,shipping_fee:q.customer_shipping_fee,groups:q.groups.map(g=>({key:g.key,fee:g.customer_shipping_fee,shipped:g.shipped}))}));
     }
 
@@ -473,6 +479,20 @@ async function action(pool, options){
       }
     }
 
+    // Preserve every application round (including zero-photo applications) in one existing order row.
+    let csPhotoRound=null;
+    if(actionName==='return_request'||actionName==='exchange_request'){
+      const col=actionName==='return_request'?'return_image_history':'exchange_image_history';
+      const previous=String(rows[0][col]||'');
+      const rounds=previous?previous.split('|'):[];
+      if(rounds.some((x,i)=>!new RegExp('^'+(i+1)+':[0-6]$').test(x)))throw new Error('cs_photo_history_invalid');
+      csPhotoRound=rounds.length+1;
+      // Two-digit file slots allow 01..06, 11..16 ... 91..96; from round 11 slots become 101..106.
+      if(csPhotoRound>10000)throw new Error('cs_photo_round_limit');
+      const next=previous?previous+'|'+csPhotoRound+':0':csPhotoRound+':0';
+      await client.query('UPDATE gm_order SET '+col+'=$3 WHERE member_id=$1 AND order_no=$2',[memberId,orderNo,next]);
+      console.log('[GM_CS_PHOTO_ROUND_RESERVED]',JSON.stringify({order_no:orderNo,action:actionName,round:csPhotoRound}));
+    }
     const updatedRows = (await client.query(`SELECT * FROM gm_order WHERE member_id=$1 AND order_no=$2 LIMIT 1`, [memberId, orderNo])).rows;
     const updated = normalizeOrder(updatedRows[0], itemRows);
 
@@ -499,7 +519,7 @@ async function action(pool, options){
     }
 
     await client.query('COMMIT');
-    return { action:actionName, order:updated, refund:refundResult, message_event:messageEvent, message_event_error:messageEventError };
+    return { action:actionName, order:updated, refund:refundResult, message_event:messageEvent, message_event_error:messageEventError, photo_round:csPhotoRound };
   }catch(error){
     try{ await client.query('ROLLBACK'); }catch(_){}
     throw error;

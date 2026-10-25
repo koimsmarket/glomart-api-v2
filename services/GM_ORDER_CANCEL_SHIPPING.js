@@ -1,5 +1,6 @@
 /* GM_ORDER_CANCEL_SHIPPING_V001 - Quote only; never cancels or refunds. */
 'use strict';
+const crypto=require('crypto');
 const num=v=>{const n=Number(v);return Number.isFinite(n)?Math.max(0,Math.trunc(n)):0;};
 const str=v=>String(v==null?'':v).trim();
 const upper=v=>str(v).toUpperCase();
@@ -29,7 +30,9 @@ function quote(order,items,reasonCode){
     const t=upper(item.delivery_type||item.shipping_type||'');
     const type=t.includes('FRESH')?'FRESH':t.includes('BUNDLE')?'BUNDLE':t.includes('FREE')?'FREE':'SELLER';
     // Seller delivery: each product kind, not seller account and not ordered quantity.
-    const key=type==='SELLER'?'SELLER_ITEM|'+str(item.source_mall||item.mall_code||'')+'|'+str(item.pi_ii_vi||item.product_uid||item.source_uid||'ROW_'+index):type;
+    const mall=upper(item.source_mall||item.mall_code);
+    // Separate different source malls; within one mall retain the original delivery-type grouping.
+    const key=type==='SELLER'?'SELLER_ITEM|'+mall+'|'+str(item.pi_ii_vi||item.product_uid||item.source_uid||'ROW_'+index):type+'|'+mall;
     const base=num(item.delivery_fee),remote=num(item.extra_area_delivery_fee);
     const shipped=itemShipped(item);
     const prev=groups.get(key);
@@ -64,4 +67,11 @@ function refundPreview(order,shippingFee,depositUsed){
   if(!paid && payment===0)return {available:false,paid_amount:0,customer_shipping_fee:shippingFee,estimated_refund_amount:null,remaining_shipping_fee:0,source:'PAYMENT_NOT_VERIFIED',manual_review:true};
   return {available:true,paid_amount:payment,customer_shipping_fee:shippingFee,estimated_refund_amount:Math.max(0,payment-shippingFee),remaining_shipping_fee:Math.max(0,shippingFee-payment),source,manual_review:true};
 }
-module.exports={quote,refundPreview};
+// Bind the displayed quotation to the exact selected lines, reason, group and amount.
+// Pure deterministic fingerprint, not an authorization token. Never trust it without a fresh DB quote.
+function quoteFingerprint(orderNo,action,reason,selected,q){
+  const lines=(selected||[]).map(x=>[str(x.pi_ii_vi),num(x.quantity)]).sort((a,b)=>a[0].localeCompare(b[0]));
+  const groups=(q.groups||[]).map(g=>[g.key,g.base_delivery_fee,g.extra_area_delivery_fee,g.round_trip_shipping_fee,g.customer_shipping_fee,g.seller_shipping_fee]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])));
+  return crypto.createHash('sha256').update(JSON.stringify([str(orderNo),str(action),upper(reason),lines,groups,q.customer_shipping_fee,q.seller_shipping_fee])).digest('hex');
+}
+module.exports={quote,refundPreview,quoteFingerprint};
