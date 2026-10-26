@@ -49,4 +49,27 @@ router.get('/api/gm/gpay/member-profile', async (req, res) => {
     res.status(500).json({ok:false,error:'MEMBER_PROFILE_READ_FAILED'});
   }
 });
+
+// GM_GPAY_SINGLE_V031: exact-match recipient resolution, restricted to trusted LIFE bridge.
+router.get('/api/gm/gpay/recipient-lookup', async (req,res) => {
+ res.set('Cache-Control','no-store');
+ const secret=s(process.env.GPAY_MEMBER_LOOKUP_KEY);
+ const provided=s(req.get('x-gpay-member-lookup-key'));
+ const crypto=require('crypto');
+ if(secret.length<32 || provided.length!==secret.length || !crypto.timingSafeEqual(Buffer.from(secret),Buffer.from(provided)))return res.status(403).json({ok:false,error:'TRUSTED_LOOKUP_REQUIRED'});
+ const query=s(req.query.q);
+ const phone=/^[+0-9() .-]{9,25}$/.test(query)&&query.replace(/\D/g,'').length>=9;
+ const id=/^[a-zA-Z0-9_.@-]{2,64}$/.test(query);
+ if(!phone&&!id)return res.status(400).json({ok:false,error:'INVALID_LOOKUP'});
+ const db=pool(req);if(!db)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
+ try{
+  const v=phone?query.replace(/\D/g,''):query;
+  const sql=phone?`SELECT member_id,member_name,phone FROM gm_member WHERE regexp_replace(COALESCE(phone,''),'[^0-9]','','g')=$1 ORDER BY member_id LIMIT 2`:`SELECT member_id,member_name,phone FROM gm_member WHERE LOWER(member_id)=LOWER($1) ORDER BY member_id LIMIT 2`;
+  const result=await db.query(sql,[v]);
+  if(result.rows.length!==1)return res.json({ok:true,found:false,ambiguous:result.rows.length>1});
+  const m=result.rows[0];const digits=s(m.phone).replace(/\D/g,'');
+  return res.json({ok:true,found:true,recipient:{member_id:s(m.member_id),masked_name:s(m.member_name).length>1?s(m.member_name)[0]+'*'.repeat(Math.min(s(m.member_name).length-1,3)):s(m.member_name)||'회원',masked_phone:digits.length>=10?digits.slice(0,3)+'-****-'+digits.slice(-4):''}});
+ }catch(e){console.error('[GM_GPAY_RECIPIENT_V031] lookup_failed',e&&e.code);return res.status(503).json({ok:false,error:'LOOKUP_FAILED'});}
+});
+
 module.exports = router;
