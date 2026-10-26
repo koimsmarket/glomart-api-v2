@@ -53,10 +53,10 @@ router.get('/api/gm/gpay/member-profile', async (req, res) => {
 // GM_GPAY_SINGLE_V031: exact-match recipient resolution, restricted to trusted LIFE bridge.
 router.get('/api/gm/gpay/recipient-lookup', async (req,res) => {
  res.set('Cache-Control','no-store');
- const secret=s(process.env.GPAY_MEMBER_LOOKUP_KEY);
- const provided=s(req.get('x-gpay-member-lookup-key'));
+ const secret=s(process.env.GPAY_TRUSTED_CALLER_KEY);
+ const provided=s(req.get('x-gpay-trusted-caller'));
  const crypto=require('crypto');
- if(secret.length<32 || provided.length!==secret.length || !crypto.timingSafeEqual(Buffer.from(secret),Buffer.from(provided)))return res.status(403).json({ok:false,error:'TRUSTED_LOOKUP_REQUIRED'});
+ if(secret.length<32 || provided.length!==secret.length || !crypto.timingSafeEqual(Buffer.from(secret),Buffer.from(provided))){console.warn('[GM_GPAY_RECIPIENT_V036] stage=AUTH_REJECT configured='+(secret.length>=32)+' provided='+(provided.length>0));return res.status(403).json({ok:false,error:'TRUSTED_LOOKUP_REQUIRED'});}
  const query=s(req.query.q);
  const phone=/^[+0-9() .-]{9,25}$/.test(query)&&query.replace(/\D/g,'').length>=9;
  const id=/^[a-zA-Z0-9_.@-]{2,64}$/.test(query);
@@ -70,7 +70,7 @@ router.get('/api/gm/gpay/recipient-lookup', async (req,res) => {
   const recipients=result.rows.map(m=>{const digits=s(m.phone).replace(/\D/g,'');const name=s(m.member_name);return {member_id:s(m.member_id),masked_name:name.length>1?name[0]+'*'.repeat(Math.min(name.length-1,3)):name||'회원',masked_phone:digits.length>=10?digits.slice(0,3)+'-****-'+digits.slice(-4):''};});
   console.info('[GM_GPAY_RECIPIENT_V035] lookup match_count='+recipients.length+' mode='+(phone?'PHONE':'ID'));
   return res.json({ok:true,found:recipients.length>0,recipients,recipient:recipients.length===1?recipients[0]:null});
- }catch(e){console.error('[GM_GPAY_RECIPIENT_V031] lookup_failed',e&&e.code);return res.status(503).json({ok:false,error:'LOOKUP_FAILED'});}
+ }catch(e){console.error('[GM_GPAY_RECIPIENT_V036] stage=DB_ERROR code='+String(e&&e.code||'UNKNOWN'));return res.status(503).json({ok:false,error:'LOOKUP_FAILED'});}
 });
 
 module.exports = router;
