@@ -64,11 +64,12 @@ router.get('/api/gm/gpay/recipient-lookup', async (req,res) => {
  const db=pool(req);if(!db)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
  try{
   const v=phone?query.replace(/\D/g,''):query;
-  const sql=phone?`SELECT member_id,member_name,phone FROM gm_member WHERE regexp_replace(COALESCE(phone,''),'[^0-9]','','g')=$1 ORDER BY member_id LIMIT 2`:`SELECT member_id,member_name,phone FROM gm_member WHERE LOWER(member_id)=LOWER($1) ORDER BY member_id LIMIT 2`;
+  const sql=phone?`SELECT member_id,member_name,phone FROM gm_member WHERE regexp_replace(COALESCE(phone,''),'[^0-9]','','g')=$1 ORDER BY member_id LIMIT 51`:`SELECT member_id,member_name,phone FROM gm_member WHERE LOWER(member_id)=LOWER($1) ORDER BY member_id LIMIT 51`;
   const result=await db.query(sql,[v]);
-  if(result.rows.length!==1)return res.json({ok:true,found:false,ambiguous:result.rows.length>1});
-  const m=result.rows[0];const digits=s(m.phone).replace(/\D/g,'');
-  return res.json({ok:true,found:true,recipient:{member_id:s(m.member_id),masked_name:s(m.member_name).length>1?s(m.member_name)[0]+'*'.repeat(Math.min(s(m.member_name).length-1,3)):s(m.member_name)||'회원',masked_phone:digits.length>=10?digits.slice(0,3)+'-****-'+digits.slice(-4):''}});
+  if(result.rows.length>50)return res.status(409).json({ok:false,error:'TOO_MANY_MATCHES_USE_MEMBER_ID'});
+  const recipients=result.rows.map(m=>{const digits=s(m.phone).replace(/\D/g,'');const name=s(m.member_name);return {member_id:s(m.member_id),masked_name:name.length>1?name[0]+'*'.repeat(Math.min(name.length-1,3)):name||'회원',masked_phone:digits.length>=10?digits.slice(0,3)+'-****-'+digits.slice(-4):''};});
+  console.info('[GM_GPAY_RECIPIENT_V035] lookup match_count='+recipients.length+' mode='+(phone?'PHONE':'ID'));
+  return res.json({ok:true,found:recipients.length>0,recipients,recipient:recipients.length===1?recipients[0]:null});
  }catch(e){console.error('[GM_GPAY_RECIPIENT_V031] lookup_failed',e&&e.code);return res.status(503).json({ok:false,error:'LOOKUP_FAILED'});}
 });
 
