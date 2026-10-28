@@ -12,7 +12,7 @@ function sameOrigin(req){const origin=String(req.get('origin')||'');const host=S
 // GM_ADMIN_SESSION_GATE_V002: All Builder documents/assets and known admin APIs,
 // including /public aliases, require the same authenticated server-side session.
 const ADMIN_DOCUMENTS=new Set(['/gm_admin.html','/gm_data_builder.html','/ui_dictionary_admin.html','/product_data_builder.html','/admin','/gm_admin']);
-const ADMIN_API_EXACT=new Set(['/api/gm/db/table-counts','/api/gm/dashboard/ops','/api/gm/dashboard/snapshot']);
+const ADMIN_API_EXACT=new Set(['/api/gm/db/table-counts','/api/gm/dashboard/ops','/api/gm/dashboard/snapshot','/api/gm/dashboard/realtime','/api/gm/db/status']);
 function canonicalPath(req){
  let p=String(req.path||'/');
  try{p=decodeURIComponent(p)}catch(_){return '/__invalid_admin_path__'}
