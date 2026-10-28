@@ -73,4 +73,21 @@ router.get('/api/gm/gpay/recipient-lookup', async (req,res) => {
  }catch(e){console.error('[GM_GPAY_RECIPIENT_V036] stage=DB_ERROR code='+String(e&&e.code||'UNKNOWN'));return res.status(503).json({ok:false,error:'LOOKUP_FAILED'});}
 });
 
+
+// Authenticated Life server-only lookup; never exposed through recipient search.
+router.get('/api/gm/gpay/refund-account-private', async (req,res)=>{
+  res.set('Cache-Control','no-store');
+  const crypto=require('crypto');
+  const secret=s(process.env.GPAY_TRUSTED_CALLER_KEY), supplied=s(req.get('x-gpay-trusted-caller'));
+  if(secret.length<32||secret.length!==supplied.length||!crypto.timingSafeEqual(Buffer.from(secret),Buffer.from(supplied)))return res.status(403).json({ok:false,error:'TRUSTED_CALLER_REQUIRED'});
+  const id=s(req.query.member_id);
+  if(!/^[a-zA-Z0-9_.@-]{2,80}$/.test(id))return res.status(400).json({ok:false,error:'INVALID_MEMBER'});
+  const db=pool(req);if(!db)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
+  try{
+    const q=await db.query(`SELECT member_id,refund_bank_name,refund_account_no,refund_account_holder FROM gm_member WHERE member_id=$1 LIMIT 1`,[id]);
+    if(q.rowCount!==1)return res.status(404).json({ok:false,error:'MEMBER_NOT_FOUND'});
+    const m=q.rows[0];return res.json({ok:true,member_id:s(m.member_id),refund_bank_name:s(m.refund_bank_name),refund_account_no:s(m.refund_account_no),refund_account_holder:s(m.refund_account_holder)});
+  }catch(e){console.warn('[GM_REFUND_LINK_V005] PROFILE_DB_FAILED code='+s(e&&e.code));return res.status(503).json({ok:false,error:'REFUND_PROFILE_DB_ERROR'});}
+});
+
 module.exports = router;
