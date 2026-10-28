@@ -72,6 +72,8 @@ app.use((req, res, next) => {
 app.use(cors({ origin: true, credentials: false }));
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+// GM_ADMIN_SESSION_GATE_V001: authenticate BEFORE exposing static Builder files or API routes.
+app.use(require('./routes/admin_session_gate').middleware);
 app.use(express.static('public'));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 // GM_AUTO_ORDER_LINK_V001: serve existing auto-order dashboard assets without altering auth or API logic.
