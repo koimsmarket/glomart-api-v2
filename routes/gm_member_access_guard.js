@@ -29,14 +29,28 @@ function validate(req){
     return d.sub;
   }catch(_){return null}
 }
-const paths=new Set(['/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile']);
+// V007: protect every known member-owned profile/address route when enforcement is enabled.
+// The early server.js middleware in V006 runs BEFORE routes/member.js and direct server.js routes.
+const protectedPaths=new Set([
+  '/api/gm/member/me','/api/member/me','/api/gm/member/list','/api/gm/member/profile',
+  '/api/gm/member/upsert','/api/member/upsert',
+  '/api/gm/member/address/upsert','/api/member/address/upsert',
+  '/api/gm/member/address/select','/api/member/address/select',
+  '/api/gm/member/address/sync','/api/member/address/sync',
+  '/api/gm/member/address/list','/api/member/address/list',
+  '/api/gm/member/address/default','/api/member/address/default'
+]);
 function middleware(req,res,next){
-  if(!paths.has(req.path.toLowerCase())||!['GET','HEAD'].includes(req.method))return next();
-  if(!ENFORCE())return next(); // V005 staged; legacy clients must migrate before enablement.
+  const path=String(req.path||'').toLowerCase().replace(/\/$/,'');
+  if(!protectedPaths.has(path))return next();
+  if(!ENFORCE())return next(); // Do not enable before clients send member tokens.
   res.set('Cache-Control','no-store');
+  if(!enabled())return res.status(503).json({ok:false,error:'MEMBER_AUTH_NOT_CONFIGURED'});
   const verified=validate(req);
   if(!verified)return res.status(401).json({ok:false,error:'MEMBER_LOGIN_REQUIRED'});
-  const requested=String(req.query.member_id||req.query.memberId||req.query.id||'').trim();
+  const source=['GET','HEAD'].includes(req.method)?(req.query||{}):(req.body||{});
+  // Never fall back to an unrelated id (such as address_id); only member identity.
+  const requested=String(source.member_id||source.memberId||(['GET','HEAD'].includes(req.method)?source.id:'')||'').trim();
   if(!requested||verified!==requested)return res.status(403).json({ok:false,error:'MEMBER_ACCESS_DENIED'});
   return next();
 }
