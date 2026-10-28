@@ -25,6 +25,7 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const {pickPasswordPlain,hashPasswordIfPresent,gmVerifyHash}=require('./GM_MEMBER_PASSWORD');
+const {issue:gmIssueMemberAccess}=require('./gm_member_access_guard');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function s(v,d=''){ return v===undefined||v===null ? d : String(v).trim(); }
 function yn(v){ return String(v || '').toUpperCase() === 'Y' || v === true ? 'Y' : 'N'; }
@@ -937,16 +938,18 @@ router.post('/api/gm/member/auth/verify',async(req,res)=>{
     console.info('[GM_MEMBER_AUTH_TRACE_V023] stage=05_VERIFY_RESULT result='+(valid?'VERIFIED':'INVALID_CREDENTIALS'));
     if(!valid)return res.status(401).json({ok:false,authenticated:false,error:'INVALID_CREDENTIALS'});
     res.set('Cache-Control','no-store');
+    const memberAccessToken=gmIssueMemberAccess(x.memberId);
+    const memberAuthFields=memberAccessToken?{member_access_token:memberAccessToken,member_access_token_expires_in:900}:{};
     try{
       const assignment=await gmAgentAssignment(x.memberId);
-      if(!assignment.assigned)return res.json({ok:true,authenticated:true,agent_assigned:false});
+      if(!assignment.assigned)return res.json({ok:true,authenticated:true,agent_assigned:false,...memberAuthFields});
       const token=gmAgentSessionCreate(x.memberId,assignment.agency_id);
       console.info('[GM_AGENT_LOGIN_V002] stage=ISSUED agency_id='+String(assignment.agency_id));
-      return res.json({ok:true,authenticated:true,agent_assigned:true,agency_id:String(assignment.agency_id),agency_name:String(assignment.agency_name||''),agent_session:token});
+      return res.json({ok:true,authenticated:true,agent_assigned:true,agency_id:String(assignment.agency_id),agency_name:String(assignment.agency_name||''),agent_session:token,...memberAuthFields});
     }catch(err){
       // Failure of the separate agent service must never reject a verified ordinary member login.
       console.warn('[GM_AGENT_LOGIN_V002] stage=LOOKUP_UNAVAILABLE type='+String(err&&err.message||'ERROR').slice(0,65));
-      return res.json({ok:true,authenticated:true,agent_assigned:null,agent_error:'AGENT_AUTH_UNAVAILABLE'});
+      return res.json({ok:true,authenticated:true,agent_assigned:null,agent_error:'AGENT_AUTH_UNAVAILABLE',...memberAuthFields});
     }
   }catch(e){console.error('[GM_MEMBER_AUTH_V010]',e.code||e.message);return gmAuthError(res,500,'VERIFY_FAILED');}
 });

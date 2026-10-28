@@ -327,6 +327,8 @@ async function dbQuery(sql, vals=[]){
 
 // V024: register member routes immediately after DB query helper so /api/gm/member/me is active before any later routes.
 app.locals.pool = pool;
+// GM_ADMIN_SECURITY_V006: member profile guard before early member routes and fallback routes.
+app.use(require('./routes/gm_member_access_guard').middleware);
 try {
   app.use(require('./routes/member'));
   console.log('[GM_MEMBER_ROUTE_V024] routes/member registered early');
