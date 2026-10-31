@@ -133,6 +133,38 @@ router.post('/api/gm/message/settings/save', async (req,res)=>{
   }catch(e){ fail(res,500,'settings save failed',{ detail:String(e.message||e) }); }
 });
 
+// GM_GPAY_NOTICE_V001: private G-PAY notification intake, independent of browser personal/create.
+// Reuses gm_message_personal. This route does not send FCM or create a second mailbox.
+router.post('/api/gm/message/internal/gpay',async(req,res)=>{
+  const crypto=require('crypto');
+  const expected=String(process.env.GPAY_NOTICE_WEBHOOK_TOKEN||'');
+  const got=String(req.get('authorization')||'').replace(/^Bearer\s+/i,'');
+  const a=Buffer.from(got),b=Buffer.from(expected);
+  if(!expected||a.length!==b.length||!crypto.timingSafeEqual(a,b))return fail(res,403,'GPAY_NOTICE_AUTH_REQUIRED');
+  const x=req.body||{}, key=s(x.notice_key),rid=Number(x.request_id),event=s(x.event_type).toUpperCase();
+  const member=s(x.recipient_id),kind=s(x.recipient_type).toUpperCase();
+  if(kind!=='MEMBER'||!key||key.length>180||!Number.isSafeInteger(rid)||rid<=0||!member||member.length>100||!/^[-_A-Z0-9:]+$/i.test(event))return fail(res,400,'GPAY_NOTICE_INVALID');
+  const names={REQUEST_CREATED:'G-PAY 양도요청',REQUEST_ACCEPTED:'G-PAY 양도요청 수락',PAYMENT_NOTIFIED:'G-PAY 송금통보',TRANSFER_COMPLETED:'G-PAY 양도완료',GIFT_COMPLETED:'G-PAY 선물완료',ISSUE_COMPLETED:'G-PAY 구입·공급완료',PURCHASE_REQUESTED:'G-PAY 구입신청',REQUEST_DENIED:'G-PAY 요청거절',ACCEPTANCE_RETRACTED:'G-PAY 수락취소',PAYMENT_RETRACTED:'G-PAY 송금통보 취소'};
+  if(!Object.prototype.hasOwnProperty.call(names,event))return fail(res,400,'GPAY_NOTICE_EVENT_UNKNOWN');
+  const no='GP'+crypto.createHash('sha256').update(key).digest('hex').slice(0,30);
+  const amount=Number(x.amount_g||0),display=Number.isSafeInteger(amount)&&amount>0?amount.toLocaleString('ko-KR')+'G ':'';
+  const role=s(x.recipient_role).toUpperCase();
+  const copy={REQUEST_CREATED:'양도요청이 도착했습니다.',REQUEST_ACCEPTED:'상대방이 양도요청을 수락했습니다.',PAYMENT_NOTIFIED:'상대방이 송금을 통보했습니다. 입금 확인 후 승인하세요.',TRANSFER_COMPLETED:'양도가 완료되었습니다.',GIFT_COMPLETED:role==='SENDER'?'선물 발송이 완료되었습니다.':'선물이 도착했습니다.',ISSUE_COMPLETED:role==='AGENT'?'회원에게 G-PAY 공급이 완료되었습니다.':'G-PAY 지급이 완료되었습니다.',PURCHASE_REQUESTED:role==='AGENT'?'회원이 G-PAY 구입을 신청했습니다.':'G-PAY 구입신청이 접수되었습니다.',REQUEST_DENIED:'양도요청이 거절되었습니다.',ACCEPTANCE_RETRACTED:'상대방이 수락을 취소했습니다.',PAYMENT_RETRACTED:'상대방이 송금통보를 철회했습니다.'};
+  try{
+    const pool=db(req);
+    const r=await pool.query(`INSERT INTO gm_message_personal(message_no,member_id,message_type,title,message,move_type,move_value,action_json,priority)
+      VALUES($1,$2,'GPAY',$3,$4,'GPAY_TRANSACTION',$5,$6::jsonb,'NORMAL')
+      ON CONFLICT(message_no) DO NOTHING RETURNING id,message_no`,
+      [no,member,names[event],display+copy[event],String(rid),JSON.stringify({request_id:rid,event_type:event,recipient_role:role})]);
+    if(!r.rowCount){
+      const old=await pool.query('SELECT id,member_id FROM gm_message_personal WHERE message_no=$1',[no]);
+      if(!old.rowCount||old.rows[0].member_id!==member)return fail(res,409,'GPAY_NOTICE_IDEMPOTENCY_CONFLICT');
+      return ok(res,{duplicate:true,message_no:no,id:old.rows[0].id});
+    }
+    return ok(res,{inserted:true,message_no:no,id:r.rows[0].id});
+  }catch(e){console.error('[GM_GPAY_NOTICE_V001] INTAKE_FAILED',String(e.code||'UNKNOWN'));return fail(res,503,'GPAY_NOTICE_DB_FAILED');}
+});
+
 router.post('/api/gm/message/personal/create', async (req,res)=>{
   try{
     const pool=db(req), b=req.body||{}; const member=s(b.member_id||b.memberId); if(!member) return fail(res,400,'member_id required');
