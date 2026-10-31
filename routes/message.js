@@ -159,8 +159,10 @@ router.post('/api/gm/message/internal/gpay',async(req,res)=>{
     if(!r.rowCount){
       const old=await pool.query('SELECT id,member_id FROM gm_message_personal WHERE message_no=$1',[no]);
       if(!old.rowCount||old.rows[0].member_id!==member)return fail(res,409,'GPAY_NOTICE_IDEMPOTENCY_CONFLICT');
+      console.info('[GM_GPAY_NOTICE_V003] DUPLICATE request='+rid+' event='+event+' recipient='+member);
       return ok(res,{duplicate:true,message_no:no,id:old.rows[0].id});
     }
+    console.info('[GM_GPAY_NOTICE_V003] INSERTED request='+rid+' event='+event+' recipient='+member);
     return ok(res,{inserted:true,message_no:no,id:r.rows[0].id});
   }catch(e){console.error('[GM_GPAY_NOTICE_V001] INTAKE_FAILED',String(e.code||'UNKNOWN'));return fail(res,503,'GPAY_NOTICE_DB_FAILED');}
 });
