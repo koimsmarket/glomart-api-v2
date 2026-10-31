@@ -150,6 +150,33 @@ router.post('/api/gm/message/internal/gpay',async(req,res)=>{
   const amount=Number(x.amount_g||0),display=Number.isSafeInteger(amount)&&amount>0?amount.toLocaleString('ko-KR')+'G ':'';
   const role=s(x.recipient_role).toUpperCase();
   const copy={REQUEST_CREATED:'양도요청이 도착했습니다.',REQUEST_ACCEPTED:'상대방이 양도요청을 수락했습니다.',PAYMENT_NOTIFIED:'상대방이 송금을 통보했습니다. 입금 확인 후 승인하세요.',TRANSFER_COMPLETED:'양도가 완료되었습니다.',GIFT_COMPLETED:role==='SENDER'?'선물 발송이 완료되었습니다.':'선물이 도착했습니다.',ISSUE_COMPLETED:role==='AGENT'?'회원에게 G-PAY 공급이 완료되었습니다.':'G-PAY 지급이 완료되었습니다.',PURCHASE_REQUESTED:role==='AGENT'?'회원이 G-PAY 구입을 신청했습니다.':'G-PAY 구입신청이 접수되었습니다.',REQUEST_DENIED:'양도요청이 거절되었습니다.',ACCEPTANCE_RETRACTED:'상대방이 수락을 취소했습니다.',PAYMENT_RETRACTED:'상대방이 송금통보를 철회했습니다.',REQUEST_DELETED:'상대방이 수락 전 양도요청을 삭제했습니다.',TRANSFER_CANCELLED:'양도 거래가 취소되었습니다.',PURCHASE_CANCELLED:role==='AGENT'?'회원의 G-PAY 구입이 취소되었습니다.':'G-PAY 구입이 취소되었습니다.',PAYMENT_APPROVED:role==='AGENT'?'회원의 입금이 확인되었습니다.':'입금이 확인되었습니다.',PAYMENT_INSTRUCTION:role==='AGENT'?'회원의 G-PAY 입금 처리 요청이 있습니다.':'G-PAY 입금 안내를 확인하세요.',PURCHASE_REJECTED:'G-PAY 구입신청이 거절되었습니다.'};
+
+  // V007: use existing Life FCM transport only after durable G-PAY personal-message insert.
+  // No transaction is modified and a missing/failed push never turns a stored message into a failed financial event.
+  async function forwardToLife(){
+    const target=String(process.env.GM_MESSAGE_FCM_BRIDGE_URL||'').trim();
+    const secret=String(process.env.GM_MESSAGE_FCM_BRIDGE_TOKEN||'').trim();
+    if(!target||!secret){console.warn('[GM_GPAY_NOTICE_V007] PUSH_DISABLED request='+rid+' reason=BRIDGE_CONFIG');return;}
+    let parsed;
+    try{parsed=new URL(target);}catch(_){console.warn('[GM_GPAY_NOTICE_V007] PUSH_DISABLED reason=BAD_URL');return;}
+    if(parsed.protocol!=='https:'||parsed.pathname!=='/api/life/internal/glomart-notification'){
+      console.warn('[GM_GPAY_NOTICE_V007] PUSH_DISABLED reason=UNSAFE_ENDPOINT');return;
+    }
+    const payload=JSON.stringify({member_id:member,message_no:no,title:names[event],body:display+copy[event],request_id:rid,event_type:event});
+    try{
+      const https=require('https');
+      await new Promise((resolve)=>{
+        const request=https.request(parsed,{method:'POST',timeout:8000,headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(payload),'Authorization':'Bearer '+secret}},response=>{
+          let out='';response.setEncoding('utf8');response.on('data',chunk=>{if(out.length<8192)out+=chunk;});
+          response.on('end',()=>{let json={};try{json=JSON.parse(out);}catch(_){};
+            console.info('[GM_GPAY_NOTICE_V007] PUSH_RESULT request='+rid+' message_no='+no+' status='+response.statusCode+' sent='+Number(json.sent||0)+' no_device='+Boolean(json.no_device));resolve();});
+        });
+        request.on('error',e=>{console.warn('[GM_GPAY_NOTICE_V007] PUSH_FAIL request='+rid+' reason='+String(e.code||'NETWORK'));resolve();});
+        request.on('timeout',()=>request.destroy(new Error('timeout')));
+        request.end(payload);
+      });
+    }catch(e){console.warn('[GM_GPAY_NOTICE_V007] PUSH_FAIL request='+rid+' reason='+String(e.code||'UNKNOWN'));}
+  }
   try{
     const pool=db(req);
     const r=await pool.query(`INSERT INTO gm_message_personal(message_no,member_id,message_type,title,message,move_type,move_value,action_json,priority)
@@ -160,9 +187,12 @@ router.post('/api/gm/message/internal/gpay',async(req,res)=>{
       const old=await pool.query('SELECT id,member_id FROM gm_message_personal WHERE message_no=$1',[no]);
       if(!old.rowCount||old.rows[0].member_id!==member)return fail(res,409,'GPAY_NOTICE_IDEMPOTENCY_CONFLICT');
       console.info('[GM_GPAY_NOTICE_V003] DUPLICATE request='+rid+' event='+event+' recipient='+member);
+      // Replays are deliberate delivery retries; Android deduplicates by message_no.
+      await forwardToLife();
       return ok(res,{duplicate:true,message_no:no,id:old.rows[0].id});
     }
     console.info('[GM_GPAY_NOTICE_V003] INSERTED request='+rid+' event='+event+' recipient='+member);
+    await forwardToLife();
     return ok(res,{inserted:true,message_no:no,id:r.rows[0].id});
   }catch(e){console.error('[GM_GPAY_NOTICE_V001] INTAKE_FAILED',String(e.code||'UNKNOWN'));return fail(res,503,'GPAY_NOTICE_DB_FAILED');}
 });
