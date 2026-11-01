@@ -31,16 +31,18 @@ router.get('/api/gm/gpay/checkout-balance', async (req,res) => {
     if(!Array.isArray(data.wallet) || data.wallet.length>10000)
       return res.status(502).json({ok:false,error:'GPAY_WALLET_INVALID'});
     const wallet=[];
-    let sum=0;
+    let sum=0, availableSum=0;
     for(const row of data.wallet){
       if(!row || !['ACTIVE','HOLD'].includes(row.status))
         return res.status(502).json({ok:false,error:'GPAY_WALLET_STATUS_INVALID'});
       if(row.status!=='ACTIVE')continue;
       const idNumber=Number(row.pay_id), value=Number(row.balance);
-      if(!Number.isSafeInteger(idNumber)||idNumber<=0||!Number.isSafeInteger(value)||value<0||!Number.isSafeInteger(sum+value))
+      const available=Number(row.available_amount_g);
+      if(!Number.isSafeInteger(idNumber)||idNumber<=0||!Number.isSafeInteger(value)||value<0||!Number.isSafeInteger(sum+value)||
+         row.available_amount_g==null||!Number.isSafeInteger(available)||available<0||available>value||!Number.isSafeInteger(availableSum+available))
         return res.status(502).json({ok:false,error:'GPAY_WALLET_AMOUNT_INVALID'});
-      sum+=value;
-      wallet.push({pay_id:idNumber,balance_g:value,issued_at:row.issued_at||null});
+      sum+=value;availableSum+=available;
+      wallet.push({pay_id:idNumber,balance_g:value,available_amount_g:available,issued_at:row.issued_at||null});
     }
     if(sum!==amount){
       console.error('[GM_GPAY_CHECKOUT_BALANCE_V061] WALLET_SUM_MISMATCH');
@@ -48,7 +50,7 @@ router.get('/api/gm/gpay/checkout-balance', async (req,res) => {
     }
     wallet.sort((a,b)=>String(a.issued_at||'').localeCompare(String(b.issued_at||''))||a.pay_id-b.pay_id);
     console.log('[GM_GPAY_CHECKOUT_BALANCE_V061] verified member=Y active_count='+wallet.length);
-    return res.json({ok:true,member_id:id,balance_g:amount,active_certificates:wallet});
+    return res.json({ok:true,member_id:id,balance_g:amount,available_balance_g:availableSum,active_certificates:wallet});
   }catch(e){
     console.error('[GM_GPAY_CHECKOUT_BALANCE_V001] error='+String(e&&e.name||'UNKNOWN'));
     return res.status(502).json({ok:false,error:'GPAY_BALANCE_UNAVAILABLE'});
