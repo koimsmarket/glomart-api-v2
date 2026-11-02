@@ -6,6 +6,18 @@
 
 const express=require('express');
 const router=express.Router();
+const memberGuard=require('./gm_member_access_guard');
+
+// Financial information: reject all unauthenticated requests regardless of profile ENFORCE flag.
+router.use('/api/gm/deposit', (req,res,next)=>{
+  res.set('Cache-Control','no-store');
+  if(!memberGuard.enabled())return res.status(503).json({ok:false,error:'MEMBER_AUTH_NOT_CONFIGURED'});
+  const authenticated=memberGuard.validate(req);
+  if(!authenticated)return res.status(401).json({ok:false,error:'MEMBER_LOGIN_REQUIRED'});
+  const requested=clean(req.query.member_id||req.query.cafe24_member_id||req.query.id);
+  if(!requested||authenticated!==requested)return res.status(403).json({ok:false,error:'MEMBER_ACCESS_DENIED'});
+  next();
+});
 
 router.use((req,res,next)=>{
   res.set('Cache-Control','no-store, no-cache, must-revalidate, private');
