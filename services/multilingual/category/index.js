@@ -55,4 +55,25 @@ async function complete(db,progress){
  progress.remaining.category=await inspect(db);
  return progress.remaining.category===0;
 }
-module.exports={inspect,complete,LANGS};
+// Category BASE/DELTA ownership remains in the existing asset pack manager.
+// This function is called only after both dictionaries pass final missing-cell checks.
+async function publish(db){
+ const mgr=require('../../asset_pack_manager');
+ const cfg=await mgr.config(db);
+ const initial=await mgr.versionState(db);
+ let result;
+ if(!initial.base_started_at){
+  const v=Math.max(Number(cfg.category_pack_base_target||0),Number(cfg.category_pack_base_published||0))+1;
+  result=await mgr.publishBase(db,v);
+ }else{
+  const v=Math.max(Number(cfg.category_pack_delta_target||0),Number(cfg.category_pack_delta_published||0))+1;
+  result=await mgr.publishDelta(db,v);
+ }
+ const state=mgr.categoryFileState();
+ if(!state.base_files||!state.base_files.ok)throw Error('CATEGORY_BASE_PACK_VERIFY_FAILED');
+ if(state.delta_files&&state.delta_files.total&&!state.delta_files.ok)throw Error('CATEGORY_DELTA_PACK_VERIFY_FAILED');
+ if(result&&result.state==='NO_CHANGES')return {ok:true,unchanged:true,result,version:state.last_updated_at};
+ if(!result||result.files_ready!==mgr.LANGS.length)throw Error('CATEGORY_PACK_PUBLISH_NOT_CONFIRMED');
+ return {ok:true,unchanged:false,result,version:state.last_updated_at};
+}
+module.exports={inspect,complete,publish,LANGS};
