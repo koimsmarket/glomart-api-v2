@@ -131,8 +131,29 @@ async function current(db){
   // Pre-V009 published versions can be rebuilt ONLY when the live source is
   // identical to the version hash. Otherwise retain safe Cafe24 fallback.
   const rows=await snapshot(db);
-  if(fingerprint(rows)!==hash)return {version:v,ready:false};
+  const liveHash=fingerprint(rows);
+  if(liveHash!==hash){
+   // A redeployment erases temp/. If no published snapshot survived, a changed
+   // live DB cannot be labelled with the old release version. A fully translated
+   // DB can be recovered as a NEW release (without translating anything).
+   // An incomplete DB must keep the previous Cafe24 fallback instead.
+   const missing=rows.reduce((n,r)=>n+LANGS.filter(l=>!String(r[l]||'').trim()).length,0);
+   if(missing){
+    console.warn('[GM_UI_PACK_RECOVERY_BLOCKED]',JSON.stringify({reason:'SNAPSHOT_MISSING_SOURCE_CHANGED_INCOMPLETE',version:v,missing}));
+    return {version:v,ready:false};
+   }
+   console.warn('[GM_UI_PACK_RECOVER_NEW_VERSION]',JSON.stringify({previous:v,reason:'SNAPSHOT_MISSING_SOURCE_CHANGED_COMPLETE'}));
+   // Recovery is limited to already-complete dictionary data; no translation
+   // requests, UI captures, or unrelated dictionary operations are started.
+   const repaired=await publish(db);
+   if(!repaired.ok)return {version:v,ready:false};
+   return {version:repaired.version,ready:true};
+  }
   packs=packSet(rows,v);materialize(v,hash,packs);published={version:v,hash,packs};
+  // Upgrade pre-snapshot releases to durable DB storage so the next deploy can
+  // regenerate all language files without relying on temp/.
+  await persistLegacySnapshot(db,v,hash,packs);
+  console.log('[GM_UI_PACK_REBUILT_FROM_DB]',JSON.stringify({version:v,count:rows.length,languages:LANGS.length}));
  }
  if(!LANGS.every(l=>diskPack(l,v))){materialize(v,hash,packs);console.log('[GM_UI_PACK_FILES_RESTORED]',v);}
  return {version:v,ready:true};
