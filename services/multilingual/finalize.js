@@ -1,10 +1,11 @@
 'use strict';
 const ui=require('./ui'),category=require('./category');
+const release=require('./release');
 let running=false;
-let state={stage:'idle',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null};
+let state={stage:'idle',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null,release:null};
 async function launch(db){
  if(running)return {ok:false,error:'ALREADY_RUNNING'};
- running=true;state={stage:'scanning',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null};
+ running=true;state={stage:'scanning',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null,release:null};
  void (async()=>{try{
   // Fail closed: category translations and legacy publishing stay untouched.
   state.remaining.category=await category.inspect(db);
@@ -19,7 +20,12 @@ async function launch(db){
   state.categoryVersion=c.version;
   state.stage='publishing_ui';const p=await ui.publish(db);
   if(!p||!p.ok||!p.ready)throw Error('UI_PUBLISH_NOT_CONFIRMED '+JSON.stringify(p));
-  state.version=p.version;state.stage='published_separate_versions';
+  state.version=p.version;
+  // A single release marker is committed only after BOTH legacy publishers confirm success.
+  state.stage='recording_release';
+  const confirmed=await release.record(db,{uiVersion:p.version,categoryVersion:c.version});
+  if(!confirmed.ok)throw Error('RELEASE_RECORD_FAILED '+String(confirmed.error||''));
+  state.release=confirmed.release;state.stage='published_separate_versions_release_recorded';
  }catch(e){state.stage='error';state.error=String(e&&e.message||e);}finally{running=false;}})();
  return {ok:true,started:true};
 }
