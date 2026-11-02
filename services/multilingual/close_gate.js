@@ -1,21 +1,26 @@
 'use strict';
-// GM_UI_AUTO_V006: server-side hook only. The Android application must call
-// /api/gm/builder/multilingual/app-closed on an EXPLICIT app close, not on idle,
-// backgrounding, page visibility, or process termination.
+// GM_UI_AUTO_V007: explicit-close only, plus persisted content comparison.
+// A fully translated but newly discovered word still requires publication.
 const flow=require('./finalize');
 const ui=require('./ui');
 const category=require('./category');
+const {snapshot}=require('./dictionary_fingerprint');
+const {KEY}=require('./release');
 let inFlight=false;
 async function onClosed(db){
  if(inFlight||flow.status().running)return {ok:true,started:false,reason:'ALREADY_RUNNING'};
  inFlight=true;
  try{
-  // Missing cells are a persistent DB signal. Never launch for an unchanged,
-  // fully translated dictionary merely because the admin window was closed.
-  const [missingUI,missingCategory]=await Promise.all([ui.missing(db),category.inspect(db)]);
-  if(!missingUI.length&&!missingCategory)return {ok:true,started:false,reason:'NO_MISSING_TRANSLATIONS'};
-  const started=await flow.launch(db);
-  return {ok:!!started.ok,started:!!started.started,reason:started.error||'MISSING_TRANSLATIONS',remaining:{ui:missingUI.length,category:missingCategory}};
+  const [missingUI,missingCategory,now,record]=await Promise.all([
+   ui.missing(db),category.inspect(db),snapshot(db),
+   db.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[KEY])
+  ]);
+  let prior='';
+  try{prior=String(JSON.parse(record.rows[0].config_value).dictionary_hash||'');}catch(_){/* no prior release */}
+  if(!missingUI.length&&!missingCategory&&prior===now)
+   return {ok:true,started:false,reason:'NO_DICTIONARY_CHANGE'};
+  const result=await flow.launch(db);
+  return {ok:!!result.ok,started:!!result.started,reason:result.error||(prior!==now?'DICTIONARY_CHANGED':'MISSING_TRANSLATIONS'),remaining:{ui:missingUI.length,category:missingCategory}};
  }finally{inFlight=false;}
 }
 module.exports={onClosed};
