@@ -2,8 +2,8 @@
 // GM_UI_AUTO_V007: content fingerprint for close-time change detection.
 // Read-only DB scans; never mutate existing translations.
 const crypto=require('crypto');
-const LANGS=require('../ui_dictionary_v2').LANGS;
-const FOREIGN=require('../ui_dictionary_v2').FOREIGN;
+const LANGS=require('./ui/ui_dictionary_v2').LANGS;
+const FOREIGN=require('./ui/ui_dictionary_v2').FOREIGN;
 function quote(s){return '"'+String(s).replace(/"/g,'""')+'"';}
 function feed(hash,domain,rows,fields){
  hash.update(domain+'\n');

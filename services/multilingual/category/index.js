@@ -1,7 +1,7 @@
 'use strict';
 // V003: complete existing category language cells only; never overwrite translations.
 // Admin-only finalization is enforced in routes/builder/admin_reauth.js.
-const LANGS=require('../../ui_dictionary_v2').FOREIGN;
+const LANGS=require('../ui/ui_dictionary_v2').FOREIGN;
 const quote=s=>'"'+s.replace(/"/g,'""')+'"';
 const delays=[1000,2000,3000,5000,8000];
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));

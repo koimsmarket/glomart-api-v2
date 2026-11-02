@@ -3,7 +3,7 @@
 // Existing manual BASE/DELTA and UI distribution remain authoritative.
 const {snapshot}=require('./dictionary_fingerprint');
 const ui=require('./ui'),category=require('./category');
-const uiLangs=require('../ui_dictionary_v2').LANGS;
+const uiLangs=require('./ui/ui_dictionary_v2').LANGS;
 const categoryLangs=require('../asset_pack_manager').LANGS;
 function countLanguages(){
  if(uiLangs.length!==25||new Set(uiLangs).size!==25)throw Error('UI_LANGUAGE_COUNT_NOT_25');

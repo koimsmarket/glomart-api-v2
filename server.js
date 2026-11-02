@@ -1765,7 +1765,7 @@ app.locals.pool = pool;
 /* GM_UI_DICTIONARY_V004: Cloudtype deploy recreates ephemeral UI JSON from DB.
  * Isolated from category-pack and search workers. No DB migration on boot. */
 try {
-  const uiAutoPack=require('./services/ui_dictionary_auto_publish');
+  const uiAutoPack=require('./services/multilingual/ui/ui_dictionary_auto_publish');
   let uiRestoreAttempts=0;
   const restoreUiPack=()=>{
     uiRestoreAttempts++;

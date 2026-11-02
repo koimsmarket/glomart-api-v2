@@ -5,7 +5,7 @@ const fs=require('fs');
 const path=require('path');
 const router=express.Router();
 const {dbFrom}=require('./core');
-const uiV2=require('../../services/ui_dictionary_v2');
+const uiV2=require('../../services/multilingual/ui/ui_dictionary_v2');
 
 function s(v){return String(v==null?'':v).replace(/\s+/g,' ').trim();}
 function hasKo(v){return /[가-힣]/.test(String(v||''));}
@@ -315,11 +315,11 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/scan-static',express.json({li
 
 // Generated, versioned, per-language UI JSON. No dictionary scan triggered by ordinary users.
 router.get('/api/gm/ui-dictionary/v2/auto/meta',async(req,res)=>{
- try{const m=await require('../../services/ui_dictionary_auto_publish').current(dbFrom(req));res.set('Cache-Control','no-store');res.json({ok:true,...m});}
+ try{const m=await require('../../services/multilingual/ui/ui_dictionary_auto_publish').current(dbFrom(req));res.set('Cache-Control','no-store');res.json({ok:true,...m});}
  catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 router.get('/api/gm/ui-dictionary/v2/auto/:lang/:version.json',async(req,res)=>{
- try{const svc=require('../../services/ui_dictionary_auto_publish');const lang=String(req.params.lang||'').toLowerCase();
+ try{const svc=require('../../services/multilingual/ui/ui_dictionary_auto_publish');const lang=String(req.params.lang||'').toLowerCase();
  if(!svc.LANGS.includes(lang))return res.status(404).json({ok:false,error:'INVALID_LANG'});
  const pack=await svc.getPack(dbFrom(req),lang,String(req.params.version||''));
  if(!pack)return res.status(404).json({ok:false,error:'PACK_NOT_READY_OR_VERSION_MISMATCH'});

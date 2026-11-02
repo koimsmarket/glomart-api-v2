@@ -73,8 +73,8 @@ router.post('/api/gm/builder/translation-backfill/one',express.json({limit:'8kb'
  const update=await db.query(`UPDATE ${quote(cfg.table)} SET ${quote(target)}=$1 ${type==='ui'&&cols.has('translation_status')?",translation_status='PARTIAL'":''} WHERE ctid=$2::tid AND ${quote(src)}=$3 AND NULLIF(BTRIM(${quote(target)}::text),'') IS NULL RETURNING ${type==='ui'?'gm_code':'ctid::text AS row_token'}`,[translated,token,row.ko]);
  if(!update.rowCount)return res.json({ok:true,skipped:'CONCURRENTLY_UPDATED'});
  if(type==='ui'){
-  try{const ui=require('../../services/ui_dictionary_v2');const foreign=ui.FOREIGN.filter(x=>cols.has(x));const check=await db.query(`SELECT ${foreign.map(quote).join(',')} FROM gm_ui_dictionary WHERE gm_code=$1`,[update.rows[0].gm_code]);const missing=foreign.filter(l=>!s(check.rows[0]&&check.rows[0][l]));await db.query(`UPDATE gm_ui_dictionary SET translation_status=$2 WHERE gm_code=$1`,[update.rows[0].gm_code,missing.length?'PARTIAL':'READY']);}catch(e){console.warn('[BUILDER_TRANSLATION_STATUS]',String(e.message||e));}
-  try{require('../../services/ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[BUILDER_TRANSLATION_PUBLISH]',String(e.message||e));}
+  try{const ui=require('../../services/multilingual/ui/ui_dictionary_v2');const foreign=ui.FOREIGN.filter(x=>cols.has(x));const check=await db.query(`SELECT ${foreign.map(quote).join(',')} FROM gm_ui_dictionary WHERE gm_code=$1`,[update.rows[0].gm_code]);const missing=foreign.filter(l=>!s(check.rows[0]&&check.rows[0][l]));await db.query(`UPDATE gm_ui_dictionary SET translation_status=$2 WHERE gm_code=$1`,[update.rows[0].gm_code,missing.length?'PARTIAL':'READY']);}catch(e){console.warn('[BUILDER_TRANSLATION_STATUS]',String(e.message||e));}
+  try{require('../../services/multilingual/ui/ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[BUILDER_TRANSLATION_PUBLISH]',String(e.message||e));}
  }
  res.json({ok:true,domain:type,lang,source:s(row.ko),translated});
  }catch(e){if(e.is429)console.warn('[GM_BACKFILL_429] source=online_translate domain='+type+' lang='+lang);res.status(e.is429?429:500).json({ok:false,error:String(e.message||e),domain:type,lang:lang});}
@@ -119,7 +119,7 @@ router.post('/api/gm/builder/translation-backfill/batch',express.json({limit:'8k
    }
   }
   if(type==='ui'&&completed){
-   try{require('../../services/ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[BUILDER_TRANSLATION_PUBLISH]',String(e.message||e));}
+   try{require('../../services/multilingual/ui/ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[BUILDER_TRANSLATION_PUBLISH]',String(e.message||e));}
   }
   res.json({ok:true,domain:type,completed,skipped,failed,halted,examined:processed,rate_limit_until:blockedUntil>Date.now()?new Date(blockedUntil).toISOString():null});
  }catch(e){res.status(500).json({ok:false,error:String(e.message||e),completed,skipped,failed});}finally{running=false;}

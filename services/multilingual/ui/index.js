@@ -1,6 +1,6 @@
 'use strict';
-const legacy=require('../../ui_dictionary_v2');
-const publisher=require('../../ui_dictionary_auto_publish');
+const legacy=require('./ui_dictionary_v2');
+const publisher=require('./ui_dictionary_auto_publish');
 const FOREIGN=legacy.FOREIGN;
 const empty=FOREIGN.map(l=>`NULLIF(BTRIM(${l}::text),'') IS NULL`).join(' OR ');
 async function missing(db){const r=await db.query(`SELECT gm_code FROM gm_ui_dictionary WHERE active_yn='Y' AND NULLIF(BTRIM(kr),'') IS NOT NULL AND (${empty}) ORDER BY gm_code`);return r.rows.map(x=>x.gm_code);}
