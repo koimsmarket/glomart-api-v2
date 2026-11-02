@@ -1,11 +1,13 @@
 'use strict';
 const ui=require('./ui'),category=require('./category');
 const release=require('./release');
+const preflight=require('./publish_preflight');
+const fingerprint=require('./dictionary_fingerprint');
 let running=false;
-let state={stage:'idle',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null,release:null};
+let state={stage:'idle',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null,release:null,preflight:null};
 async function launch(db){
  if(running)return {ok:false,error:'ALREADY_RUNNING'};
- running=true;state={stage:'scanning',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null,release:null};
+ running=true;state={stage:'scanning',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null,release:null,preflight:null};
  void (async()=>{try{
   // Fail closed: category translations and legacy publishing stay untouched.
   state.remaining.category=await category.inspect(db);
@@ -13,14 +15,20 @@ async function launch(db){
   state.stage='translating_category';const catOk=await category.complete(db,state);
   state.stage='verifying';state.remaining.category=await category.inspect(db);state.remaining.ui=(await ui.missing(db)).length;
   if(!uiOk || !catOk || state.remaining.category || state.remaining.ui) {state.stage='incomplete';return;}
+  state.stage='preflight';
+  const verified=await preflight.check(db);
+  state.preflight={uiLanguages:verified.uiLanguages,categoryLanguages:verified.categoryLanguages};
   // Publish category first; do not expose a new UI version if category fails.
   // Category and UI versions remain distinct until the integrated version phase.
   state.stage='publishing_category';const c=await category.publish(db);
   if(!c||!c.ok)throw Error('CATEGORY_PUBLISH_NOT_CONFIRMED');
   state.categoryVersion=c.version;
+  // Fail closed if dictionary changed while the category writer was running.
+  if((await fingerprint.snapshot(db))!==verified.fingerprint)throw Error('DICTIONARY_CHANGED_DURING_CATEGORY_PUBLISH');
   state.stage='publishing_ui';const p=await ui.publish(db);
   if(!p||!p.ok||!p.ready)throw Error('UI_PUBLISH_NOT_CONFIRMED '+JSON.stringify(p));
   state.version=p.version;
+  if((await fingerprint.snapshot(db))!==verified.fingerprint)throw Error('DICTIONARY_CHANGED_DURING_UI_PUBLISH');
   // A single release marker is committed only after BOTH legacy publishers confirm success.
   state.stage='recording_release';
   const confirmed=await release.record(db,{uiVersion:p.version,categoryVersion:c.version});
