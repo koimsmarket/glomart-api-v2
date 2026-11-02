@@ -5,6 +5,7 @@ const crypto=require('crypto');
 const fs=require('fs');
 const path=require('path');
 const os=require('os');
+const zlib=require('zlib');
 // Same writable-temp policy as category packs; never write into /app/public.
 const ROOT=path.resolve(process.env.GM_UI_AUTO_PACK_ROOT || path.join(os.tmpdir(),'glomart-ui-dictionary-auto'));
 function atomicJSON(file,data){fs.mkdirSync(path.dirname(file),{recursive:true});const tmp=file+'.'+process.pid+'.tmp';fs.writeFileSync(tmp,JSON.stringify(data),'utf8');fs.renameSync(tmp,file);}
@@ -15,6 +16,8 @@ const ui=require('./ui_dictionary_v2');
 const {LANGS}=ui;
 const KEY='gm_ui_dictionary_auto_version';
 const HASH='gm_ui_dictionary_auto_hash';
+// Durable last-known-good pack: survives ephemeral disk loss and new DB captures.
+const SNAPSHOT='gm_ui_dictionary_auto_published_snapshot_v1';
 let timer=null, running=false, pendingDb=null;
 function versionNow(){
  const d=new Date(Date.now()+9*3600000), p=n=>String(n).padStart(2,'0');
@@ -30,6 +33,32 @@ async function snapshot(db){
 }
 function fingerprint(rows){return crypto.createHash('sha256').update(JSON.stringify(rows.map(x=>LANGS.map(l=>l==='kr'?[x.gm_code,x.kr]:x[l])))).digest('hex');}
 let published=null;
+function packSet(rows,version){
+ const packs={};for(const lang of LANGS)packs[lang]={type:'ui_dictionary',lang,version,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:x[lang]}))};
+ return packs;
+}
+async function savedPackSet(db,version,hash){
+ try{
+  const raw=await read(db,SNAPSHOT);if(!raw)return null;
+  const obj=JSON.parse(zlib.gunzipSync(Buffer.from(raw,'base64')).toString('utf8'));
+  if(!obj||obj.version!==version||obj.hash!==hash||!Array.isArray(obj.rows))return null;
+  if(fingerprint(obj.rows)!==hash)return null;
+  return packSet(obj.rows,version);
+ }catch(e){console.warn('[GM_UI_PACK_SNAPSHOT_READ_ERROR]',String(e.message||e));return null;}
+}
+async function restorePublished(db,version,hash){
+ if(!version||!hash)return null;
+ if(published&&published.version===version&&published.hash===hash)return published.packs;
+ const saved=await savedPackSet(db,version,hash);
+ if(saved){materialize(version,hash,saved);published={version,hash,packs:saved};return saved;}
+ // Legacy releases have no persisted snapshot. Existing on-disk files remain
+ // valid until replaced; never mislabel changed live DB rows as old version.
+ const disk={};if(LANGS.every(l=>{disk[l]=diskPack(l,version);return !!disk[l];})){
+  published={version,hash,packs:disk};return disk;
+ }
+ return null;
+}
+
 async function publish(db){
  if(running)return {ok:false,error:"ALREADY_PUBLISHING"};running=true;
  try{
@@ -43,11 +72,13 @@ async function publish(db){
    const ms=60000-(Date.now()%60000)+250;
    timer=setTimeout(()=>{timer=null;queue(db);},ms);if(timer.unref)timer.unref();return {ok:false,error:"VERSION_MINUTE_COLLISION"};
   }
-  const packs={};
-  for(const lang of LANGS){packs[lang]={type:'ui_dictionary',lang,version:v,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:x[lang]}))};}
+  const packs=packSet(rows,v);
   // Publish all files first, then DB metadata. Rebuilds never change version.
   materialize(v,hash,packs);
-  await set(db,KEY,v);await set(db,HASH,hash);
+  // Persist validated content before switching the public version.
+  const compressed=zlib.gzipSync(Buffer.from(JSON.stringify({version:v,hash,rows}),'utf8')).toString('base64');
+  await set(db,SNAPSHOT,compressed);
+  await set(db,HASH,hash);await set(db,KEY,v);
   published={version:v,hash,packs};
   console.log('[GM_UI_PACK_PUBLISHED]',JSON.stringify({version:v,count:rows.length,languages:LANGS.length}));return {ok:true,ready:true,version:v};
  }catch(e){console.error('[GM_UI_PACK_PUBLISH_ERROR]',String(e&&e.message||e));return {ok:false,error:String(e&&e.message||e)};}
@@ -56,27 +87,23 @@ async function publish(db){
 function queue(db){ /* GM_UI_AUTO_V002: retain changed DB, publish only after admin finalize. */ pendingDb=db; }
 async function current(db){
  const v=await read(db,KEY),hash=await read(db,HASH);
- if(!published||published.version!==v||published.hash!==hash){
-   const rows=await snapshot(db),actual=fingerprint(rows);
-   if(!v||!hash||actual!==hash){return {version:v,ready:false};}
-   const packs={};for(const lang of LANGS)packs[lang]={type:'ui_dictionary',lang,version:v,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:x[lang]}))};
-   materialize(v,hash,packs);
-   published={version:v,hash,packs};
+ if(!v||!hash)return {version:v,ready:false};
+ let packs=await restorePublished(db,v,hash);
+ if(!packs){
+  // Pre-V009 published versions can be rebuilt ONLY when the live source is
+  // identical to the version hash. Otherwise retain safe Cafe24 fallback.
+  const rows=await snapshot(db);
+  if(fingerprint(rows)!==hash)return {version:v,ready:false};
+  packs=packSet(rows,v);materialize(v,hash,packs);published={version:v,hash,packs};
  }
- // Files may have disappeared after a Cloudtype redeploy. Never bump version for this.
- if(!LANGS.every(l=>diskPack(l,v))){materialize(v,hash,published.packs);console.log('[GM_UI_PACK_FILES_RESTORED]',v);}
+ if(!LANGS.every(l=>diskPack(l,v))){materialize(v,hash,packs);console.log('[GM_UI_PACK_FILES_RESTORED]',v);}
  return {version:v,ready:true};
 }
 async function rehydrate(db){
- const version=await read(db,KEY),hash=await read(db,HASH);
- if(!version||!hash){console.log('[GM_UI_PACK_REHYDRATE_SKIP] no published version');return {ready:false};}
- const rows=await snapshot(db),actual=fingerprint(rows);
- if(actual!==hash){console.warn('[GM_UI_PACK_REHYDRATE_DEFER] DB changed after publish; retaining published version until next publish');return {ready:false};}
- const packs={};
- for(const lang of LANGS)packs[lang]={type:'ui_dictionary',lang,version,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:x[lang]}))};
- materialize(version,hash,packs);published={version,hash,packs};
- console.log('[GM_UI_PACK_REHYDRATE_DONE]',JSON.stringify({version,files:LANGS.length,count:rows.length,root:ROOT,db_version_unchanged:true}));
- return {version,ready:true};
+ const m=await current(db);
+ if(m.ready)console.log('[GM_UI_PACK_REHYDRATE_DONE]',JSON.stringify({version:m.version,files:LANGS.length,root:ROOT}));
+ else console.warn('[GM_UI_PACK_REHYDRATE_DEFER]',JSON.stringify(m));
+ return m;
 }
 
 async function getPack(db,lang,version){const m=await current(db);if(!m.ready||m.version!==version||!LANGS.includes(lang))return null;return diskPack(lang,version)||published.packs[lang]||null;}
