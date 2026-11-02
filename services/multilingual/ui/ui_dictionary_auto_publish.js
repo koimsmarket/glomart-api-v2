@@ -34,7 +34,14 @@ async function snapshot(db){
 function fingerprint(rows){return crypto.createHash('sha256').update(JSON.stringify(rows.map(x=>LANGS.map(l=>l==='kr'?[x.gm_code,x.kr]:x[l])))).digest('hex');}
 let published=null;
 function packSet(rows,version){
- const packs={};for(const lang of LANGS)packs[lang]={type:'ui_dictionary',lang,version,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:x[lang]}))};
+ // Each language publishes all completed cells. One missing translation never
+ // blocks other records or other languages. Never insert a Korean substitute.
+ const packs={};
+ for(const lang of LANGS){
+  const items=rows.filter(x=>String(x.kr||'').trim()&&String(lang==='kr'?x.kr:x[lang]||'').trim())
+   .map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:x[lang]}));
+  packs[lang]={type:'ui_dictionary',lang,version,count:items.length,items};
+ }
  return packs;
 }
 async function savedPackSet(db,version,hash){
@@ -49,9 +56,16 @@ async function savedPackSet(db,version,hash){
 function validPackSet(packs,version){
  if(!packs||!LANGS.every(l=>packs[l]&&packs[l].version===version&&packs[l].lang===l&&Array.isArray(packs[l].items)))return false;
  const ko=packs.kr.items;
- const keys=ko.map(x=>String(x.dict_key||''));
- if(new Set(keys).size!==keys.length)return false;
- return LANGS.every(l=>packs[l].count===ko.length&&packs[l].items.length===ko.length&&packs[l].items.every((x,i)=>String(x.dict_key||'')===keys[i]&&String(x.source_text||'')===String(ko[i].source_text||'')));
+ const source=new Map(ko.map(x=>[String(x.dict_key||''),String(x.source_text||'')]));
+ if(source.size!==ko.length)return false;
+ return LANGS.every(l=>{
+  const p=packs[l],seen=new Set();
+  return p.count===p.items.length&&p.items.every(x=>{
+   const key=String(x.dict_key||'');
+   if(!key||seen.has(key)||!source.has(key)||!String(x.value||'').trim()||String(x.source_text||'')!==source.get(key))return false;
+   seen.add(key);return true;
+  });
+ });
 }
 function rowsFromPacks(packs){
  const ko=packs.kr.items;
@@ -64,7 +78,7 @@ function rowsFromPacks(packs){
 async function persistLegacySnapshot(db,version,hash,packs){
  // Upgrade an existing on-disk legacy release without rewriting its published version.
  // Only byte-identical source data (as proven by the historical fingerprint) qualifies.
- if(!validPackSet(packs,version))return false;
+ if(!validPackSet(packs,version)||!LANGS.every(l=>packs[l].items.length===packs.kr.items.length))return false;
  const rows=rowsFromPacks(packs);
  if(fingerprint(rows)!==hash)return false;
  const compressed=zlib.gzipSync(Buffer.from(JSON.stringify({version,hash,rows}),'utf8')).toString('base64');
@@ -98,7 +112,6 @@ async function publish(db){
  try{
   const rows=await snapshot(db);
    const missing=rows.reduce((n,r)=>n+LANGS.filter(l=>!String(r[l]||'').trim()).length,0);
-   if(missing)throw new Error('INCOMPLETE_TRANSLATIONS '+missing);
    const hash=fingerprint(rows),prevHash=await read(db,HASH),prev=await read(db,KEY);
   if(prevHash===hash && prev){
    const existing=await rehydrate(db);
@@ -107,8 +120,7 @@ async function publish(db){
   }
   const v=versionNow();
   if(prev===v){ // Preserve yyMMdd_HHmm uniqueness: publish once the minute rolls over.
-   const ms=60000-(Date.now()%60000)+250;
-   timer=setTimeout(()=>{timer=null;queue(db);},ms);if(timer.unref)timer.unref();return {ok:false,error:"VERSION_MINUTE_COLLISION"};
+   return {ok:false,error:'VERSION_MINUTE_COLLISION'};
   }
   const packs=packSet(rows,v);
   // Publish all files first, then DB metadata. Rebuilds never change version.
@@ -118,7 +130,7 @@ async function publish(db){
   await set(db,SNAPSHOT,compressed);
   await set(db,HASH,hash);await set(db,KEY,v);
   published={version:v,hash,packs};
-  console.log('[GM_UI_PACK_PUBLISHED]',JSON.stringify({version:v,count:rows.length,languages:LANGS.length}));return {ok:true,ready:true,version:v};
+  console.log('[GM_UI_PACK_PUBLISHED]',JSON.stringify({version:v,count:rows.length,languages:LANGS.length,missing,partial:missing>0}));return {ok:true,ready:true,version:v};
  }catch(e){console.error('[GM_UI_PACK_PUBLISH_ERROR]',String(e&&e.message||e));return {ok:false,error:String(e&&e.message||e)};}
  finally{running=false;}
 }
@@ -133,18 +145,11 @@ async function current(db){
   const rows=await snapshot(db);
   const liveHash=fingerprint(rows);
   if(liveHash!==hash){
-   // A redeployment erases temp/. If no published snapshot survived, a changed
-   // live DB cannot be labelled with the old release version. A fully translated
-   // DB can be recovered as a NEW release (without translating anything).
-   // An incomplete DB must keep the previous Cafe24 fallback instead.
+   // A deployment erases temp/. Rebuild a new release from completed DB
+   // cells without changing the historical version's contents. Missing cells
+   // are simply absent from their language pack, not a global publish blocker.
    const missing=rows.reduce((n,r)=>n+LANGS.filter(l=>!String(r[l]||'').trim()).length,0);
-   if(missing){
-    console.warn('[GM_UI_PACK_RECOVERY_BLOCKED]',JSON.stringify({reason:'SNAPSHOT_MISSING_SOURCE_CHANGED_INCOMPLETE',version:v,missing}));
-    return {version:v,ready:false};
-   }
-   console.warn('[GM_UI_PACK_RECOVER_NEW_VERSION]',JSON.stringify({previous:v,reason:'SNAPSHOT_MISSING_SOURCE_CHANGED_COMPLETE'}));
-   // Recovery is limited to already-complete dictionary data; no translation
-   // requests, UI captures, or unrelated dictionary operations are started.
+   console.warn('[GM_UI_PACK_RECOVER_NEW_VERSION]',JSON.stringify({previous:v,missing,reason:'SNAPSHOT_MISSING_SOURCE_CHANGED'}));
    const repaired=await publish(db);
    if(!repaired.ok)return {version:v,ready:false};
    return {version:repaired.version,ready:true};
