@@ -31,19 +31,15 @@ async function snapshot(db){
  const r=await db.query(`SELECT gm_code,kr,${LANGS.filter(x=>x!=='kr').join(',')} FROM gm_ui_dictionary WHERE active_yn='Y' ORDER BY gm_code`);
  return r.rows||[];
 }
-function fingerprint(rows){return crypto.createHash('sha256').update(JSON.stringify(rows.map(x=>LANGS.map(l=>l==='kr'?[x.gm_code,x.kr]:x[l])))).digest('hex');}
+// Include the JSON contract in the fingerprint: V017's filtered packs require one new release.
+// Subsequent deployments reuse the same hash/version unless dictionary content changes.
+function fingerprint(rows){return crypto.createHash('sha256').update('aligned_kr_fallback_v1|').update(JSON.stringify(rows.map(x=>LANGS.map(l=>l==='kr'?[x.gm_code,x.kr]:x[l])))).digest('hex');}
 let published=null;
 function packSet(rows,version){
- // Each language publishes all completed cells. One missing translation never
- // blocks other records or other languages. Never insert a Korean substitute.
- const packs={};
- for(const lang of LANGS){
-  const items=rows.filter(x=>String(x.kr||'').trim()&&String(lang==='kr'?x.kr:x[lang]||'').trim())
-   .map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:x[lang]}));
-  packs[lang]={type:'ui_dictionary',lang,version,count:items.length,items};
- }
+ const packs={};for(const lang of LANGS)packs[lang]={type:'ui_dictionary',lang,version,count:rows.length,items:rows.map(x=>({dict_key:x.gm_code,source_text:x.kr,value:lang==='kr'?x.kr:(x[lang]||x.kr)}))};
  return packs;
 }
+
 async function savedPackSet(db,version,hash){
  try{
   const raw=await read(db,SNAPSHOT);if(!raw)return null;
@@ -56,17 +52,11 @@ async function savedPackSet(db,version,hash){
 function validPackSet(packs,version){
  if(!packs||!LANGS.every(l=>packs[l]&&packs[l].version===version&&packs[l].lang===l&&Array.isArray(packs[l].items)))return false;
  const ko=packs.kr.items;
- const source=new Map(ko.map(x=>[String(x.dict_key||''),String(x.source_text||'')]));
- if(source.size!==ko.length)return false;
- return LANGS.every(l=>{
-  const p=packs[l],seen=new Set();
-  return p.count===p.items.length&&p.items.every(x=>{
-   const key=String(x.dict_key||'');
-   if(!key||seen.has(key)||!source.has(key)||!String(x.value||'').trim()||String(x.source_text||'')!==source.get(key))return false;
-   seen.add(key);return true;
-  });
- });
+ const keys=ko.map(x=>String(x.dict_key||''));
+ if(new Set(keys).size!==keys.length)return false;
+ return LANGS.every(l=>packs[l].count===ko.length&&packs[l].items.length===ko.length&&packs[l].items.every((x,i)=>String(x.dict_key||'')===keys[i]&&String(x.source_text||'')===String(ko[i].source_text||'')));
 }
+
 function rowsFromPacks(packs){
  const ko=packs.kr.items;
  return ko.map((item,i)=>{
