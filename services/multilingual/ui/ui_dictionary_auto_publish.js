@@ -46,14 +46,48 @@ async function savedPackSet(db,version,hash){
   return packSet(obj.rows,version);
  }catch(e){console.warn('[GM_UI_PACK_SNAPSHOT_READ_ERROR]',String(e.message||e));return null;}
 }
+function validPackSet(packs,version){
+ if(!packs||!LANGS.every(l=>packs[l]&&packs[l].version===version&&packs[l].lang===l&&Array.isArray(packs[l].items)))return false;
+ const ko=packs.kr.items;
+ const keys=ko.map(x=>String(x.dict_key||''));
+ if(new Set(keys).size!==keys.length)return false;
+ return LANGS.every(l=>packs[l].count===ko.length&&packs[l].items.length===ko.length&&packs[l].items.every((x,i)=>String(x.dict_key||'')===keys[i]&&String(x.source_text||'')===String(ko[i].source_text||'')));
+}
+function rowsFromPacks(packs){
+ const ko=packs.kr.items;
+ return ko.map((item,i)=>{
+  const row={gm_code:item.dict_key,kr:item.source_text};
+  for(const lang of LANGS){if(lang!=='kr')row[lang]=packs[lang].items[i].value;}
+  return row;
+ });
+}
+async function persistLegacySnapshot(db,version,hash,packs){
+ // Upgrade an existing on-disk legacy release without rewriting its published version.
+ // Only byte-identical source data (as proven by the historical fingerprint) qualifies.
+ if(!validPackSet(packs,version))return false;
+ const rows=rowsFromPacks(packs);
+ if(fingerprint(rows)!==hash)return false;
+ const compressed=zlib.gzipSync(Buffer.from(JSON.stringify({version,hash,rows}),'utf8')).toString('base64');
+ await set(db,SNAPSHOT,compressed);
+ console.log('[GM_UI_PACK_LEGACY_SNAPSHOT_SAVED]',JSON.stringify({version,count:rows.length}));
+ return true;
+}
 async function restorePublished(db,version,hash){
  if(!version||!hash)return null;
- if(published&&published.version===version&&published.hash===hash)return published.packs;
+ if(published&&published.version===version&&published.hash===hash&&validPackSet(published.packs,version))return published.packs;
  const saved=await savedPackSet(db,version,hash);
- if(saved){materialize(version,hash,saved);published={version,hash,packs:saved};return saved;}
- // Legacy releases have no persisted snapshot. Existing on-disk files remain
- // valid until replaced; never mislabel changed live DB rows as old version.
- const disk={};if(LANGS.every(l=>{disk[l]=diskPack(l,version);return !!disk[l];})){
+ if(saved&&validPackSet(saved,version)){
+  materialize(version,hash,saved);published={version,hash,packs:saved};return saved;
+ }
+ // Before V009, files were the only backup. Promote only a complete, verified
+ // on-disk release to a durable snapshot. Never rebuild an old version from
+ // today's changed dictionary.
+ const disk={};
+ if(LANGS.every(l=>{disk[l]=diskPack(l,version);return !!disk[l];})&&validPackSet(disk,version)){
+  if(!(await persistLegacySnapshot(db,version,hash,disk))){
+   console.warn('[GM_UI_PACK_LEGACY_UNVERIFIED]',version);
+   return null;
+  }
   published={version,hash,packs:disk};return disk;
  }
  return null;
@@ -66,7 +100,11 @@ async function publish(db){
    const missing=rows.reduce((n,r)=>n+LANGS.filter(l=>!String(r[l]||'').trim()).length,0);
    if(missing)throw new Error('INCOMPLETE_TRANSLATIONS '+missing);
    const hash=fingerprint(rows),prevHash=await read(db,HASH),prev=await read(db,KEY);
-  if(prevHash===hash && prev){await rehydrate(db);console.log('[GM_UI_PACK_UNCHANGED]',prev);return {ok:true,ready:true,version:prev,unchanged:true};}
+  if(prevHash===hash && prev){
+   const existing=await rehydrate(db);
+   if(!existing.ready)throw Error('EXISTING_UI_PACK_NOT_RECOVERABLE');
+   console.log('[GM_UI_PACK_UNCHANGED]',prev);return {ok:true,ready:true,version:prev,unchanged:true};
+  }
   const v=versionNow();
   if(prev===v){ // Preserve yyMMdd_HHmm uniqueness: publish once the minute rolls over.
    const ms=60000-(Date.now()%60000)+250;
