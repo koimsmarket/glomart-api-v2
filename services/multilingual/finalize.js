@@ -3,6 +3,25 @@ const ui=require('./ui'),category=require('./category');
 const release=require('./release');
 const preflight=require('./publish_preflight');
 const fingerprint=require('./dictionary_fingerprint');
+const fs=require('fs');
+const path=require('path');
+const uiPublisher=require('./ui/ui_dictionary_auto_publish');
+// V011: verify every published UI language file before writing the combined release marker.
+async function verifyUiFiles(db,version){
+ const meta=await uiPublisher.current(db);
+ if(!meta.ready||meta.version!==version)throw Error('UI_PUBLISHED_META_UNAVAILABLE');
+ const root=uiPublisher.ROOT;
+ let expected=null;
+ for(const lang of uiPublisher.LANGS){
+  const file=path.join(root,version,lang+'.json');
+  const pack=JSON.parse(fs.readFileSync(file,'utf8'));
+  if(!pack||pack.lang!==lang||pack.version!==version||pack.type!=='ui_dictionary'||!Array.isArray(pack.items))throw Error('UI_PUBLISHED_FILE_INVALID '+lang);
+  if(!Number.isInteger(pack.count)||pack.count!==pack.items.length)throw Error('UI_PUBLISHED_COUNT_INVALID '+lang);
+  if(expected===null)expected=pack.count;
+  if(pack.count!==expected)throw Error('UI_PUBLISHED_LANGUAGE_COUNT_MISMATCH '+lang);
+ }
+ return {languages:uiPublisher.LANGS.length,itemsPerLanguage:expected};
+}
 let running=false;
 let state={stage:'idle',total:{ui:0,category:0},done:{ui:0,category:0},failed:{category:0},remaining:{ui:0,category:0},error:null,version:null,categoryVersion:null,release:null,preflight:null};
 async function launch(db){
@@ -29,6 +48,8 @@ async function launch(db){
   if(!p||!p.ok||!p.ready)throw Error('UI_PUBLISH_NOT_CONFIRMED '+JSON.stringify(p));
   state.version=p.version;
   if((await fingerprint.snapshot(db))!==verified.fingerprint)throw Error('DICTIONARY_CHANGED_DURING_UI_PUBLISH');
+  state.stage='verifying_published_ui';
+  state.publishedUI=await verifyUiFiles(db,p.version);
   // A single release marker is committed only after BOTH legacy publishers confirm success.
   state.stage='recording_release';
   const confirmed=await release.record(db,{uiVersion:p.version,categoryVersion:c.version});
