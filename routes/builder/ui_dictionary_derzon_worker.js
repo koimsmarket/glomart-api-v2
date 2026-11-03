@@ -1,9 +1,10 @@
-// GM_UI_AUTO_V039: derzon-only native background translation worker endpoints.
+// GM_UI_AUTO_V040: derzon-only native background translation worker endpoints.
 // Does not change the existing server translation engine, publisher, or Builder endpoints.
 'use strict';
 const express = require('express');
 const { dbFrom } = require('./core');
 const uiV2 = require('../../services/multilingual/ui/ui_dictionary_v2');
+const memberGuard = require('../gm_member_access_guard');
 const router = express.Router();
 const API='/api/gm/ui-dictionary/v2/derzon-worker';
 const LIFE_DASHBOARD='https://port-0-glomart-life-api-mss6kcqn688f1333.sel3.cloudtype.app/api/life/gpay/dashboard';
@@ -32,8 +33,13 @@ async function isAuthenticatedDerzon(req){
  }catch(_){return false;}
 }
 async function gate(req,res,next){
- if(!await isAuthenticatedDerzon(req))return res.status(403).set('Cache-Control','no-store').json({ok:false,error:'DERZON_LIFE_SESSION_REQUIRED'});
- next();
+ // Two independent SERVER-VERIFIED alternatives: existing Glomart signed member
+ // access token or the existing Guppy Life token. No client-supplied ID authority.
+ const bearer=memberGuard.validate(req);
+ if(bearer==='derzon')return next();
+ if(await isAuthenticatedDerzon(req))return next();
+ console.warn('[GM_UI_DERZON_AUTH_V040] denied path='+String(req.path||'').slice(0,110));
+ return res.status(403).set('Cache-Control','no-store').json({ok:false,error:'DERZON_AUTH_REQUIRED'});
 }
 function conditions(){return uiV2.FOREIGN.map(l=>`NULLIF(BTRIM(${l}::text),'') IS NULL`)}
 async function updateMissing(db,force){
