@@ -329,7 +329,9 @@ router.post('/api/gm/bank/gpay/claim', requireGpayServiceAuth, async(req,res)=>{
     try { accounts=JSON.parse(process.env.GPAY_BANK_ACCOUNT_MAP||'{}'); } catch(_) {accounts={};}
     const ownerKey=scope==='HQ'?'HQ':`AGENT:${Number(b.agent_id)}`;
     const approvedAccounts=accounts[ownerKey];
-    if(!Array.isArray(approvedAccounts)||!approvedAccounts.map(clean).includes(clean(t.account_no))){
+    // A bank export can omit account hyphens; compare complete digits, never partial account numbers.
+    const bankAccountDigits=v=>clean(v).replace(/[-\s]/g,'');
+    if(!Array.isArray(approvedAccounts)||!approvedAccounts.some(x=>bankAccountDigits(x)===bankAccountDigits(t.account_no)&&bankAccountDigits(x).length>=8)){
       await c.query('ROLLBACK');return fail(res,409,'BANK_ACCOUNT_NOT_AUTHORIZED_FOR_RECIPIENT');
     }
     if(Number(t.deposit_amount)!==amount){await c.query('ROLLBACK');return fail(res,409,'AMOUNT_MISMATCH');}
@@ -369,14 +371,14 @@ router.post('/api/gm/bank/gpay/builder-candidates',requireGpayServiceAuth,async(
   .filter(r=>Number.isSafeInteger(r.id)&&r.id>0&&/^GR-[A-Za-z0-9-]{8,80}$/.test(r.request_no)&&r.member_id&&r.member_id.length<=100&&Number.isSafeInteger(r.amount)&&r.amount>0&&Number.isFinite(Date.parse(r.requested_at)));
  try{
   let accounts;try{accounts=JSON.parse(process.env.GPAY_BANK_ACCOUNT_MAP||'{}')}catch(_){accounts={}}
-  const hq=Array.isArray(accounts.HQ)?accounts.HQ.map(clean).filter(Boolean):[];
+  const hq=Array.isArray(accounts.HQ)?accounts.HQ.map(v=>clean(v).replace(/[-\s]/g,'')).filter(v=>/^\d{8,30}$/.test(v)):[];
   if(!hq.length)return fail(res,503,'HQ_BANK_ACCOUNT_MAP_REQUIRED');
   const database=db(req);if(!database)return fail(res,503,'BANK_DB_NOT_READY');
   const ids=[...new Set(valid.map(r=>r.member_id))];
   const people=ids.length?(await database.query(`SELECT member_id,member_name,phone,refund_bank_name,refund_account_no,refund_account_holder FROM gm_member WHERE member_id=ANY($1::text[])`,[ids])).rows:[];
   const byId=new Map(people.map(m=>[clean(m.member_id).toLowerCase(),m]));
   const result=await database.query(`SELECT bank_transaction_id,account_no,transaction_at,description,deposit_amount,source_type,source_row_no,process_status,matched_order_no FROM gm_bank_transaction
-   WHERE bank_code='WOORI' AND account_no=ANY($1::text[]) AND deposit_amount>0 AND source_type='FILE'
+   WHERE bank_code='WOORI' AND regexp_replace(account_no,'[-[:space:]]','','g')=ANY($1::text[]) AND deposit_amount>0 AND source_type='FILE'
    ORDER BY transaction_at DESC,bank_transaction_id DESC LIMIT 1500`,[hq]);
   const compact=v=>clean(v).replace(/[\s\u00a0]/g,'');
   const normalizePhone=v=>clean(v).replace(/\D/g,'').slice(-8);
