@@ -366,6 +366,9 @@ router.post('/api/gm/bank/gpay/builder-upload',requireGpayServiceAuth,async(req,
 // Candidate matching is read-only. Bank identity remains authoritative in gm_bank_transaction.
 router.post('/api/gm/bank/gpay/builder-candidates',requireGpayServiceAuth,async(req,res)=>{
  const requests=Array.isArray(req.body?.requests)?req.body.requests:[];
+ const fromDate=clean(req.body?.from_date),toDate=clean(req.body?.to_date);
+ const validDate=v=>!v||(/^\d{4}-\d{2}-\d{2}$/.test(v)&&!Number.isNaN(Date.parse(v+'T00:00:00Z'))&&new Date(v+'T00:00:00Z').toISOString().slice(0,10)===v);
+ if(!validDate(fromDate)||!validDate(toDate)||(fromDate&&toDate&&fromDate>toDate))return fail(res,400,'INVALID_BANK_DATE_RANGE');
  if(requests.length>1000)return fail(res,400,'TOO_MANY_REQUESTS');
  const valid=requests.map(r=>({id:Number(r.id),request_no:clean(r.request_no),member_id:clean(r.member_id),amount:Number(r.amount),requested_at:clean(r.requested_at)}))
   .filter(r=>Number.isSafeInteger(r.id)&&r.id>0&&/^GR-[A-Za-z0-9-]{8,80}$/.test(r.request_no)&&r.member_id&&r.member_id.length<=100&&Number.isSafeInteger(r.amount)&&r.amount>0&&Number.isFinite(Date.parse(r.requested_at)));
@@ -379,7 +382,9 @@ router.post('/api/gm/bank/gpay/builder-candidates',requireGpayServiceAuth,async(
   const byId=new Map(people.map(m=>[clean(m.member_id).toLowerCase(),m]));
   const result=await database.query(`SELECT bank_transaction_id,account_no,transaction_at,description,deposit_amount,source_type,source_row_no,process_status,matched_order_no FROM gm_bank_transaction
    WHERE bank_code='WOORI' AND regexp_replace(account_no,'[-[:space:]]','','g')=ANY($1::text[]) AND deposit_amount>0 AND source_type='FILE'
-   ORDER BY transaction_at DESC,bank_transaction_id DESC LIMIT 1500`,[hq]);
+   AND ($2::date IS NULL OR transaction_at >= $2::date)
+   AND ($3::date IS NULL OR transaction_at < ($3::date + INTERVAL '1 day'))
+   ORDER BY transaction_at DESC,bank_transaction_id DESC LIMIT 1500`,[hq,fromDate||null,toDate||null]);
   const compact=v=>clean(v).replace(/[\s\u00a0]/g,'');
   const normalizePhone=v=>clean(v).replace(/\D/g,'').slice(-8);
   const items=result.rows.map(tx=>{
@@ -403,6 +408,30 @@ router.post('/api/gm/bank/gpay/builder-candidates',requireGpayServiceAuth,async(
   });
   return ok(res,{items,pending_count:valid.length,match_window_hours:24});
  }catch(e){console.error('[GM_GPAY_BANK_BUILDER_V001] candidates_failed',e.code||e.message);return fail(res,503,'BANK_CANDIDATES_FAILED');}
+});
+
+// V004: confirmed financial transactions cannot be deleted. Unlinked FILE rows only.
+// Deletes are scoped to bank transactions explicitly selected by the authenticated Builder.
+router.post('/api/gm/bank/gpay/builder-delete',requireGpayServiceAuth,async(req,res)=>{
+ const ids=req.body?.bank_transaction_ids;
+ if(!Array.isArray(ids)||ids.length<1||ids.length>200||ids.some(x=>!Number.isSafeInteger(x)||x<=0)||new Set(ids).size!==ids.length)
+  return fail(res,400,'INVALID_BANK_DELETE_SELECTION');
+ const pool=db(req);if(!pool)return fail(res,503,'BANK_DB_NOT_READY');
+ const c=await pool.connect();
+ try{
+  await c.query('BEGIN');
+  const q=await c.query('SELECT bank_transaction_id,process_status,matched_order_no,source_type,bank_code,transaction_hash FROM gm_bank_transaction WHERE bank_transaction_id=ANY($1::bigint[]) FOR UPDATE',[ids]);
+  if(q.rowCount!==ids.length||q.rows.some(r=>r.process_status!=='UNPROCESSED'||r.matched_order_no||r.source_type!=='FILE'||r.bank_code!=='WOORI')){
+   await c.query('ROLLBACK');return fail(res,409,'BANK_DELETE_REQUIRES_UNLINKED_UNPROCESSED_FILE_ROWS');
+  }
+  const result=await c.query(`DELETE FROM gm_bank_transaction WHERE bank_transaction_id=ANY($1::bigint[]) AND process_status='UNPROCESSED' AND matched_order_no IS NULL AND source_type='FILE' AND bank_code='WOORI' RETURNING bank_transaction_id,transaction_hash`,[ids]);
+  if(result.rowCount!==ids.length){await c.query('ROLLBACK');return fail(res,409,'BANK_DELETE_CONCURRENT_CHANGE');}
+  await c.query('COMMIT');
+  // No account/name details in logs. Requires retention of operator-side export for full audit.
+  console.warn('[GM_GPAY_BANK_BUILDER_V004_DELETE]',JSON.stringify({count:result.rowCount,ids:result.rows.map(r=>r.bank_transaction_id),hashes:result.rows.map(r=>r.transaction_hash)}));
+  return ok(res,{deleted:result.rowCount});
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});console.error('[GM_GPAY_BANK_BUILDER_V004_DELETE_FAILED]',e.code||e.message);return fail(res,500,'BANK_DELETE_FAILED');}
+ finally{c.release();}
 });
 
 // GM_GPAY_BANK_V013: master-session-only proxy to G-PAY. Authentication above is V008 unchanged.
