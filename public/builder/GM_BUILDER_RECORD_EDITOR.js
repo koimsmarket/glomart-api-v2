@@ -1,4 +1,4 @@
-let recordMeta=null, recordItems=[], selectedRecord=null, selectedKey=null, lastSearchPayload=null;
+let recordMeta=null, recordItems=[], selectedRecord=null, selectedKey=null, lastSearchPayload=null, lastIssueQuery=null;
 function esc(v){ return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function displayValue(v){ if(v===null)return 'NULL'; if(typeof v==='object')return JSON.stringify(v); return String(v); }
 function metaOf(c){ return recordMeta && recordMeta.column_meta ? (recordMeta.column_meta[c]||{}) : {}; }
@@ -16,7 +16,7 @@ async function initRecordEditor(){ await fillSelect('tableSelect'); await loadRe
 async function loadRecordMeta(){
   const table=document.getElementById('tableSelect').value; if(!table)return;
   const r=await fetch(`${API}/api/gm/builder/record/meta?table=${encodeURIComponent(table)}&t=${Date.now()}`); const j=await r.json();
-  if(!r.ok||!j.ok){ log(j); return; } recordMeta=j; recordItems=[]; closeEditor();
+  if(!r.ok||!j.ok){ log(j); return; } recordMeta=j; recordItems=[]; lastSearchPayload=null; lastIssueQuery=null; closeEditor();
   const opts=j.columns.map(c=>`<option value="${esc(c)}">${esc(c)} · ${esc(typeLabel(metaOf(c)))}</option>`).join('');
   document.getElementById('rangeField').innerHTML=opts;
   document.getElementById('sortField').innerHTML='<option value="">기본 정렬</option>'+opts;
@@ -63,6 +63,7 @@ function collectFilters(){
   }).filter(f=>f.op==='is_null'||f.op==='not_null'||String(f.value||'')!=='');
 }
 async function performAdvancedSearch(payload){
+  lastIssueQuery=null;
   lastSearchPayload=JSON.parse(JSON.stringify(payload));
   const r=await fetch(`${API}/api/gm/builder/record/search-advanced`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json(); if(!r.ok||!j.ok){log(j);return;}
@@ -91,8 +92,41 @@ function clearSearchConditions(){
   document.getElementById('rangeValue').value=''; document.getElementById('filterRows').innerHTML=''; addFilterRow();
   document.getElementById('joinSelect').value='AND'; document.getElementById('sortDirection').value='ASC';
 }
-// 기존 외부 호출 호환용: 고급조회로 연결한다.
-async function searchRecords(){ return lastSearchPayload?performAdvancedSearch(lastSearchPayload):searchAdvancedRecords(); }
+// Read-only audit of the selected UI dictionary table; results use existing editor controls.
+async function searchDictionaryIssues(mode){
+  const table=document.getElementById('tableSelect').value;
+  if(table!=='ui_dictionary'){
+    const notice='UI 사전(gm_ui_dictionary) 테이블을 먼저 선택해야 합니다.';
+    document.getElementById('recordActionStatus').textContent=notice;
+    log(notice);return;
+  }
+  const limit=Number(document.getElementById('limitInput').value||100);
+  const label=mode==='duplicate_kr'?'중복 한국어 문구':'GM_CODE 누락';
+  try{
+    const response=await fetch(`${API}/api/gm/builder/record/ui-dictionary-audit`,{
+      method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({mode,limit})
+    });
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw Error((result.error||'AUDIT_FAILED')+(result.detail?' · '+result.detail:''));
+    recordItems=result.items||[];
+    recordMeta.key_sets=result.key_sets||[];
+    recordMeta.key_info=result.key_info||[];
+    recordMeta.editable=result.editable||[];
+    lastIssueQuery=mode;lastSearchPayload=null;
+    document.getElementById('resultInfo').textContent=`${label} · 총 ${result.total}건 / 표시 ${result.count}건 · 기준키: ${keySummary()}`;
+    document.getElementById('recordActionStatus').textContent=`${label}: ${result.total}건 중 ${result.count}건 조회 (읽기 전용 조회)`;
+    renderResults();closeEditor();
+  }catch(e){
+    const msg=`${label} 조회 실패: ${String(e&&e.message||e)}`;
+    document.getElementById('recordActionStatus').textContent=msg;log(msg);
+  }
+}
+// 기존 외부 호출 호환용: 조회 종류에 맞게 다시 실행한다.
+async function searchRecords(){
+  if(lastIssueQuery)return searchDictionaryIssues(lastIssueQuery);
+  return lastSearchPayload?performAdvancedSearch(lastSearchPayload):searchAdvancedRecords();
+}
 function renderResults(){
   const t=document.getElementById('resultTable');
   if(!recordItems.length){t.innerHTML='<tbody><tr><td>조회 결과 없음</td></tr></tbody>';return;}
@@ -113,24 +147,45 @@ function chooseKey(row){
 }
 function toggleDeleteChecks(on){ document.querySelectorAll('.deleteCheck:not(:disabled)').forEach(x=>x.checked=!!on); }
 async function deleteSelectedRecords(){
-  const selected=[...document.querySelectorAll('.deleteCheck:checked')]
-    .map(ch=>recordItems[Number(ch.dataset.idx)])
-    .filter(Boolean)
-    .map(row=>({row,key:chooseKey(row)}))
-    .filter(x=>x.key);
-  if(!selected.length){ log('삭제할 레코드를 체크하세요.'); return; }
+  const status=document.getElementById('recordActionStatus');
+  const checks=[...document.querySelectorAll('.deleteCheck:checked')];
+  const selected=checks.map(ch=>recordItems[Number(ch.dataset.idx)])
+    .filter(Boolean).map(row=>({row,key:chooseKey(row)})).filter(x=>x.key);
+  if(!selected.length){
+    const disabled=document.querySelectorAll('.deleteCheck:disabled').length;
+    const msg=disabled?'선택할 수 없는 레코드가 있습니다. 유효한 기준키가 없어 안전 삭제가 차단됩니다.':'삭제할 레코드를 체크하세요.';
+    status.textContent=msg;log(msg);return;
+  }
+  if(selected.length>100){status.textContent='한 번에 최대 100건만 삭제할 수 있습니다.';return;}
   const answer=prompt(`${selected.length}개 레코드를 삭제합니다.\n실행하려면 DELETE SELECTED 를 입력하세요.`);
-  if(answer!=='DELETE SELECTED')return;
+  if(answer!=='DELETE SELECTED'){
+    status.textContent='삭제 취소: 확인 문구가 일치하지 않습니다.';return;
+  }
   const table=document.getElementById('tableSelect').value;
-  const r=await fetch(`${API}/api/gm/builder/record/delete-selected`,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({table,confirm:'DELETE SELECTED',items:selected.map(x=>({key:x.key}))})
-  });
-  const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch(_){j={ok:false,error:'NON_JSON_RESPONSE',status:r.status,text:txt.slice(0,500)};}
-  log(j);
-  if(!r.ok||!j.ok)return;
-  alert(`삭제 완료: ${j.deleted||0}건`);
-  await searchRecords();
+  status.textContent=`${selected.length}건 삭제 요청 중 · 관리자 재인증 필요`;
+  try{
+    // The existing GM_BUILDER_COMMON.js fetch wrapper performs per-operation
+    // server-side administrator password verification; do not bypass it.
+    const response=await fetch(`${API}/api/gm/builder/record/delete-selected`,{
+      method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({table,confirm:'DELETE SELECTED',items:selected.map(x=>({key:x.key}))})
+    });
+    const text=await response.text();let result;
+    try{result=JSON.parse(text);}catch(_){result={ok:false,error:'NON_JSON_RESPONSE',detail:text.slice(0,300)};}
+    log(result);
+    if(!response.ok||!result.ok){
+      let hint='';
+      if(response.status===401||response.status===403)hint='관리자 인증 또는 삭제 권한을 확인하세요.';
+      else if(response.status===409)hint='참조 중인 레코드이거나 기준키 충돌/원본 변경이 발생했습니다.';
+      const message=`삭제 실패 (HTTP ${response.status}): ${result.error||'UNKNOWN'}${result.detail?' · '+result.detail:''}${hint?' · '+hint:''}`;
+      status.textContent=message;return;
+    }
+    status.textContent=`삭제 완료: ${result.deleted||0}건`;
+    await searchRecords();
+  }catch(e){
+    const message=`삭제 요청 오류: ${String(e&&e.message||e)}`;
+    status.textContent=message;log(message);
+  }
 }
 function fieldControl(c,v,locked){
   const m=metaOf(c), nullable=m.is_nullable==='YES', type=typeLabel(m), id='fld_'+c;

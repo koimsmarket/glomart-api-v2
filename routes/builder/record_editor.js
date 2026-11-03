@@ -281,6 +281,38 @@ router.post('/api/gm/builder/record/search-advanced', express.json({limit:'256kb
   }
 });
 
+// UI dictionary diagnostics: read-only. Never delete or merge duplicate keys automatically.
+router.post('/api/gm/builder/record/ui-dictionary-audit', express.json({limit:'16kb'}), async (req,res)=>{
+  const spec=tableSpec('ui_dictionary');
+  if(!spec || spec.table!=='gm_ui_dictionary') return fail(res,400,'UI_DICTIONARY_UNAVAILABLE');
+  const mode=String((req.body||{}).mode||'');
+  if(mode!=='duplicate_kr' && mode!=='missing_code') return fail(res,400,'INVALID_AUDIT_MODE');
+  const db=dbFrom(req);
+  try{
+    const allColumns=await getColumns(db,spec.table);
+    if(!allColumns.includes('gm_code') || !allColumns.includes('kr')) return fail(res,409,'UI_DICTIONARY_COLUMNS_MISSING');
+    const columns=visibleColumns(spec,allColumns);
+    const identity=await recordKeyInfo(db,spec,allColumns);
+    const limit=safeLimit((req.body||{}).limit||100);
+    const selectSql=columns.map(qIdent).join(', ');
+    let where, order;
+    if(mode==='duplicate_kr'){
+      where=`WHERE NULLIF(BTRIM(kr::text),'') IS NOT NULL AND BTRIM(kr::text) IN (
+        SELECT BTRIM(kr::text) FROM ${qIdent(spec.table)}
+        WHERE NULLIF(BTRIM(kr::text),'') IS NOT NULL
+        GROUP BY BTRIM(kr::text) HAVING COUNT(*) > 1)`;
+      order='ORDER BY BTRIM(kr::text), gm_code NULLS LAST';
+    }else{
+      where=`WHERE gm_code IS NULL OR BTRIM(gm_code::text) = ''`;
+      order='ORDER BY kr NULLS LAST';
+    }
+    const total=await db.query(`SELECT COUNT(*)::int AS n FROM ${qIdent(spec.table)} ${where}`);
+    const rows=await db.query(`SELECT ${selectSql} FROM ${qIdent(spec.table)} ${where} ${order} LIMIT $1`,[limit]);
+    return ok(res,{table:spec.table,mode,total:Number(total.rows[0]?.n||0),count:rows.rows.length,items:rows.rows,
+      key_sets:identity.map(x=>x.columns),key_info:publicKeyInfo(identity),editable:editableColumns(spec,allColumns,identity),limit});
+  }catch(e){return fail(res,500,'UI_DICTIONARY_AUDIT_FAILED',{detail:String(e&&e.message||e)});}
+});
+
 router.post('/api/gm/builder/record/update', express.json({limit:'2mb'}), async (req,res)=>{
   const tableKey = req.body && req.body.table;
   const spec = tableSpec(tableKey);
