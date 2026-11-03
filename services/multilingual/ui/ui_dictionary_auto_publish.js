@@ -187,27 +187,73 @@ function scheduleAutomation(db,reason){
  autoTimer=setTimeout(()=>{autoTimer=null;void runAutomation();},reason==='SERVER_DEPLOY'?180000:1200);
  if(autoTimer.unref)autoTimer.unref();
 }
+// GM_UI_AUTO_V041: translation cells are committed independently by the existing API.
+// Automatic JSON publication is allowed ONLY after the DB confirms zero missing cells.
+// Manual publish endpoint, translation engine, and write/upload routes remain untouched.
+function gmV041PublishRetry(db,reason,delay){
+ if(!db||autoTimer)return;
+ autoDb=db;
+ autoState.reason=reason;
+ autoState.state='PUBLISH_RETRY_SCHEDULED';
+ autoTimer=setTimeout(()=>{autoTimer=null;void runAutomation();},delay);
+ if(autoTimer.unref)autoTimer.unref();
+}
 async function runAutomation(){
  if(autoRunning){autoAgain=true;return;}
  autoRunning=true;const db=autoDb,reason=autoState.reason;
  autoState.state='VERIFYING';autoState.started_at=new Date().toISOString();autoState.error=null;
+ let shouldRetryPublish=false,retryDelay=60000;
  try{
   const remaining=await dbCompletion(db);
   autoState.remaining=remaining.phrases;autoState.remaining_cells=remaining.cells;
-  const rows=await snapshot(db),hash=fingerprint(rows),previous=await read(db,HASH);
+  if(remaining.cells>0){
+   // Continue receiving client uploads. Do not fingerprint, build, or publish
+   // 25 JSON packs on each 10-cell batch, and do not change the public version.
+   autoState.state='WAITING_FOR_CLIENT';
+   console.log('[GM_UI_CLIENT_WAIT_V041]',JSON.stringify({reason,remaining:remaining.phrases,missing_cells:remaining.cells,version:autoState.version}));
+   return;
+  }
+  // Recheck the exact snapshot used to generate the pack before publication.
+  const rows=await snapshot(db);
+  const stillMissing=rows.reduce((n,r)=>n+ui.FOREIGN.filter(l=>!String(r[l]||'').trim()).length,0);
+  if(stillMissing>0){
+   autoState.remaining_cells=stillMissing;
+   autoState.remaining=rows.filter(r=>ui.FOREIGN.some(l=>!String(r[l]||'').trim())).length;
+   autoState.state='WAITING_FOR_CLIENT';
+   console.log('[GM_UI_CLIENT_WAIT_V041]',JSON.stringify({reason,remaining:autoState.remaining,missing_cells:stillMissing,version:autoState.version}));
+   return;
+  }
+  const hash=fingerprint(rows),previous=await read(db,HASH);
   if(hash!==previous){
    const result=await publish(db);
-   if(!result||!result.ok||!result.ready)throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
+   if(!result||!result.ok||!result.ready){
+    if(result&&result.error==='VERSION_MINUTE_COLLISION'){
+     retryDelay=62000-(Date.now()%60000);
+    }
+    shouldRetryPublish=true;
+    throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
+   }
   }
+  // Also verify an unchanged already published result; never create a new version.
   const meta=await current(db);
-  if(!meta.ready||await read(db,HASH)!==hash||!meta.version)throw Error('UI_PUBLISH_METADATA_VERIFY_FAILED');
+  if(!meta.ready||await read(db,HASH)!==hash||!meta.version){shouldRetryPublish=true;throw Error('UI_PUBLISH_METADATA_VERIFY_FAILED');}
   const packs={};
-  if(!LANGS.every(l=>{packs[l]=diskPack(l,meta.version);return !!packs[l];})||!validPackSet(packs,meta.version))throw Error('UI_PUBLISH_25_LANGUAGE_VERIFY_FAILED');
+  if(!LANGS.every(l=>{packs[l]=diskPack(l,meta.version);return !!packs[l];})||!validPackSet(packs,meta.version)){
+   shouldRetryPublish=true;throw Error('UI_PUBLISH_25_LANGUAGE_VERIFY_FAILED');
+  }
   autoState.version=meta.version;autoState.verified_languages=LANGS.length;
-  autoState.state=remaining.cells===0?'COMPLETED_VERIFIED':'WAITING_FOR_CLIENT';
-  console.log('[GM_UI_CLIENT_PUBLISH_V036]',JSON.stringify({reason,state:autoState.state,version:meta.version,remaining:remaining.phrases,missing_cells:remaining.cells,verified_languages:LANGS.length}));
- }catch(e){autoState.state='ERROR';autoState.error=String(e&&e.message||e);console.error('[GM_UI_CLIENT_PUBLISH_V036_ERROR]',autoState.error);}
- finally{autoState.finished_at=new Date().toISOString();autoRunning=false;if(autoAgain){autoAgain=false;scheduleAutomation(autoDb,'CLIENT_DATA_CHANGED');}}
+  autoState.state='COMPLETED_VERIFIED';
+  console.log('[GM_UI_CLIENT_PUBLISH_V041]',JSON.stringify({reason,state:autoState.state,version:meta.version,remaining:0,missing_cells:0,verified_languages:LANGS.length}));
+ }catch(e){
+  autoState.state='ERROR';autoState.error=String(e&&e.message||e);
+  console.error('[GM_UI_CLIENT_PUBLISH_V041_ERROR]',autoState.error);
+  // If DB inspection itself fails, repeat only the verification, not translation.
+  shouldRetryPublish=true;
+ }finally{
+  autoState.finished_at=new Date().toISOString();autoRunning=false;
+  if(autoAgain){autoAgain=false;scheduleAutomation(autoDb,'CLIENT_DATA_CHANGED');}
+  else if(shouldRetryPublish)gmV041PublishRetry(autoDb,'PUBLISH_RETRY',retryDelay);
+ }
 }
 function startManualTranslation(){return false;}
 function endManualTranslation(){}

@@ -1818,6 +1818,7 @@ app.use(require('./routes/health'));
 app.use(require('./routes/search_keyword'));
 app.use(require('./routes/search_local'));
 app.use(require('./routes/category_pack'));
+app.use(require('./routes/category_menu'));
 // GM_API_404_V001: member-bound deposit read routes; auth enforced inside routes/deposit.js.
 app.use(require('./routes/deposit'));
 console.log('[GM_SEARCH_ROUTE_RECOVERY_V001] search_keyword/search_local/category_pack registered');
