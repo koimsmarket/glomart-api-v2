@@ -66,77 +66,128 @@ async function publishJsonV2(btn){
 async function loadAutomationStatus(){try{const r=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/automation-status?t='+Date.now());const a=r.automation||{};const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 '+(a.state||'IDLE')+' · 원인 '+(a.reason||'-')+' · 미완성 '+(a.remaining==null?'-':a.remaining)+' · 버전 '+(a.version||'-')+(a.error?' · 오류 '+a.error:'')+(a.remaining_cells==null?'':' · 남은 번역 셀 '+a.remaining_cells)+(a.retry_at?' · 재개 예정 '+a.retry_at:'')+(a.verified_languages?' · JSON 검증 '+a.verified_languages+'개 언어':'')+(a.upstream&&a.upstream.rate_limited?' · 번역 API 제한 ('+(a.upstream.last_http||'?')+')':'');}catch(e){const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 상태 확인 실패: '+String(e);}}
 loadAll();loadV2();
 
-// V036 administrator browser-side translation. NO proxy to the Glomart server.
+// V037: automatically start and resume client translation whenever the authorised
+// Builder page is active. Persist translated text (never credentials) before upload.
 const GM_CLIENT_LANG_TARGET={tw:'zh-TW'};
 const GM_CLIENT_LANGS=['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
-let gmClientRunning=false,gmClientStop=false;
+const GM_CLIENT_QUEUE_KEY='gm_ui_auto_v037_pending_cells';
+const GM_CLIENT_UPLOAD_BATCH=10;
+let gmClientRunning=false,gmClientStop=false,gmClientAutoTimer=null,gmClientBlocked=false,gmClientNextAttemptAt=0;
+let gmClientSuccess=0,gmClientFailed=0,gmClientSaved=0;
 const gmClientSleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function gmClientStatus(message){const el=document.getElementById('clientTranslationStatus');if(el)el.textContent=message;}
-function stopClientTranslation(){gmClientStop=true;gmClientStatus('중단 요청됨 · 현재 요청 종료 후 중단합니다.');}
+function gmClientQueueRead(){
+ try{const x=JSON.parse(localStorage.getItem(GM_CLIENT_QUEUE_KEY)||'[]');return Array.isArray(x)?x.filter(y=>y&&y.gm_code&&y.kr&&GM_CLIENT_LANGS.includes(y.lang)&&y.value).slice(0,500):[];}
+ catch(_){return [];}
+}
+function gmClientQueueWrite(a){
+ // localStorage holds translation text only: never the derzon password or session keys.
+ localStorage.setItem(GM_CLIENT_QUEUE_KEY,JSON.stringify(a));
+}
+function gmClientQueueAdd(item){
+ const a=gmClientQueueRead(),key=item.gm_code+':'+item.lang;
+ const idx=a.findIndex(x=>x.gm_code+':'+x.lang===key);
+ if(idx>=0)a[idx]=item;else a.push(item);
+ gmClientQueueWrite(a);
+}
+function stopClientTranslation(){gmClientStop=true;gmClientStatus('중단 요청됨 · 이미 번역된 셀은 이 브라우저에 보관됩니다.');}
 function gmClientProtect(text){
  const tokens=[];const safe=String(text||'').replace(/%[dsm]/g,m=>{tokens.push(m);return 'ZZGMKEEP'+(tokens.length-1)+'ZZ';});
  return {safe,restore(out){let x=String(out||'');for(let i=0;i<tokens.length;i++)x=x.replace(new RegExp('ZZGMKEEP\\s*'+i+'ZZ','g'),tokens[i]);return x;}};
 }
 async function gmClientTranslate(kr,lang){
- const target=GM_CLIENT_LANG_TARGET[lang]||lang;
- const p=gmClientProtect(kr);
+ const target=GM_CLIENT_LANG_TARGET[lang]||lang,p=gmClientProtect(kr);
  const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl='+encodeURIComponent(target)+'&dt=t&q='+encodeURIComponent(p.safe);
  let r;
  try{r=await fetch(url,{mode:'cors',credentials:'omit',cache:'no-store'});}
  catch(e){throw Error('BROWSER_CORS_OR_NETWORK_BLOCK: '+String(e&&e.message||e));}
- if(r.status===429)throw Error('HTTP_429');
+ if(r.status===429||r.status===403)throw Error('GOOGLE_RATE_LIMIT_HTTP_'+r.status);
  if(!r.ok)throw Error('HTTP_'+r.status);
- const j=await r.json();let text='';for(const item of (j&&j[0])||[])if(item&&item[0])text+=item[0];
- text=p.restore(text).trim();
- if(!text||text===kr)throw Error('EMPTY_OR_UNTRANSLATED');
- if((kr.match(/%[dsm]/g)||[]).join('|')!==(text.match(/%[dsm]/g)||[]).join('|'))throw Error('PLACEHOLDER_MISMATCH');
- return text;
+ const j=await r.json();let value='';for(const x of (j&&j[0])||[])if(x&&x[0])value+=x[0];
+ value=p.restore(value).trim();
+ if(!value||value===kr)throw Error('EMPTY_OR_UNTRANSLATED');
+ if((kr.match(/%[dsm]/g)||[]).join('|')!==(value.match(/%[dsm]/g)||[]).join('|'))throw Error('PLACEHOLDER_MISMATCH');
+ return value;
 }
 async function gmClientUpload(items){
- // Existing Builder policy: NEVER retain the password. Verify each upload server-side.
- const password=prompt('번역 '+items.length+'셀을 서버에 저장합니다. 관리자 비밀번호를 입력하세요.');
+ // V037 retains the existing per-operation server-side derzon password recheck.
+ // No automatic or remembered password, cookie-bypass, or unsupervised write grant.
+ const password=prompt('자동 번역 '+items.length+'셀을 서버에 저장합니다. 관리자 비밀번호를 입력하세요.');
  if(!password)throw Error('ADMIN_REAUTH_CANCELLED');
- try{
-  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-upload',{
-   method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},
-   credentials:'same-origin',cache:'no-store',body:JSON.stringify({items})});
-  const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error+': '+(j.detail||r.status));return j;
- }finally{ /* password is scoped to this call only */ }
+ const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-upload',{
+  method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},
+  credentials:'same-origin',cache:'no-store',body:JSON.stringify({items})});
+ const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error+': '+(j.detail||r.status));return j;
+}
+async function gmClientFlush(){
+ const a=gmClientQueueRead();if(!a.length)return true;
+ const portion=a.slice(0,GM_CLIENT_UPLOAD_BATCH);
+ gmClientStatus('서버 저장 대기 '+a.length+'셀 · 관리자 재인증 필요');
+ const result=await gmClientUpload(portion);
+ // Remove only after server acknowledged a committed transaction.
+ const sigs=new Set(portion.map(x=>x.gm_code+':'+x.lang));
+ gmClientQueueWrite(gmClientQueueRead().filter(x=>!sigs.has(x.gm_code+':'+x.lang)));
+ gmClientSaved+=Number(result.saved||0);
+ gmClientStatus('서버 DB 저장 '+gmClientSaved+'셀 · 브라우저 보관 '+gmClientQueueRead().length+'셀');
+ console.log('[GM_UI_CLIENT_UPLOAD_ACK_V037]',JSON.stringify({saved:result.saved,already:result.already,waiting:gmClientQueueRead().length}));
+ return true;
 }
 async function startClientTranslation(btn){
- if(gmClientRunning)return;
+ if(gmClientRunning||gmClientBlocked)return;
  gmClientRunning=true;gmClientStop=false;if(btn)btn.disabled=true;
- let success=0,failed=0;
  try{
-  gmClientStatus('브라우저에서 미완료 번역을 조회합니다. 브라우저를 닫으면 실행이 중단됩니다.');
+  gmClientStatus('누락 번역 자동 조회 · 기기 번역 실행');
+  // First upload any translations persisted before navigation/refresh.
+  while(gmClientQueueRead().length&&!gmClientStop)await gmClientFlush();
   for(let round=0;round<200&&!gmClientStop;round++){
    const data=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-missing?limit=20&t='+Date.now());
-   if(!data.items||!data.items.length){gmClientStatus('DB에 누락된 번역 셀이 없습니다. JSON 발행 확인 중');break;}
-   const batch=[];let blocked=false;
+   if(!data.items||!data.items.length){gmClientStatus('누락 셀 0건 · JSON 발행 상태 확인');break;}
+   let produced=0,translationError=null;
    for(const row of data.items){
-    for(const lang of row.missing){
+    for(const lang of row.missing||[]){
      if(gmClientStop)break;
      if(!GM_CLIENT_LANGS.includes(lang))continue;
+     if(gmClientQueueRead().some(x=>x.gm_code===row.gm_code&&x.lang===lang&&x.kr===row.kr))continue;
      try{
       const value=await gmClientTranslate(row.kr,lang);
-      batch.push({gm_code:row.gm_code,kr:row.kr,lang,value});success++;
-      gmClientStatus('기기에서 번역 중 · 성공 '+success+'셀 · 실패 '+failed+'셀 · 서버 저장 대기 '+batch.length+'셀');
-     }catch(e){
-      failed++;
-      // No silent fallback through server. CORS and 429 require manual resolution.
-      gmClientStatus('클라이언트 번역 중단: '+String(e&&e.message||e)+' · 성공 '+success+'셀');
-      blocked=true;break;
-     }
+      gmClientQueueAdd({gm_code:row.gm_code,kr:row.kr,lang,value});gmClientSuccess++;produced++;
+      gmClientStatus('기기 번역 성공 '+gmClientSuccess+'셀 · 서버 저장 '+gmClientSaved+'셀 · 보관 '+gmClientQueueRead().length+'셀');
+     }catch(e){gmClientFailed++;translationError=e;break;}
+     if(gmClientQueueRead().length>=GM_CLIENT_UPLOAD_BATCH)await gmClientFlush();
      await gmClientSleep(1800);
-     if(batch.length>=80)break;
     }
-    if(blocked||gmClientStop||batch.length>=80)break;
+    if(translationError||gmClientStop)break;
    }
-   if(batch.length){const saved=await gmClientUpload(batch);gmClientStatus('서버 DB 저장 검증: '+saved.saved+'셀 · 기기 성공 '+success+'셀');}
-   if(blocked||gmClientStop||!batch.length)break;
+   if(gmClientQueueRead().length&&!gmClientStop)await gmClientFlush();
+   if(translationError){
+    const error=String(translationError.message||translationError);
+    gmClientStatus('외부 번역 제한 · '+error+' · 재시도 예약 · 저장 '+gmClientSaved+'셀');
+    console.warn('[GM_UI_CLIENT_TRANSLATION_RETRY_V037]',error);
+    gmClientSchedule(15*60*1000);break;
+   }
+   if(!produced)break;
    await loadV2();
   }
   await loadV2();
- }catch(e){gmClientStatus('클라이언트 작업 종료: '+String(e&&e.message||e));log(String(e));}
- finally{gmClientRunning=false;if(btn)btn.disabled=false;}
+ }catch(e){
+  const message=String(e&&e.message||e);
+  gmClientStatus('자동 처리 보류: '+message+' · 보관 '+gmClientQueueRead().length+'셀');
+  if(/ADMIN_REAUTH_CANCELLED|BUILDER_REAUTH_REQUIRED|BUILDER_AUTH_INVALID/.test(message))gmClientBlocked=true;
+  console.warn('[GM_UI_CLIENT_AUTO_PAUSED_V037]',message);
+ }finally{gmClientRunning=false;if(btn)btn.disabled=false;}
 }
+function gmClientSchedule(delay){
+ gmClientNextAttemptAt=Date.now()+delay;
+ if(gmClientAutoTimer)clearTimeout(gmClientAutoTimer);
+ gmClientAutoTimer=setTimeout(()=>{gmClientAutoTimer=null;if(!document.hidden&&navigator.onLine&&!gmClientBlocked)void startClientTranslation();},delay);
+}
+function gmClientAutoBoot(){
+ gmClientStatus('자동 실행 준비 · 관리자 클라이언트가 열리면 번역을 시작합니다.');
+ gmClientSchedule(1500);
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!gmClientRunning&&!gmClientBlocked&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);});
+ window.addEventListener('online',()=>{if(!gmClientRunning&&!gmClientBlocked&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);});
+ // New dictionary rows are discovered server-side; query periodically only while open.
+ setInterval(()=>{if(!document.hidden&&!gmClientRunning&&!gmClientBlocked&&!gmClientAutoTimer&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);},60000);
+}
+function gmClientResume(btn){gmClientBlocked=false;void startClientTranslation(btn);}
+gmClientAutoBoot();
