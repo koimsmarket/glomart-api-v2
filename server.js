@@ -1769,7 +1769,9 @@ try {
   let uiRestoreAttempts=0;
   const restoreUiPack=()=>{
     uiRestoreAttempts++;
-    uiAutoPack.rehydrate(pool).catch(e=>{
+    uiAutoPack.rehydrate(pool).then(()=>{
+      if(uiRestoreAttempts===1)uiAutoPack.scheduleAutomation(pool,'SERVER_DEPLOY');
+    }).catch(e=>{
       console.error('[GM_UI_PACK_REHYDRATE_ERROR]',String(e&&e.message||e));
       if(uiRestoreAttempts<6){const t=setTimeout(restoreUiPack,5000);if(t.unref)t.unref();}
     });

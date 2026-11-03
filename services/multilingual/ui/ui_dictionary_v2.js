@@ -13,6 +13,15 @@ const TRANSLATE_QUEUE=[];
 const QUEUED=new Set();
 let TRANSLATE_ACTIVE=0;
 const TRANSLATE_CONCURRENCY=2;
+const IDLE_WAITERS=[];
+function whenIdle(){
+ if(!TRANSLATE_ACTIVE&&!TRANSLATE_QUEUE.length)return Promise.resolve();
+ return new Promise(resolve=>IDLE_WAITERS.push(resolve));
+}
+function notifyIdle(){
+ if(TRANSLATE_ACTIVE||TRANSLATE_QUEUE.length)return;
+ while(IDLE_WAITERS.length)IDLE_WAITERS.shift()();
+}
 
 function s(v){return String(v==null?'':v).replace(/\s+/g,' ').trim();}
 function hasKo(v){return /[가-힣]/.test(String(v||''));}
@@ -205,7 +214,7 @@ function pumpTranslationQueue(){
   while(TRANSLATE_ACTIVE<TRANSLATE_CONCURRENCY && TRANSLATE_QUEUE.length){
     const job=TRANSLATE_QUEUE.shift(),code=job.code,db=job.db;
     QUEUED.delete(code);TRANSLATE_ACTIVE++;
-    const p=Promise.resolve().then(()=>fillTranslations(db,code)).catch(e=>{try{console.warn('[GM_UI_DICTIONARY_V2_TRANSLATE_FAIL]',code,String(e&&e.message||e));}catch(_e){}}).finally(()=>{TRANSLATING.delete(code);TRANSLATE_ACTIVE--;pumpTranslationQueue();});
+    const p=Promise.resolve().then(()=>fillTranslations(db,code)).catch(e=>{try{console.warn('[GM_UI_DICTIONARY_V2_TRANSLATE_FAIL]',code,String(e&&e.message||e));}catch(_e){}}).finally(()=>{TRANSLATING.delete(code);TRANSLATE_ACTIVE--;pumpTranslationQueue();notifyIdle();});
     TRANSLATING.set(code,p);
   }
 }
@@ -281,4 +290,4 @@ async function retryPending(db,limit=20){
   const out=[];for(const x of r.rows)out.push({gm_code:x.gm_code,result:await fillTranslations(db,x.gm_code)});return out;
 }
 
-module.exports={LANGS,FOREIGN,normalizeTemplate,dynamicNonUiReason,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey};
+module.exports={LANGS,FOREIGN,normalizeTemplate,dynamicNonUiReason,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey,whenIdle};

@@ -161,4 +161,40 @@ async function rehydrate(db){
 }
 
 async function getPack(db,lang,version){const m=await current(db);if(!m.ready||m.version!==version||!LANGS.includes(lang))return null;return diskPack(lang,version)||published.packs[lang]||null;}
-module.exports={queue,current,getPack,rehydrate,publishCompleted:publish,LANGS,ROOT};
+// GM_UI_AUTO_V028: event-only auto-completion. Never run an idle polling timer.
+// The existing UI translation engine owns per-phrase retries (up to five attempts).
+let autoTimer=null, autoRunning=false, autoAgain=false, autoDb=null;
+const autoState={state:'IDLE',reason:'',started_at:null,finished_at:null,remaining:null,version:null,error:null,events:0};
+function autoStatus(){return {...autoState,running:autoRunning,scheduled:!!autoTimer};}
+function scheduleAutomation(db,reason){
+ if(!db)return;
+ autoDb=db;autoState.reason=String(reason||'EVENT');autoState.events++;
+ if(autoRunning){autoAgain=true;return;}
+ if(autoTimer)clearTimeout(autoTimer);
+ autoState.state='SCHEDULED';
+ autoTimer=setTimeout(()=>{autoTimer=null;void runAutomation();},1200);
+ if(autoTimer.unref)autoTimer.unref();
+}
+async function runAutomation(){
+ if(autoRunning){autoAgain=true;return;}
+ autoRunning=true;const db=autoDb,reason=autoState.reason;
+ autoState.state='RUNNING';autoState.started_at=new Date().toISOString();autoState.error=null;
+ try{
+  // Wait only for already queued translation jobs. This is not a perpetual check.
+  await ui.whenIdle();
+  const pipeline=require('./index');
+  const progress={total:{ui:0},done:{ui:0},remaining:{ui:0}};
+  const complete=await pipeline.complete(db,progress);
+  autoState.remaining=progress.remaining.ui;
+  if(!complete){autoState.state='INCOMPLETE';console.warn('[GM_UI_AUTO_V028_INCOMPLETE]',JSON.stringify({reason,remaining:autoState.remaining}));return;}
+  const result=await publish(db);
+  if(!result||!result.ok||!result.ready)throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
+  autoState.version=result.version;autoState.state='PUBLISHED';
+  console.log('[GM_UI_AUTO_V028_PUBLISHED]',JSON.stringify({reason,version:result.version,unchanged:!!result.unchanged}));
+ }catch(e){autoState.state='ERROR';autoState.error=String(e&&e.message||e);console.error('[GM_UI_AUTO_V028_ERROR]',autoState.error);}
+ finally{
+  autoState.finished_at=new Date().toISOString();autoRunning=false;
+  if(autoAgain){autoAgain=false;scheduleAutomation(autoDb,'NEW_WORD_DURING_RUN');}
+ }
+}
+module.exports={queue,current,getPack,rehydrate,publishCompleted:publish,LANGS,ROOT,scheduleAutomation,autoStatus};

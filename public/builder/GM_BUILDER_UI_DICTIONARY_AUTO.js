@@ -3,4 +3,5 @@ async function loadV2(){try{const j=await jfetch(API+'/api/gm/builder/ui-diction
 async function scanV2(btn){btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/scan-static',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:250})});log(j);await loadV2();}catch(e){log(String(e));}finally{btn.disabled=false;}}
 async function retryV2(btn){btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/retry-translations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:10})});log(j);await loadV2();}catch(e){log(String(e));}finally{btn.disabled=false;}}
 
-loadAll();loadV2();
+async function loadAutomationStatus(){try{const r=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/automation-status?t='+Date.now());const a=r.automation||{};const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 '+(a.state||'IDLE')+' · 원인 '+(a.reason||'-')+' · 미완성 '+(a.remaining==null?'-':a.remaining)+' · 버전 '+(a.version||'-')+(a.error?' · 오류 '+a.error:'');}catch(e){const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 상태 확인 실패: '+String(e);}}
+loadAll();loadV2();loadAutomationStatus();

@@ -193,6 +193,9 @@ router.post('/api/gm/ui-dictionary/runtime-capture',express.json({limit:'256kb'}
     }));
     const stats=await uiV2.captureMany(db,items,{incrementUsage:true});
     uiV2.queueTranslations(db,stats.translate_codes);
+    if(stats.created||stats.changed){
+      require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
+    }
     res.json({ok:true,stats});
   }catch(e){runtimeCaptureError('compat',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
@@ -253,6 +256,9 @@ router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1m
       out.push({pending_id:id,gm_code:code,change_type:pr.change_type});
     }
     await client.query('COMMIT');
+    if(out.some(x=>x.change_type==='NEW'||x.change_type==='CHANGED')){
+      require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'BUILDER_APPROVAL');
+    }
     res.json({ok:true,applied:out.length,items:out});
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
@@ -309,6 +315,9 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/scan-static',express.json({li
     }
     const stats=await uiV2.captureMany(db,rows,{incrementUsage:false});
     uiV2.queueTranslations(db,stats.translate_codes);
+    if(stats.created||stats.changed){
+      require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
+    }
     res.json({ok:true,dirs:envDirs,limit,stats});
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
@@ -339,8 +348,16 @@ router.post('/api/gm/ui-dictionary/v2/runtime-capture',express.json({limit:'256k
     }));
     const stats=await uiV2.captureMany(db,items,{incrementUsage:true});
     uiV2.queueTranslations(db,stats.translate_codes);
+    if(stats.created||stats.changed){
+      require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
+    }
     res.json({ok:true,stats:{received:stats.received,created:stats.created,changed:stats.changed,reused:stats.reused,skipped:stats.skipped,ambiguous_number:stats.ambiguous_number,translation_queued:stats.translate_codes.length}});
   }catch(e){runtimeCaptureError('v2',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+
+router.get('/api/gm/builder/ui-dictionary-auto/v2/automation-status',(req,res)=>{
+ try{res.set('Cache-Control','no-store').json({ok:true,automation:require('../../services/multilingual/ui/ui_dictionary_auto_publish').autoStatus()});}
+ catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
 router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.json({limit:'64kb'}),async(req,res)=>{
