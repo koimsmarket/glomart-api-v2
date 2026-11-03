@@ -115,6 +115,10 @@ async function publish(db){
   const packs=packSet(rows,v);
   // Publish all files first, then DB metadata. Rebuilds never change version.
   materialize(v,hash,packs);
+  // V035: Validate all 25 disk packs BEFORE switching the public DB version.
+  const verified={};
+  if(!LANGS.every(l=>{verified[l]=diskPack(l,v);return !!verified[l];}) || !validPackSet(verified,v))
+   throw Error('UI_PACK_25_LANGUAGE_VERIFY_FAILED');
   // Persist validated content before switching the public version.
   const compressed=zlib.gzipSync(Buffer.from(JSON.stringify({version:v,hash,rows}),'utf8')).toString('base64');
   await set(db,SNAPSHOT,compressed);
@@ -161,51 +165,131 @@ async function rehydrate(db){
 }
 
 async function getPack(db,lang,version){const m=await current(db);if(!m.ready||m.version!==version||!LANGS.includes(lang))return null;return diskPack(lang,version)||published.packs[lang]||null;}
-// GM_UI_AUTO_V028: event-only auto-completion. Never run an idle polling timer.
-// The existing UI translation engine owns per-phrase retries (up to five attempts).
+// GM_UI_AUTO_V035: event-driven work plus a retry ONLY while translations remain.
+// 429 cooldown is respected, no perpetual idle polling and no paid API.
 let autoTimer=null, autoRunning=false, autoAgain=false, autoDb=null;
-const autoState={state:'IDLE',reason:'',started_at:null,finished_at:null,remaining:null,version:null,error:null,events:0};
+let manualBusy=false, manualDeferred=false;
+let retryFailures=0;
+const autoState={state:'IDLE',reason:'',started_at:null,finished_at:null,remaining:null,
+ remaining_cells:null,version:null,error:null,events:0,retry_at:null,retry_count:0,verified_languages:null};
 function autoStatus(){return {...autoState,running:autoRunning,scheduled:!!autoTimer,upstream:ui.upstreamStatus()};}
+function armTimer(delay, state){
+ if(autoTimer)clearTimeout(autoTimer);
+ const safeDelay=Math.max(1000,Math.ceil(delay));
+ autoState.state=state;
+ autoState.retry_at=state==='RETRY_SCHEDULED'||state==='RATE_LIMITED_RETRY_SCHEDULED' ? new Date(Date.now()+safeDelay).toISOString() : null;
+ autoTimer=setTimeout(()=>{autoTimer=null;autoState.retry_at=null;void runAutomation();},safeDelay);
+ if(autoTimer.unref)autoTimer.unref();
+}
+function cooldownMs(){
+ const upstream=ui.upstreamStatus();
+ if(!upstream.rate_limited)return 0;
+ const until=Date.parse(upstream.blocked_until||'');
+ return Number.isFinite(until)?Math.max(2000,until-Date.now()+2000):302000;
+}
 function scheduleAutomation(db,reason){
  if(!db)return;
+ if(manualBusy){autoDb=db;manualDeferred=true;autoState.reason=String(reason||'EVENT');return;}
  autoDb=db;autoState.reason=String(reason||'EVENT');autoState.events++;
  if(autoRunning){autoAgain=true;return;}
- if(autoTimer)clearTimeout(autoTimer);
- autoState.state='SCHEDULED';
- autoTimer=setTimeout(()=>{autoTimer=null;void runAutomation();},1200);
- if(autoTimer.unref)autoTimer.unref();
+ // New events must not shorten an already scheduled cooldown/backoff retry.
+ if(autoTimer && (autoState.state==='RATE_LIMITED_RETRY_SCHEDULED'||autoState.state==='RETRY_SCHEDULED'))return;
+ const cooldown=cooldownMs();
+ const delay=Math.max(reason==='SERVER_DEPLOY'?180000:1200,cooldown);
+ armTimer(delay,cooldown>0?'RATE_LIMITED_RETRY_SCHEDULED':'SCHEDULED');
+}
+async function dbCompletion(db){
+ const expressions=ui.FOREIGN.map(l=>`NULLIF(BTRIM(${l}::text),'') IS NULL`);
+ const r=await db.query(`SELECT COUNT(*) FILTER(WHERE ${expressions.join(' OR ')})::int AS phrases,
+   COALESCE(SUM(${expressions.map(e=>`CASE WHEN ${e} THEN 1 ELSE 0 END`).join('+')}),0)::bigint AS cells
+   FROM gm_ui_dictionary WHERE active_yn='Y' AND NULLIF(BTRIM(kr::text),'') IS NOT NULL`);
+ return {phrases:Number(r.rows[0]?.phrases||0),cells:Number(r.rows[0]?.cells||0)};
+}
+function queueRemainingRetry(db,rateLimited){
+ if(!db)return;
+ retryFailures++;
+ autoState.retry_count++;
+ // Ordinary transient errors get capped exponential delays, never a tight loop.
+ const backoff=Math.min(600000,60000*Math.pow(2,Math.min(retryFailures-1,4)));
+ const delay=Math.max(rateLimited?300000:backoff,cooldownMs());
+ armTimer(delay,rateLimited?'RATE_LIMITED_RETRY_SCHEDULED':'RETRY_SCHEDULED');
+ console.warn('[GM_UI_AUTO_RETRY_SCHEDULED_V035]',JSON.stringify({state:autoState.state,retry_at:autoState.retry_at,remaining:autoState.remaining,cells:autoState.remaining_cells}));
 }
 async function runAutomation(){
  if(autoRunning){autoAgain=true;return;}
+ if(manualBusy){manualDeferred=true;return;}
  autoRunning=true;const db=autoDb,reason=autoState.reason;
  autoState.state='RUNNING';autoState.started_at=new Date().toISOString();autoState.error=null;
+ let remaining=null,rateLimited=false;
  try{
-  // Wait only for already queued translation jobs. This is not a perpetual check.
-  await ui.whenIdle();
-  const pipeline=require('./index');
-  const progress={total:{ui:0},done:{ui:0},remaining:{ui:0}};
-  const complete=await pipeline.complete(db,progress);
-  autoState.remaining=progress.remaining.ui;
-  const upstream=ui.upstreamStatus();
-  // Compute hash first, so a failed translator never emits a false publish success.
-  const rows=await snapshot(db),hash=fingerprint(rows),publishedHash=await read(db,HASH);
-  if(hash===publishedHash){
-   const old=await current(db);autoState.version=old.version||null;
-   autoState.state=upstream.rate_limited?'RATE_LIMITED':'NO_CHANGE';
-   autoState.error=upstream.rate_limited?(upstream.last_error||'TRANSLATION_RATE_LIMITED'):null;
-   console.warn('[GM_UI_AUTO_NO_NEW_TRANSLATIONS]',JSON.stringify({reason,state:autoState.state,remaining:autoState.remaining,http:upstream.last_http}));
-   return;
+  // Do not send requests to free GTX during the provider's announced cooldown.
+  if(cooldownMs()>0){
+   rateLimited=true;
+   remaining=await dbCompletion(db);
+  }else{
+   await ui.whenIdle();
+   const pipeline=require('./index');
+   const progress={total:{ui:0},done:{ui:0},remaining:{ui:0}};
+   await pipeline.complete(db,progress);
+   // DB is the source of truth: do not trust loop counters as proof of completion.
+   remaining=await dbCompletion(db);
+   rateLimited=ui.upstreamRateLimited();
   }
-  // Automatic event may publish verified successful cells; manual 10-row action never does.
-  const result=await publish(db);
-  if(!result||!result.ok||!result.ready)throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
-  autoState.version=result.version;
-  autoState.state=result.unchanged?'NO_CHANGE':complete?'PUBLISHED':'PARTIAL_PUBLISHED';
-  console.log('[GM_UI_AUTO_PUBLISH_RESULT_V031]',JSON.stringify({reason,state:autoState.state,version:result.version,unchanged:!!result.unchanged,remaining:autoState.remaining}));
- }catch(e){autoState.state='ERROR';autoState.error=String(e&&e.message||e);console.error('[GM_UI_AUTO_V028_ERROR]',autoState.error);}
- finally{
+  autoState.remaining=remaining.phrases;autoState.remaining_cells=remaining.cells;
+  const rows=await snapshot(db),hash=fingerprint(rows),publishedHash=await read(db,HASH);
+  let result;
+  if(hash!==publishedHash){
+   result=await publish(db);
+   if(!result||!result.ok||!result.ready){
+    if(result&&result.error==='VERSION_MINUTE_COLLISION')throw Error('VERSION_MINUTE_COLLISION');
+    throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
+   }
+  }
+  // Verify version/hash and every language pack AFTER the DB metadata write.
+  const meta=await current(db);
+  if(!meta.ready || (await read(db,HASH))!==hash || !meta.version)throw Error('UI_PUBLISH_METADATA_VERIFY_FAILED');
+  const verified={};
+  if(!LANGS.every(l=>{verified[l]=diskPack(l,meta.version);return !!verified[l];})||!validPackSet(verified,meta.version))
+    throw Error('UI_PUBLISH_25_LANGUAGE_VERIFY_FAILED');
+  autoState.version=meta.version;autoState.verified_languages=LANGS.length;
+  // A partial pack can serve the UI but is never called translation-complete.
+  autoState.state=remaining.cells===0?'COMPLETED_VERIFIED':rateLimited?'RATE_LIMITED_PARTIAL':'PARTIAL_PUBLISHED';
+  console.log('[GM_UI_AUTO_PUBLISH_RESULT_V035]',JSON.stringify({reason,state:autoState.state,version:meta.version,remaining:remaining.phrases,missing_cells:remaining.cells,verified_languages:LANGS.length}));
+  if(remaining.cells===0){retryFailures=0;autoState.retry_count=0;}
+ }catch(e){
+  autoState.state='ERROR';autoState.error=String(e&&e.message||e);
+  rateLimited=ui.upstreamRateLimited();
+  console.error('[GM_UI_AUTO_V035_ERROR]',autoState.error);
+  // Even a verification error must be retried, never silently abandoned.
+  if(!remaining)remaining=await dbCompletion(db).catch(()=>({phrases:1,cells:1}));
+  autoState.remaining=remaining.phrases;autoState.remaining_cells=remaining.cells;
+ }finally{
   autoState.finished_at=new Date().toISOString();autoRunning=false;
-  if(autoAgain){autoAgain=false;scheduleAutomation(autoDb,'NEW_WORD_DURING_RUN');}
+  if(autoAgain){
+   autoAgain=false;
+   if(manualBusy)manualDeferred=true;
+   else if(autoState.remaining_cells>0||autoState.state==='ERROR')queueRemainingRetry(autoDb,rateLimited);
+   else scheduleAutomation(autoDb,'NEW_WORD_DURING_RUN');
+  }else if(autoState.remaining_cells>0||autoState.state==='ERROR'){
+   if(manualBusy)manualDeferred=true;
+   else queueRemainingRetry(autoDb,rateLimited);
+  }
  }
 }
-module.exports={queue,current,getPack,rehydrate,publishCompleted:publish,LANGS,ROOT,scheduleAutomation,autoStatus};
+function startManualTranslation(){
+ if(autoRunning||manualBusy)return false;
+ manualBusy=true;
+ if(autoTimer){clearTimeout(autoTimer);autoTimer=null;autoState.retry_at=null;manualDeferred=true;}
+ autoState.state='MANUAL_PRIORITY';
+ return true;
+}
+function endManualTranslation(){
+ manualBusy=false;
+ if(manualDeferred){
+  manualDeferred=false;
+  scheduleAutomation(autoDb,'MANUAL_COMPLETE_DEFERRED');
+  // The manual 10-row run must never cause a rapid automatic retry burst.
+  armTimer(Math.max(180000,cooldownMs()),cooldownMs()?'RATE_LIMITED_RETRY_SCHEDULED':'SCHEDULED');
+ }else if(autoState.state==='MANUAL_PRIORITY'){autoState.state='IDLE';}
+}
+module.exports={queue,current,getPack,rehydrate,publishCompleted:publish,LANGS,ROOT,scheduleAutomation,autoStatus,startManualTranslation,endManualTranslation};
