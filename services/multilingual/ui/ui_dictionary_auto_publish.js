@@ -165,7 +165,7 @@ async function getPack(db,lang,version){const m=await current(db);if(!m.ready||m
 // The existing UI translation engine owns per-phrase retries (up to five attempts).
 let autoTimer=null, autoRunning=false, autoAgain=false, autoDb=null;
 const autoState={state:'IDLE',reason:'',started_at:null,finished_at:null,remaining:null,version:null,error:null,events:0};
-function autoStatus(){return {...autoState,running:autoRunning,scheduled:!!autoTimer};}
+function autoStatus(){return {...autoState,running:autoRunning,scheduled:!!autoTimer,upstream:ui.upstreamStatus()};}
 function scheduleAutomation(db,reason){
  if(!db)return;
  autoDb=db;autoState.reason=String(reason||'EVENT');autoState.events++;
@@ -186,12 +186,22 @@ async function runAutomation(){
   const progress={total:{ui:0},done:{ui:0},remaining:{ui:0}};
   const complete=await pipeline.complete(db,progress);
   autoState.remaining=progress.remaining.ui;
-  // Event-driven auto publication is independent from the manual JSON button.
-  // A partial dictionary is publishable; unchanged hash preserves old JSON/version.
+  const upstream=ui.upstreamStatus();
+  // Compute hash first, so a failed translator never emits a false publish success.
+  const rows=await snapshot(db),hash=fingerprint(rows),publishedHash=await read(db,HASH);
+  if(hash===publishedHash){
+   const old=await current(db);autoState.version=old.version||null;
+   autoState.state=upstream.rate_limited?'RATE_LIMITED':'NO_CHANGE';
+   autoState.error=upstream.rate_limited?(upstream.last_error||'TRANSLATION_RATE_LIMITED'):null;
+   console.warn('[GM_UI_AUTO_NO_NEW_TRANSLATIONS]',JSON.stringify({reason,state:autoState.state,remaining:autoState.remaining,http:upstream.last_http}));
+   return;
+  }
+  // Automatic event may publish verified successful cells; manual 10-row action never does.
   const result=await publish(db);
   if(!result||!result.ok||!result.ready)throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
-  autoState.version=result.version;autoState.state=complete?'PUBLISHED':'PARTIAL_PUBLISHED';
-  console.log('[GM_UI_AUTO_V028_PUBLISHED]',JSON.stringify({reason,version:result.version,unchanged:!!result.unchanged}));
+  autoState.version=result.version;
+  autoState.state=result.unchanged?'NO_CHANGE':complete?'PUBLISHED':'PARTIAL_PUBLISHED';
+  console.log('[GM_UI_AUTO_PUBLISH_RESULT_V031]',JSON.stringify({reason,state:autoState.state,version:result.version,unchanged:!!result.unchanged,remaining:autoState.remaining}));
  }catch(e){autoState.state='ERROR';autoState.error=String(e&&e.message||e);console.error('[GM_UI_AUTO_V028_ERROR]',autoState.error);}
  finally{
   autoState.finished_at=new Date().toISOString();autoRunning=false;

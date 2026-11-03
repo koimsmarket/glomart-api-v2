@@ -62,5 +62,5 @@ async function publishJsonV2(btn){
  finally{btn.disabled=false;}
 }
 
-async function loadAutomationStatus(){try{const r=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/automation-status?t='+Date.now());const a=r.automation||{};const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 '+(a.state||'IDLE')+' · 원인 '+(a.reason||'-')+' · 미완성 '+(a.remaining==null?'-':a.remaining)+' · 버전 '+(a.version||'-')+(a.error?' · 오류 '+a.error:'');}catch(e){const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 상태 확인 실패: '+String(e);}}
+async function loadAutomationStatus(){try{const r=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/automation-status?t='+Date.now());const a=r.automation||{};const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 '+(a.state||'IDLE')+' · 원인 '+(a.reason||'-')+' · 미완성 '+(a.remaining==null?'-':a.remaining)+' · 버전 '+(a.version||'-')+(a.error?' · 오류 '+a.error:'')+(a.upstream&&a.upstream.rate_limited?' · 번역 API 제한 ('+(a.upstream.last_http||'?')+')':'');}catch(e){const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 상태 확인 실패: '+String(e);}}
 loadAll();loadV2();loadAutomationStatus();

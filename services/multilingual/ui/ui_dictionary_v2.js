@@ -168,21 +168,60 @@ function protect(text){
   const safe=String(text||'').replace(/(%[dsm]|https?:\/\/[^\s)\]}>,”"']+|\{\$[^}]+\}|<\/?[A-Za-z][^>]*>)/g,m=>{const k='ZZGMKEEP'+tokens.length+'ZZ';tokens.push(m);return k;});
   return {safe,restore(out){let x=String(out==null?'':out);for(let i=0;i<tokens.length;i++)x=x.replace(new RegExp('ZZGMKEEP\\s*'+i+'ZZ','g'),tokens[i]);return x;}};
 }
+// V031: serialize upstream calls and expose non-sensitive response diagnostics.
+// The public GTX endpoint may reject usage; do not report its rejection as success.
+let upstreamTail=Promise.resolve();
+let upstreamNextAt=0;
+let upstreamBlockedUntil=0;
+const upstreamState={state:'IDLE',last_http:null,last_error:'',last_lang:'',last_at:null,blocked_until:null,success:0,failed:0};
+const RATE_COOLDOWN_MS=5*60*1000;
+function upstreamStatus(){return {...upstreamState,blocked_until:upstreamBlockedUntil?new Date(upstreamBlockedUntil).toISOString():null,rate_limited:Date.now()<upstreamBlockedUntil};}
+function upstreamRateLimited(){return Date.now()<upstreamBlockedUntil;}
+function upstreamError(e){return String(e&&e.message||e||'UNKNOWN').slice(0,180);}
+function upstreamStep(fn){
+ const next=upstreamTail.catch(()=>{}).then(async()=>{
+  if(upstreamRateLimited())throw Error('translate_rate_limit_cooldown');
+  const wait=Math.max(0,upstreamNextAt-Date.now());if(wait)await new Promise(resolve=>setTimeout(resolve,wait));
+  upstreamNextAt=Date.now()+350;
+  return fn();
+ });
+ upstreamTail=next.catch(()=>{});return next;
+}
 async function translateOne(text,lang){
-  const p=protect(text),target=TARGET[lang]||lang;
-  const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),8000);
-  try{
-    const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl='+encodeURIComponent(target)+'&dt=t&q='+encodeURIComponent(p.safe);
-    const r=await fetch(url,{headers:{accept:'application/json'},signal:ctrl.signal});
-    if(!r.ok)throw new Error('translate_http_'+r.status);
-    const j=await r.json();let out='';if(j&&Array.isArray(j[0]))for(const z of j[0])if(z&&z[0])out+=z[0];
-    out=s(p.restore(out));
-    // Slot contract must survive translation exactly.
-    const srcSlots=(String(text).match(/%[dsm]/g)||[]).join('|');
-    const outSlots=(String(out).match(/%[dsm]/g)||[]).join('|');
-    if(srcSlots!==outSlots)throw new Error('slot_mismatch_'+lang+'_'+srcSlots+'_'+outSlots);
-    return out;
-  }finally{clearTimeout(timer);}
+  return upstreamStep(async()=>{
+    const p=protect(text),target=TARGET[lang]||lang;
+    const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),12000);
+    upstreamState.last_lang=lang;upstreamState.last_at=new Date().toISOString();
+    try{
+      const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl='+encodeURIComponent(target)+'&dt=t&q='+encodeURIComponent(p.safe);
+      const r=await fetch(url,{headers:{accept:'application/json'},signal:ctrl.signal});
+      upstreamState.last_http=r.status;
+      if(!r.ok){
+        if(r.status===429||r.status===403){
+          const ra=Number(r.headers.get('retry-after'));
+          upstreamBlockedUntil=Date.now()+(Number.isFinite(ra)&&ra>0?Math.min(ra*1000,3600000):RATE_COOLDOWN_MS);
+          upstreamState.state='RATE_LIMITED';
+          console.warn('[GM_UI_TRANSLATE_UPSTREAM_LIMIT]',JSON.stringify({lang,http:r.status,blocked_until:new Date(upstreamBlockedUntil).toISOString()}));
+        }
+        throw new Error('translate_http_'+r.status);
+      }
+      const ct=String(r.headers.get('content-type')||'');
+      if(ct&&!/json|javascript|text\/plain/i.test(ct))throw Error('translate_unexpected_content_type');
+      const j=await r.json();if(!j||!Array.isArray(j[0]))throw Error('translate_invalid_json_shape');
+      let out='';for(const z of j[0])if(z&&z[0])out+=z[0];
+      out=s(p.restore(out));if(!out)throw Error('translate_empty_result');
+      const srcSlots=(String(text).match(/%[dsm]/g)||[]).join('|');
+      const outSlots=(String(out).match(/%[dsm]/g)||[]).join('|');
+      if(srcSlots!==outSlots)throw new Error('slot_mismatch_'+lang+'_'+srcSlots+'_'+outSlots);
+      upstreamState.success++;upstreamState.last_error='';upstreamState.state='OK';return out;
+    }catch(e){
+      const reason=e&&e.name==='AbortError'?'translate_timeout':upstreamError(e);
+      upstreamState.failed++;upstreamState.last_error=reason;
+      if(!upstreamRateLimited())upstreamState.state='ERROR';
+      console.warn('[GM_UI_TRANSLATE_UPSTREAM_FAIL]',JSON.stringify({lang,http:upstreamState.last_http,error:reason,rate_limited:upstreamRateLimited()}));
+      throw Error(reason);
+    }finally{clearTimeout(timer);}
+  });
 }
 async function fillTranslations(db,gmCode){
   gmCode=s(gmCode).toUpperCase();if(!gmCode)return {ok:false};
@@ -193,10 +232,10 @@ async function fillTranslations(db,gmCode){
   if(!need.length){await db.query(`UPDATE gm_ui_dictionary SET translation_status='READY' WHERE gm_code=$1`,[gmCode]);return {ok:true,ready:true,translated:0};}
   await db.query(`UPDATE gm_ui_dictionary SET translation_status='TRANSLATING' WHERE gm_code=$1`,[gmCode]);
   const done={};let failed=[];
-  for(let i=0;i<need.length;i+=6){
-    const part=need.slice(i,i+6);
-    const vals=await Promise.all(part.map(async l=>{try{return [l,await translateOne(kr,l),''];}catch(e){return [l,'',String(e&&e.message||e)];}}));
-    for(const [l,v,e] of vals){if(v)done[l]=v;else failed.push({lang:l,error:e});}
+  for(const l of need){
+    if(upstreamRateLimited()){failed.push({lang:l,error:'translate_rate_limit_cooldown'});break;}
+    try{const v=await translateOne(kr,l);if(v)done[l]=v;}
+    catch(e){failed.push({lang:l,error:upstreamError(e)});if(upstreamRateLimited())break;}
   }
   const keys=Object.keys(done);
   if(keys.length){
@@ -208,7 +247,10 @@ async function fillTranslations(db,gmCode){
   const missing=FOREIGN.filter(l=>!s(check[l]));
   await db.query(`UPDATE gm_ui_dictionary SET translation_status=$2 WHERE gm_code=$1`,[gmCode,missing.length?'PARTIAL':'READY']);
   if(keys.length){try{require('./ui_dictionary_auto_publish').queue(db);}catch(e){console.warn('[GM_UI_PACK_QUEUE_ERROR]',String(e&&e.message||e));}}
-  return {ok:true,translated:keys.length,missing,failed};
+  const saved=keys.filter(l=>s(check[l])===s(done[l]));
+  if(saved.length!==keys.length)console.error('[GM_UI_TRANSLATE_DB_VERIFY_FAIL]',JSON.stringify({gmCode,attempted:keys.length,saved:saved.length}));
+  if(saved.length)console.log('[GM_UI_TRANSLATE_DB_SAVED]',JSON.stringify({gmCode,saved:saved.length,remaining:missing.length}));
+  return {ok:true,translated:saved.length,missing,failed,rateLimited:upstreamRateLimited(),upstream:upstreamStatus()};
 }
 function pumpTranslationQueue(){
   while(TRANSLATE_ACTIVE<TRANSLATE_CONCURRENCY && TRANSLATE_QUEUE.length){
@@ -287,8 +329,12 @@ async function retryPending(db,limit=20){
   limit=Math.max(1,Math.min(100,Number(limit||20)));
   const where=FOREIGN.map(l=>`COALESCE(${l},'')=''`).join(' OR ');
   const r=await db.query(`SELECT gm_code FROM gm_ui_dictionary WHERE active_yn='Y' AND (translation_status<>'READY' OR ${where}) ORDER BY updated_at ASC LIMIT $1`,[limit]);
-  const out=[];for(const x of r.rows)out.push({gm_code:x.gm_code,result:await fillTranslations(db,x.gm_code)});return out;
+  const out=[];for(const x of r.rows){
+    if(upstreamRateLimited())break;
+    const result=await fillTranslations(db,x.gm_code);out.push({gm_code:x.gm_code,result});
+    if(result.rateLimited)break;
+  }return out;
 }
 
 function isIdle(){return TRANSLATE_ACTIVE===0&&TRANSLATE_QUEUE.length===0;}
-module.exports={LANGS,FOREIGN,normalizeTemplate,dynamicNonUiReason,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey,whenIdle,isIdle};
+module.exports={LANGS,FOREIGN,normalizeTemplate,dynamicNonUiReason,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey,whenIdle,isIdle,upstreamStatus,upstreamRateLimited};

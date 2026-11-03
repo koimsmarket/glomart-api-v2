@@ -11,7 +11,7 @@ async function missingCells(db){
  return FOREIGN.reduce((n,l)=>n+Number((r.rows[0]||{})[l]||0),0);
 }
 function rateLimited(result){
- return /429|rate.limit|too.many.requests/i.test(String(result&&result.error||'')) ||
+ return !!(result&&result.rateLimited) || /429|rate.limit|too.many.requests/i.test(String(result&&result.error||'')) ||
   !!(result&&Array.isArray(result.failed)&&result.failed.some(x=>/429|rate.limit|too.many.requests/i.test(JSON.stringify(x))));
 }
 async function complete(db,progress){
