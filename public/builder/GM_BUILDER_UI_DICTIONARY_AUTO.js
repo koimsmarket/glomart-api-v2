@@ -110,19 +110,20 @@ async function gmClientTranslate(kr,lang){
  return value;
 }
 async function gmClientUpload(items){
- // V037 retains the existing per-operation server-side derzon password recheck.
- // No automatic or remembered password, cookie-bypass, or unsupervised write grant.
- const password=prompt('자동 번역 '+items.length+'셀을 서버에 저장합니다. 관리자 비밀번호를 입력하세요.');
- if(!password)throw Error('ADMIN_REAUTH_CANCELLED');
+ // V038: this UI-dictionary-only upload is authenticated by the existing
+ // server-side derzon ADMIN SESSION GATE; no password is read, cached or prompted.
+ // Other Builder data uploads continue to require per-operation reauthentication.
  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-upload',{
-  method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},
+  method:'POST',headers:{'Content-Type':'application/json'},
   credentials:'same-origin',cache:'no-store',body:JSON.stringify({items})});
- const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error+': '+(j.detail||r.status));return j;
+ let j;try{j=await r.json();}catch(_){throw Error('UPLOAD_NON_JSON_HTTP_'+r.status);}
+ if(!r.ok||!j.ok)throw Error(String(j.error||'HTTP_'+r.status)+': '+String(j.detail||r.status));
+ return j;
 }
 async function gmClientFlush(){
  const a=gmClientQueueRead();if(!a.length)return true;
  const portion=a.slice(0,GM_CLIENT_UPLOAD_BATCH);
- gmClientStatus('서버 저장 대기 '+a.length+'셀 · 관리자 재인증 필요');
+ gmClientStatus('서버에 자동 저장 중 · 대기 '+a.length+'셀');
  const result=await gmClientUpload(portion);
  // Remove only after server acknowledged a committed transaction.
  const sigs=new Set(portion.map(x=>x.gm_code+':'+x.lang));
@@ -172,7 +173,7 @@ async function startClientTranslation(btn){
  }catch(e){
   const message=String(e&&e.message||e);
   gmClientStatus('자동 처리 보류: '+message+' · 보관 '+gmClientQueueRead().length+'셀');
-  if(/ADMIN_REAUTH_CANCELLED|BUILDER_REAUTH_REQUIRED|BUILDER_AUTH_INVALID/.test(message))gmClientBlocked=true;
+  if(/ADMIN_LOGIN_REQUIRED|ADMIN_SESSION_REQUIRED|ORIGIN_REJECTED|UPLOAD_NON_JSON_HTTP_401/.test(message))gmClientBlocked=true;
   console.warn('[GM_UI_CLIENT_AUTO_PAUSED_V037]',message);
  }finally{gmClientRunning=false;if(btn)btn.disabled=false;}
 }

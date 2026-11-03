@@ -424,7 +424,10 @@ router.get('/api/gm/builder/ui-dictionary-auto/v2/client-missing', async(req,res
 
 // Each upload requires the EXISTING Builder per-operation derzon password hash check.
 // Never trust an arbitrary GM_CODE/language or overwrite a translated cell.
-router.post('/api/gm/builder/ui-dictionary-auto/v2/client-upload',express.json({limit:'128kb'}),async(req,res)=>{
+// V038: repeat the existing mandatory admin session gate for this exact endpoint.
+// It independently verifies derzon's HttpOnly session cookie and same-origin POST.
+// No generic Builder write/delete permission is changed.
+router.post('/api/gm/builder/ui-dictionary-auto/v2/client-upload',require('../admin_session_gate').middleware,express.json({limit:'128kb'}),async(req,res)=>{
  const db=dbFrom(req),entries=req.body&&req.body.items;
  if(!Array.isArray(entries)||!entries.length||entries.length>100)return res.status(400).json({ok:false,error:'INVALID_BATCH_SIZE'});
  const seen=new Set(),validated=[];
@@ -463,7 +466,7 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/client-upload',express.json({
   }
   await handle.query('COMMIT');inTx=false;
   if(saved)require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'CLIENT_TRANSLATION_SAVED');
-  console.log('[GM_UI_CLIENT_DB_SAVED_V036]',JSON.stringify({cells:saved,already,rows:codes.length}));
+  console.log('[GM_UI_CLIENT_DB_SAVED_V038]',JSON.stringify({cells:saved,already,rows:codes.length,auth:'DERZON_ADMIN_SESSION',source:'BUILDER_CLIENT'}));
   res.set('Cache-Control','no-store').json({ok:true,saved,already,rows:codes.length});
  }catch(e){if(inTx)await handle.query('ROLLBACK').catch(()=>{});res.status(e.http||500).json({ok:false,error:'CLIENT_UPLOAD_FAILED',detail:String(e.message||e)});}
  finally{handle.release();}
