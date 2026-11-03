@@ -290,4 +290,5 @@ async function retryPending(db,limit=20){
   const out=[];for(const x of r.rows)out.push({gm_code:x.gm_code,result:await fillTranslations(db,x.gm_code)});return out;
 }
 
-module.exports={LANGS,FOREIGN,normalizeTemplate,dynamicNonUiReason,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey,whenIdle};
+function isIdle(){return TRANSLATE_ACTIVE===0&&TRANSLATE_QUEUE.length===0;}
+module.exports={LANGS,FOREIGN,normalizeTemplate,dynamicNonUiReason,observe,captureMany,queueTranslations,fillTranslations,retryPending,sourceKey,whenIdle,isIdle};

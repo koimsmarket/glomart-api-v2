@@ -360,10 +360,27 @@ router.get('/api/gm/builder/ui-dictionary-auto/v2/automation-status',(req,res)=>
  catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
+// GM_UI_AUTO_V030: Explicit manual JSON publish; translation button never publishes.
+// Existing server-level builder admin gate protects this POST route.
+router.post('/api/gm/builder/ui-dictionary-auto/v2/publish-json',express.json({limit:'16kb'}),async(req,res)=>{
+  const db=dbFrom(req);
+  try{
+    const svc=require('../../services/multilingual/ui/ui_dictionary_auto_publish');
+    const state=svc.autoStatus();
+    if(state.running||state.scheduled)return res.status(409).json({ok:false,error:'AUTO_TRANSLATION_RUNNING'});
+    if(!uiV2.isIdle())return res.status(409).json({ok:false,error:'TRANSLATION_RUNNING'});
+    const result=await svc.publishCompleted(db);
+    if(!result.ok)return res.status(409).json(result);
+    res.set('Cache-Control','no-store').json(result);
+  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+
 router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.json({limit:'64kb'}),async(req,res)=>{
   const db=dbFrom(req);
   try{
     const limit=Math.max(1,Math.min(50,Number(req.body&&req.body.limit||10)));
+    const state=require('../../services/multilingual/ui/ui_dictionary_auto_publish').autoStatus();
+    if(state.running||state.scheduled||!uiV2.isIdle())return res.status(409).json({ok:false,error:'AUTO_TRANSLATION_RUNNING'});
     const items=await uiV2.retryPending(db,limit);
     res.json({ok:true,count:items.length,items});
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}

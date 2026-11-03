@@ -24,6 +24,8 @@ async function complete(db,progress){
   for(let attempt=0;attempt<5;attempt++){
    try{result=await legacy.fillTranslations(db,code);}catch(e){result={ok:false,error:String(e&&e.message||e)};}
    if(result&&result.ok&&(!result.missing||!result.missing.length)){ok=true;break;}
+   // Stop across all phrases when upstream rate limits: do not hammer 71 phrases.
+   if(rateLimited(result)){console.warn('[GM_UI_AUTO_RATE_LIMIT_STOP]',JSON.stringify({code,attempt:attempt+1}));progress.remaining.ui=(await missing(db)).length;return false;}
    if(attempt<4){
     const limited=rateLimited(result);
     const waitMs=limited?Math.min(120000,15000*Math.pow(2,attempt)):Math.min(30000,2000*Math.pow(2,attempt));

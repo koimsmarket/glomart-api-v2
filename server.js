@@ -1766,11 +1766,11 @@ app.locals.pool = pool;
  * Isolated from category-pack and search workers. No DB migration on boot. */
 try {
   const uiAutoPack=require('./services/multilingual/ui/ui_dictionary_auto_publish');
-  let uiRestoreAttempts=0;
+  let uiRestoreAttempts=0, uiDeployScheduled=false;
   const restoreUiPack=()=>{
     uiRestoreAttempts++;
     uiAutoPack.rehydrate(pool).then(()=>{
-      if(uiRestoreAttempts===1)uiAutoPack.scheduleAutomation(pool,'SERVER_DEPLOY');
+      if(!uiDeployScheduled){uiDeployScheduled=true;uiAutoPack.scheduleAutomation(pool,'SERVER_DEPLOY');}
     }).catch(e=>{
       console.error('[GM_UI_PACK_REHYDRATE_ERROR]',String(e&&e.message||e));
       if(uiRestoreAttempts<6){const t=setTimeout(restoreUiPack,5000);if(t.unref)t.unref();}

@@ -186,10 +186,11 @@ async function runAutomation(){
   const progress={total:{ui:0},done:{ui:0},remaining:{ui:0}};
   const complete=await pipeline.complete(db,progress);
   autoState.remaining=progress.remaining.ui;
-  if(!complete){autoState.state='INCOMPLETE';console.warn('[GM_UI_AUTO_V028_INCOMPLETE]',JSON.stringify({reason,remaining:autoState.remaining}));return;}
+  // Event-driven auto publication is independent from the manual JSON button.
+  // A partial dictionary is publishable; unchanged hash preserves old JSON/version.
   const result=await publish(db);
   if(!result||!result.ok||!result.ready)throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
-  autoState.version=result.version;autoState.state='PUBLISHED';
+  autoState.version=result.version;autoState.state=complete?'PUBLISHED':'PARTIAL_PUBLISHED';
   console.log('[GM_UI_AUTO_V028_PUBLISHED]',JSON.stringify({reason,version:result.version,unchanged:!!result.unchanged}));
  }catch(e){autoState.state='ERROR';autoState.error=String(e&&e.message||e);console.error('[GM_UI_AUTO_V028_ERROR]',autoState.error);}
  finally{
