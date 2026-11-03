@@ -136,12 +136,48 @@ async function exportTableToFile(table,format,directoryHandle){
   await saveBlobAsFile(blob,filename,directoryHandle);
   return {filename,bytes:blob.size,verified:!!directoryHandle,streamed:false,requested_format:format,actual_format:actualFormat};
 }
+// GM_ADMIN_SECURITY_V006: keep an authenticated Builder session active only while
+// a user-started export is running.  Does not renew the absolute 8-hour limit,
+// authenticate a new operation, or send the operation password.
+const GM_EXPORT_SESSION_PING_MS=5*60*1000;
+async function gmExportSessionStatus(){
+  const response=await fetch('/gm-admin-auth/status',{method:'GET',credentials:'same-origin',cache:'no-store'});
+  if(!response.ok)return false;
+  const body=await response.json();
+  return body&&body.authenticated===true;
+}
+async function gmExportRequireSession(){
+  let loggedIn=false;
+  try{loggedIn=await gmExportSessionStatus();}catch(_e){}
+  if(!loggedIn){
+    throw new Error('관리자 로그인 세션이 만료되었거나 확인되지 않습니다. 관리자 로그인 후 이 페이지에서 다운로드를 다시 실행하세요. (/gm-admin-auth/login)');
+  }
+}
+async function gmExportWithActivity(task){
+  let active=true, inFlight=false, warned=false;
+  async function ping(){
+    if(!active||inFlight)return;
+    inFlight=true;
+    try{
+      const ok=await gmExportSessionStatus();
+      if(!ok&&!warned){
+        warned=true;
+        log('관리자 세션이 만료되었습니다. 진행 중인 전송은 유지되지만 다음 다운로드에는 다시 로그인이 필요합니다.');
+      }
+    }catch(_e){
+      // A temporary heartbeat network error must not cancel an active CSV stream.
+    }finally{inFlight=false;}
+  }
+  const timer=setInterval(ping,GM_EXPORT_SESSION_PING_MS);
+  try{return await task();}finally{active=false;clearInterval(timer);}
+}
 async function download(button){
   const t=document.getElementById('downTable').value, f=document.getElementById('format').value;
   const timed=startButtonTimer(button,`${f==='xlsx'?'Excel':'CSV'} 준비 중`);
   log(`개별 다운로드 준비 중: ${t} / ${f==='xlsx'?'Excel':'CSV'}`);
   try{
-    const saved=await GMBuilderWithReauth(()=>exportTableToFile(t,f,null));
+    await gmExportRequireSession();
+    const saved=await GMBuilderWithReauth(()=>gmExportWithActivity(()=>exportTableToFile(t,f,null)));
     log(`다운로드 시작: ${saved.filename} / ${timed?timed.seconds:0}초 / ${saved.bytes.toLocaleString()} bytes`);
   }catch(e){ log(`다운로드 오류: ${String(e&&e.message||e)}`); }
   finally{ stopButtonTimer(timed); }
@@ -276,7 +312,8 @@ async function downloadAll(button){
     log({action:'selected-export-product-standalone-stream-save-v041',selected:total,processed:shared.results.length,groups:groups.length,success:okCount,failed:fail.length,seconds:timed?timed.seconds:0,group_status:groupStatus,failures:fail});
     if(fail.length) alert(`다운로드 종료: 성공 ${okCount}개, 실패 ${fail.length}개\n실패한 테이블만 다시 선택해 재실행하세요.`);
     }
-    await GMBuilderWithReauth(runAllSelectedExports);
+    await gmExportRequireSession();
+    await GMBuilderWithReauth(()=>gmExportWithActivity(runAllSelectedExports));
   }finally{
     downloadAllRunning=false;
     stopButtonTimer(timed);

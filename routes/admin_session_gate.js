@@ -4,7 +4,8 @@ const crypto = require('crypto');
 const {gmVerifyHash}=require('./GM_MEMBER_PASSWORD');
 const COOKIE='__Host-gm_admin';
 const sessions=new Map(), failures=new Map();
-const MAX_AGE=30*60*1000, IDLE=15*60*1000, MAX_FAILURES=5, FAILURE_WINDOW=15*60*1000;
+// GM_ADMIN_SECURITY_V006: admin-only 8h absolute / 60m idle (customer sessions unchanged).
+const MAX_AGE=8*60*60*1000, IDLE=60*60*1000, MAX_FAILURES=5, FAILURE_WINDOW=15*60*1000;
 function log(action,req,detail){console.log('[GM_ADMIN_GATE_V001]',JSON.stringify({action,ip:req.ip||'',path:req.path,detail:detail||'',at:new Date().toISOString()}));}
 function cookie(req,value,age){return `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${age}`;}
 function getCookie(req){const h=String(req.headers.cookie||'');const re=new RegExp('(?:^|;\\s*)'+COOKIE+'=([^;]*)');const m=h.match(re);return m?m[1]:'';}

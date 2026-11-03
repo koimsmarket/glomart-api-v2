@@ -472,4 +472,6 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/client-upload',require('../ad
  finally{handle.release();}
 });
 
+// V039: separate, life-session-verified derzon client worker; existing translation routes preserved.
+router.use(require('./ui_dictionary_derzon_worker'));
 module.exports=router;
