@@ -117,7 +117,7 @@ router.post('/api/gm/bank/admin/logout',requireBankSession,(req,res)=>{
   return ok(res,{authenticated:false});
 });
 
-router.post('/api/gm/bank/woori/upload', requireBankSession, upload.single('file'), async (req,res)=>{
+async function gmWooriUploadHandler(req,res){
   const pool = db(req);
   if(!pool) return fail(res, 500, 'DB pool is not attached');
   if(!req.file || !Buffer.isBuffer(req.file.buffer)) return fail(res, 400, 'xlsx file required (field name: file)');
@@ -192,7 +192,8 @@ router.post('/api/gm/bank/woori/upload', requireBankSession, upload.single('file
     console.error('[GM_BANK_WOORI_UPLOAD_ERROR]', String(e && e.message || e));
     return fail(res, 500, 'WOORI upload failed', { detail:String(e && e.message || e) });
   }finally{ client.release(); }
-});
+}
+router.post('/api/gm/bank/woori/upload',requireBankSession,upload.single('file'),gmWooriUploadHandler);
 
 router.get('/api/gm/bank/transactions', requireBankSession, async (req,res)=>{
   const pool = db(req);
@@ -347,6 +348,60 @@ router.post('/api/gm/bank/gpay/lookup', requireGpayServiceAuth, async(req,res)=>
 });
 
 
+
+
+// GM_GPAY_BANK_BUILDER_V001: authenticated G-PAY Builder -> existing bank XLSX importer.
+router.post('/api/gm/bank/gpay/builder-upload',requireGpayServiceAuth,async(req,res)=>{
+ const name=clean(req.body?.filename);
+ const data=clean(req.body?.file_base64);
+ if(!/^[^\\/]{1,100}\.xlsx$/i.test(name)||!data||data.length>17*1024*1024||!/^[A-Za-z0-9+/]+={0,2}$/.test(data))return fail(res,400,'INVALID_WOORI_FILE');
+ const buffer=Buffer.from(data,'base64');
+ if(!buffer.length||buffer.length>12*1024*1024||buffer.subarray(0,2).toString('hex')!=='504b')return fail(res,400,'INVALID_WOORI_XLSX');
+ req.file={buffer,originalname:name};
+ return gmWooriUploadHandler(req,res);
+});
+
+// Candidate matching is read-only. Bank identity remains authoritative in gm_bank_transaction.
+router.post('/api/gm/bank/gpay/builder-candidates',requireGpayServiceAuth,async(req,res)=>{
+ const requests=Array.isArray(req.body?.requests)?req.body.requests:[];
+ if(requests.length>1000)return fail(res,400,'TOO_MANY_REQUESTS');
+ const valid=requests.map(r=>({id:Number(r.id),request_no:clean(r.request_no),member_id:clean(r.member_id),amount:Number(r.amount),requested_at:clean(r.requested_at)}))
+  .filter(r=>Number.isSafeInteger(r.id)&&r.id>0&&/^GR-[A-Za-z0-9-]{8,80}$/.test(r.request_no)&&r.member_id&&r.member_id.length<=100&&Number.isSafeInteger(r.amount)&&r.amount>0&&Number.isFinite(Date.parse(r.requested_at)));
+ try{
+  let accounts;try{accounts=JSON.parse(process.env.GPAY_BANK_ACCOUNT_MAP||'{}')}catch(_){accounts={}}
+  const hq=Array.isArray(accounts.HQ)?accounts.HQ.map(clean).filter(Boolean):[];
+  if(!hq.length)return fail(res,503,'HQ_BANK_ACCOUNT_MAP_REQUIRED');
+  const database=db(req);if(!database)return fail(res,503,'BANK_DB_NOT_READY');
+  const ids=[...new Set(valid.map(r=>r.member_id))];
+  const people=ids.length?(await database.query(`SELECT member_id,member_name,phone,refund_bank_name,refund_account_no,refund_account_holder FROM gm_member WHERE member_id=ANY($1::text[])`,[ids])).rows:[];
+  const byId=new Map(people.map(m=>[clean(m.member_id).toLowerCase(),m]));
+  const result=await database.query(`SELECT bank_transaction_id,account_no,transaction_at,description,deposit_amount,source_type,source_row_no,process_status,matched_order_no FROM gm_bank_transaction
+   WHERE bank_code='WOORI' AND account_no=ANY($1::text[]) AND deposit_amount>0 AND source_type='FILE'
+   ORDER BY transaction_at DESC,bank_transaction_id DESC LIMIT 1500`,[hq]);
+  const compact=v=>clean(v).replace(/[\s\u00a0]/g,'');
+  const normalizePhone=v=>clean(v).replace(/\D/g,'').slice(-8);
+  const items=result.rows.map(tx=>{
+   const written=compact(tx.description),digits=written.replace(/-/g,'');
+   const matches=[];
+   if(tx.process_status==='UNPROCESSED')for(const r of valid){
+    if(Number(tx.deposit_amount)!==r.amount)continue;
+    const person=byId.get(r.member_id.toLowerCase());
+    const diff=Math.abs(new Date(tx.transaction_at).getTime()-Date.parse(r.requested_at));
+    // ID/phone matches remain exact. Name-based evidence needs near-time request.
+    let kind='';
+    if(written.toLowerCase()===compact(r.member_id).toLowerCase())kind='MEMBER_ID';
+    else if(/^\d{8}$/.test(digits)&&normalizePhone(person?.phone).length===8&&digits===normalizePhone(person.phone))kind='PHONE8';
+    else if(diff<=24*3600*1000 && person&&written && written===compact(person.member_name))kind='REAL_NAME';
+    else if(diff<=24*3600*1000 && person&&written && clean(person.refund_account_no)&&written===compact(person.refund_account_holder))kind='REFUND_HOLDER';
+    if(kind)matches.push({request_id:r.id,request_no:r.request_no,member_id:r.member_id,kind,time_gap_minutes:Math.round(diff/60000)});
+   }
+   // All matches compete for the same bank row; never auto-confirm ambiguous names.
+   return {bank_transaction_id:Number(tx.bank_transaction_id),transaction_at:tx.transaction_at,description:tx.description,deposit_amount:Number(tx.deposit_amount),process_status:tx.process_status,matched_order_no:tx.matched_order_no,account_no:tx.account_no,candidates:matches,
+     match_state:tx.process_status!=='UNPROCESSED'?'USED':matches.length===1?'SINGLE':matches.length>1?'AMBIGUOUS':'UNMATCHED'};
+  });
+  return ok(res,{items,pending_count:valid.length,match_window_hours:24});
+ }catch(e){console.error('[GM_GPAY_BANK_BUILDER_V001] candidates_failed',e.code||e.message);return fail(res,503,'BANK_CANDIDATES_FAILED');}
+});
 
 // GM_GPAY_BANK_V013: master-session-only proxy to G-PAY. Authentication above is V008 unchanged.
 const GPAY_REQUEST_BASE=()=>clean(process.env.GPAY_API_BASE_URL||process.env.GPAY_SERVER_URL).replace(/\/$/,'');
