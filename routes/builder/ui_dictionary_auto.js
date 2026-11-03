@@ -386,6 +386,8 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/publish-json',express.json({l
 });
 
 router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.json({limit:'64kb'}),async(req,res)=>{
+  // V036: legacy server-side GTX translation is deliberately disabled.
+  return res.status(409).json({ok:false,error:'CLIENT_TRANSLATION_REQUIRED'});
   const db=dbFrom(req);
   try{
     const limit=Math.max(1,Math.min(50,Number(req.body&&req.body.limit||10)));
@@ -402,6 +404,69 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.j
       res.json({ok:true,count:items.length,translated,rate_limited:uiV2.upstreamRateLimited(),upstream:uiV2.upstreamStatus(),items});
     }finally{uiManualTranslationRunning=false;publisher.endManualTranslation();}
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+
+// V036: server supplies ONLY missing cells; Google requests originate from client device.
+router.get('/api/gm/builder/ui-dictionary-auto/v2/client-missing', async(req,res)=>{
+ const db=dbFrom(req);
+ try{
+  const limit=Math.max(1,Math.min(100,Number(req.query.limit)||20));
+  const cols=uiV2.FOREIGN;
+  const where=cols.map(l=>`NULLIF(BTRIM(${l}::text),'') IS NULL`).join(' OR ');
+  const result=await db.query(`SELECT gm_code,kr,${cols.join(',')} FROM gm_ui_dictionary
+    WHERE active_yn='Y' AND NULLIF(BTRIM(kr::text),'') IS NOT NULL AND (${where})
+    ORDER BY gm_code LIMIT $1`,[limit]);
+  const items=result.rows.map(row=>({gm_code:row.gm_code,kr:row.kr,
+     missing:cols.filter(l=>!String(row[l]||'').trim())}));
+  res.set('Cache-Control','no-store').json({ok:true,items,count:items.length});
+ }catch(e){res.status(500).json({ok:false,error:'CLIENT_MISSING_FAILED',detail:String(e.message||e)});}
+});
+
+// Each upload requires the EXISTING Builder per-operation derzon password hash check.
+// Never trust an arbitrary GM_CODE/language or overwrite a translated cell.
+router.post('/api/gm/builder/ui-dictionary-auto/v2/client-upload',express.json({limit:'128kb'}),async(req,res)=>{
+ const db=dbFrom(req),entries=req.body&&req.body.items;
+ if(!Array.isArray(entries)||!entries.length||entries.length>100)return res.status(400).json({ok:false,error:'INVALID_BATCH_SIZE'});
+ const seen=new Set(),validated=[];
+ for(const x of entries){
+  const code=String(x&&x.gm_code||'');const kr=String(x&&x.kr||'');
+  const lang=String(x&&x.lang||'');const value=String(x&&x.value||'').trim();
+  if(!/^GM_\d{4,}$/.test(code)||!uiV2.FOREIGN.includes(lang)||!kr.trim()||kr.length>500||!value||value.length>3000)
+   return res.status(400).json({ok:false,error:'INVALID_CELL'});
+  const srcSlots=(kr.match(/%[dsm]/g)||[]).join('|'),dstSlots=(value.match(/%[dsm]/g)||[]).join('|');
+  if(srcSlots!==dstSlots)return res.status(400).json({ok:false,error:'PLACEHOLDER_MISMATCH',gm_code:code,lang});
+  if(value===kr && !/^[\d\s%.,:()/-]+$/.test(kr))return res.status(400).json({ok:false,error:'UNTRANSLATED_VALUE',gm_code:code,lang});
+  const sig=code+':'+lang;if(seen.has(sig))return res.status(400).json({ok:false,error:'DUPLICATE_CELL'});
+  seen.add(sig);validated.push({code,kr,lang,value});
+ }
+ const handle=await db.connect();let inTx=false;
+ try{
+  await handle.query('BEGIN');inTx=true;
+  // Lock all affected rows in deterministic order to avoid concurrent conflicts.
+  const codes=[...new Set(validated.map(x=>x.code))].sort();const rows=new Map();
+  for(const code of codes){
+   const r=await handle.query(`SELECT gm_code,kr,${uiV2.FOREIGN.join(',')} FROM gm_ui_dictionary WHERE gm_code=$1 AND active_yn='Y' FOR UPDATE`,[code]);
+   if(r.rows.length!==1)throw Object.assign(Error('ROW_NOT_FOUND'),{http:409});
+   rows.set(code,r.rows[0]);
+  }
+  let saved=0,already=0;
+  for(const x of validated){
+   const row=rows.get(x.code);
+   if(row.kr!==x.kr)throw Object.assign(Error('SOURCE_TEXT_CHANGED:'+x.code),{http:409});
+   if(String(row[x.lang]||'').trim()){already++;continue;}
+   await handle.query(`UPDATE gm_ui_dictionary SET ${x.lang}=$2,updated_at=now() WHERE gm_code=$1`,[x.code,x.value]);
+   row[x.lang]=x.value;saved++;
+  }
+  for(const code of codes){
+   const row=rows.get(code),missing=uiV2.FOREIGN.filter(l=>!String(row[l]||'').trim());
+   await handle.query('UPDATE gm_ui_dictionary SET translation_status=$2 WHERE gm_code=$1',[code,missing.length?'PARTIAL':'READY']);
+  }
+  await handle.query('COMMIT');inTx=false;
+  if(saved)require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'CLIENT_TRANSLATION_SAVED');
+  console.log('[GM_UI_CLIENT_DB_SAVED_V036]',JSON.stringify({cells:saved,already,rows:codes.length}));
+  res.set('Cache-Control','no-store').json({ok:true,saved,already,rows:codes.length});
+ }catch(e){if(inTx)await handle.query('ROLLBACK').catch(()=>{});res.status(e.http||500).json({ok:false,error:'CLIENT_UPLOAD_FAILED',detail:String(e.message||e)});}
+ finally{handle.release();}
 });
 
 module.exports=router;

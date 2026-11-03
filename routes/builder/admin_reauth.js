@@ -16,6 +16,7 @@ function protectedOperation(req) {
   if (method !== 'POST') return false;
   if (path === '/api/gm/background/image-vector/mode' || path === '/api/gm/background/image-vector/pending/import') return true;
   if (path === '/api/gm/builder/safe-update') return true;
+  if (path === '/api/gm/builder/ui-dictionary-auto/v2/client-upload') return true; // V036
   if (path === '/api/gm/builder/multilingual/finalize') return true; // DRY_RUN also uploads data; authenticate all uploads
   return (
     path === '/api/gm/builder/cafe24-member-import' ||

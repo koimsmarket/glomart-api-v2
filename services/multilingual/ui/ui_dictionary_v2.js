@@ -224,6 +224,8 @@ async function translateOne(text,lang){
   });
 }
 async function fillTranslations(db,gmCode){
+  // V036: server must never invoke the unofficial Google translate endpoint.
+  return {ok:false,error:'CLIENT_TRANSLATION_REQUIRED',missing:FOREIGN};
   gmCode=s(gmCode).toUpperCase();if(!gmCode)return {ok:false};
   const q=await db.query(`SELECT * FROM gm_ui_dictionary WHERE gm_code=$1`,[gmCode]);
   const row=q.rows[0];if(!row)return {ok:false,reason:'NOT_FOUND'};
@@ -261,6 +263,8 @@ function pumpTranslationQueue(){
   }
 }
 function queueTranslations(db,codes){
+  // V036: no implicit server-origin Google translation requests.
+  return;
   for(const raw of codes||[]){
     const code=s(raw).toUpperCase();if(!code||TRANSLATING.has(code)||QUEUED.has(code))continue;
     QUEUED.add(code);TRANSLATE_QUEUE.push({db,code});

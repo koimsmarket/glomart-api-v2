@@ -49,7 +49,8 @@ async function jfetch(u,o,retried){
 }async function loadAll(){try{const [s,p]=await Promise.all([jfetch(API+'/api/gm/builder/ui-dictionary-auto/status?t='+Date.now()),jfetch(API+'/api/gm/builder/ui-dictionary-auto/pending?t='+Date.now())]);document.getElementById('status').textContent='사전 '+s.dictionary.total+'건 · 활성 '+s.dictionary.active+' · 재번역 '+s.dictionary.recheck+' · pending '+(p.items||[]).length+'건';document.getElementById('rows').innerHTML=(p.items||[]).map(x=>'<tr><td><input type="checkbox" class="pchk" value="'+x.pending_id+'"></td><td><b>'+esc(x.change_type)+'</b><br><span class="small">'+esc(x.source_type)+'</span></td><td>'+esc(x.gm_code||'(자동발급)')+'</td><td>'+esc(x.previous_text_ko||'')+'</td><td>'+esc(x.source_text_ko||'')+'</td><td>'+esc(x.page_name||'')+'</td><td><span class="small">'+esc(x.source_locator||x.source_file||'')+'</span></td><td>'+esc(x.seen_count||0)+'</td><td>'+esc(x.last_seen_at||'')+'</td></tr>').join('')||'<tr><td colspan="9">pending 없음</td></tr>';log({status:s,pending_count:(p.items||[]).length});}catch(e){log(String(e));}}async function scanStatic(btn){btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/scan-static',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});log(j);await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}function ids(){return Array.from(document.querySelectorAll('.pchk:checked')).map(x=>Number(x.value));}function selectAll(v){document.querySelectorAll('.pchk').forEach(x=>x.checked=v);}async function approveSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');if(!confirm('선택 '+a.length+'건을 UI 사전에 반영할까요?'))return;btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}async function ignoreSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}
 async function loadV2(){try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/status?t='+Date.now());const d=j.dictionary||{};document.getElementById('v2status').textContent='사전 '+(d.total||0)+'건 · 변수문구 '+(d.variable||0)+' · 사용 '+(d.use_count||0)+' · 번역미완성 '+(d.translation_pending||0);document.getElementById('v2rows').innerHTML=(j.recent||[]).map(x=>'<tr><td>'+esc(x.gm_code)+'</td><td>'+esc(x.kr)+'</td><td>'+esc(x.has_variable||'N')+'</td><td>'+esc(x.translation_status)+'</td><td>'+esc(x.use_count||0)+'</td><td>'+esc(x.last_used_at||'')+'</td><td>'+esc(x.updated_at||'')+'</td></tr>').join('')||'<tr><td colspan="7">V2 기록 없음</td></tr>';await loadAutomationStatus();return j;}catch(e){document.getElementById('v2status').textContent=String(e);await loadAutomationStatus();throw e;}}
 async function scanV2(btn){btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/scan-static',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:250})});log(j);await loadV2();}catch(e){log(String(e));}finally{btn.disabled=false;}}
-async function retryV2(btn){btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/retry-translations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:10})});log(j);await loadV2();}catch(e){log(String(e));}finally{btn.disabled=false;}}
+async function retryV2(btn){return startClientTranslation(btn);}
+
 
 // GM_UI_AUTO_V030: manual translation updates DB only; JSON publish is an explicit separate action.
 async function publishJsonV2(btn){
@@ -64,3 +65,78 @@ async function publishJsonV2(btn){
 
 async function loadAutomationStatus(){try{const r=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/automation-status?t='+Date.now());const a=r.automation||{};const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 '+(a.state||'IDLE')+' · 원인 '+(a.reason||'-')+' · 미완성 '+(a.remaining==null?'-':a.remaining)+' · 버전 '+(a.version||'-')+(a.error?' · 오류 '+a.error:'')+(a.remaining_cells==null?'':' · 남은 번역 셀 '+a.remaining_cells)+(a.retry_at?' · 재개 예정 '+a.retry_at:'')+(a.verified_languages?' · JSON 검증 '+a.verified_languages+'개 언어':'')+(a.upstream&&a.upstream.rate_limited?' · 번역 API 제한 ('+(a.upstream.last_http||'?')+')':'');}catch(e){const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 상태 확인 실패: '+String(e);}}
 loadAll();loadV2();
+
+// V036 administrator browser-side translation. NO proxy to the Glomart server.
+const GM_CLIENT_LANG_TARGET={tw:'zh-TW'};
+const GM_CLIENT_LANGS=['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+let gmClientRunning=false,gmClientStop=false;
+const gmClientSleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function gmClientStatus(message){const el=document.getElementById('clientTranslationStatus');if(el)el.textContent=message;}
+function stopClientTranslation(){gmClientStop=true;gmClientStatus('중단 요청됨 · 현재 요청 종료 후 중단합니다.');}
+function gmClientProtect(text){
+ const tokens=[];const safe=String(text||'').replace(/%[dsm]/g,m=>{tokens.push(m);return 'ZZGMKEEP'+(tokens.length-1)+'ZZ';});
+ return {safe,restore(out){let x=String(out||'');for(let i=0;i<tokens.length;i++)x=x.replace(new RegExp('ZZGMKEEP\\s*'+i+'ZZ','g'),tokens[i]);return x;}};
+}
+async function gmClientTranslate(kr,lang){
+ const target=GM_CLIENT_LANG_TARGET[lang]||lang;
+ const p=gmClientProtect(kr);
+ const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl='+encodeURIComponent(target)+'&dt=t&q='+encodeURIComponent(p.safe);
+ let r;
+ try{r=await fetch(url,{mode:'cors',credentials:'omit',cache:'no-store'});}
+ catch(e){throw Error('BROWSER_CORS_OR_NETWORK_BLOCK: '+String(e&&e.message||e));}
+ if(r.status===429)throw Error('HTTP_429');
+ if(!r.ok)throw Error('HTTP_'+r.status);
+ const j=await r.json();let text='';for(const item of (j&&j[0])||[])if(item&&item[0])text+=item[0];
+ text=p.restore(text).trim();
+ if(!text||text===kr)throw Error('EMPTY_OR_UNTRANSLATED');
+ if((kr.match(/%[dsm]/g)||[]).join('|')!==(text.match(/%[dsm]/g)||[]).join('|'))throw Error('PLACEHOLDER_MISMATCH');
+ return text;
+}
+async function gmClientUpload(items){
+ // Existing Builder policy: NEVER retain the password. Verify each upload server-side.
+ const password=prompt('번역 '+items.length+'셀을 서버에 저장합니다. 관리자 비밀번호를 입력하세요.');
+ if(!password)throw Error('ADMIN_REAUTH_CANCELLED');
+ try{
+  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-upload',{
+   method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},
+   credentials:'same-origin',cache:'no-store',body:JSON.stringify({items})});
+  const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error+': '+(j.detail||r.status));return j;
+ }finally{ /* password is scoped to this call only */ }
+}
+async function startClientTranslation(btn){
+ if(gmClientRunning)return;
+ gmClientRunning=true;gmClientStop=false;if(btn)btn.disabled=true;
+ let success=0,failed=0;
+ try{
+  gmClientStatus('브라우저에서 미완료 번역을 조회합니다. 브라우저를 닫으면 실행이 중단됩니다.');
+  for(let round=0;round<200&&!gmClientStop;round++){
+   const data=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-missing?limit=20&t='+Date.now());
+   if(!data.items||!data.items.length){gmClientStatus('DB에 누락된 번역 셀이 없습니다. JSON 발행 확인 중');break;}
+   const batch=[];let blocked=false;
+   for(const row of data.items){
+    for(const lang of row.missing){
+     if(gmClientStop)break;
+     if(!GM_CLIENT_LANGS.includes(lang))continue;
+     try{
+      const value=await gmClientTranslate(row.kr,lang);
+      batch.push({gm_code:row.gm_code,kr:row.kr,lang,value});success++;
+      gmClientStatus('기기에서 번역 중 · 성공 '+success+'셀 · 실패 '+failed+'셀 · 서버 저장 대기 '+batch.length+'셀');
+     }catch(e){
+      failed++;
+      // No silent fallback through server. CORS and 429 require manual resolution.
+      gmClientStatus('클라이언트 번역 중단: '+String(e&&e.message||e)+' · 성공 '+success+'셀');
+      blocked=true;break;
+     }
+     await gmClientSleep(1800);
+     if(batch.length>=80)break;
+    }
+    if(blocked||gmClientStop||batch.length>=80)break;
+   }
+   if(batch.length){const saved=await gmClientUpload(batch);gmClientStatus('서버 DB 저장 검증: '+saved.saved+'셀 · 기기 성공 '+success+'셀');}
+   if(blocked||gmClientStop||!batch.length)break;
+   await loadV2();
+  }
+  await loadV2();
+ }catch(e){gmClientStatus('클라이언트 작업 종료: '+String(e&&e.message||e));log(String(e));}
+ finally{gmClientRunning=false;if(btn)btn.disabled=false;}
+}
