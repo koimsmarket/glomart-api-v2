@@ -106,11 +106,19 @@ async function observe(db,row){
   return {new:true};
 }
 
+// GM_BUILDER_STATIC_CAPTURE_PAUSE_V003: Builder and auto-order UI capture paused.
+// Keep normal display/translation/API behavior unchanged.
+function gmUiStaticCapturePausedPath(rel){
+  const p=String(rel||'').replace(/\\/g,'/').replace(/^\/+/, '').toLowerCase();
+  return p.startsWith('public/builder/') || p.startsWith('builder/') ||
+    p.startsWith('auto-order/') || p.startsWith('public/auto-order/');
+}
 function walk(dir,out,root){
   if(!fs.existsSync(dir))return;
   for(const ent of fs.readdirSync(dir,{withFileTypes:true})){
     if(ent.name==='node_modules'||ent.name.startsWith('.'))continue;
     const p=path.join(dir,ent.name);
+    if(gmUiStaticCapturePausedPath(path.relative(root,p)))continue; // No STATIC capture here.
     if(ent.isDirectory())walk(p,out,root);
     else if(/\.(html?|js)$/i.test(ent.name)){
       try{const st=fs.statSync(p);if(st.size<=2*1024*1024)out.push({abs:p,rel:path.relative(root,p).replace(/\\/g,'/')});}catch(_){ }
@@ -119,6 +127,7 @@ function walk(dir,out,root){
 }
 
 function extractFile(file){
+  if(gmUiStaticCapturePausedPath(file.rel))return [];
   const src=fs.readFileSync(file.abs,'utf8');
   const rows=[];
   const lines=src.split(/\r?\n/);
@@ -380,15 +389,18 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.j
   const db=dbFrom(req);
   try{
     const limit=Math.max(1,Math.min(50,Number(req.body&&req.body.limit||10)));
-    const state=require('../../services/multilingual/ui/ui_dictionary_auto_publish').autoStatus();
-    if(state.running||state.scheduled||!uiV2.isIdle()||uiManualTranslationRunning)return res.status(409).json({ok:false,error:'TRANSLATION_RUNNING'});
+    const publisher=require('../../services/multilingual/ui/ui_dictionary_auto_publish');
+    const state=publisher.autoStatus();
+    // Scheduled automatic work yields to explicit manual work (V034 existing API).
+    if(state.running||!uiV2.isIdle()||uiManualTranslationRunning)return res.status(409).json({ok:false,error:'TRANSLATION_RUNNING'});
     if(uiV2.upstreamRateLimited())return res.status(429).json({ok:false,error:'TRANSLATION_PROVIDER_RATE_LIMITED',upstream:uiV2.upstreamStatus()});
+    if(!publisher.startManualTranslation())return res.status(409).json({ok:false,error:'TRANSLATION_RUNNING'});
     uiManualTranslationRunning=true;
     try{
       const items=await uiV2.retryPending(db,limit);
       const translated=items.reduce((n,x)=>n+Number(x.result&&x.result.translated||0),0);
       res.json({ok:true,count:items.length,translated,rate_limited:uiV2.upstreamRateLimited(),upstream:uiV2.upstreamStatus(),items});
-    }finally{uiManualTranslationRunning=false;}
+    }finally{uiManualTranslationRunning=false;publisher.endManualTranslation();}
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 

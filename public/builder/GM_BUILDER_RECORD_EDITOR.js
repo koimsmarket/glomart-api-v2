@@ -157,10 +157,8 @@ async function deleteSelectedRecords(){
     status.textContent=msg;log(msg);return;
   }
   if(selected.length>100){status.textContent='한 번에 최대 100건만 삭제할 수 있습니다.';return;}
-  const answer=prompt(`${selected.length}개 레코드를 삭제합니다.\n실행하려면 DELETE SELECTED 를 입력하세요.`);
-  if(answer!=='DELETE SELECTED'){
-    status.textContent='삭제 취소: 확인 문구가 일치하지 않습니다.';return;
-  }
+  // GM_BUILDER_RECORD_EDITOR_V003: remove redundant typed confirmation.
+  // Existing admin password re-authentication and server token stay unchanged.
   const table=document.getElementById('tableSelect').value;
   status.textContent=`${selected.length}건 삭제 요청 중 · 관리자 재인증 필요`;
   try{
