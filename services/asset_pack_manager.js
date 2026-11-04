@@ -19,6 +19,8 @@ const UI_ROOT=path.join(__dirname,'..','public','data','gm-assets','ui');
 const PRIVATE_ROOT=path.join(CATEGORY_ROOT,'_state');
 const BASE_SNAPSHOT_FILE=path.join(PRIVATE_ROOT,'category_base_snapshot.json');
 let poolRef=null,timer=null,pumping=false,rehydrating=false,startupPromise=null;
+// GM_CATEGORY_PACK_RETRY_V001: a failed boot restore must not poison later requests.
+let retryAfter=0;
 let lastState={state:'IDLE',running:false,last_error:'',last_run_at:null,last_result:null,rehydrate_state:'IDLE',rehydrate_at:null,rehydrate_result:null};
 function s(v){return String(v==null?'':v).trim();}
 function n(v,d=0){const x=Number(v);return Number.isFinite(x)?Math.trunc(x):d;}
@@ -198,9 +200,13 @@ function ensureStarted(pool){
   if(pool)poolRef=pool;
   if(!poolRef)return Promise.resolve({state:'WAIT_DB'});
   if(startupPromise)return startupPromise;
+  // Avoid repeated SQL retries while PostgreSQL DNS/network is temporarily down.
+  if(Date.now()<retryAfter)return Promise.resolve({state:'RETRY_BACKOFF'});
   rehydrating=true;
   startupPromise=rehydratePublishedPack(poolRef).catch(e=>{
     lastState.rehydrate_state='ERROR';lastState.last_error=String(e&&e.stack||e);
+    retryAfter=Date.now()+5000;
+    startupPromise=null; // Failure must not permanently block next restore attempt.
     console.error('[GM_CATEGORY_PACK_REHYDRATE_ERROR]',lastState.last_error);throw e;
   }).finally(()=>{rehydrating=false;});
   if(!timer){timer=setInterval(()=>pump().catch(e=>console.error('[GM_CATEGORY_PACK_PUMP_ERROR]',String(e))),60000);if(timer.unref)timer.unref();setTimeout(()=>pump().catch(()=>{}),2000);}
