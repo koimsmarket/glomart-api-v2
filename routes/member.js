@@ -749,6 +749,73 @@ router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (r
   finally{ client.release(); }
 });
 
+// GM_CAFE24_ADDRESS_KEY_V008: Cafe24 ma_idx is the external identity.
+// Mirror ONLY explicit Cafe24 address actions. Never infer identity from address text.
+router.post(['/api/gm/member/address/cafe24/action','/api/member/address/cafe24/action'],async(req,res)=>{
+  const pool=db(req),b=req.body||{};
+  if(!pool)return res.status(500).json({ok:false,error:'DB_UNAVAILABLE'});
+  const {validate:validateMemberAccess}=require('./gm_member_access_guard');
+  const verified=validateMemberAccess(req);
+  if(!verified)return res.status(401).json({ok:false,error:'MEMBER_ACCESS_REQUIRED'});
+  const memberId=pick(b,['member_id','memberId']);
+  if(!memberId||verified!==memberId)return res.status(403).json({ok:false,error:'MEMBER_ACCESS_DENIED'});
+  const action=s(b.action).toLowerCase();
+  if(!['register','modify','delete','select'].includes(action))return res.status(400).json({ok:false,error:'INVALID_ACTION'});
+  const maIdx=s(b.cafe24_ma_idx||b.ma_idx);
+  if(!/^[0-9]{1,20}$/.test(maIdx))return res.status(400).json({ok:false,error:'CAFE24_MA_IDX_REQUIRED'});
+  // The Cafe24 registration callback must first obtain its newly issued ma_idx.
+  const a=addressPayload(Object.assign({},b,{is_default:b.is_default===undefined?'N':b.is_default}),memberId);
+  if((action==='register'||action==='modify')&&(!a.receiver_name||(!a.receiver_phone&&!a.receiver_mobile)||!a.zipcode||!a.address1))
+    return res.status(400).json({ok:false,error:'INCOMPLETE_ADDRESS'});
+  const client=await pool.connect().catch(()=>null);
+  if(!client)return res.status(500).json({ok:false,error:'DB_UNAVAILABLE'});
+  try{
+    await client.query('BEGIN');
+    // Serializes default changes and prevents races for the same member.
+    const owner=await client.query('SELECT member_id FROM gm_member WHERE member_id=$1 FOR UPDATE',[memberId]);
+    if(!owner.rowCount){await client.query('ROLLBACK');return res.status(404).json({ok:false,error:'MEMBER_NOT_FOUND'});}
+    const found=await client.query('SELECT address_id FROM gm_member_address WHERE member_id=$1 AND cafe24_ma_idx=$2 FOR UPDATE',[memberId,maIdx]);
+    if(action==='delete'){
+      const removed=await client.query('DELETE FROM gm_member_address WHERE member_id=$1 AND cafe24_ma_idx=$2 RETURNING address_id',[memberId,maIdx]);
+      await client.query('COMMIT');
+      return res.json({ok:true,action,cafe24_ma_idx:maIdx,affected:removed.rowCount});
+    }
+    if(action==='select'&&!found.rowCount){await client.query('ROLLBACK');return res.status(404).json({ok:false,error:'ADDRESS_NOT_FOUND'});}
+    const makeDefault=action==='select'||a.is_default==='Y';
+    if(makeDefault)await client.query("UPDATE gm_member_address SET is_default='N',updated_at=NOW() WHERE member_id=$1 AND is_default='Y'",[memberId]);
+    let saved;
+    if(action==='select'){
+      const result=await client.query("UPDATE gm_member_address SET is_default='Y',updated_at=NOW(),last_used_at=NOW() WHERE member_id=$1 AND cafe24_ma_idx=$2 RETURNING *",[memberId,maIdx]);
+      saved=result.rows[0];
+    }else if(found.rowCount){
+      const result=await client.query(`UPDATE gm_member_address SET
+        address_name=$3,receiver_name=$4,receiver_phone=$5,receiver_mobile=$6,zipcode=$7,address1=$8,address2=$9,address_old=$10,address_full=$11,
+        sido=$12,sigungu=$13,eup_myeon_dong=$14,customs_clearance_code=$15,delivery_memo=$16,is_default=$17,updated_at=NOW()
+        WHERE member_id=$1 AND cafe24_ma_idx=$2 RETURNING *`,
+        [memberId,maIdx,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,makeDefault?'Y':'N']);
+      saved=result.rows[0];
+    }else{
+      // 36 bytes; the original address_id VARCHAR(40) remains untouched.
+      const addressId='C24_'+crypto.randomBytes(16).toString('hex');
+      const result=await client.query(`INSERT INTO gm_member_address
+        (address_id,member_id,cafe24_ma_idx,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW(),NOW()) RETURNING *`,
+        [addressId,memberId,maIdx,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,makeDefault?'Y':'N']);
+      saved=result.rows[0];
+    }
+    // Follow pre-existing member.js behavior when the default address changes.
+    if(saved&&saved.is_default==='Y'){
+      await client.query(`UPDATE gm_member SET
+        default_receiver_name=$2,default_receiver_phone=$3,default_receiver_mobile=$4,default_zipcode=$5,default_address1=$6,default_address2=$7,default_address_old=$8,default_address_full=$9,
+        default_sido=$10,default_sigungu=$11,default_eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,updated_at=NOW() WHERE member_id=$1`,
+        [memberId,saved.receiver_name,saved.receiver_phone,saved.receiver_mobile,saved.zipcode,saved.address1,saved.address2,saved.address_old,saved.address_full,saved.sido,saved.sigungu,saved.eup_myeon_dong,saved.customs_clearance_code,saved.delivery_memo]);
+    }
+    await client.query('COMMIT');
+    return res.json({ok:true,action,cafe24_ma_idx:maIdx,address_id:saved.address_id,address:saved});
+  }catch(e){await client.query('ROLLBACK').catch(()=>{});console.error('[GM_CAFE24_ADDRESS_KEY_V008]',{action,code:e&&e.code});return res.status(500).json({ok:false,error:'ADDRESS_MIRROR_FAILED'});}
+  finally{client.release();}
+});
+
 router.get(['/api/gm/member/address/list','/api/member/address/list'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
