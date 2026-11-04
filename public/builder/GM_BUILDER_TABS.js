@@ -8,7 +8,7 @@
     {id:'transfer',title:'업로드 / 다운로드',items:[['/builder/download.html','종류별 다운로드'],['/builder/safe_update.html','종류별 업로드'],['/builder/members.html','회원 가져오기']]},
     {id:'build',title:'빌드 / 발행',items:[['asset','카테고리 / 사전'],['lang','언어 / 국가'],['translation','다국어 번역'],['gmcode','상품 코드']]},
     {id:'special',title:'특별 기능',items:[['vector','이미지 벡터'],['/builder/image_hnsw.html','HNSW / 대표이미지'],['purchase','구매확정'],['/builder/category_unit.html','단위가격'],['/builder/ui_dictionary_auto.html','UI 사전 자동점검'],['/builder/dev_restore.html','개발 파일 복원']]},
-    {id:'operation',title:'운영 / 설정',items:[['runtime','운영 설정'],['status','현황 / 로그'],['/auto-order/','자동주문 대시보드']]}
+    {id:'operation',title:'운영 / 설정',items:[['runtime','운영 설정'],['version','버전 관리'],['status','현황 / 로그'],['/auto-order/','자동주문 대시보드']]}
   ];
   let group='data';
   function names(el){return String(el.getAttribute('data-builder-tab')||'').split(/\s+/).filter(Boolean);}

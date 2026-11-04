@@ -93,3 +93,38 @@ async function prepareFdHs6DepthSpecial(){
   const st=document.getElementById('specialCategoryPlanStatus');if(st)st.textContent=`FD/HS 6단계 SPECIAL 준비 완료 · ${ym.value} · FD → HS 우선`;
 }
 
+
+// GM_BUILDER_VERSION_MANUAL_V001: separate administrator-controlled values.
+async function loadBuilderVersions(){
+  const tb=document.getElementById('builderVersionRows'),st=document.getElementById('builderVersionStatus');
+  if(!tb)return;
+  try{
+    const r=await fetch(`${API}/api/gm/builder/config/version-control?t=${Date.now()}`,{cache:'no-store'});
+    const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    const labels={gm_v1:'실행 JS: 미연결 (빌더 보관값)',gm_v2:'운영 설정값만 변경',gm_v3:'운영 설정값만 변경'};
+    tb.innerHTML=['gm_v1','gm_v2','gm_v3'].map(k=>{
+      const x=j.versions&&j.versions[k]||{};
+      return `<tr><td><b>${k}</b></td><td>${cfgEsc(x.value||'-')}</td><td>${cfgEsc(labels[k])}</td><td><button type="button" onclick="updateBuilderVersion('${k}',this)">현재시각으로 갱신</button></td></tr>`;
+    }).join('');
+    if(st)st.textContent='조회 완료 · 기준시각 KST · 서버 재배포와 별개';
+  }catch(e){tb.innerHTML=`<tr><td colspan="4">조회 실패: ${cfgEsc(e.message||e)}</td></tr>`;if(st)st.textContent='';}
+}
+async function updateBuilderVersion(key,btn){
+  if(!['gm_v1','gm_v2','gm_v3'].includes(key))return;
+  const st=document.getElementById('builderVersionStatus');
+  const msg=key==='gm_v1'?'gm_v1의 빌더 보관값만 갱신합니다. 실제 실행 버전에는 연결되지 않습니다.':`${key} 운영 설정값을 KST 현재시각으로 갱신합니다. JSON 발행은 하지 않습니다.`;
+  if(!confirm(`${msg}\n실행하시겠습니까?`))return;
+  const password=prompt('관리자 derzon 비밀번호를 입력하세요. 이 작업에만 사용하며 저장하지 않습니다.');
+  if(password===null||!password)return;
+  if(btn)btn.disabled=true;
+  try{
+    const r=await fetch(`${API}/api/gm/builder/config/version-control/${key}`,{method:'POST',headers:{'x-gm-builder-admin-password':password}});
+    const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    if(st)st.textContent=`${key} 변경: ${j.previous||'-'} → ${j.value} · ${j.connected?'운영 설정 갱신':'빌더 보관만 (미연결)'}`;
+    await loadBuilderVersions();
+    if(st)st.textContent=`${key} 변경 완료: ${j.previous||'-'} → ${j.value} · ${j.connected?'운영 설정 갱신':'빌더 보관만 (미연결)'}`;
+  }catch(e){if(st)st.textContent=`${key} 변경 실패: ${String(e.message||e)}`;}
+  finally{if(btn)btn.disabled=false;}
+}
+window.loadBuilderVersions=loadBuilderVersions;
+window.updateBuilderVersion=updateBuilderVersion;

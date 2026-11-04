@@ -95,7 +95,7 @@ router.post('/api/gm/builder/config',async(req,res)=>{
   if(!TYPES.has(type))return fail(res,400,'invalid value_type');
   if(!MODE_RE.test(mode))return fail(res,400,'invalid mode');
   if(key==='gm_v1')return fail(res,400,'gm_v1 is protected: AUTO_1MIN');
-  if(key==='gm_v2')return fail(res,400,'gm_v2 is protected: use gm-v2/next');
+  if(key==='gm_v2'||key==='gm_v3'||key==='gm_v1_builder_pending')return fail(res,400,'version is protected: use version-control');
   if(IMAGE_VECTOR_PROTECTED_KEYS.has(key))return fail(res,409,'IMAGE_VECTOR_CONFIG_PROTECTED',{detail:'Use the dedicated image-vector representative settings/build flow. LIVE/build/epoch keys are internal state.'});
   try{
     const r=await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
@@ -141,12 +141,38 @@ router.post('/api/gm/builder/config/special-category-plan',async(req,res)=>{
   }catch(e){fail(res,500,'special category plan save failed',{detail:String(e&&e.message||e)});}
 });
 
-router.post('/api/gm/builder/config/gm-v2/next',async(req,res)=>{
+// Manual version stamps are independent from UI dictionary/category pack publishers.
+// gm_v1 is deliberately a shadow value: do not modify the live gm_v1 config.
+const MANUAL_VERSION_KEYS=Object.freeze({gm_v1:'gm_v1_builder_pending',gm_v2:'gm_v2',gm_v3:'gm_v3'});
+function versionStampKst(){
+  const p=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Seoul',year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
+  const get=k=>(p.find(x=>x.type===k)||{}).value||'';
+  return get('year')+get('month')+get('day')+'_'+get('hour')+get('minute');
+}
+router.get('/api/gm/builder/config/version-control',async(req,res)=>{
   const db=dbFrom(req);
   try{
-    const r=await db.query(`UPDATE gm_runtime_config SET config_value=(GREATEST(CASE WHEN config_value ~ '^[0-9]+$' THEN config_value::int ELSE 0 END,0)+1)::text,updated_at=now() WHERE config_key='gm_v2' RETURNING *`);
-    if(!r.rows.length)return fail(res,404,'gm_v2 not found');
-    ok(res,{item:r.rows[0]});
-  }catch(e){fail(res,500,'gm_v2 increment failed',{detail:String(e&&e.message||e)});}
+    const q=await db.query(`SELECT config_key,config_value,updated_at FROM gm_runtime_config WHERE config_key=ANY($1::text[])`,[Object.values(MANUAL_VERSION_KEYS)]);
+    const byKey=new Map(q.rows.map(x=>[x.config_key,x]));const versions={};
+    for(const [name,key] of Object.entries(MANUAL_VERSION_KEYS)){
+      const x=byKey.get(key);versions[name]={value:x?x.config_value:null,updated_at:x?x.updated_at:null,connected:name!=='gm_v1'};
+    }
+    res.set('Cache-Control','no-store');ok(res,{versions});
+  }catch(e){fail(res,500,'version control read failed',{detail:String(e&&e.message||e)});}
 });
+router.post('/api/gm/builder/config/version-control/:name',async(req,res)=>{
+  const name=String(req.params.name||'');const key=MANUAL_VERSION_KEYS[name];
+  if(!key)return fail(res,400,'invalid version name');
+  const db=dbFrom(req),stamp=versionStampKst();
+  try{
+    const q=await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
+      VALUES($1,$2,'VERSION','SYSTEM','MANUAL',TRUE,$3,now())
+      ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,value_type='VERSION',mode='MANUAL',updated_at=now()
+      WHERE gm_runtime_config.config_value IS DISTINCT FROM EXCLUDED.config_value
+      RETURNING config_value,updated_at`,[key,stamp,name==='gm_v1'?'Builder manual reserve only; NOT connected to running gm_v1':'Builder administrator manual version']);
+    if(!q.rows.length)return fail(res,409,'VERSION_ALREADY_CURRENT_MINUTE');
+    res.set('Cache-Control','no-store');ok(res,{name,value:stamp,connected:name!=='gm_v1'});
+  }catch(e){fail(res,500,'version control update failed',{detail:String(e&&e.message||e)});}
+});
+router.post('/api/gm/builder/config/gm-v2/next',(_req,res)=>fail(res,410,'Use version-control/gm_v2 with administrator reauthentication'));
 module.exports=router;
