@@ -193,35 +193,52 @@ function gmClientAutoBoot(){
 function gmClientResume(btn){gmClientBlocked=false;void startClientTranslation(btn);}
 gmClientAutoBoot();
 
-// GM_UI_PENDING_CLEAN_V001: downloads the COMPLETE pending set with SHA-256 snapshot.
-let gmPendingBackupDownloaded=false;
-async function gmPendingCleanDownload(btn){
+// GM_UI_PENDING_CLEAN_V003: read-only backup, human-readable CSV, explicit DELETE actions.
+let gmPendingLastBackup=null;
+function gmPendingFileDownload(content,mime,name){
+ const blob=new Blob([content],{type:mime});const url=URL.createObjectURL(blob),a=document.createElement('a');
+ a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+async function gmPendingExport(btn,format){
  btn.disabled=true;
  try{
-  const password=prompt('전체 후보 다운로드: derzon 관리자 비밀번호를 입력하세요.');
-  if(!password)return;
+  const password=prompt('후보 전체 다운로드: derzon 관리자 비밀번호를 입력하세요.');if(!password)return;
   const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/export',{cache:'no-store',credentials:'same-origin',headers:{'x-gm-builder-admin-password':password}});
   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
-  const blob=new Blob([JSON.stringify(j,null,2)],{type:'application/json;charset=utf-8'});
-  const a=document.createElement('a'),url=URL.createObjectURL(blob);a.href=url;a.download='GM_UI_PENDING_BACKUP_'+new Date().toISOString().slice(0,19).replace(/[:-]/g,'')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
-  gmPendingBackupDownloaded=true;log({action:'PENDING_BACKUP_DOWNLOADED',count:j.snapshot.count,sha256:j.snapshot.sha256});
- }catch(e){log('후보 백업 실패: '+String(e));}finally{btn.disabled=false;}
+  const date=new Date().toISOString().slice(0,19).replace(/[:-]/g,'');
+  if(format==='csv'){
+   const fields=[['pending_id','ID'],['change_type','구분'],['source_text_ko','한국어 문구'],['previous_text_ko','기존 문구'],['page_name','페이지'],['source_locator','출처'],['source_type','수집형태'],['seen_count','수집횟수'],['last_seen_at','마지막 발견']];
+   const cell=v=>{let text=String(v==null?'':v);if(/^[\s]*[=+@-]/.test(text))text="'"+text;return '"'+text.replace(/"/g,'""')+'"';};
+   const content='\ufeff'+[fields.map(x=>cell(x[1])).join(','),...(j.items||[]).map(x=>fields.map(f=>cell(x[f[0]])).join(','))].join('\r\n');
+   gmPendingFileDownload(content,'text/csv;charset=utf-8','GM_UI_PENDING_REVIEW_'+date+'.csv');
+   log({action:'PENDING_REVIEW_CSV',count:j.snapshot.count});
+  }else{
+   gmPendingFileDownload(JSON.stringify(j,null,2),'application/json;charset=utf-8','GM_UI_PENDING_BACKUP_'+date+'.json');
+   gmPendingLastBackup={count:j.snapshot.count,sha256:j.snapshot.sha256};
+   log({action:'PENDING_BACKUP_JSON',count:j.snapshot.count,sha256:j.snapshot.sha256});
+  }
+ }catch(e){log('후보 다운로드 실패: '+String(e));}finally{btn.disabled=false;}
 }
-async function gmPendingCleanUpload(btn){
- const input=document.getElementById('gmPendingCleanFile'),file=input&&input.files&&input.files[0];
- if(!file)return alert('먼저 정리된 JSON 파일을 선택하세요.');
- if(!gmPendingBackupDownloaded)return alert('이 작업을 실행하기 전에 현재 후보 전체 백업을 먼저 다운로드하세요.');
- let j;try{j=JSON.parse(await file.text());}catch(_){return alert('올바른 JSON 파일이 아닙니다.');}
- if(j.format!=='GM_UI_PENDING_CLEAN_V001'||!j.snapshot||!Array.isArray(j.keep_ids))return alert('후보 정리본 형식이 아닙니다.');
- const removed=j.snapshot.count-j.keep_ids.length;
- if(removed<0)return alert('정리본의 보존 수량이 원본보다 많습니다.');
- if(!confirm('정식 UI 사전은 변경하지 않습니다.\n대기 후보 '+j.snapshot.count+'건 전체삭제 후 '+j.keep_ids.length+'건 복원 ('+removed+'건 제거)합니다.\n원본 백업을 보관했는지 확인하세요.'))return;
- const typed=prompt('최종 확인: 삭제 대상 '+removed+'건. 실행하려면 삭제 를 입력하세요.');if(typed!=='삭제')return;
- const password=prompt('derzon 관리자 비밀번호를 재입력하세요.');if(!password)return;
+async function gmPendingDeleteSelected(btn){
+ const selected=ids();if(!selected.length)return alert('삭제할 후보를 먼저 체크하세요.');
+ if(!confirm('체크한 대기 후보 '+selected.length+'건을 삭제할까요?\n정식 UI 사전과 번역 JSON에는 영향이 없습니다.'))return;
+ const password=prompt('선택삭제: derzon 관리자 비밀번호를 입력하세요.');if(!password)return;
  btn.disabled=true;
  try{
-  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/replace',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({format:j.format,snapshot:j.snapshot,keep_ids:j.keep_ids,allow_empty:j.keep_ids.length===0})});
-  const resp=await r.json();if(!r.ok||!resp.ok)throw Error(resp.error||'HTTP '+r.status);
-  gmPendingBackupDownloaded=false;log({action:'PENDING_REPLACED',...resp});await loadAll();
- }catch(e){log('후보 교체 실패 (기존 DB 유지): '+String(e));}finally{btn.disabled=false;}
+  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/delete-selected',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({pending_ids:selected})});
+  const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
+  gmPendingLastBackup=null;log({action:'PENDING_DELETE_SELECTED',...j});await loadAll();
+ }catch(e){log('선택삭제 실패: '+String(e));}finally{btn.disabled=false;}
+}
+async function gmPendingDeleteAll(btn){
+ if(!gmPendingLastBackup)return alert('전체삭제 전에 위의 [전체 JSON 백업]을 먼저 다운로드하세요.');
+ if(!confirm('대기 후보 '+gmPendingLastBackup.count+'건을 모두 삭제합니다.\n정식 UI 사전은 삭제하지 않습니다.\n백업 JSON 파일을 보관했습니까?'))return;
+ if(prompt('최종 확인: 전체삭제를 실행하려면 전체삭제 라고 입력하세요.')!=='전체삭제')return;
+ const password=prompt('전체삭제: derzon 관리자 비밀번호를 입력하세요.');if(!password)return;
+ btn.disabled=true;
+ try{
+  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/delete-all',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({snapshot:gmPendingLastBackup})});
+  const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
+  gmPendingLastBackup=null;log({action:'PENDING_DELETE_ALL',...j});await loadAll();
+ }catch(e){log('전체삭제 실패: '+String(e)+' (백업 이후 신규 수집이 있었다면 백업을 다시 받으세요)');}finally{btn.disabled=false;}
 }

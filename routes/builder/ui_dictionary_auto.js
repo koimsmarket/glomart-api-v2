@@ -176,33 +176,36 @@ router.get('/api/gm/builder/ui-dictionary-auto/pending-clean/export',async(req,r
   res.set('Cache-Control','no-store');res.json({ok:true,format:'GM_UI_PENDING_CLEAN_V001',exported_at:new Date().toISOString(),snapshot:{count:snap.count,sha256:snap.sha256},keep_ids:snap.items.map(x=>Number(x.pending_id)),items:snap.items});
  }catch(e){res.status(500).json({ok:false,error:'PENDING_EXPORT_FAILED',detail:String(e&&e.message||e)});}
 });
-router.post('/api/gm/builder/ui-dictionary-auto/pending-clean/replace',express.json({limit:'12mb'}),async(req,res)=>{
- const b=req.body||{},ids=b.keep_ids;
- if(b.format!=='GM_UI_PENDING_CLEAN_V001'||!b.snapshot||!Array.isArray(ids)||ids.length>30000||!Number.isInteger(b.snapshot.count)||!/^([a-f0-9]{64})$/.test(String(b.snapshot.sha256||'')))
-   return res.status(400).json({ok:false,error:'INVALID_CLEAN_FILE'});
- if(!ids.every(x=>Number.isSafeInteger(x)&&x>0)||new Set(ids).size!==ids.length)
-   return res.status(400).json({ok:false,error:'INVALID_KEEP_IDS'});
- if(ids.length===0&&b.allow_empty!==true)return res.status(400).json({ok:false,error:'EMPTY_REPLACEMENT_NOT_ALLOWED'});
+// GM_UI_PENDING_CLEAN_V003: download remains read-only; delete is a separate explicit action.
+// The legacy file-upload replacement route is intentionally disabled.
+router.post('/api/gm/builder/ui-dictionary-auto/pending-clean/replace',(_req,res)=>res.status(410).json({ok:false,error:'REPLACE_DISABLED_USE_SELECTION_DELETE'}));
+router.post('/api/gm/builder/ui-dictionary-auto/pending-clean/delete-selected',express.json({limit:'64kb'}),async(req,res)=>{
+ const ids=req.body&&req.body.pending_ids;
+ if(!Array.isArray(ids)||!ids.length||ids.length>1000||!ids.every(x=>Number.isSafeInteger(x)&&x>0)||new Set(ids).size!==ids.length)
+  return res.status(400).json({ok:false,error:'INVALID_PENDING_IDS'});
+ const db=dbFrom(req);
+ try{
+  const r=await db.query(`DELETE FROM gm_ui_dictionary_pending WHERE status='PENDING' AND pending_id=ANY($1::bigint[]) RETURNING pending_id`,[ids]);
+  res.set('Cache-Control','no-store').json({ok:true,deleted:r.rowCount,requested:ids.length});
+ }catch(e){res.status(500).json({ok:false,error:'PENDING_SELECTED_DELETE_FAILED',detail:String(e&&e.message||e)});}
+});
+router.post('/api/gm/builder/ui-dictionary-auto/pending-clean/delete-all',express.json({limit:'4kb'}),async(req,res)=>{
+ const expected=req.body&&req.body.snapshot;
+ if(!expected||!Number.isInteger(expected.count)||!/^[a-f0-9]{64}$/.test(String(expected.sha256||'')))
+  return res.status(400).json({ok:false,error:'BACKUP_SNAPSHOT_REQUIRED'});
  const db=dbFrom(req),client=await db.connect();
  try{
   await client.query('BEGIN');
-  // Concurrent runtime captures are blocked until commit. No lost additions.
   await client.query('LOCK TABLE gm_ui_dictionary_pending IN SHARE ROW EXCLUSIVE MODE');
   const snap=await pendingSnapshot(client);
-  if(snap.count!==b.snapshot.count||snap.sha256!==b.snapshot.sha256){
+  if(snap.count!==expected.count||snap.sha256!==expected.sha256){
    await client.query('ROLLBACK');return res.status(409).json({ok:false,error:'PENDING_CHANGED_EXPORT_AGAIN',current_count:snap.count});
   }
-  const existing=new Set(snap.items.map(x=>Number(x.pending_id)));
-  if(ids.some(x=>!existing.has(x))){await client.query('ROLLBACK');return res.status(400).json({ok:false,error:'KEEP_ID_NOT_IN_ORIGINAL'});}
-  // This executes the requested delete-all + restore-kept entirely in one transaction.
-  await client.query(`CREATE TEMP TABLE gm_pending_clean_restore ON COMMIT DROP AS SELECT * FROM gm_ui_dictionary_pending WHERE status='PENDING' AND pending_id=ANY($1::bigint[])`,[ids]);
-  const removed=await client.query(`DELETE FROM gm_ui_dictionary_pending WHERE status='PENDING'`);
-  if(ids.length)await client.query(`INSERT INTO gm_ui_dictionary_pending SELECT * FROM gm_pending_clean_restore`);
-  const check=await client.query(`SELECT COUNT(*)::int AS n FROM gm_ui_dictionary_pending WHERE status='PENDING'`);
-  if(check.rows[0].n!==ids.length)throw Error('REPLACEMENT_COUNT_MISMATCH');
+  const r=await client.query(`DELETE FROM gm_ui_dictionary_pending WHERE status='PENDING'`);
+  if(r.rowCount!==snap.count)throw Error('DELETE_COUNT_MISMATCH');
   await client.query('COMMIT');
-  res.set('Cache-Control','no-store');res.json({ok:true,previous:removed.rowCount,restored:ids.length,removed:removed.rowCount-ids.length});
- }catch(e){await client.query('ROLLBACK').catch(()=>{});res.status(500).json({ok:false,error:'PENDING_REPLACE_FAILED',detail:String(e&&e.message||e)});}
+  res.set('Cache-Control','no-store').json({ok:true,deleted:r.rowCount});
+ }catch(e){await client.query('ROLLBACK').catch(()=>{});res.status(500).json({ok:false,error:'PENDING_DELETE_ALL_FAILED',detail:String(e&&e.message||e)});}
  finally{client.release();}
 });
 
