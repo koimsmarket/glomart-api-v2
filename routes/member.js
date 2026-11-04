@@ -749,58 +749,6 @@ router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (r
   finally{ client.release(); }
 });
 
-// GM_CAFE24_ADDRESS_SYNC_V005: authenticated, best-effort Cafe24 action mirror.
-router.post(['/api/gm/member/address/cafe24/action','/api/member/address/cafe24/action'], async(req,res)=>{
-  const pool=db(req), b=req.body||{}, action=s(b.action),memberId=pick(b,['member_id','memberId']);
-  if(!pool)return res.status(500).json({ok:false,error:'DB_UNAVAILABLE'});
-  // A client-supplied member_id is never proof of ownership.
-  const {validate:validateMemberAccess}=require('./gm_member_access_guard');
-  const verified=validateMemberAccess(req);
-  if(!verified)return res.status(401).json({ok:false,error:'MEMBER_ACCESS_REQUIRED'});
-  if(verified!==memberId)return res.status(403).json({ok:false,error:'MEMBER_ACCESS_DENIED'});
-  if(!['register','modify','delete'].includes(action))return res.status(400).json({ok:false,error:'INVALID_ACTION'});
-  const maIdx=s(b.ma_idx);
-  if(action!=='register'&&!/^\d{1,20}$/.test(maIdx))return res.status(400).json({ok:false,error:'INVALID_MA_IDX'});
-  const client=await pool.connect().catch(()=>null);
-  if(!client)return res.status(500).json({ok:false,error:'DB_UNAVAILABLE'});
-  const norm=v=>s(v).replace(/\s+/g,' ').toLowerCase();
-  const a=addressPayload(Object.assign({},b,{is_default:b.is_default||'N'}),memberId);
-  try{
-    await client.query('BEGIN');
-    const id=maIdx?`CAF24_${memberId}_${maIdx}`:'';
-    let found=[];
-    if(id){const q=await client.query('SELECT * FROM gm_member_address WHERE member_id=$1 AND address_id=$2 FOR UPDATE',[memberId,id]);found=q.rows;}
-    // Old records may have content-derived identifiers; update/delete only an exact unique match.
-    if(!found.length){
-      const snap=action==='modify'?{
-        receiver_name:b.old_receiver_name,zipcode:b.old_zipcode,address1:b.old_address1,address2:b.old_address2,
-        receiver_phone:b.old_receiver_phone,receiver_mobile:b.old_receiver_mobile
-      }:a;
-      if(s(snap.receiver_name)&&s(snap.zipcode)&&s(snap.address1)){
-        const q=await client.query(`SELECT * FROM gm_member_address WHERE member_id=$1 AND LOWER(TRIM(receiver_name))=$2 AND TRIM(zipcode)=$3 AND LOWER(TRIM(address1))=$4 AND LOWER(TRIM(address2))=$5 AND LOWER(TRIM(COALESCE(receiver_mobile,'')))=$6 AND LOWER(TRIM(COALESCE(receiver_phone,'')))=$7 FOR UPDATE`,
-          [memberId,norm(snap.receiver_name),s(snap.zipcode),norm(snap.address1),norm(snap.address2),norm(snap.receiver_mobile),norm(snap.receiver_phone)]);
-        found=q.rows;
-      }
-    }
-    if(found.length>1){await client.query('ROLLBACK');return res.status(409).json({ok:false,error:'AMBIGUOUS_ADDRESS'});}
-    if(action==='delete'){
-      if(found.length)await client.query('DELETE FROM gm_member_address WHERE member_id=$1 AND address_id=$2',[memberId,found[0].address_id]);
-      await client.query('COMMIT');return res.json({ok:true,action,affected:found.length});
-    }
-    if(!a.receiver_name||!a.zipcode||!a.address1||(!a.receiver_mobile&&!a.receiver_phone)){
-      await client.query('ROLLBACK');return res.status(400).json({ok:false,error:'INCOMPLETE_ADDRESS'});
-    }
-    if(a.is_default==='Y')await client.query("UPDATE gm_member_address SET is_default='N',updated_at=NOW() WHERE member_id=$1 AND is_default='Y'",[memberId]);
-    const addrId=found.length?found[0].address_id:(id||stableAddressId(Object.assign({},a,{address_id:''}),memberId));
-    const saved=await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,created_at,updated_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
-      ON CONFLICT(address_id) DO UPDATE SET address_name=EXCLUDED.address_name,receiver_name=EXCLUDED.receiver_name,receiver_phone=EXCLUDED.receiver_phone,receiver_mobile=EXCLUDED.receiver_mobile,zipcode=EXCLUDED.zipcode,address1=EXCLUDED.address1,address2=EXCLUDED.address2,address_old=EXCLUDED.address_old,address_full=EXCLUDED.address_full,is_default=EXCLUDED.is_default,updated_at=NOW()
-      RETURNING address_id`,[addrId,memberId,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.is_default]);
-    await client.query('COMMIT');return res.json({ok:true,action,address_id:saved.rows[0].address_id});
-  }catch(e){await client.query('ROLLBACK').catch(()=>{});console.error('[GM_CAFE24_ADDRESS_SYNC_V005]',action,e&&e.code);return res.status(500).json({ok:false,error:'ADDRESS_MIRROR_FAILED'});}
-  finally{client.release();}
-});
-
 router.get(['/api/gm/member/address/list','/api/member/address/list'], async (req,res)=>{
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,error:'서버 데이터베이스에 연결할 수 없습니다.'});
   const memberId=s(req.query.member_id || req.query.memberId); if(!memberId) return res.status(400).json({ok:false,error:'회원 정보가 필요합니다.'});
