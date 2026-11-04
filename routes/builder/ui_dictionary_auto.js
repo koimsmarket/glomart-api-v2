@@ -16,6 +16,56 @@ function pageNameFromFile(f){return String(f||'').replace(/\\/g,'/').replace(/^.
 function cleanUiText(v){let x=s(v).replace(/<[^>]+>/g,' ').replace(/\{\$[^}]+\}/g,' ').replace(/\{[^}]{0,120}\}/g,' ').replace(/\s+/g,' ').trim();return x.length>500?'':x;}
 function hasVariable(text){return /%[dsm]/.test(String(text||''))?'Y':'N';}
 
+// GM_UI_PENDING_MATCH_V004: mirror the verified GM_MATCH_ENGINE comparison-key
+// rules in the server-side candidate observer. The browser engine remains unchanged.
+// Normalize only the candidate KEY; do not mutate the user's rendered DOM text.
+function gmPendingMatchKey(raw){
+  let x=cleanUiText(raw).replace(/\u00a0/g,' ');
+  if(!x)return '';
+  // GM_MATCH_ENGINE: stripOuterWrap (whole-string wrappers, nested up to 8).
+  for(let n=0;n<8;n++){
+    const old=x;
+    x=x.replace(/^\s*[([<{（【「『〈《〔［｛｟｢]\s*([\s\S]*?)\s*[)\]}>）】」』〉》〕］｝｠｣]\s*$/u,'$1').trim();
+    // GM_MATCH_ENGINE: remove leading bullets / line numbering and edge symbols.
+    x=x.replace(/^(?:\s*(?:[-\u2022\u00B7\u203B※•·▪▫▶»*]+|\(?\d+\)?[.)]|[①-⑳])\s*)+/u,'').trim();
+    x=x.replace(/^[\s★☆●○◆◇▶▷▸•·※▪▫»«'"“”‘’()[\]{}<>〈〉《》【】「」『』:：;；,.。．!?！？…—–-]+/u,'');
+    x=x.replace(/[\s★☆●○◆◇▶▷▸•·※▪▫»«'"“”‘’()[\]{}<>〈〉《》【】「」『』:：;；,.。．!?！？…—–-]+$/u,'').trim();
+    if(x===old)break;
+  }
+  // GM_MATCH_ENGINE removeAllQuotesForMatch: comparison only; never alter inner quotes in the original text.
+  return x.replace(/['"\u2018\u2019\u201C\u201D]/g,'').replace(/\s+/g,' ').trim();
+}
+function gmPendingCanonicalText(raw){
+  // Edge-symbol-free dictionary input, while preserving inner quotes and placeholders.
+  let text=cleanUiText(raw);
+  if(!text)return '';
+  const key=gmPendingMatchKey(text);
+  if(!key)return '';
+  // Keep a correctly quoted interior phrase; only remove decorative edge affixes.
+  for(let n=0;n<8;n++){
+    const before=text;
+    text=text.replace(/^\s*[([<{（【「『〈《〔［｛｟｢]\s*([\s\S]*?)\s*[)\]}>）】」』〉》〕］｝｠｣]\s*$/u,'$1').trim();
+    text=text.replace(/^(?:\s*(?:[-\u2022\u00B7\u203B※•·▪▫▶»*]+|\(?\d+\)?[.)]|[①-⑳])\s*)+/u,'').trim();
+    text=text.replace(/^[\s★☆●○◆◇▶▷▸•·※▪▫»«'"“”‘’()[\]{}<>〈〉《》【】「」『』:：;；,.。．!?！？…—–-]+/u,'');
+    text=text.replace(/[\s★☆●○◆◇▶▷▸•·※▪▫»«'"“”‘’()[\]{}<>〈〉《》【】「」『』:：;；,.。．!?！？…—–-]+$/u,'').trim();
+    if(text===before)break;
+  }
+  return text;
+}
+function gmPendingV2Input(item){
+  const raw=cleanUiText(item.source_text_ko||item.text||item.kr||item.value||'');
+  // V2 keeps its own dynamic-data guard. Only unify key normalization.
+  const cleaned=gmPendingCanonicalText(raw);
+  return cleaned&&cleaned!==raw?{...item,source_text_ko:cleaned}:item;
+}
+function gmPendingDynamicReason(row,raw){
+  // Reuse the already deployed V2 dynamic-data filter (no second heuristic engine).
+  // In particular positional product links, search values, seller/option values,
+  // Smartfit data and Guppy conversation content must never enter pending.
+  return uiV2.dynamicNonUiReason(row,{raw})||'';
+}
+
+
 async function ensure(db){await db.query(`SELECT 1 FROM gm_ui_dictionary_pending LIMIT 1`);}
 
 // V009: runtime-capture requires the four canonical runtime metadata columns.
@@ -84,8 +134,12 @@ async function pendingUpsert(db,row){
 // Canonical gm_ui_dictionary no longer owns source_file/source_locator/source_type timestamps.
 async function observe(db,row){
   const code=s(row.gm_code).toUpperCase();
-  const text=cleanUiText(row.source_text_ko);
-  if(!text||!hasKo(text))return {skip:true};
+  const raw=cleanUiText(row.source_text_ko);
+  if(!raw||!hasKo(raw))return {skip:true};
+  if(gmPendingDynamicReason(row,raw))return {skip:true,dynamic:true};
+  const text=gmPendingCanonicalText(raw);
+  const normalized=gmPendingMatchKey(raw);
+  if(!text||!normalized||!hasKo(text))return {skip:true};
 
   let cur=null;
   if(/^GM_\d{4,}$/.test(code)){
@@ -93,15 +147,17 @@ async function observe(db,row){
     cur=r.rows[0]||null;
   }
   if(cur){
-    if(s(cur.kr)!==text){
+    if(gmPendingMatchKey(cur.kr)!==normalized){
       await pendingUpsert(db,{...row,gm_code:code,source_text_ko:text,previous_text_ko:s(cur.kr),change_type:'CHANGED'});
       return {changed:true};
     }
     return {same:true};
   }
   if(!code){
-    const ex=await db.query(`SELECT gm_code FROM gm_ui_dictionary WHERE active_yn='Y' AND kr=$1 ORDER BY gm_code LIMIT 1`,[text]);
-    if(ex.rowCount)return {sameText:true};
+    // Compare by the same normalized full-key rule as GM_MATCH_ENGINE,
+    // not by raw equality. One DB read per scan, not per candidate.
+    const rows=row._gmKnownDictionary||[];
+    if(rows.some(x=>gmPendingMatchKey(x.kr)===normalized))return {sameText:true};
   }
   await pendingUpsert(db,{...row,gm_code:code||null,source_text_ko:text,change_type:'NEW'});
   return {new:true};
@@ -224,11 +280,13 @@ router.post('/api/gm/builder/ui-dictionary-auto/scan-static',express.json({limit
     const root=path.resolve(__dirname,'../..');
     const envDirs=s(process.env.GM_UI_SCAN_DIRS||'public,routes,services').split(',').map(x=>x.trim()).filter(Boolean);
     const files=[];envDirs.forEach(x=>walk(path.join(root,x),files,root));
-    const stats={files:files.length,candidates:0,new:0,changed:0,same:0,removed:0};
+    const stats={files:files.length,candidates:0,new:0,changed:0,same:0,removed:0,dynamic_skipped:0};
+    const known=(await db.query(`SELECT gm_code,kr FROM gm_ui_dictionary WHERE active_yn='Y'`)).rows;
     for(const f of files){
       for(const row of extractFile(f)){
         stats.candidates++;
-        const o=await observe(db,row);
+        const o=await observe(db,{...row,_gmKnownDictionary:known});
+        if(o.dynamic)stats.dynamic_skipped++;
         if(o.new)stats.new++;else if(o.changed)stats.changed++;else stats.same++;
       }
     }
@@ -249,7 +307,7 @@ router.post('/api/gm/ui-dictionary/runtime-capture',express.json({limit:'256kb'}
       source_app:(x&&x.source_app)||(x&&x.sourceApp)||baseApp||'GLOMART',
       source_surface:(x&&x.source_surface)||(x&&x.sourceSurface)||(x&&x.page)||'RUNTIME'
     }));
-    const stats=await uiV2.captureMany(db,items,{incrementUsage:true});
+    const stats=await uiV2.captureMany(db,items.map(gmPendingV2Input),{incrementUsage:true});
     uiV2.queueTranslations(db,stats.translate_codes);
     if(stats.created||stats.changed){
       require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
@@ -371,7 +429,7 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/scan-static',express.json({li
         if(rows.length>=limit)break outer;
       }
     }
-    const stats=await uiV2.captureMany(db,rows,{incrementUsage:false});
+    const stats=await uiV2.captureMany(db,rows.map(gmPendingV2Input),{incrementUsage:false});
     uiV2.queueTranslations(db,stats.translate_codes);
     if(stats.created||stats.changed){
       require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
@@ -404,7 +462,7 @@ router.post('/api/gm/ui-dictionary/v2/runtime-capture',express.json({limit:'256k
       source_app:(x&&x.source_app)||(x&&x.sourceApp)||baseApp||'GLOMART',
       source_surface:(x&&x.source_surface)||(x&&x.sourceSurface)||(x&&x.page)||'RUNTIME'
     }));
-    const stats=await uiV2.captureMany(db,items,{incrementUsage:true});
+    const stats=await uiV2.captureMany(db,items.map(gmPendingV2Input),{incrementUsage:true});
     uiV2.queueTranslations(db,stats.translate_codes);
     if(stats.created||stats.changed){
       require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
