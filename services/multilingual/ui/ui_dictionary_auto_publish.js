@@ -11,6 +11,22 @@ const ROOT=path.resolve(process.env.GM_UI_AUTO_PACK_ROOT || path.join(os.tmpdir(
 function atomicJSON(file,data){fs.mkdirSync(path.dirname(file),{recursive:true});const tmp=file+'.'+process.pid+'.tmp';fs.writeFileSync(tmp,JSON.stringify(data),'utf8');fs.renameSync(tmp,file);}
 function diskPack(lang,version){const file=path.join(ROOT,version,lang+'.json');try{const o=JSON.parse(fs.readFileSync(file,'utf8'));return o&&o.version===version&&o.lang===lang?o:null;}catch(_){return null;}}
 function materialize(version,hash,packs){for(const lang of LANGS)atomicJSON(path.join(ROOT,version,lang+'.json'),packs[lang]);atomicJSON(path.join(ROOT,'meta.json'),{ok:true,version,hash,languages:LANGS,count:packs.kr.count});}
+// GM_UI_PREPARE_V006: build current DB JSON into private temp workspace only.
+// This is NOT a public release; neither public version nor content hash is written.
+async function prepareDraft(db){
+ const rows=await snapshot(db),hash=fingerprint(rows),token='prepared_'+hash.slice(0,24);
+ const packs=packSet(rows,token);
+ if(!validPackSet(packs,token))throw Error('UI_PREPARE_25_LANGUAGE_VERIFY_FAILED');
+ const dir=path.join(ROOT,'_prepared',token);
+ for(const lang of LANGS)atomicJSON(path.join(dir,lang+'.json'),packs[lang]);
+ const check={};
+ if(!LANGS.every(lang=>{try{check[lang]=JSON.parse(fs.readFileSync(path.join(dir,lang+'.json'),'utf8'));return !!check[lang];}catch(_){return false;}})||!validPackSet(check,token))
+  throw Error('UI_PREPARE_FILES_NOT_VERIFIED');
+ atomicJSON(path.join(ROOT,'_prepared','meta.json'),{ready:true,hash,token,count:rows.length,languages:LANGS.length});
+ console.log('[GM_UI_PREPARED_V006]',JSON.stringify({count:rows.length,languages:LANGS.length,public_version_unchanged:true}));
+ return {ready:true,count:rows.length};
+}
+
 
 const ui=require('./ui_dictionary_v2');
 const {LANGS}=ui;
@@ -205,6 +221,8 @@ async function runAutomation(){
  autoState.state='VERIFYING';autoState.started_at=new Date().toISOString();autoState.error=null;
  let shouldRetryPublish=false,retryDelay=60000;
  try{
+  // Keep temp/ JSON ready after deploy and verified uploads, without publishing.
+  await prepareDraft(db);
   const remaining=await dbCompletion(db);
   autoState.remaining=remaining.phrases;autoState.remaining_cells=remaining.cells;
   if(remaining.cells>0){

@@ -166,46 +166,13 @@ router.post('/api/gm/builder/config/version-control/:name',async(req,res)=>{
   if(!key)return fail(res,400,'invalid version name');
   const db=dbFrom(req),stamp=versionStampKst();
   try{
-    const previousStamp=await db.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[key]);
-    if(previousStamp.rows.length && previousStamp.rows[0].config_value===stamp)
-      return fail(res,409,'VERSION_ALREADY_CURRENT_MINUTE');
-    // Manual approval is the only new publisher entry point. Nothing changes on a
-    // server deploy, ordinary client request, or a builder version-page refresh.
-    let publication=null;
-    if(name==='ui_dictionary'){
-      const svc=require('../../services/multilingual/ui/ui_dictionary_auto_publish');
-      const state=svc.autoStatus();
-      if(state.running)return fail(res,409,'UI_DICTIONARY_VERIFICATION_RUNNING');
-      publication=await svc.publishCompleted(db);
-      if(!publication||!publication.ok||!publication.ready)return fail(res,409,'UI_DICTIONARY_PUBLISH_NOT_READY',{detail:publication});
-      const verified=await svc.current(db);
-      if(!verified.ready||verified.version!==publication.version)return fail(res,409,'UI_DICTIONARY_PUBLISHED_VERSION_MISMATCH');
-    }else if(name==='category_base'||name==='category_delta'){
-      const mgr=require('../../services/asset_pack_manager');
-      await mgr.ensureStarted(db);
-      await mgr.ensureDefaults(db);
-      const cfg=await mgr.config(db);
-      const type=name==='category_base'?'base':'delta';
-      const target=Number(cfg['category_pack_'+type+'_target']||0);
-      const published=Number(cfg['category_pack_'+type+'_published']||0);
-      const version=Math.max(target,published)+1;
-      publication=type==='base'?await mgr.publishBase(db,version):await mgr.publishDelta(db,version);
-      const files=mgr.categoryFileState();
-      if(!files.base_files||!files.base_files.ok || (files.delta_files && files.delta_files.total && !files.delta_files.ok))
-        return fail(res,409,'CATEGORY_PACK_FILES_NOT_VERIFIED');
-      if(publication.state!=='NO_CHANGES' && publication.files_ready!==mgr.LANGS.length)
-        return fail(res,409,'CATEGORY_PACK_PUBLISH_NOT_VERIFIED');
-      if(publication.state!=='NO_CHANGES'){
-        await db.query(`UPDATE gm_runtime_config SET config_value=$2,updated_at=now() WHERE config_key=$1`,['category_pack_'+type+'_target',String(version)]);
-      }
-    }
     const q=await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
       VALUES($1,$2,'VERSION','SYSTEM','MANUAL',TRUE,$3,now())
       ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,value_type='VERSION',mode='MANUAL',updated_at=now()
       WHERE gm_runtime_config.config_value IS DISTINCT FROM EXCLUDED.config_value
-      RETURNING config_value,updated_at`,[key,stamp,name==='gm_v1'?'Builder manual reserve only; NOT connected to running gm_v1':(name==='gm_v2'||name==='gm_v3')?'Builder administrator manual version':'Builder approval timestamp; published JSON version changes only after verified release']);
+      RETURNING config_value,updated_at`,[key,stamp,name==='gm_v1'?'Builder manual reserve only; NOT connected to running gm_v1':(name==='gm_v2'||name==='gm_v3')?'Builder administrator manual version':'Builder release approval stamp only; never overwrites published JSON token']);
     if(!q.rows.length)return fail(res,409,'VERSION_ALREADY_CURRENT_MINUTE');
-    res.set('Cache-Control','no-store');ok(res,{name,value:stamp,connected:name!=='gm_v1',publication});
+    res.set('Cache-Control','no-store');ok(res,{name,value:stamp,connected:name==='gm_v2'||name==='gm_v3'});
   }catch(e){fail(res,500,'version control update failed',{detail:String(e&&e.message||e)});}
 });
 router.post('/api/gm/builder/config/gm-v2/next',(_req,res)=>fail(res,410,'Use version-control/gm_v2 with administrator reauthentication'));
