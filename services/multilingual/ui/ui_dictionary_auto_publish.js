@@ -144,9 +144,10 @@ async function current(db){
    // are simply absent from their language pack, not a global publish blocker.
    const missing=rows.reduce((n,r)=>n+LANGS.filter(l=>!String(r[l]||'').trim()).length,0);
    console.warn('[GM_UI_PACK_RECOVER_NEW_VERSION]',JSON.stringify({previous:v,missing,reason:'SNAPSHOT_MISSING_SOURCE_CHANGED'}));
-   const repaired=await publish(db);
-   if(!repaired.ok)return {version:v,ready:false};
-   return {version:repaired.version,ready:true};
+   // GM_UI_ADMIN_RELEASE_V005: preserve the last published token; never
+   // generate a new release during deploy-time recovery or a normal GET.
+   // A missing historical snapshot is an error, not authorization to publish.
+   return {version:v,ready:false,error:'APPROVED_UI_PACK_SNAPSHOT_NOT_RECOVERABLE'};
   }
   packs=packSet(rows,v);materialize(v,hash,packs);published={version:v,hash,packs};
   // Upgrade pre-snapshot releases to durable DB storage so the next deploy can
@@ -225,14 +226,13 @@ async function runAutomation(){
   }
   const hash=fingerprint(rows),previous=await read(db,HASH);
   if(hash!==previous){
-   const result=await publish(db);
-   if(!result||!result.ok||!result.ready){
-    if(result&&result.error==='VERSION_MINUTE_COLLISION'){
-     retryDelay=62000-(Date.now()%60000);
-    }
-    shouldRetryPublish=true;
-    throw Error('UI_PUBLISH_FAILED '+JSON.stringify(result));
-   }
+   // GM_UI_ADMIN_RELEASE_V005: V041 continues accepting client translations
+   // and verifying missing cells. Only a reauthenticated Builder operation
+   // may call publishCompleted() and change the public dictionary version.
+   autoState.state='WAITING_FOR_ADMIN_RELEASE';
+   autoState.version=await read(db,KEY);
+   console.log('[GM_UI_RELEASE_PENDING_ADMIN_V005]',JSON.stringify({reason,version:autoState.version,remaining:remaining.phrases,missing_cells:remaining.cells}));
+   return;
   }
   // Also verify an unchanged already published result; never create a new version.
   const meta=await current(db);

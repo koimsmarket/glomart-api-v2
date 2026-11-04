@@ -182,6 +182,7 @@ async function publishDelta(db,version){
 }
 async function publishUi(db,version){const q=await db.query(`SELECT gm_code AS dict_key, kr AS source_text, kr AS source_value FROM gm_ui_dictionary ORDER BY gm_code`);const items=(q.rows||[]).map(x=>({dict_key:s(x.dict_key),source_text:s(x.source_text),value:s(x.source_value)})),v=n(version);writeJson(path.join(UI_ROOT,'ko','v'+v+'.json'),{type:'ui_dictionary',lang:'ko',version:v,count:items.length,items});writeJson(path.join(UI_ROOT,'meta.json'),{version:v,updated_at:new Date().toISOString(),lang:'ko',count:items.length});await setConfig(db,'ui_dictionary_published',v);return {kind:'ui_dictionary',version:v,count:items.length};}
 async function runPending(db,force=false){
+  if(!force)return {state:'WAITING_FOR_ADMIN_RELEASE'};
   const c=await config(db),mode=s(c.asset_pack_background_mode||'AUTO').toUpperCase();if(!force){if(mode==='OFF')return {state:'OFF'};if(mode==='AUTO'&&!inWindow(kstParts().hhmm,c.asset_pack_auto_start||'00:00',c.asset_pack_auto_end||'08:00'))return {state:'AUTO_TIME_WAIT'};}
   const results=[],bt=n(c.category_pack_base_target,1),bp=n(c.category_pack_base_published,0),ut=n(c.ui_dictionary_target,1),up=n(c.ui_dictionary_published,0);let baseMade=false;
   if(bt>bp){results.push(await publishBase(db,bt));baseMade=true;}
@@ -209,7 +210,7 @@ function ensureStarted(pool){
     startupPromise=null; // Failure must not permanently block next restore attempt.
     console.error('[GM_CATEGORY_PACK_REHYDRATE_ERROR]',lastState.last_error);throw e;
   }).finally(()=>{rehydrating=false;});
-  if(!timer){timer=setInterval(()=>pump().catch(e=>console.error('[GM_CATEGORY_PACK_PUMP_ERROR]',String(e))),60000);if(timer.unref)timer.unref();setTimeout(()=>pump().catch(()=>{}),2000);}
+  // Manual category release only: no server-deploy or scheduled publication.
   return startupPromise;
 }
 function status(){return Object.assign({},lastState);}

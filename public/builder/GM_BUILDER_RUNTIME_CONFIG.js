@@ -100,9 +100,9 @@ const GM_VERSION_LABELS={
   gm_v1:['실행 JS (미연결)','빌더 보관값만 변경 · 실제 JS는 layout/main/api'],
   gm_v2:['gm_v2 설정','운영 설정값 변경 · UI 사전과 별개'],
   gm_v3:['gm_v3 설정','운영 설정값 변경 · 카테고리와 별개'],
-  ui_dictionary:['UI 사전','실제 JSON 발행 버전과 별도 · 미발행 수동 승인값'],
-  category_base:['카테고리 BASE','실제 BASE JSON 버전과 별도 · 미발행 수동 승인값'],
-  category_delta:['카테고리 DELTA','실제 DELTA JSON 버전과 별도 · 미발행 수동 승인값']
+  ui_dictionary:['UI 사전','관리자 승인 시 25개 언어 JSON 검증·발행 후 다운로드 버전 갱신'],
+  category_base:['카테고리 BASE','관리자 승인 시 BASE 25개 언어 JSON 제작·검증 후 발행'],
+  category_delta:['카테고리 DELTA','관리자 승인 시 누적 DELTA 제작·검증, 변경 없으면 버전 유지']
 };
 async function loadBuilderVersions(){
   const tb=document.getElementById('builderVersionRows'),st=document.getElementById('builderVersionStatus');if(!tb)return;
@@ -113,14 +113,14 @@ async function loadBuilderVersions(){
       const x=j.versions&&j.versions[k]||{},label=GM_VERSION_LABELS[k];
       return `<tr><td><b>${cfgEsc(label[0])}</b></td><td>${cfgEsc(x.live_value||'-')}</td><td>${cfgEsc(x.value||'-')}</td><td>${cfgEsc(label[1])}</td><td><button type="button" onclick="updateBuilderVersion('${k}',this)">현재시각으로 갱신</button></td></tr>`;
     }).join('');
-    if(st)st.textContent='조회 완료 · KST · UI 사전/카테고리는 실제 발행 버전과 관리자 수동값을 구분';
+    if(st)st.textContent='조회 완료 · KST · UI 사전/카테고리 다운로드 버전은 관리자 승인 후에만 변경';
   }catch(e){tb.innerHTML=`<tr><td colspan="5">조회 실패: ${cfgEsc(e.message||e)}</td></tr>`;if(st)st.textContent='조회 API 또는 관리자 인증 상태를 확인하세요.';}
 }
 async function updateBuilderVersion(key,btn){
   if(!GM_VERSION_KEYS.includes(key))return;
   const st=document.getElementById('builderVersionStatus');
   const staged=['ui_dictionary','category_base','category_delta'].includes(key);
-  const msg=key==='gm_v1'?'실제 JS 버전은 유지하며 빌더 보관값만 변경합니다.':staged?'실제 JSON/카테고리 팩 버전은 그대로 유지하고 관리자 수동 승인값만 변경합니다. 파일 발행은 별도 작업입니다.':`${key} 운영 설정값을 KST 현재시각으로 변경합니다. JSON은 발행하지 않습니다.`;
+  const msg=key==='gm_v1'?'실제 JS 버전은 유지하며 빌더 보관값만 변경합니다.':staged?'이번 승인으로 검증된 JSON을 실제 발행하고 사용자 다운로드 버전이 변경될 수 있습니다. 새 파일이 정상 검증된 경우에만 적용합니다.':`${key} 운영 설정값을 KST 현재시각으로 변경합니다. JSON은 발행하지 않습니다.`;
   if(!confirm(`${GM_VERSION_LABELS[key][0]}: ${msg}\n진행하시겠습니까?`))return;
   const password=prompt('derzon 관리자 비밀번호를 입력하세요. 이번 요청에만 사용하고 저장하지 않습니다.');
   if(password===null||!password)return;
@@ -129,7 +129,7 @@ async function updateBuilderVersion(key,btn){
     const r=await fetch(`${API}/api/gm/builder/config/version-control/${key}`,{method:'POST',headers:{'x-gm-builder-admin-password':password}});
     const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
     await loadBuilderVersions();
-    if(st)st.textContent=`${GM_VERSION_LABELS[key][0]} 수동값 변경: ${j.previous||'-'} → ${j.value}${staged?' · 실제 발행 버전 유지':''}`;
+    if(st)st.textContent=`${GM_VERSION_LABELS[key][0]} 수동값 변경: ${j.previous||'-'} → ${j.value}${staged?' · 발행 결과는 실제 적용 버전 열에서 확인':''}`;
   }catch(e){if(st)st.textContent=`${GM_VERSION_LABELS[key][0]} 변경 실패: ${String(e.message||e)}`;}
   finally{if(btn)btn.disabled=false;}
 }
