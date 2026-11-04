@@ -122,7 +122,7 @@ async function rehydratePublishedPack(db){
     if(!dc.ok)throw new Error('CATEGORY_REHYDRATE_DELTA_VERIFY_FAILED '+JSON.stringify(dc));
     console.log('[GM_CATEGORY_PACK_DELTA_REBUILD]',JSON.stringify({base,updated,upserts:rows.length,deletes:deleted.length,mode:'CUMULATIVE_DB_RECONSTRUCTION'}));
   }
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:base,last_updated_at:updated,hnsw_version:updated,hnsw_count:n(hnsw.count,0),base_version:legacyV,delta_versions:updated!==base?[n(c.category_pack_delta_published,0)].filter(x=>x>0):[],updated_at:new Date().toISOString(),languages:LANGS,base_files:check.ready,delta_files:updated!==base?LANGS.length:0,rehydrated:true});
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:base,last_updated_at:updated,hnsw_version:updated,hnsw_count:n(hnsw.count,0),count:rows.length,base_version:legacyV,delta_versions:updated!==base?[n(c.category_pack_delta_published,0)].filter(x=>x>0):[],updated_at:new Date().toISOString(),languages:LANGS,base_files:check.ready,delta_files:updated!==base?LANGS.length:0,rehydrated:true});
   const out={state:'READY',base_started_at:base,last_updated_at:updated,count:rows.length,delta_count:deltaCount,hnsw_count:n(hnsw.count,0),elapsed_ms:Date.now()-started,db_version_unchanged:true};
   lastState.rehydrate_state='READY';lastState.rehydrate_result=out;
   console.log('[GM_CATEGORY_PACK_REHYDRATE_DONE]',JSON.stringify(out));
@@ -146,7 +146,7 @@ async function publishBase(db,version){
   const snap={base_started_at:baseToken,legacy_version:legacyV,rows:{}};
   for(const r of rows)snap.rows[s(r.gm_code).toUpperCase()]={sig:signature(r),row:r};
   writeJson(BASE_SNAPSHOT_FILE,snap);
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:baseToken,base_version:legacyV,delta_versions:[],updated_at:tm.iso,languages:LANGS,base_files:check.ready});
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:baseToken,base_version:legacyV,delta_versions:[],count:rows.length,updated_at:tm.iso,languages:LANGS,base_files:check.ready});
   await setConfig(db,'category_pack_base_started_at',baseToken);
   await setConfig(db,'category_pack_last_updated_at',baseToken);
   try{await db.query(`UPDATE gm_category_pack_pending SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE status='PENDING'`);}catch(e){if(!(e&&e.code==='42P01'))throw e;}
@@ -173,7 +173,7 @@ async function publishDelta(db,version){
   const check=verifyPack('delta',updateToken,changes.length);
   if(!check.ok){const e=new Error('CATEGORY_DELTA_25LANG_VERIFY_FAILED '+JSON.stringify(check));e.code='PACK_VERIFY';throw e;}
   const meta0=categoryMeta(),ds=Array.from(new Set([...(meta0.delta_versions||[]).map(Number),legacyV])).filter(x=>x>0).sort((a,b)=>a-b);
-  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:updateToken,base_version:n(meta0.base_version||snap.legacy_version),delta_versions:ds,updated_at:tm.iso,languages:LANGS,base_files:LANGS.length,delta_files:check.ready});
+  writeJson(path.join(CATEGORY_ROOT,'meta.json'),{base_started_at:baseToken,last_updated_at:updateToken,base_version:n(meta0.base_version||snap.legacy_version),delta_versions:ds,count:current.length,updated_at:tm.iso,languages:LANGS,base_files:LANGS.length,delta_files:check.ready});
   if(!s(c0.category_pack_base_started_at))await setConfig(db,'category_pack_base_started_at',baseToken);
   await setConfig(db,'category_pack_last_updated_at',updateToken);
   try{await db.query(`UPDATE gm_category_pack_pending SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE status='PENDING'`);}catch(e){if(!(e&&e.code==='42P01'))throw e;}
