@@ -94,36 +94,43 @@ async function prepareFdHs6DepthSpecial(){
 }
 
 
-// GM_BUILDER_VERSION_MANUAL_V001: separate administrator-controlled values.
+// GM_BUILDER_VERSION_MANUAL_V003: six independently controlled version stamps.
+const GM_VERSION_KEYS=['gm_v1','gm_v2','gm_v3','ui_dictionary','category_base','category_delta'];
+const GM_VERSION_LABELS={
+  gm_v1:['실행 JS (미연결)','빌더 보관값만 변경 · 실제 JS는 layout/main/api'],
+  gm_v2:['gm_v2 설정','운영 설정값 변경 · UI 사전과 별개'],
+  gm_v3:['gm_v3 설정','운영 설정값 변경 · 카테고리와 별개'],
+  ui_dictionary:['UI 사전','실제 JSON 발행 버전과 별도 · 미발행 수동 승인값'],
+  category_base:['카테고리 BASE','실제 BASE JSON 버전과 별도 · 미발행 수동 승인값'],
+  category_delta:['카테고리 DELTA','실제 DELTA JSON 버전과 별도 · 미발행 수동 승인값']
+};
 async function loadBuilderVersions(){
-  const tb=document.getElementById('builderVersionRows'),st=document.getElementById('builderVersionStatus');
-  if(!tb)return;
+  const tb=document.getElementById('builderVersionRows'),st=document.getElementById('builderVersionStatus');if(!tb)return;
   try{
     const r=await fetch(`${API}/api/gm/builder/config/version-control?t=${Date.now()}`,{cache:'no-store'});
     const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
-    const labels={gm_v1:'실행 JS: 미연결 (빌더 보관값)',gm_v2:'운영 설정값만 변경',gm_v3:'운영 설정값만 변경'};
-    tb.innerHTML=['gm_v1','gm_v2','gm_v3'].map(k=>{
-      const x=j.versions&&j.versions[k]||{};
-      return `<tr><td><b>${k}</b></td><td>${cfgEsc(x.value||'-')}</td><td>${cfgEsc(labels[k])}</td><td><button type="button" onclick="updateBuilderVersion('${k}',this)">현재시각으로 갱신</button></td></tr>`;
+    tb.innerHTML=GM_VERSION_KEYS.map(k=>{
+      const x=j.versions&&j.versions[k]||{},label=GM_VERSION_LABELS[k];
+      return `<tr><td><b>${cfgEsc(label[0])}</b></td><td>${cfgEsc(x.live_value||'-')}</td><td>${cfgEsc(x.value||'-')}</td><td>${cfgEsc(label[1])}</td><td><button type="button" onclick="updateBuilderVersion('${k}',this)">현재시각으로 갱신</button></td></tr>`;
     }).join('');
-    if(st)st.textContent='조회 완료 · 기준시각 KST · 서버 재배포와 별개';
-  }catch(e){tb.innerHTML=`<tr><td colspan="4">조회 실패: ${cfgEsc(e.message||e)}</td></tr>`;if(st)st.textContent='';}
+    if(st)st.textContent='조회 완료 · KST · UI 사전/카테고리는 실제 발행 버전과 관리자 수동값을 구분';
+  }catch(e){tb.innerHTML=`<tr><td colspan="5">조회 실패: ${cfgEsc(e.message||e)}</td></tr>`;if(st)st.textContent='조회 API 또는 관리자 인증 상태를 확인하세요.';}
 }
 async function updateBuilderVersion(key,btn){
-  if(!['gm_v1','gm_v2','gm_v3'].includes(key))return;
+  if(!GM_VERSION_KEYS.includes(key))return;
   const st=document.getElementById('builderVersionStatus');
-  const msg=key==='gm_v1'?'gm_v1의 빌더 보관값만 갱신합니다. 실제 실행 버전에는 연결되지 않습니다.':`${key} 운영 설정값을 KST 현재시각으로 갱신합니다. JSON 발행은 하지 않습니다.`;
-  if(!confirm(`${msg}\n실행하시겠습니까?`))return;
-  const password=prompt('관리자 derzon 비밀번호를 입력하세요. 이 작업에만 사용하며 저장하지 않습니다.');
+  const staged=['ui_dictionary','category_base','category_delta'].includes(key);
+  const msg=key==='gm_v1'?'실제 JS 버전은 유지하며 빌더 보관값만 변경합니다.':staged?'실제 JSON/카테고리 팩 버전은 그대로 유지하고 관리자 수동 승인값만 변경합니다. 파일 발행은 별도 작업입니다.':`${key} 운영 설정값을 KST 현재시각으로 변경합니다. JSON은 발행하지 않습니다.`;
+  if(!confirm(`${GM_VERSION_LABELS[key][0]}: ${msg}\n진행하시겠습니까?`))return;
+  const password=prompt('derzon 관리자 비밀번호를 입력하세요. 이번 요청에만 사용하고 저장하지 않습니다.');
   if(password===null||!password)return;
   if(btn)btn.disabled=true;
   try{
     const r=await fetch(`${API}/api/gm/builder/config/version-control/${key}`,{method:'POST',headers:{'x-gm-builder-admin-password':password}});
     const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
-    if(st)st.textContent=`${key} 변경: ${j.previous||'-'} → ${j.value} · ${j.connected?'운영 설정 갱신':'빌더 보관만 (미연결)'}`;
     await loadBuilderVersions();
-    if(st)st.textContent=`${key} 변경 완료: ${j.previous||'-'} → ${j.value} · ${j.connected?'운영 설정 갱신':'빌더 보관만 (미연결)'}`;
-  }catch(e){if(st)st.textContent=`${key} 변경 실패: ${String(e.message||e)}`;}
+    if(st)st.textContent=`${GM_VERSION_LABELS[key][0]} 수동값 변경: ${j.previous||'-'} → ${j.value}${staged?' · 실제 발행 버전 유지':''}`;
+  }catch(e){if(st)st.textContent=`${GM_VERSION_LABELS[key][0]} 변경 실패: ${String(e.message||e)}`;}
   finally{if(btn)btn.disabled=false;}
 }
 window.loadBuilderVersions=loadBuilderVersions;

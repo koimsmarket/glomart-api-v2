@@ -39,6 +39,7 @@
     if(!menus.find(m=>m.id===group)?.items.some(x=>x[0]===tab))group=groupOf(tab);
     save(KEY,tab);save(GROUP_KEY,group);renderMenus(tab);
     if(tab==='inventory' && typeof window.loadBuilderInventory==='function')window.loadBuilderInventory();
+    if(tab==='version' && typeof window.loadBuilderVersions==='function')window.loadBuilderVersions();
     window.scrollTo({top:0,behavior:'smooth'});
   };
   // Registered table names are a local fallback only; live database discovery supersedes them.
