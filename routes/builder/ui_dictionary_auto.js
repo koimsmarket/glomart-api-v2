@@ -1,6 +1,7 @@
 'use strict';
 // GM_UI_DICTIONARY_AUTO_V009_RUNTIME_500_FIX
 const express=require('express');
+const crypto=require('crypto');
 const fs=require('fs');
 const path=require('path');
 const router=express.Router();
@@ -158,6 +159,51 @@ router.get('/api/gm/builder/ui-dictionary-auto/status',async(req,res)=>{
     const d=(await db.query(`SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE active_yn='Y')::int active,COUNT(*) FILTER(WHERE translation_status<>'READY')::int recheck FROM gm_ui_dictionary`)).rows[0];
     res.json({ok:true,dictionary:d,pending:a});
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+
+// GM_UI_PENDING_CLEAN_V001: export/replace ONLY PENDING rows, never the canonical dictionary.
+// Both endpoints require the existing Builder server-side derzon password verification.
+const PENDING_COLUMNS='pending_id,gm_code,source_text_ko,previous_text_ko,page_name,source_file,source_locator,source_type,change_type,status,seen_count,first_seen_at,last_seen_at,reviewed_at,review_note';
+async function pendingSnapshot(db){
+ const q=await db.query(`SELECT ${PENDING_COLUMNS} FROM gm_ui_dictionary_pending WHERE status='PENDING' ORDER BY pending_id`);
+ const items=q.rows;
+ const sha256=crypto.createHash('sha256').update(JSON.stringify(items)).digest('hex');
+ return {items,count:items.length,sha256};
+}
+router.get('/api/gm/builder/ui-dictionary-auto/pending-clean/export',async(req,res)=>{
+ try{
+  const snap=await pendingSnapshot(dbFrom(req));
+  res.set('Cache-Control','no-store');res.json({ok:true,format:'GM_UI_PENDING_CLEAN_V001',exported_at:new Date().toISOString(),snapshot:{count:snap.count,sha256:snap.sha256},keep_ids:snap.items.map(x=>Number(x.pending_id)),items:snap.items});
+ }catch(e){res.status(500).json({ok:false,error:'PENDING_EXPORT_FAILED',detail:String(e&&e.message||e)});}
+});
+router.post('/api/gm/builder/ui-dictionary-auto/pending-clean/replace',express.json({limit:'12mb'}),async(req,res)=>{
+ const b=req.body||{},ids=b.keep_ids;
+ if(b.format!=='GM_UI_PENDING_CLEAN_V001'||!b.snapshot||!Array.isArray(ids)||ids.length>30000||!Number.isInteger(b.snapshot.count)||!/^([a-f0-9]{64})$/.test(String(b.snapshot.sha256||'')))
+   return res.status(400).json({ok:false,error:'INVALID_CLEAN_FILE'});
+ if(!ids.every(x=>Number.isSafeInteger(x)&&x>0)||new Set(ids).size!==ids.length)
+   return res.status(400).json({ok:false,error:'INVALID_KEEP_IDS'});
+ if(ids.length===0&&b.allow_empty!==true)return res.status(400).json({ok:false,error:'EMPTY_REPLACEMENT_NOT_ALLOWED'});
+ const db=dbFrom(req),client=await db.connect();
+ try{
+  await client.query('BEGIN');
+  // Concurrent runtime captures are blocked until commit. No lost additions.
+  await client.query('LOCK TABLE gm_ui_dictionary_pending IN SHARE ROW EXCLUSIVE MODE');
+  const snap=await pendingSnapshot(client);
+  if(snap.count!==b.snapshot.count||snap.sha256!==b.snapshot.sha256){
+   await client.query('ROLLBACK');return res.status(409).json({ok:false,error:'PENDING_CHANGED_EXPORT_AGAIN',current_count:snap.count});
+  }
+  const existing=new Set(snap.items.map(x=>Number(x.pending_id)));
+  if(ids.some(x=>!existing.has(x))){await client.query('ROLLBACK');return res.status(400).json({ok:false,error:'KEEP_ID_NOT_IN_ORIGINAL'});}
+  // This executes the requested delete-all + restore-kept entirely in one transaction.
+  await client.query(`CREATE TEMP TABLE gm_pending_clean_restore ON COMMIT DROP AS SELECT * FROM gm_ui_dictionary_pending WHERE status='PENDING' AND pending_id=ANY($1::bigint[])`,[ids]);
+  const removed=await client.query(`DELETE FROM gm_ui_dictionary_pending WHERE status='PENDING'`);
+  if(ids.length)await client.query(`INSERT INTO gm_ui_dictionary_pending SELECT * FROM gm_pending_clean_restore`);
+  const check=await client.query(`SELECT COUNT(*)::int AS n FROM gm_ui_dictionary_pending WHERE status='PENDING'`);
+  if(check.rows[0].n!==ids.length)throw Error('REPLACEMENT_COUNT_MISMATCH');
+  await client.query('COMMIT');
+  res.set('Cache-Control','no-store');res.json({ok:true,previous:removed.rowCount,restored:ids.length,removed:removed.rowCount-ids.length});
+ }catch(e){await client.query('ROLLBACK').catch(()=>{});res.status(500).json({ok:false,error:'PENDING_REPLACE_FAILED',detail:String(e&&e.message||e)});}
+ finally{client.release();}
 });
 
 router.get('/api/gm/builder/ui-dictionary-auto/pending',async(req,res)=>{

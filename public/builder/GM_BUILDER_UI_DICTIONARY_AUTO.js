@@ -192,3 +192,36 @@ function gmClientAutoBoot(){
 }
 function gmClientResume(btn){gmClientBlocked=false;void startClientTranslation(btn);}
 gmClientAutoBoot();
+
+// GM_UI_PENDING_CLEAN_V001: downloads the COMPLETE pending set with SHA-256 snapshot.
+let gmPendingBackupDownloaded=false;
+async function gmPendingCleanDownload(btn){
+ btn.disabled=true;
+ try{
+  const password=prompt('전체 후보 다운로드: derzon 관리자 비밀번호를 입력하세요.');
+  if(!password)return;
+  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/export',{cache:'no-store',credentials:'same-origin',headers:{'x-gm-builder-admin-password':password}});
+  const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
+  const blob=new Blob([JSON.stringify(j,null,2)],{type:'application/json;charset=utf-8'});
+  const a=document.createElement('a'),url=URL.createObjectURL(blob);a.href=url;a.download='GM_UI_PENDING_BACKUP_'+new Date().toISOString().slice(0,19).replace(/[:-]/g,'')+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
+  gmPendingBackupDownloaded=true;log({action:'PENDING_BACKUP_DOWNLOADED',count:j.snapshot.count,sha256:j.snapshot.sha256});
+ }catch(e){log('후보 백업 실패: '+String(e));}finally{btn.disabled=false;}
+}
+async function gmPendingCleanUpload(btn){
+ const input=document.getElementById('gmPendingCleanFile'),file=input&&input.files&&input.files[0];
+ if(!file)return alert('먼저 정리된 JSON 파일을 선택하세요.');
+ if(!gmPendingBackupDownloaded)return alert('이 작업을 실행하기 전에 현재 후보 전체 백업을 먼저 다운로드하세요.');
+ let j;try{j=JSON.parse(await file.text());}catch(_){return alert('올바른 JSON 파일이 아닙니다.');}
+ if(j.format!=='GM_UI_PENDING_CLEAN_V001'||!j.snapshot||!Array.isArray(j.keep_ids))return alert('후보 정리본 형식이 아닙니다.');
+ const removed=j.snapshot.count-j.keep_ids.length;
+ if(removed<0)return alert('정리본의 보존 수량이 원본보다 많습니다.');
+ if(!confirm('정식 UI 사전은 변경하지 않습니다.\n대기 후보 '+j.snapshot.count+'건 전체삭제 후 '+j.keep_ids.length+'건 복원 ('+removed+'건 제거)합니다.\n원본 백업을 보관했는지 확인하세요.'))return;
+ const typed=prompt('최종 확인: 삭제 대상 '+removed+'건. 실행하려면 삭제 를 입력하세요.');if(typed!=='삭제')return;
+ const password=prompt('derzon 관리자 비밀번호를 재입력하세요.');if(!password)return;
+ btn.disabled=true;
+ try{
+  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/replace',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({format:j.format,snapshot:j.snapshot,keep_ids:j.keep_ids,allow_empty:j.keep_ids.length===0})});
+  const resp=await r.json();if(!r.ok||!resp.ok)throw Error(resp.error||'HTTP '+r.status);
+  gmPendingBackupDownloaded=false;log({action:'PENDING_REPLACED',...resp});await loadAll();
+ }catch(e){log('후보 교체 실패 (기존 DB 유지): '+String(e));}finally{btn.disabled=false;}
+}
