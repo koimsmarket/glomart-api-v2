@@ -30,13 +30,11 @@ async function uploadSafe(tableKey,file,apply,leafOnly=false){
 }
 async function send(apply,button){
   const f=document.getElementById('file').files[0]; if(!f){alert('Excel 또는 CSV 파일을 선택하세요.');return;}
-  if(apply && prompt('실제 업데이트 하려면 APPLY 라고 입력하세요.')!=='APPLY') return;
   const table=document.getElementById('upTable').value; const timed=startButtonTimer(button,apply?'업데이트 중':'검증 중');
   try{ const summary=await uploadSafe(table,f,apply); log({file:f.name,result:'DONE',...summary}); }catch(e){log(String(e&&e.message||e));}finally{stopButtonTimer(timed);}
 }
 async function sendAll(apply,button){
   const files=[...document.getElementById('multiFiles').files]; if(!files.length){alert('파일들을 선택하세요.');return;}
-  if(apply && prompt('전체 실제 업데이트 하려면 APPLY ALL 이라고 입력하세요.')!=='APPLY ALL') return;
   const timed=startButtonTimer(button,apply?'전체 업데이트 중':'전체 검증 중'); const result=[];
   try{ for(const f of files){ const text=await readCsvText(f); if(isCafe24MemberCsvText(text)){ await uploadCafe24MemberText(text,f.name,apply); result.push({file:f.name,table:'cafe24_member',result:'DONE'}); continue; } const key=inferTableFromFileName(f.name); if(!key){result.push({file:f.name,result:'SKIP',reason:'테이블명 추정 실패'});continue;} await uploadSafe(key,f,apply); result.push({file:f.name,table:key,result:'DONE'}); } log(result); }catch(e){log(String(e&&e.message||e));}finally{stopButtonTimer(timed);}
 }
@@ -47,7 +45,6 @@ async function applyLeafOnly(button){
   const f=document.getElementById('file').files[0]; if(!f){alert('Excel 또는 CSV 파일을 선택하세요.');return;}
   const table=document.getElementById('upTable').value;
   if(table!=='category'){ log('카테고리(gm_category)를 선택해야 합니다.'); return; }
-  if(prompt('leaf_yn만 실제 반영하려면 LEAF APPLY 라고 입력하세요.')!=='LEAF APPLY') return;
   const timed=startButtonTimer(button,'leaf_yn 업데이트 중');
   try{
     const summary=await uploadSafe(table,f,true,true);
