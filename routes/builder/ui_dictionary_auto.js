@@ -301,13 +301,13 @@ async function nextCode(db){
   return 'GM_'+String(r.rows[0].n).padStart(4,'0');
 }
 
-// GM_UI_PENDING_CSV_V002: use EXISTING Pending table; translation values in its review_note TEXT.
+// GM_UI_PENDING_CSV_V003: CSV -> existing gm_ui_dictionary_pending; no new tables or approval buttons.
 const GM_CSV_LANGS=['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
-function gmCsvNote(row){return JSON.stringify({type:'GM_UI_CSV_162_V002',translations:Object.fromEntries(GM_CSV_LANGS.map(l=>[l,row[l]]))});}
+function gmCsvNote(row){return JSON.stringify({type:'GM_UI_CSV_162_V003',translations:Object.fromEntries(GM_CSV_LANGS.map(l=>[l,row[l]]))});}
 router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/upload',require('../admin_session_gate').middleware,express.json({limit:'5mb'}),async(req,res)=>{
  res.set('Cache-Control','no-store');
  const rows=req.body&&req.body.rows;
- if(!Array.isArray(rows)||rows.length<1||rows.length>500)return res.status(400).json({ok:false,error:'CSV_ROWS_INVALID'});
+ if(!Array.isArray(rows)||rows.length!==162)return res.status(400).json({ok:false,error:'CSV_ROWS_MUST_BE_162'});
  const clean=[],seen=new Set();
  for(let i=0;i<rows.length;i++){
   const raw=rows[i];if(!raw||typeof raw!=='object'||Array.isArray(raw))return res.status(400).json({ok:false,error:'INVALID_CSV_ROW',row:i+1});
@@ -366,7 +366,7 @@ router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1m
         const reason=(pr.change_type!=='NEW'&&pr.change_type!=='CHANGED')?'NOT_NEW_OR_CHANGED':
           !text||(pr.source_file!=='CSV_UI_PENDING_IMPORT'&&!hasKo(text))?'NOT_KOREAN_UI':
           gmUiStaticCapturePausedPath(pr.source_file||pr.page_name||'')?'BUILDER_OR_AUTO_ORDER_SOURCE':
-          gmPendingDynamicReason(pr,pr.source_text_ko)?'DYNAMIC_DATA':
+          (pr.source_file!=='CSV_UI_PENDING_IMPORT'&&gmPendingDynamicReason(pr,pr.source_text_ko))?'DYNAMIC_DATA':
           pr.change_type==='NEW'&&pr.source_file!=='CSV_UI_PENDING_IMPORT'&&knownKeys.has(key)?'ALREADY_IN_DICTIONARY':'';
         if(reason){skipped.push({pending_id:id,reason});continue;}
         if(pr.change_type==='NEW')knownKeys.add(key);
@@ -375,7 +375,7 @@ router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1m
       let csvTranslations=null;
       if(pr.source_file==='CSV_UI_PENDING_IMPORT'){
         let payload;try{payload=JSON.parse(pr.review_note||'');}catch(_){throw Error('CSV_PENDING_TRANSLATIONS_INVALID_'+id);}
-        if(!payload||payload.type!=='GM_UI_CSV_162_V002'||!payload.translations||
+        if(!payload||payload.type!=='GM_UI_CSV_162_V003'||!payload.translations||
            !GM_CSV_LANGS.every(l=>typeof payload.translations[l]==='string'&&payload.translations[l].trim()))
            throw Error('CSV_PENDING_TRANSLATIONS_MISSING_'+id);
         csvTranslations=payload.translations;

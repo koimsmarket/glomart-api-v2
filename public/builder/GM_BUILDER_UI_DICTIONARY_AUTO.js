@@ -302,7 +302,7 @@ async function gmPendingDeleteAll(btn){
  }catch(e){gmPendingStatus('전체삭제 실패 · '+String(e));log('전체삭제 실패: '+String(e)+' (백업 이후 신규 수집이 있었다면 백업을 다시 받으세요)');}finally{btn.disabled=false;}
 }
 
-// GM_UI_PENDING_CSV_V002: direct CSV -> EXISTING gm_ui_dictionary_pending.
+// GM_UI_PENDING_CSV_V003: visible file upload directly into EXISTING gm_ui_dictionary_pending.
 function gmUiCsvParse(src){
  src=String(src||'').replace(/^\uFEFF/,'');const lines=[];let row=[],field='',inQuote=false;
  for(let i=0;i<src.length;i++){
@@ -331,7 +331,8 @@ async function gmUiUploadPendingCsv(btn){
   gmPendingStatus('CSV '+rows.length+'건 Pending DB 업로드 중...');
   const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-csv/upload',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({rows})});
   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||('HTTP '+r.status));
+  if(Number(j.inserted)!==rows.length||Number(j.pending_count)!==rows.length)throw Error('서버 확인 수량 불일치: '+JSON.stringify(j));
   gmPendingStatus('기존 Pending DB 업로드 완료 '+j.inserted+'건 · 현재 Pending '+j.pending_count+'건');
-  log({action:'UPLOAD_TO_EXISTING_PENDING',...j});await loadAll();
+  log({action:'UPLOAD_TO_EXISTING_PENDING',...j});await loadAll();alert('Pending 업로드 완료: '+j.inserted+'건. 아래 기존 승인 버튼에서 확인할 수 있습니다.');
  }catch(e){gmPendingStatus('CSV Pending 업로드 실패: '+String(e));log(String(e));}finally{btn.disabled=false;}
 }
