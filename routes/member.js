@@ -749,7 +749,7 @@ router.post(['/api/gm/member/address/sync','/api/member/address/sync'], async (r
   finally{ client.release(); }
 });
 
-// GM_CAFE24_ADDRESS_KEY_V008: Cafe24 ma_idx is the external identity.
+// GM_CAFE24_ADDRESS_KEY_V009: Cafe24 ma_idx is the external identity.
 // Mirror ONLY explicit Cafe24 address actions. Never infer identity from address text.
 router.post(['/api/gm/member/address/cafe24/action','/api/member/address/cafe24/action'],async(req,res)=>{
   const pool=db(req),b=req.body||{};
@@ -812,7 +812,7 @@ router.post(['/api/gm/member/address/cafe24/action','/api/member/address/cafe24/
     }
     await client.query('COMMIT');
     return res.json({ok:true,action,cafe24_ma_idx:maIdx,address_id:saved.address_id,address:saved});
-  }catch(e){await client.query('ROLLBACK').catch(()=>{});console.error('[GM_CAFE24_ADDRESS_KEY_V008]',{action,code:e&&e.code});return res.status(500).json({ok:false,error:'ADDRESS_MIRROR_FAILED'});}
+  }catch(e){await client.query('ROLLBACK').catch(()=>{});console.error('[GM_CAFE24_ADDRESS_KEY_V009]',{action,code:e&&e.code});return res.status(500).json({ok:false,error:'ADDRESS_MIRROR_FAILED'});}
   finally{client.release();}
 });
 
