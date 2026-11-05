@@ -18,6 +18,7 @@ function protectedOperation(req) {
   if (path === '/api/gm/background/image-vector/mode' || path === '/api/gm/background/image-vector/pending/import') return true;
   if (path === '/api/gm/builder/safe-update') return true;
   if (path === '/api/gm/builder/ui-dictionary-auto/approve') return true;
+  if (path === '/api/gm/builder/ui-dictionary-auto/pending-csv/upload') return true;
   if (path === '/api/gm/builder/ui-dictionary-auto/pending-clean/replace') return true;
   if (path === '/api/gm/builder/ui-dictionary-auto/pending-clean/delete-selected' || path === '/api/gm/builder/ui-dictionary-auto/pending-clean/delete-all') return true;
   if (/^\/api\/gm\/builder\/config\/version-control\/(?:gm_v[123]|ui_dictionary|category_base|category_delta)$/.test(path)) return true;

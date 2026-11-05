@@ -301,3 +301,37 @@ async function gmPendingDeleteAll(btn){
   gmPendingLastBackup=null;gmPendingStatus('전체삭제 서버 처리 완료 · 실제 결과 '+JSON.stringify(j));log({action:'PENDING_DELETE_ALL',...j});await loadAll();
  }catch(e){gmPendingStatus('전체삭제 실패 · '+String(e));log('전체삭제 실패: '+String(e)+' (백업 이후 신규 수집이 있었다면 백업을 다시 받으세요)');}finally{btn.disabled=false;}
 }
+
+// GM_UI_PENDING_CSV_V002: direct CSV -> EXISTING gm_ui_dictionary_pending.
+function gmUiCsvParse(src){
+ src=String(src||'').replace(/^\uFEFF/,'');const lines=[];let row=[],field='',inQuote=false;
+ for(let i=0;i<src.length;i++){
+  const ch=src[i];
+  if(inQuote){if(ch==='"'&&src[i+1]==='"'){field+='"';i++;}else if(ch==='"')inQuote=false;else field+=ch;}
+  else if(ch==='"'){if(field)throw Error('CSV 인용부호 오류');inQuote=true;}
+  else if(ch===','){row.push(field);field='';}
+  else if(ch==='\r'||ch==='\n'){if(ch==='\r'&&src[i+1]==='\n')i++;row.push(field);if(row.some(c=>c!==''))lines.push(row);row=[];field='';}
+  else field+=ch;
+ }
+ if(inQuote)throw Error('CSV 닫히지 않은 인용부호');if(field||row.length){row.push(field);lines.push(row);}
+ if(!lines.length)throw Error('CSV가 비었습니다');const keys=lines.shift().map(c=>c.trim());
+ if(new Set(keys).size!==keys.length)throw Error('CSV 중복 컬럼');
+ return lines.map((r,i)=>{if(r.length!==keys.length)throw Error('CSV 컬럼 수 불일치: '+(i+2)+'행');return Object.fromEntries(keys.map((k,j)=>[k,r[j]]));});
+}
+async function gmUiUploadPendingCsv(btn){
+ const input=document.getElementById('gmUiPendingCsvFile'),file=input&&input.files&&input.files[0];
+ if(!file)return alert('CSV 파일을 선택하세요.');btn.disabled=true;
+ try{
+  if(file.size>4*1024*1024)throw Error('CSV 파일이 너무 큽니다');
+  const rows=gmUiCsvParse(await file.text());
+  const required=['gm_code','kr','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+  if(!rows.length||rows.length>500||rows.some(r=>required.some(key=>!String(r[key]||'').trim())))throw Error('CSV 필수 값 또는 24개 언어 누락');
+  if(!confirm('CSV '+rows.length+'건을 기존 Pending 테이블에 업로드할까요? 업로드 후 기존 Pending 목록에서 검토할 수 있습니다.'))return;
+  const password=await gmUiAskAdminPassword('CSV → 기존 Pending 업로드');if(!password)return;
+  gmPendingStatus('CSV '+rows.length+'건 Pending DB 업로드 중...');
+  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-csv/upload',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({rows})});
+  const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||('HTTP '+r.status));
+  gmPendingStatus('기존 Pending DB 업로드 완료 '+j.inserted+'건 · 현재 Pending '+j.pending_count+'건');
+  log({action:'UPLOAD_TO_EXISTING_PENDING',...j});await loadAll();
+ }catch(e){gmPendingStatus('CSV Pending 업로드 실패: '+String(e));log(String(e));}finally{btn.disabled=false;}
+}

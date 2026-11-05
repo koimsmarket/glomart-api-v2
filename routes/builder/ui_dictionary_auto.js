@@ -301,6 +301,49 @@ async function nextCode(db){
   return 'GM_'+String(r.rows[0].n).padStart(4,'0');
 }
 
+// GM_UI_PENDING_CSV_V002: use EXISTING Pending table; translation values in its review_note TEXT.
+const GM_CSV_LANGS=['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+function gmCsvNote(row){return JSON.stringify({type:'GM_UI_CSV_162_V002',translations:Object.fromEntries(GM_CSV_LANGS.map(l=>[l,row[l]]))});}
+router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/upload',require('../admin_session_gate').middleware,express.json({limit:'5mb'}),async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ const rows=req.body&&req.body.rows;
+ if(!Array.isArray(rows)||rows.length<1||rows.length>500)return res.status(400).json({ok:false,error:'CSV_ROWS_INVALID'});
+ const clean=[],seen=new Set();
+ for(let i=0;i<rows.length;i++){
+  const raw=rows[i];if(!raw||typeof raw!=='object'||Array.isArray(raw))return res.status(400).json({ok:false,error:'INVALID_CSV_ROW',row:i+1});
+  const code=String(raw.gm_code||'').trim().toUpperCase(),kr=String(raw.kr||'').trim();
+  if(!/^GM_\d{4,}$/.test(code)||!kr||kr.length>10000||seen.has(code))return res.status(400).json({ok:false,error:'INVALID_OR_DUPLICATE_CODE',row:i+1,code});
+  seen.add(code);
+  const row={gm_code:code,kr,page_name:String(raw.page_name||'').slice(0,240)};
+  for(const lang of GM_CSV_LANGS){const value=raw[lang];if(typeof value!=='string'||!value.trim()||value.length>15000)return res.status(400).json({ok:false,error:'CSV_MISSING_TRANSLATION',row:i+1,lang});row[lang]=value;}
+  clean.push(row);
+ }
+ const db=dbFrom(req),client=await db.connect();
+ try{
+  await client.query('BEGIN');
+  // Lock the established Pending table to prevent concurrent duplicate imports.
+  await client.query('LOCK TABLE gm_ui_dictionary_pending IN SHARE ROW EXCLUSIVE MODE');
+  const count=(await client.query(`SELECT count(*)::int c FROM gm_ui_dictionary_pending WHERE status='PENDING'`)).rows[0].c;
+  if(count>0){await client.query('ROLLBACK');return res.status(409).json({ok:false,error:'PENDING_NOT_EMPTY_REVIEW_FIRST',pending_count:count});}
+  const codes=clean.map(r=>r.gm_code);
+  const knownRows=(await client.query(`SELECT gm_code,kr FROM gm_ui_dictionary WHERE gm_code=ANY($1::text[])`,[codes])).rows;
+  const known=new Map(knownRows.map(r=>[r.gm_code,r.kr]));
+  let newCount=0,changedCount=0;
+  for(const row of clean){
+   const kind=known.has(row.gm_code)?'CHANGED':'NEW';if(kind==='NEW')newCount++;else changedCount++;
+   await client.query(`INSERT INTO gm_ui_dictionary_pending
+     (gm_code,source_text_ko,previous_text_ko,page_name,source_file,source_locator,source_type,change_type,review_note)
+     VALUES ($1,$2,$3,$4,'CSV_UI_PENDING_IMPORT',$5,'RUNTIME',$6,$7)`,
+     [row.gm_code,row.kr,known.get(row.gm_code)||'',row.page_name,'csv-ui-162:'+row.gm_code,kind,gmCsvNote(row)]);
+  }
+  const after=(await client.query(`SELECT count(*)::int c FROM gm_ui_dictionary_pending WHERE status='PENDING'`)).rows[0].c;
+  if(after!==clean.length)throw Error('CSV_PENDING_COUNT_MISMATCH');
+  await client.query('COMMIT');
+  res.json({ok:true,received:clean.length,inserted:clean.length,pending_count:after,new_rows:newCount,changed_rows:changedCount,translation_languages:GM_CSV_LANGS.length,canonical_dictionary_unchanged:true});
+ }catch(e){await client.query('ROLLBACK').catch(()=>{});res.status(500).json({ok:false,error:'CSV_PENDING_UPLOAD_FAILED',detail:String(e.message||e)});}
+ finally{client.release();}
+});
+
 router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1mb'}),async(req,res)=>{
   const db=dbFrom(req);
   const autoOnly=req.body&&req.body.auto_only===true;
@@ -321,12 +364,21 @@ router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1m
         const text=gmPendingCanonicalText(pr.source_text_ko);
         const key=gmPendingMatchKey(text);
         const reason=(pr.change_type!=='NEW'&&pr.change_type!=='CHANGED')?'NOT_NEW_OR_CHANGED':
-          !text||!hasKo(text)?'NOT_KOREAN_UI':
+          !text||(pr.source_file!=='CSV_UI_PENDING_IMPORT'&&!hasKo(text))?'NOT_KOREAN_UI':
           gmUiStaticCapturePausedPath(pr.source_file||pr.page_name||'')?'BUILDER_OR_AUTO_ORDER_SOURCE':
           gmPendingDynamicReason(pr,pr.source_text_ko)?'DYNAMIC_DATA':
-          pr.change_type==='NEW'&&knownKeys.has(key)?'ALREADY_IN_DICTIONARY':'';
+          pr.change_type==='NEW'&&pr.source_file!=='CSV_UI_PENDING_IMPORT'&&knownKeys.has(key)?'ALREADY_IN_DICTIONARY':'';
         if(reason){skipped.push({pending_id:id,reason});continue;}
         if(pr.change_type==='NEW')knownKeys.add(key);
+      }
+      // Existing 'Pending 정상 후보 → UI 사전 일괄 반영' button also handles CSV imports.
+      let csvTranslations=null;
+      if(pr.source_file==='CSV_UI_PENDING_IMPORT'){
+        let payload;try{payload=JSON.parse(pr.review_note||'');}catch(_){throw Error('CSV_PENDING_TRANSLATIONS_INVALID_'+id);}
+        if(!payload||payload.type!=='GM_UI_CSV_162_V002'||!payload.translations||
+           !GM_CSV_LANGS.every(l=>typeof payload.translations[l]==='string'&&payload.translations[l].trim()))
+           throw Error('CSV_PENDING_TRANSLATIONS_MISSING_'+id);
+        csvTranslations=payload.translations;
       }
       let code=s(pr.gm_code).toUpperCase();
       if(pr.change_type==='NEW'){
@@ -363,6 +415,13 @@ router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1m
           );
           await client.query(`UPDATE gm_ui_dictionary SET active_yn='N',updated_at=now() WHERE gm_code=$1`,[code]);
         }
+      }
+      if(csvTranslations){
+        // Preserve all 24 supplied translations; do NOT trigger redundant Google translations.
+        // This is in the same DB transaction as the established Pending approval.
+        const assignments=GM_CSV_LANGS.map((lang,i)=>lang+'=$'+(i+2)).join(',');
+        await client.query(`UPDATE gm_ui_dictionary SET ${assignments},translation_status='READY',updated_at=now() WHERE gm_code=$1`,
+          [code,...GM_CSV_LANGS.map(lang=>csvTranslations[lang])]);
       }
       await client.query(`UPDATE gm_ui_dictionary_pending SET status='APPROVED',reviewed_at=now(),gm_code=$2 WHERE pending_id=$1`,[id,code||null]);
       out.push({pending_id:id,gm_code:code,change_type:pr.change_type});
