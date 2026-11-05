@@ -273,27 +273,7 @@ router.get('/api/gm/builder/ui-dictionary-auto/pending',async(req,res)=>{
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
-router.post('/api/gm/builder/ui-dictionary-auto/scan-static',express.json({limit:'1mb'}),async(req,res)=>{
-  const db=dbFrom(req);
-  try{
-    await ensure(db);
-    const root=path.resolve(__dirname,'../..');
-    const envDirs=s(process.env.GM_UI_SCAN_DIRS||'public,routes,services').split(',').map(x=>x.trim()).filter(Boolean);
-    const files=[];envDirs.forEach(x=>walk(path.join(root,x),files,root));
-    const stats={files:files.length,candidates:0,new:0,changed:0,same:0,removed:0,dynamic_skipped:0};
-    const known=(await db.query(`SELECT gm_code,kr FROM gm_ui_dictionary WHERE active_yn='Y'`)).rows;
-    for(const f of files){
-      for(const row of extractFile(f)){
-        stats.candidates++;
-        const o=await observe(db,{...row,_gmKnownDictionary:known});
-        if(o.dynamic)stats.dynamic_skipped++;
-        if(o.new)stats.new++;else if(o.changed)stats.changed++;else stats.same++;
-      }
-    }
-    // V007: no REMOVED inference from canonical rows. Source lifecycle lives in pending/history only.
-    res.json({ok:true,dirs:envDirs,stats});
-  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
-});
+router.post('/api/gm/builder/ui-dictionary-auto/scan-static',(_req,res)=>res.status(410).json({ok:false,error:'STATIC_SOURCE_SCAN_REMOVED'}));
 
 // Compatibility endpoint: use the same V2 canonical path instead of writing dropped source columns.
 router.post('/api/gm/ui-dictionary/runtime-capture',express.json({limit:'256kb'}),async(req,res)=>{
@@ -415,28 +395,7 @@ router.get('/api/gm/builder/ui-dictionary-auto/v2/status',async(req,res)=>{
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
-router.post('/api/gm/builder/ui-dictionary-auto/v2/scan-static',express.json({limit:'256kb'}),async(req,res)=>{
-  const db=dbFrom(req);
-  try{
-    const root=path.resolve(__dirname,'../..');
-    const envDirs=s(process.env.GM_UI_SCAN_DIRS||'public,routes,services').split(',').map(x=>x.trim()).filter(Boolean);
-    const files=[];envDirs.forEach(x=>walk(path.join(root,x),files,root));
-    const limit=Math.max(1,Math.min(1000,Number(req.body&&req.body.limit||250)));
-    const rows=[];
-    outer: for(const f of files){
-      for(const row of extractFile(f)){
-        rows.push({...row,source_app:'GLOMART',source_surface:'STATIC:'+pageNameFromFile(f.rel)});
-        if(rows.length>=limit)break outer;
-      }
-    }
-    const stats=await uiV2.captureMany(db,rows.map(gmPendingV2Input),{incrementUsage:false});
-    uiV2.queueTranslations(db,stats.translate_codes);
-    if(stats.created||stats.changed){
-      require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
-    }
-    res.json({ok:true,dirs:envDirs,limit,stats});
-  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
-});
+router.post('/api/gm/builder/ui-dictionary-auto/v2/scan-static',(_req,res)=>res.status(410).json({ok:false,error:'STATIC_SOURCE_SCAN_REMOVED'}));
 
 // Generated, versioned, per-language UI JSON. No dictionary scan triggered by ordinary users.
 router.get('/api/gm/ui-dictionary/v2/auto/meta',async(req,res)=>{

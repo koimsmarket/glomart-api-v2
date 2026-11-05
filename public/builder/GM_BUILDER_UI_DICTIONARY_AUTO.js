@@ -14,7 +14,7 @@ function gmAdminLoginDialog(){
   let finished=false;
   const finish=(err)=>{
    if(finished)return;finished=true;form.removeEventListener('submit',onSubmit);cancel.removeEventListener('click',onCancel);
-   password.value='';submit.disabled=false;panel.hidden=true;panel.style.display='none';gmAdminLoginPending=null;
+   password.value='';submit.disabled=false;const hint=document.getElementById('gmUiAdminPasswordHint');if(hint)hint.textContent='입력 대기';panel.hidden=true;panel.style.display='none';gmAdminLoginPending=null;
    if(err)reject(err);else resolve();
   };
   const onCancel=()=>finish(new Error('관리자 인증을 취소했습니다. 작업은 실행되지 않았습니다.'));
@@ -25,7 +25,7 @@ function gmAdminLoginDialog(){
    try{
     const r=await fetch('/gm-admin-auth/login',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',cache:'no-store',body:JSON.stringify({password:p})});
     password.value='';
-    if(r.ok){finish();return;}
+    if(r.ok){error.textContent='관리자 인증 성공 · 요청 재실행 중';finish();return;}
     if(r.status===429)error.textContent='인증 시도가 제한되었습니다. 잠시 후 다시 인증해 주세요.';
     else if(r.status===401)error.textContent='관리자 비밀번호가 일치하지 않습니다.';
     else error.textContent='인증 실패 (HTTP '+r.status+').';
@@ -46,9 +46,8 @@ async function jfetch(u,o,retried){
  const ct=String(r.headers.get('content-type')||'');
  if(!ct.includes('json'))throw new Error('JSON 응답이 아닙니다 (HTTP '+r.status+').');
  const j=await r.json();if(!r.ok||j.ok===false)throw new Error(j.error||('HTTP '+r.status));return j;
-}async function loadAll(){try{const [s,p]=await Promise.all([jfetch(API+'/api/gm/builder/ui-dictionary-auto/status?t='+Date.now()),jfetch(API+'/api/gm/builder/ui-dictionary-auto/pending?t='+Date.now())]);document.getElementById('status').textContent='사전 '+s.dictionary.total+'건 · 활성 '+s.dictionary.active+' · 재번역 '+s.dictionary.recheck+' · pending '+(p.items||[]).length+'건';document.getElementById('rows').innerHTML=(p.items||[]).map(x=>'<tr><td><input type="checkbox" class="pchk" value="'+x.pending_id+'"></td><td><b>'+esc(x.change_type)+'</b><br><span class="small">'+esc(x.source_type)+'</span></td><td>'+esc(x.gm_code||'(자동발급)')+'</td><td>'+esc(x.previous_text_ko||'')+'</td><td>'+esc(x.source_text_ko||'')+'</td><td>'+esc(x.page_name||'')+'</td><td><span class="small">'+esc(x.source_locator||x.source_file||'')+'</span></td><td>'+esc(x.seen_count||0)+'</td><td>'+esc(x.last_seen_at||'')+'</td></tr>').join('')||'<tr><td colspan="9">pending 없음</td></tr>';log({status:s,pending_count:(p.items||[]).length});}catch(e){log(String(e));}}async function scanStatic(btn){btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/scan-static',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});log(j);await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}function ids(){return Array.from(document.querySelectorAll('.pchk:checked')).map(x=>Number(x.value));}function selectAll(v){document.querySelectorAll('.pchk').forEach(x=>x.checked=v);}async function approveSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');if(!confirm('선택 '+a.length+'건을 UI 사전에 반영할까요?'))return;btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}async function ignoreSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}
+}async function loadAll(){try{const [s,p]=await Promise.all([jfetch(API+'/api/gm/builder/ui-dictionary-auto/status?t='+Date.now()),jfetch(API+'/api/gm/builder/ui-dictionary-auto/pending?t='+Date.now())]);document.getElementById('status').textContent='사전 '+s.dictionary.total+'건 · 활성 '+s.dictionary.active+' · 재번역 '+s.dictionary.recheck+' · pending '+(p.items||[]).length+'건';document.getElementById('rows').innerHTML=(p.items||[]).map(x=>'<tr><td><input type="checkbox" class="pchk" value="'+x.pending_id+'"></td><td><b>'+esc(x.change_type)+'</b><br><span class="small">'+esc(x.source_type)+'</span></td><td>'+esc(x.gm_code||'(자동발급)')+'</td><td>'+esc(x.previous_text_ko||'')+'</td><td>'+esc(x.source_text_ko||'')+'</td><td>'+esc(x.page_name||'')+'</td><td><span class="small">'+esc(x.source_locator||x.source_file||'')+'</span></td><td>'+esc(x.seen_count||0)+'</td><td>'+esc(x.last_seen_at||'')+'</td></tr>').join('')||'<tr><td colspan="9">pending 없음</td></tr>';log({status:s,pending_count:(p.items||[]).length});}catch(e){log(String(e));}}function ids(){return Array.from(document.querySelectorAll('.pchk:checked')).map(x=>Number(x.value));}function selectAll(v){document.querySelectorAll('.pchk').forEach(x=>x.checked=v);}async function approveSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');if(!confirm('선택 '+a.length+'건을 UI 사전에 반영할까요?'))return;btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}async function ignoreSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}
 async function loadV2(){try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/status?t='+Date.now());const d=j.dictionary||{};document.getElementById('v2status').textContent='사전 '+(d.total||0)+'건 · 변수문구 '+(d.variable||0)+' · 사용 '+(d.use_count||0)+' · 번역미완성 '+(d.translation_pending||0);document.getElementById('v2rows').innerHTML=(j.recent||[]).map(x=>'<tr><td>'+esc(x.gm_code)+'</td><td>'+esc(x.kr)+'</td><td>'+esc(x.has_variable||'N')+'</td><td>'+esc(x.translation_status)+'</td><td>'+esc(x.use_count||0)+'</td><td>'+esc(x.last_used_at||'')+'</td><td>'+esc(x.updated_at||'')+'</td></tr>').join('')||'<tr><td colspan="7">V2 기록 없음</td></tr>';await loadAutomationStatus();return j;}catch(e){document.getElementById('v2status').textContent=String(e);await loadAutomationStatus();throw e;}}
-async function scanV2(btn){btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/scan-static',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:250})});log(j);await loadV2();}catch(e){log(String(e));}finally{btn.disabled=false;}}
 async function retryV2(btn){return startClientTranslation(btn);}
 
 
@@ -199,10 +198,31 @@ function gmPendingFileDownload(content,mime,name){
  const blob=new Blob([content],{type:mime});const url=URL.createObjectURL(blob),a=document.createElement('a');
  a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
 }
+
+// One-operation password dialog; the server continues to verify derzon's hash.
+function gmUiAskAdminPassword(purpose){
+ return new Promise(resolve=>{
+  const cover=document.createElement('div');cover.style.cssText='position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,.57);display:flex;align-items:center;justify-content:center;padding:16px';
+  const form=document.createElement('form');form.style.cssText='max-width:430px;width:100%;box-sizing:border-box;border-radius:12px;background:white;color:#222;padding:22px';
+  const title=document.createElement('h3');title.textContent=purpose+' · 관리자 비밀번호';
+  const label=document.createElement('div');label.textContent='승인 계정: derzon';label.style.marginBottom='10px';
+  const input=document.createElement('input');input.type='password';input.autocomplete='off';input.autocapitalize='off';input.spellcheck=false;input.setAttribute('lang','en');input.style.cssText='display:block;width:100%;box-sizing:border-box;padding:12px;border:1px solid #999;border-radius:5px';
+  const hint=document.createElement('div');hint.style.cssText='font-size:12px;color:#555;margin-top:6px';hint.textContent='입력 대기';
+  input.addEventListener('input',()=>{let v=input.value;hint.textContent=!v?'입력 대기':(/[\u3131-\u318e\uac00-\ud7a3]/.test(v)?'한글 포함 입력됨 · 한/영 확인':'입력됨 · '+v.length+'자 (한글 문자 없음)');});
+  const show=document.createElement('label');show.style.cssText='display:block;margin:10px 0';const cb=document.createElement('input');cb.type='checkbox';cb.onchange=()=>{input.type=cb.checked?'text':'password';input.focus();};show.append(cb,document.createTextNode(' 비밀번호 표시'));
+  const ok=document.createElement('button');ok.type='submit';ok.textContent='비밀번호 인증 후 실행';
+  const cancel=document.createElement('button');cancel.type='button';cancel.textContent='취소';cancel.className='gray';cancel.style.marginLeft='8px';
+  function finish(v){input.value='';cover.remove();resolve(v);}
+  form.addEventListener('submit',e=>{e.preventDefault();finish(input.value||null);});cancel.addEventListener('click',()=>finish(null));
+  form.append(title,label,input,hint,show,ok,cancel);cover.append(form);document.body.append(cover);input.focus();
+ });
+}
+
+function gmPendingStatus(text){const el=document.getElementById('gmPendingOperationStatus');if(el)el.textContent=text;}
 async function gmPendingExport(btn,format){
  btn.disabled=true;
  try{
-  const password=prompt('후보 전체 다운로드: derzon 관리자 비밀번호를 입력하세요.');if(!password)return;
+  const password=await gmUiAskAdminPassword('후보 전체 다운로드');if(!password)return;
   const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/export',{cache:'no-store',credentials:'same-origin',headers:{'x-gm-builder-admin-password':password}});
   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
   const date=new Date().toISOString().slice(0,19).replace(/[:-]/g,'');
@@ -211,34 +231,34 @@ async function gmPendingExport(btn,format){
    const cell=v=>{let text=String(v==null?'':v);if(/^[\s]*[=+@-]/.test(text))text="'"+text;return '"'+text.replace(/"/g,'""')+'"';};
    const content='\ufeff'+[fields.map(x=>cell(x[1])).join(','),...(j.items||[]).map(x=>fields.map(f=>cell(x[f[0]])).join(','))].join('\r\n');
    gmPendingFileDownload(content,'text/csv;charset=utf-8','GM_UI_PENDING_REVIEW_'+date+'.csv');
-   log({action:'PENDING_REVIEW_CSV',count:j.snapshot.count});
+   gmPendingStatus('후보 CSV 생성 완료 · '+j.snapshot.count+'건 · 브라우저 다운로드 요청됨');log({action:'PENDING_REVIEW_CSV',count:j.snapshot.count});
   }else{
    gmPendingFileDownload(JSON.stringify(j,null,2),'application/json;charset=utf-8','GM_UI_PENDING_BACKUP_'+date+'.json');
    gmPendingLastBackup={count:j.snapshot.count,sha256:j.snapshot.sha256};
-   log({action:'PENDING_BACKUP_JSON',count:j.snapshot.count,sha256:j.snapshot.sha256});
+   gmPendingStatus('후보 JSON 백업 생성 완료 · '+j.snapshot.count+'건 · 다운로드 요청됨');log({action:'PENDING_BACKUP_JSON',count:j.snapshot.count,sha256:j.snapshot.sha256});
   }
- }catch(e){log('후보 다운로드 실패: '+String(e));}finally{btn.disabled=false;}
+ }catch(e){gmPendingStatus('후보 다운로드 실패 · '+String(e));log('후보 다운로드 실패: '+String(e));}finally{btn.disabled=false;}
 }
 async function gmPendingDeleteSelected(btn){
  const selected=ids();if(!selected.length)return alert('삭제할 후보를 먼저 체크하세요.');
  if(!confirm('체크한 대기 후보 '+selected.length+'건을 삭제할까요?\n정식 UI 사전과 번역 JSON에는 영향이 없습니다.'))return;
- const password=prompt('선택삭제: derzon 관리자 비밀번호를 입력하세요.');if(!password)return;
+ const password=await gmUiAskAdminPassword('선택삭제');if(!password)return;
  btn.disabled=true;
  try{
   const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/delete-selected',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({pending_ids:selected})});
   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
-  gmPendingLastBackup=null;log({action:'PENDING_DELETE_SELECTED',...j});await loadAll();
- }catch(e){log('선택삭제 실패: '+String(e));}finally{btn.disabled=false;}
+  gmPendingLastBackup=null;gmPendingStatus('선택삭제 서버 처리 완료 · 실제 결과 '+JSON.stringify(j));log({action:'PENDING_DELETE_SELECTED',...j});await loadAll();
+ }catch(e){gmPendingStatus('선택삭제 실패 · '+String(e));log('선택삭제 실패: '+String(e));}finally{btn.disabled=false;}
 }
 async function gmPendingDeleteAll(btn){
  if(!gmPendingLastBackup)return alert('전체삭제 전에 위의 [전체 JSON 백업]을 먼저 다운로드하세요.');
  if(!confirm('대기 후보 '+gmPendingLastBackup.count+'건을 모두 삭제합니다.\n정식 UI 사전은 삭제하지 않습니다.\n백업 JSON 파일을 보관했습니까?'))return;
- if(prompt('최종 확인: 전체삭제를 실행하려면 전체삭제 라고 입력하세요.')!=='전체삭제')return;
- const password=prompt('전체삭제: derzon 관리자 비밀번호를 입력하세요.');if(!password)return;
+ 
+ const password=await gmUiAskAdminPassword('전체삭제');if(!password)return;
  btn.disabled=true;
  try{
   const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-clean/delete-all',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({snapshot:gmPendingLastBackup})});
   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
-  gmPendingLastBackup=null;log({action:'PENDING_DELETE_ALL',...j});await loadAll();
- }catch(e){log('전체삭제 실패: '+String(e)+' (백업 이후 신규 수집이 있었다면 백업을 다시 받으세요)');}finally{btn.disabled=false;}
+  gmPendingLastBackup=null;gmPendingStatus('전체삭제 서버 처리 완료 · 실제 결과 '+JSON.stringify(j));log({action:'PENDING_DELETE_ALL',...j});await loadAll();
+ }catch(e){gmPendingStatus('전체삭제 실패 · '+String(e));log('전체삭제 실패: '+String(e)+' (백업 이후 신규 수집이 있었다면 백업을 다시 받으세요)');}finally{btn.disabled=false;}
 }
