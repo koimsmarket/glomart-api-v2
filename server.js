@@ -1814,6 +1814,8 @@ app.use(require('./auto-order/routes/auto_order_orders'));
 app.use(require('./auto-order/routes/auto_order_account'));
 app.use(require('./auto-order/routes/auto_order_client_runtime'));
 
+// GM_ORDER_MAP_ROUTE_V004: restore existing Kakao/Google map config and coord-to-address API.
+app.use(require('./routes/address_map'));
 app.use(require('./routes/health'));
 app.use(require('./routes/search_keyword'));
 app.use(require('./routes/search_local'));
