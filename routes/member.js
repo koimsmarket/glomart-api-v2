@@ -1038,4 +1038,75 @@ router.post('/api/gm/member/auth/change-password',async(req,res)=>{
   finally{if(client)client.release();}
 });
 
+// GM_CAFE24_ADDRESS_SYNC_V015_BEGIN — authenticated Cafe24-origin mirror only.
+router.post('/api/gm/member/address/cafe24/reconcile-v015',async(req,res)=>{
+  const pool=db(req),body=req.body||{},memberId=pick(body,['member_id']);
+  if(!pool)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
+  const verified=require('./gm_member_access_guard').validate(req);
+  if(!verified||!memberId||verified!==memberId)return res.status(401).json({ok:false,error:'MEMBER_ACCESS_DENIED'});
+  const action=s(body.action),full=body.full===true;
+  if(!['add','update','delete','merge','reconcile'].includes(action)||full!==(action==='reconcile'))return res.status(400).json({ok:false,error:'INVALID_SYNC_ACTION'});
+  const raw=body.addresses;
+  if(!Array.isArray(raw)||raw.length<1||raw.length>50)return res.status(400).json({ok:false,error:'INVALID_ADDRESS_COUNT'});
+  const items=[];const keys=new Set();
+  for(const v of raw){
+    const key=s(v&&v.ma_idx);
+    if(!/^\d{1,20}$/.test(key)||keys.has(key))return res.status(400).json({ok:false,error:'INVALID_CAFE24_KEY'});
+    keys.add(key);
+    if(action==='delete') {items.push({ma_idx:key});continue}
+    const a=addressPayload(Object.assign({},v,{address_id:''}),memberId);
+    a.cafe24_ma_idx=key;
+    if(!a.receiver_name||!a.zipcode||!a.address1||(!a.receiver_mobile&&!a.receiver_phone))return res.status(400).json({ok:false,error:'INCOMPLETE_ADDRESS'});
+    a.is_default=yn(v.is_default);
+    items.push(a);
+  }
+  if(full && items.filter(a=>a.is_default==='Y').length!==1)return res.status(400).json({ok:false,error:'DEFAULT_NOT_VERIFIED'});
+  const client=await pool.connect().catch(()=>null);
+  if(!client)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
+  try{
+    await client.query('BEGIN');
+    // Key column already added by migration 138; never auto-run migration in production.
+    const current=await client.query('SELECT * FROM gm_member_address WHERE member_id=$1 FOR UPDATE',[memberId]);
+    const rows=current.rows,used=new Set(),updated=[],inserted=[],deleted=[];
+    const norm=x=>s(x).replace(/\s+/g,' ').toLowerCase();
+    const same=(row,a)=>norm(row.receiver_name)===norm(a.receiver_name)&&norm(row.zipcode)===norm(a.zipcode)&&norm(row.address1)===norm(a.address1)&&norm(row.address2)===norm(a.address2)&&norm(row.receiver_mobile||row.receiver_phone)===norm(a.receiver_mobile||a.receiver_phone);
+    if(action==='delete'){
+      for(const a of items){const found=rows.find(r=>s(r.cafe24_ma_idx)===a.ma_idx);
+        if(!found)continue;
+        await client.query('DELETE FROM gm_member_address WHERE member_id=$1 AND address_id=$2',[memberId,found.address_id]);deleted.push(found.address_id);
+      }
+    }else{
+      // Unset existing default only when Cafe24 returned a complete authoritative snapshot.
+      if(items.some(a=>a.is_default==='Y'))await client.query("UPDATE gm_member_address SET is_default='N' WHERE member_id=$1 AND is_default='Y'",[memberId]);
+      for(const a of items){
+        let found=rows.find(r=>s(r.cafe24_ma_idx)===a.cafe24_ma_idx&&!used.has(r.address_id));
+        // One-time backfill: only attach a Cafe24 key to exactly one identical unkeyed row.
+        if(!found){const matches=rows.filter(r=>!s(r.cafe24_ma_idx)&&!used.has(r.address_id)&&same(r,a));if(matches.length===1)found=matches[0]}
+        const fields=[a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_full,a.is_default,a.cafe24_ma_idx,memberId];
+        if(found){
+          await client.query(`UPDATE gm_member_address SET address_name=$1,receiver_name=$2,receiver_phone=$3,receiver_mobile=$4,zipcode=$5,address1=$6,address2=$7,address_full=$8,is_default=$9,cafe24_ma_idx=$10,updated_at=NOW() WHERE member_id=$11 AND address_id=$12`,[...fields,found.address_id]);
+          used.add(found.address_id);updated.push(found.address_id);
+        }else{
+          // Generate independent Glomart ID; never use ma_idx as address_id.
+          const newId=id('GMA_');
+          await client.query(`INSERT INTO gm_member_address(address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_full,is_default,cafe24_ma_idx,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())`,
+            [newId,memberId,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_full,a.is_default,a.cafe24_ma_idx]);
+          used.add(newId);inserted.push(newId);
+        }
+      }
+      if(full){
+        // Extra rows are removed only after a verified complete, nonempty Cafe24 list.
+        for(const row of rows){if(used.has(row.address_id))continue;
+          await client.query('DELETE FROM gm_member_address WHERE member_id=$1 AND address_id=$2',[memberId,row.address_id]);deleted.push(row.address_id);
+        }
+      }
+    }
+    await client.query('COMMIT');
+    res.set('Cache-Control','no-store');res.json({ok:true,updated_count:updated.length,added_count:inserted.length,deleted_count:deleted.length});
+  }catch(e){await client.query('ROLLBACK').catch(()=>{});console.error('[GM_CAFE24_ADDRESS_SYNC_V015]',e.code||'',e.message||'');res.status(500).json({ok:false,error:'CAFE24_SYNC_FAILED'})}
+  finally{client.release()}
+});
+// GM_CAFE24_ADDRESS_SYNC_V015_END
+
+
 module.exports=router;
