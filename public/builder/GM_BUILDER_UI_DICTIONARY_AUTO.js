@@ -84,7 +84,7 @@ const GM_CLIENT_LANG_TARGET={tw:'zh-TW'};
 const GM_CLIENT_LANGS=['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const GM_CLIENT_QUEUE_KEY='gm_ui_auto_v037_pending_cells';
 const GM_CLIENT_UPLOAD_BATCH=10;
-let gmClientRunning=false,gmClientStop=false,gmClientAutoTimer=null,gmClientBlocked=false,gmClientNextAttemptAt=0;
+let gmClientRunning=false,gmClientStop=false,gmClientAutoTimer=null,gmClientNextAttemptAt=0;
 let gmClientSuccess=0,gmClientFailed=0,gmClientSaved=0;
 const gmClientSleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function gmClientStatus(message){const el=document.getElementById('clientTranslationStatus');if(el)el.textContent=message;}
@@ -121,16 +121,20 @@ async function gmClientTranslate(kr,lang){
  if((kr.match(/%[dsm]/g)||[]).join('|')!==(value.match(/%[dsm]/g)||[]).join('|'))throw Error('PLACEHOLDER_MISMATCH');
  return value;
 }
+// V043: automatically retry translation after transient server/session failures.
+// Existing server-side derzon authorization remains the only upload permission.
+// No per-cell password prompt or permanent client-side authentication block.
+async function gmClientAutoFetch(url,options){
+  const r=await fetch(url,{...options,credentials:'same-origin',cache:'no-store'});
+  if(r.status===401||r.status===403)throw Error('GM_UI_AUTO_SESSION_UNAVAILABLE_HTTP_'+r.status);
+  let j;try{j=await r.json();}catch(_){throw Error('GM_UI_AUTO_NON_JSON_HTTP_'+r.status);}
+  if(!r.ok||!j.ok)throw Error(String(j.error||'HTTP_'+r.status)+': '+String(j.detail||r.status));
+  return j;
+}
 async function gmClientUpload(items){
- // V038: this UI-dictionary-only upload is authenticated by the existing
- // server-side derzon ADMIN SESSION GATE; no password is read, cached or prompted.
- // Other Builder data uploads continue to require per-operation reauthentication.
- const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-upload',{
-  method:'POST',headers:{'Content-Type':'application/json'},
-  credentials:'same-origin',cache:'no-store',body:JSON.stringify({items})});
- let j;try{j=await r.json();}catch(_){throw Error('UPLOAD_NON_JSON_HTTP_'+r.status);}
- if(!r.ok||!j.ok)throw Error(String(j.error||'HTTP_'+r.status)+': '+String(j.detail||r.status));
- return j;
+  // Only the derzon Builder's existing valid server session can write.
+  return gmClientAutoFetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-upload',{
+   method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})});
 }
 async function gmClientFlush(){
  const a=gmClientQueueRead();if(!a.length)return true;
@@ -146,14 +150,14 @@ async function gmClientFlush(){
  return true;
 }
 async function startClientTranslation(btn){
- if(gmClientRunning||gmClientBlocked)return;
+ if(gmClientRunning)return;
  gmClientRunning=true;gmClientStop=false;if(btn)btn.disabled=true;
  try{
   gmClientStatus('누락 번역 자동 조회 · 기기 번역 실행');
   // First upload any translations persisted before navigation/refresh.
   while(gmClientQueueRead().length&&!gmClientStop)await gmClientFlush();
   for(let round=0;round<200&&!gmClientStop;round++){
-   const data=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-missing?limit=20&t='+Date.now());
+   const data=await gmClientAutoFetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-missing?limit=20&t='+Date.now());
    if(!data.items||!data.items.length){gmClientStatus('누락 셀 0건 · JSON 발행 상태 확인');break;}
    let produced=0,translationError=null;
    for(const row of data.items){
@@ -185,24 +189,27 @@ async function startClientTranslation(btn){
  }catch(e){
   const message=String(e&&e.message||e);
   gmClientStatus('자동 처리 보류: '+message+' · 보관 '+gmClientQueueRead().length+'셀');
-  if(/ADMIN_LOGIN_REQUIRED|ADMIN_SESSION_REQUIRED|ORIGIN_REJECTED|UPLOAD_NON_JSON_HTTP_401/.test(message))gmClientBlocked=true;
-  console.warn('[GM_UI_CLIENT_AUTO_PAUSED_V037]',message);
+   // Failed uploads stay in localStorage until the server confirms DB commit.
+   // A server restart must never permanently disable the background job.
+   const authUnavailable=/GM_UI_AUTO_SESSION_UNAVAILABLE_HTTP_|ADMIN_LOGIN_REQUIRED|ADMIN_SESSION_REQUIRED|ORIGIN_REJECTED/.test(message);
+   console.warn('[GM_UI_CLIENT_AUTO_PAUSED_V043]',JSON.stringify({reason:authUnavailable?'SESSION_RECHECK':'RETRYABLE_FAILURE',pending:gmClientQueueRead().length,error:message}));
+   gmClientSchedule(authUnavailable?30000:60000);
  }finally{gmClientRunning=false;if(btn)btn.disabled=false;}
 }
 function gmClientSchedule(delay){
  gmClientNextAttemptAt=Date.now()+delay;
  if(gmClientAutoTimer)clearTimeout(gmClientAutoTimer);
- gmClientAutoTimer=setTimeout(()=>{gmClientAutoTimer=null;if(!document.hidden&&navigator.onLine&&!gmClientBlocked)void startClientTranslation();},delay);
+ gmClientAutoTimer=setTimeout(()=>{gmClientAutoTimer=null;if(!document.hidden&&navigator.onLine)void startClientTranslation();},delay);
 }
 function gmClientAutoBoot(){
  gmClientStatus('자동 실행 준비 · 관리자 클라이언트가 열리면 번역을 시작합니다.');
  gmClientSchedule(1500);
- document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!gmClientRunning&&!gmClientBlocked&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);});
- window.addEventListener('online',()=>{if(!gmClientRunning&&!gmClientBlocked&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!gmClientRunning&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);});
+ window.addEventListener('online',()=>{if(!gmClientRunning&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);});
  // New dictionary rows are discovered server-side; query periodically only while open.
- setInterval(()=>{if(!document.hidden&&!gmClientRunning&&!gmClientBlocked&&!gmClientAutoTimer&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);},60000);
+ setInterval(()=>{if(!document.hidden&&!gmClientRunning&&!gmClientAutoTimer&&Date.now()>=gmClientNextAttemptAt)gmClientSchedule(1500);},60000);
 }
-function gmClientResume(btn){gmClientBlocked=false;void startClientTranslation(btn);}
+function gmClientResume(btn){void startClientTranslation(btn);}
 gmClientAutoBoot();
 
 // GM_UI_PENDING_CLEAN_V003: read-only backup, human-readable CSV, explicit DELETE actions.
