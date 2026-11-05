@@ -132,6 +132,51 @@ function categoryMeta(){return readJson(path.join(CATEGORY_ROOT,'meta.json'),{ba
 function packFiles(kind,token){const root=path.join(CATEGORY_ROOT,kind,token);return LANGS.map(lang=>path.join(root,lang+'.json'));}
 function verifyPack(kind,token,expectedCount){const files=packFiles(kind,token),missing=[],bad=[];for(const f of files){if(!fs.existsSync(f)){missing.push(path.basename(f));continue;}const j=readJson(f,null);if(!j||!Array.isArray(j.items)||n(j.count,-1)!==n(expectedCount,-2))bad.push(path.basename(f));}return {ok:missing.length===0&&bad.length===0,total:LANGS.length,ready:LANGS.length-missing.length-bad.length,missing,bad};}
 function categoryFileState(){const meta=categoryMeta(),base=s(meta.base_started_at),updated=s(meta.last_updated_at),baseCheck=base?verifyPack('base',base,n(readJson(path.join(CATEGORY_ROOT,'base',base,'kr.json'),{}).count,0)):{ok:false,total:LANGS.length,ready:0,missing:LANGS.map(x=>x+'.json'),bad:[]};let deltaCheck={ok:true,total:0,ready:0,missing:[],bad:[]};if(base&&updated&&updated!==base){const kr=readJson(path.join(CATEGORY_ROOT,'delta',updated,'kr.json'),{});deltaCheck=verifyPack('delta',updated,n(kr.count,0));}return {base_started_at:base,last_updated_at:updated,base_files:baseCheck,delta_files:deltaCheck};}
+// GM_MANUAL_ASSET_VERSION_V001: prepare 25 private JSONs, never touch published metadata.
+const crypto=require('crypto');
+function draftFile(kind){return path.join(PRIVATE_ROOT,'manual_'+kind+'_draft.json');}
+async function categoryDraft(db,kind){
+ const rows=await categoryRows(db);
+ const srcHash=crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+ const snap=kind==='delta'?readJson(BASE_SNAPSHOT_FILE,null):null;
+ if(kind==='delta'&&(!snap||!snap.rows)){const e=new Error('CATEGORY_BASE_NOT_READY');e.code='BASE_NOT_READY';throw e;}
+ const baseToken=kind==='delta'?s(snap.base_started_at):'';
+ const changes=[];
+ if(kind==='delta'){
+   const curMap=new Map(rows.map(r=>[s(r.gm_code).toUpperCase(),r]));
+   for(const r of rows){const code=s(r.gm_code).toUpperCase(),old=snap.rows[code];if(!old||old.sig!==signature(r))changes.push({op:'upsert',row:r});}
+   for(const code of Object.keys(snap.rows))if(!curMap.has(code))changes.push({op:'delete',gm_code:code});
+ }
+ const count=kind==='base'?rows.length:changes.length;
+ const draftToken='prepared_'+srcHash.slice(0,24);
+ const dir=path.join(CATEGORY_ROOT,'_prepared',kind,draftToken);
+ for(const lang of LANGS){
+   const items=kind==='base'?rows.map(r=>localized(r,lang)):changes.map(x=>x.op==='delete'?{op:'delete',gm_code:x.gm_code}:{op:'upsert',item:localized(x.row,lang)});
+   writeJson(path.join(dir,lang+'.json'),{type:kind,prepared:true,lang,count,items,base_started_at:baseToken});
+ }
+ const files=LANGS.map(lang=>readJson(path.join(dir,lang+'.json'),null));
+ if(!files.every(p=>p&&p.count===count&&p.items.length===count)){const e=new Error('CATEGORY_PREPARED_VERIFY_FAILED');e.code='PACK_VERIFY';throw e;}
+ const draft={kind,hash:srcHash,base_started_at:baseToken,token:draftToken,count,ready:LANGS.length};
+ writeJson(draftFile(kind),draft);
+ console.log('[GM_CATEGORY_DRAFT_READY]',JSON.stringify({kind,count,languages:LANGS.length,public_version_unchanged:true}));
+ return {kind,state:'PREPARED',count,files_ready:LANGS.length,version_unchanged:true};
+}
+async function assertCategoryDraft(db,kind){
+ const d=readJson(draftFile(kind),null);
+ if(!d||d.kind!==kind){const e=new Error('CATEGORY_JSON_PREPARE_REQUIRED');e.code='PREPARE_REQUIRED';throw e;}
+ const rows=await categoryRows(db);
+ const hash=crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+ if(d.hash!==hash){const e=new Error('CATEGORY_SOURCE_CHANGED_REPREPARE_REQUIRED');e.code='PREPARE_REQUIRED';throw e;}
+ if(kind==='delta'){
+   const snap=readJson(BASE_SNAPSHOT_FILE,null);
+   if(!snap||d.base_started_at!==s(snap.base_started_at)){const e=new Error('CATEGORY_BASE_CHANGED_REPREPARE_REQUIRED');e.code='PREPARE_REQUIRED';throw e;}
+ }
+ const dir=path.join(CATEGORY_ROOT,'_prepared',kind,d.token);
+ if(!LANGS.every(lang=>{const p=readJson(path.join(dir,lang+'.json'),null);return p&&p.lang===lang&&p.count===d.count&&Array.isArray(p.items)&&p.items.length===d.count;})){
+   const e=new Error('CATEGORY_PREPARED_FILES_MISSING');e.code='PREPARE_REQUIRED';throw e;
+ }
+ return d;
+}
 async function publishBase(db,version){
   const rows=await categoryRows(db),legacyV=n(version),tm=kstParts(),baseToken=tm.token;
   const targetDir=path.join(CATEGORY_ROOT,'base',baseToken);
@@ -182,6 +227,8 @@ async function publishDelta(db,version){
 }
 async function publishUi(db,version){const q=await db.query(`SELECT gm_code AS dict_key, kr AS source_text, kr AS source_value FROM gm_ui_dictionary ORDER BY gm_code`);const items=(q.rows||[]).map(x=>({dict_key:s(x.dict_key),source_text:s(x.source_text),value:s(x.source_value)})),v=n(version);writeJson(path.join(UI_ROOT,'ko','v'+v+'.json'),{type:'ui_dictionary',lang:'ko',version:v,count:items.length,items});writeJson(path.join(UI_ROOT,'meta.json'),{version:v,updated_at:new Date().toISOString(),lang:'ko',count:items.length});await setConfig(db,'ui_dictionary_published',v);return {kind:'ui_dictionary',version:v,count:items.length};}
 async function runPending(db,force=false){
+  return {state:'MANUAL_VERSION_ONLY'};
+  /* Legacy automatic pipeline disabled. Explicit Builder version approval uses publishBase/publishDelta.
   if(!force)return {state:'WAITING_FOR_ADMIN_RELEASE'};
   const c=await config(db),mode=s(c.asset_pack_background_mode||'AUTO').toUpperCase();if(!force){if(mode==='OFF')return {state:'OFF'};if(mode==='AUTO'&&!inWindow(kstParts().hhmm,c.asset_pack_auto_start||'00:00',c.asset_pack_auto_end||'08:00'))return {state:'AUTO_TIME_WAIT'};}
   const results=[],bt=n(c.category_pack_base_target,1),bp=n(c.category_pack_base_published,0),ut=n(c.ui_dictionary_target,1),up=n(c.ui_dictionary_published,0);let baseMade=false;
@@ -195,6 +242,7 @@ async function runPending(db,force=false){
     if(dr&&dr.state==='NO_CHANGES'&&dt>dp)await setConfig(db,'category_pack_delta_published',dt);
   }
   if(ut>up)results.push(await publishUi(db,ut));return {state:results.length?'PUBLISHED':'NO_PENDING',results};
+  */
 }
 async function pump(){if(!poolRef||pumping||rehydrating)return;pumping=true;lastState.running=true;try{const r=await runPending(poolRef,false);lastState.state=r.state;lastState.last_result=r;lastState.last_error='';lastState.last_run_at=new Date().toISOString();}catch(e){lastState.state='ERROR';lastState.last_error=String(e&&e.stack||e);}finally{lastState.running=false;pumping=false;}}
 function ensureStarted(pool){
@@ -214,4 +262,4 @@ function ensureStarted(pool){
   return startupPromise;
 }
 function status(){return Object.assign({},lastState);}
-module.exports={LANGS,ensureDefaults,versionState,pendingRows,pendingCount,config,status,ensureStarted,rehydratePublishedPack,runPending,publishBase,publishDelta,publishUi,categoryMeta,categoryFileState,verifyPack,paths:{CATEGORY_ROOT,UI_ROOT}};
+module.exports={LANGS,ensureDefaults,versionState,pendingRows,pendingCount,config,status,ensureStarted,rehydratePublishedPack,runPending,categoryDraft,assertCategoryDraft,publishBase,publishDelta,publishUi,categoryMeta,categoryFileState,verifyPack,paths:{CATEGORY_ROOT,UI_ROOT}};

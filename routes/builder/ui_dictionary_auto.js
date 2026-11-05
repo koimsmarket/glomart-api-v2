@@ -436,7 +436,7 @@ router.get('/api/gm/builder/ui-dictionary-auto/v2/automation-status',(req,res)=>
 });
 
 let uiManualTranslationRunning=false;
-// GM_UI_AUTO_V030: Explicit manual JSON publish; translation button never publishes.
+// GM_UI_MANUAL_VERSION_V001: JSON button prepares privately; only admin version approval publishes.
 // Existing server-level builder admin gate protects this POST route.
 router.post('/api/gm/builder/ui-dictionary-auto/v2/publish-json',express.json({limit:'16kb'}),async(req,res)=>{
   const db=dbFrom(req);
@@ -445,13 +445,26 @@ router.post('/api/gm/builder/ui-dictionary-auto/v2/publish-json',express.json({l
     const state=svc.autoStatus();
     if(state.running||state.scheduled)return res.status(409).json({ok:false,error:'AUTO_TRANSLATION_RUNNING'});
     if(!uiV2.isIdle()||uiManualTranslationRunning)return res.status(409).json({ok:false,error:'TRANSLATION_RUNNING'});
-    const result=await svc.publishCompleted(db);
+    const result=await svc.prepareDraft(db);
+    if(!result.ready)return res.status(409).json({ok:false,error:'UI_JSON_PREPARE_FAILED'});
+    res.set('Cache-Control','no-store').json({ok:true,...result,public_version_unchanged:true});
+  }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+});
+
+router.post('/api/gm/builder/ui-dictionary-auto/v2/version-next',express.json({limit:'16kb'}),async(req,res)=>{
+  const db=dbFrom(req);
+  try{
+    const svc=require('../../services/multilingual/ui/ui_dictionary_auto_publish');
+    const state=svc.autoStatus();
+    if(state.running||state.scheduled||!uiV2.isIdle()||uiManualTranslationRunning)
+      return res.status(409).json({ok:false,error:'TRANSLATION_RUNNING'});
+    const result=await svc.publishPreparedByAdmin(db);
     if(!result.ok)return res.status(409).json(result);
     res.set('Cache-Control','no-store').json(result);
   }catch(e){res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
-router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations',express.json({limit:'64kb'}),async(req,res)=>{
+router.post('/api/gm/builder/ui-dictionary-auto/v2/retry-translations' ,express.json({limit:'64kb'}),async(req,res)=>{
   // V036: legacy server-side GTX translation is deliberately disabled.
   return res.status(409).json({ok:false,error:'CLIENT_TRANSLATION_REQUIRED'});
   const db=dbFrom(req);

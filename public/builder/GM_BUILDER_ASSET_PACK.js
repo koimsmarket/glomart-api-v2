@@ -42,27 +42,27 @@ async function saveAssetPackSchedule(){
   const r=await fetch(`${API}/api/gm/builder/asset-pack/schedule`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),j=await assetPackReadJson(r);if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}await loadAssetPack();
 }
 async function nextAssetPackVersion(kind){
-  const label={base:'카테고리 기준본',delta:'카테고리 누적본',ui:'UI 사전'}[kind]||kind;if(!confirm(`${label} 요청 버전을 +1 할까요?\nAUTO 모드에서는 야간 작업시간에 생성됩니다.`))return;
+  const label={base:'카테고리 기준본',delta:'카테고리 누적본',ui:'UI 사전'}[kind]||kind;if(!confirm(`${label}의 준비된 JSON을 새 공개 버전으로 승인할까요?\n기존 단말에서 새 버전을 다운로드할 수 있습니다.`))return;
   const r=await fetch(`${API}/api/gm/builder/asset-pack/version/${kind}/next`,{method:'POST'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}await loadAssetPack();
 }
 async function generateCategoryBaseNow(){
-  if(!confirm('현재 gm_category 전체로 원본(BASE) 25개국 JSON을 새로 생성할까요?\n성공한 시각이 새 원본 버전(YYYYMMDD_HHMM)이 되며 기존 클라이언트는 BASE를 다시 받습니다.'))return;
+  if(!confirm('카테고리 원본(BASE) 25개 언어 JSON을 비공개로 준비할까요?\n버전은 변경되지 않으며 관리자 승인으로만 새 버전이 배포됩니다.'))return;
   const b=document.getElementById('assetPackBaseGenerateBtn');if(b)b.disabled=true;
   try{
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/base/generate`,{method:'POST'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.base.generate',result:j.result});
-    alert(`원본 25개국 JSON 생성 완료\n버전: ${j.result.base_started_at}\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
+    alert(`원본 25개 언어 JSON 준비 완료\n공개 버전: 변경 없음\n카테고리: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }
 async function generateCategoryDeltaNow(){
-  if(!confirm('현재 원본(BASE) 이후의 추가/변경분으로 추가본(DELTA) 25개국 JSON을 생성할까요?\n변경이 없으면 버전 시간은 바뀌지 않습니다.'))return;
+  if(!confirm('카테고리 추가본(DELTA) 25개 언어 JSON을 비공개로 준비할까요?\n공개 버전은 변경되지 않습니다.'))return;
   const b=document.getElementById('assetPackDeltaGenerateBtn');if(b)b.disabled=true;
   try{
     const r=await fetch(`${API}/api/gm/builder/asset-pack/category/delta/generate`,{method:'POST'}),j=await assetPackReadJson(r);if(!r.ok||!j.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);
     log({action:'category-pack.delta.generate',result:j.result});
     if(j.result&&j.result.state==='NO_CHANGES')alert('원본 이후 추가/변경 카테고리가 없습니다.\n최종 업데이트 시간은 변경하지 않았습니다.');
-    else alert(`추가본 25개국 JSON 생성 완료\n버전: ${j.result.last_updated_at}\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
+    else alert(`추가본 25개 언어 JSON 준비 완료\n공개 버전: 변경 없음\n누적 변경: ${j.result.count}건\n파일: ${j.result.files_ready}/25`);
     await loadAssetPack();
   }catch(e){alert(String(e&&e.message||e));}finally{if(b)b.disabled=false;}
 }

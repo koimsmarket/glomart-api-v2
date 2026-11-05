@@ -275,4 +275,11 @@ async function runAutomation(){
 }
 function startManualTranslation(){return false;}
 function endManualTranslation(){}
-module.exports={queue,current,getPack,rehydrate,publishCompleted:publish,LANGS,ROOT,scheduleAutomation,autoStatus,startManualTranslation,endManualTranslation};
+async function publishPreparedByAdmin(db){
+ const meta=(()=>{try{return JSON.parse(fs.readFileSync(path.join(ROOT,'_prepared','meta.json'),'utf8'));}catch(_){return null;}})();
+ if(!meta||!meta.ready)return {ok:false,error:'UI_JSON_PREPARE_REQUIRED'};
+ const rows=await snapshot(db);
+ if(fingerprint(rows)!==meta.hash)return {ok:false,error:'UI_JSON_SOURCE_CHANGED_REPREPARE_REQUIRED'};
+ return publish(db);
+}
+module.exports={queue,current,getPack,rehydrate,prepareDraft,publishPreparedByAdmin,LANGS,ROOT,scheduleAutomation,autoStatus,startManualTranslation,endManualTranslation};

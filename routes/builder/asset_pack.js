@@ -20,6 +20,7 @@ function packError(res,e,label){
   const code=e&&e.code;
   const detail=String(e&&e.stack||e&&e.message||e);
   console.error('[GM_CATEGORY_PACK_GENERATE_FAIL]',JSON.stringify({label,code:code||'',detail}));
+  if(code==='PREPARE_REQUIRED')return fail(res,409,'먼저 JSON 제작을 실행한 후 관리자 버전 갱신을 실행하세요.',{detail});
   if(code==='SAME_MINUTE')return fail(res,409,'같은 분 안에서는 같은 종류의 카테고리 JSON을 두 번 생성할 수 없습니다.',{detail});
   if(code==='BASE_NOT_READY')return fail(res,409,'원본(BASE) 25개국 JSON을 먼저 생성해야 합니다.',{detail});
   if(code==='PACK_VERIFY')return fail(res,500,label+' 25개국 파일 검증에 실패했습니다.',{detail});
@@ -41,29 +42,29 @@ router.post('/api/gm/builder/asset-pack/schedule',async(req,res)=>{
   }catch(e){const detail=String(e&&e.stack||e);console.error('[GM_ASSET_PACK_BUILDER_ERROR] schedule',detail);fail(res,500,'schedule save failed',{detail});}
 });
 router.post('/api/gm/builder/asset-pack/version/:kind/next',async(req,res)=>{
-  const db=dbFrom(req),kind=String(req.params.kind||'');const map={base:'category_pack_base_target',delta:'category_pack_delta_target',ui:'ui_dictionary_target'};const key=map[kind];if(!key)return fail(res,400,'invalid kind');
-  try{await mgr.ensureDefaults(db);const r=await db.query(`UPDATE gm_runtime_config SET config_value=(COALESCE(NULLIF(config_value,''),'0')::bigint+1)::text,updated_at=now() WHERE config_key=$1 RETURNING config_value`,[key]);ok(res,{kind,target:Number(r.rows[0].config_value),state:await state(db)});}catch(e){const detail=String(e&&e.stack||e);console.error('[GM_ASSET_PACK_BUILDER_ERROR] version',detail);fail(res,500,'version update failed',{detail});}
+  const db=dbFrom(req),kind=String(req.params.kind||'');
+  if(!['base','delta','ui'].includes(kind))return fail(res,400,'invalid kind');
+  try{
+    await mgr.ensureDefaults(db);
+    if(kind==='ui')return fail(res,409,'UI 사전 버전은 UI 사전 빌더의 별도 관리자 승인 버튼으로만 갱신합니다.');
+    await mgr.assertCategoryDraft(db,kind);
+    const target='category_pack_'+kind+'_target',published='category_pack_'+kind+'_published';
+    const version=await nextInternal(db,target,published);
+    const result=kind==='base'?await mgr.publishBase(db,version):await mgr.publishDelta(db,version);
+    if(result&&result.state!=='NO_CHANGES')await saveTarget(db,target,version);
+    ok(res,{kind,result,state:await state(db)});
+  }catch(e){packError(res,e,'관리자 버전 갱신');}
 });
 
 async function generateBase(req,res){
   const db=dbFrom(req);
-  try{
-    await mgr.ensureDefaults(db);
-    const version=await nextInternal(db,'category_pack_base_target','category_pack_base_published');
-    const result=await mgr.publishBase(db,version);
-    await saveTarget(db,'category_pack_base_target',version);
-    ok(res,{result,state:await state(db)});
-  }catch(e){packError(res,e,'원본(BASE)');}
+  try{const result=await mgr.categoryDraft(db,'base');ok(res,{result,state:await state(db)});}
+  catch(e){packError(res,e,'원본(BASE) JSON 준비');}
 }
 async function generateDelta(req,res){
   const db=dbFrom(req);
-  try{
-    await mgr.ensureDefaults(db);
-    const version=await nextInternal(db,'category_pack_delta_target','category_pack_delta_published');
-    const result=await mgr.publishDelta(db,version);
-    if(result&&result.state!=='NO_CHANGES')await saveTarget(db,'category_pack_delta_target',version);
-    ok(res,{result,state:await state(db)});
-  }catch(e){packError(res,e,'추가본(DELTA)');}
+  try{const result=await mgr.categoryDraft(db,'delta');ok(res,{result,state:await state(db)});}
+  catch(e){packError(res,e,'추가본(DELTA) JSON 준비');}
 }
 
 // Builder의 명시적 카테고리 JSON 생성 기능.
@@ -75,6 +76,6 @@ router.post('/api/gm/builder/asset-pack/base/new-now',generateBase);
 // AUTO/기존 UI 사전 배포용 호환 엔드포인트. 카테고리 전용 버튼에서는 사용하지 않는다.
 router.post('/api/gm/builder/asset-pack/publish-now',async(req,res)=>{
   const db=dbFrom(req);
-  try{mgr.ensureStarted(db);const result=await mgr.runPending(db,true);ok(res,{result,state:await state(db)});}catch(e){packError(res,e,'대기 배포');}
+  try{ok(res,{result:{state:'MANUAL_VERSION_ONLY'},state:await state(db)});}catch(e){packError(res,e,'대기 배포');}
 });
 module.exports=router;

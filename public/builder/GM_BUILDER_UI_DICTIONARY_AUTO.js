@@ -53,15 +53,28 @@ async function retryV2(btn){return startClientTranslation(btn);}
 
 // GM_UI_AUTO_V030: manual translation updates DB only; JSON publish is an explicit separate action.
 async function publishJsonV2(btn){
- if(!confirm('현재 DB 번역값으로 25개 언어 JSON 사전을 제작·발행할까요?\n미완성 번역은 기존 정책에 따라 한국어 대체값으로 처리됩니다.'))return;
+ if(!confirm('현재 DB 번역값으로 25개 언어 JSON을 준비할까요?\n공개 버전은 변경되지 않습니다. 관리자 버전 갱신은 별도 실행합니다.'))return;
  btn.disabled=true;
  try{
   const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/publish-json',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-  log({action:'JSON_PUBLISH',...j});await loadAutomationStatus();
+  log({action:'JSON_PREPARED_VERSION_UNCHANGED',...j});alert('25개 언어 JSON 준비 완료. 공개 버전은 변경하지 않았습니다.');await loadAutomationStatus();
  }catch(e){log('JSON 제작 실패: '+String(e));}
  finally{btn.disabled=false;}
 }
 
+async function manualUiVersionNext(){
+ if(!confirm('관리자 승인: 준비된 UI 사전의 새 버전을 발행할까요?\n이 작업 후 단말에서 새 사전을 다운로드합니다.'))return;
+ try{
+  const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/version-next',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  log({action:'MANUAL_UI_VERSION_RELEASE',...j});alert('UI 사전 버전 처리 완료: '+(j.version||'-'));await loadAutomationStatus();
+ }catch(e){log('UI 버전 갱신 실패: '+String(e));alert(String(e));}
+}
+function addManualUiVersionButton(){
+ const old=document.querySelector('[onclick*="publishJsonV2"]');if(!old||document.getElementById('gmUiManualVersionNext'))return;
+ const b=document.createElement('button');b.type='button';b.id='gmUiManualVersionNext';b.textContent='UI 사전 버전 갱신 (관리자)';b.onclick=manualUiVersionNext;
+ old.insertAdjacentElement('afterend',b);
+}
+document.addEventListener('DOMContentLoaded',addManualUiVersionButton);
 async function loadAutomationStatus(){try{const r=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/automation-status?t='+Date.now());const a=r.automation||{};const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 '+(a.state||'IDLE')+' · 원인 '+(a.reason||'-')+' · 미완성 '+(a.remaining==null?'-':a.remaining)+' · 버전 '+(a.version||'-')+(a.error?' · 오류 '+a.error:'')+(a.remaining_cells==null?'':' · 남은 번역 셀 '+a.remaining_cells)+(a.retry_at?' · 재개 예정 '+a.retry_at:'')+(a.verified_languages?' · JSON 검증 '+a.verified_languages+'개 언어':'')+(a.upstream&&a.upstream.rate_limited?' · 번역 API 제한 ('+(a.upstream.last_http||'?')+')':'');}catch(e){const el=document.getElementById('autoRunStatus');if(el)el.textContent='자동화 상태 확인 실패: '+String(e);}}
 loadAll();loadV2();
 
