@@ -46,7 +46,7 @@ async function jfetch(u,o,retried){
  const ct=String(r.headers.get('content-type')||'');
  if(!ct.includes('json'))throw new Error('JSON 응답이 아닙니다 (HTTP '+r.status+').');
  const j=await r.json();if(!r.ok||j.ok===false)throw new Error(j.error||('HTTP '+r.status));return j;
-}async function loadAll(){try{const [s,p]=await Promise.all([jfetch(API+'/api/gm/builder/ui-dictionary-auto/status?t='+Date.now()),jfetch(API+'/api/gm/builder/ui-dictionary-auto/pending?t='+Date.now())]);document.getElementById('status').textContent='사전 '+s.dictionary.total+'건 · 활성 '+s.dictionary.active+' · 재번역 '+s.dictionary.recheck+' · pending '+(p.items||[]).length+'건';document.getElementById('rows').innerHTML=(p.items||[]).map(x=>'<tr><td><input type="checkbox" class="pchk" value="'+x.pending_id+'"></td><td><b>'+esc(x.change_type)+'</b><br><span class="small">'+esc(x.source_type)+'</span></td><td>'+esc(x.gm_code||'(자동발급)')+'</td><td>'+esc(x.previous_text_ko||'')+'</td><td>'+esc(x.source_text_ko||'')+'</td><td>'+esc(x.page_name||'')+'</td><td><span class="small">'+esc(x.source_locator||x.source_file||'')+'</span></td><td>'+esc(x.seen_count||0)+'</td><td>'+esc(x.last_seen_at||'')+'</td></tr>').join('')||'<tr><td colspan="9">pending 없음</td></tr>';log({status:s,pending_count:(p.items||[]).length});}catch(e){log(String(e));}}function ids(){return Array.from(document.querySelectorAll('.pchk:checked')).map(x=>Number(x.value));}function selectAll(v){document.querySelectorAll('.pchk').forEach(x=>x.checked=v);}async function approveSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');if(!confirm('선택 '+a.length+'건을 UI 사전에 반영할까요?'))return;btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}async function ignoreSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}
+}async function loadAll(){try{const [s,p]=await Promise.all([jfetch(API+'/api/gm/builder/ui-dictionary-auto/status?t='+Date.now()),jfetch(API+'/api/gm/builder/ui-dictionary-auto/pending?t='+Date.now())]);document.getElementById('status').textContent='사전 '+s.dictionary.total+'건 · 활성 '+s.dictionary.active+' · 재번역 '+s.dictionary.recheck+' · pending '+(p.items||[]).length+'건';document.getElementById('rows').innerHTML=(p.items||[]).map(x=>'<tr><td><input type="checkbox" class="pchk" value="'+x.pending_id+'"></td><td><b>'+esc(x.change_type)+'</b><br><span class="small">'+esc(x.source_type)+'</span></td><td>'+esc(x.gm_code||'(자동발급)')+'</td><td>'+esc(x.previous_text_ko||'')+'</td><td>'+esc(x.source_text_ko||'')+'</td><td>'+esc(x.page_name||'')+'</td><td><span class="small">'+esc(x.source_locator||x.source_file||'')+'</span></td><td>'+esc(x.seen_count||0)+'</td><td>'+esc(x.last_seen_at||'')+'</td></tr>').join('')||'<tr><td colspan="9">pending 없음</td></tr>';log({status:s,pending_count:(p.items||[]).length});}catch(e){log(String(e));}}function ids(){return Array.from(document.querySelectorAll('.pchk:checked')).map(x=>Number(x.value));}function selectAll(v){document.querySelectorAll('.pchk').forEach(x=>x.checked=v);}async function approveSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');if(!confirm('선택 '+a.length+'건을 UI 사전에 반영할까요?'))return;const password=await gmUiAskAdminPassword('Pending 선택 승인');if(!password)return;btn.disabled=true;try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/approve',{method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({pending_ids:a})});gmPendingStatus('선택 승인 '+Number(j.applied||0)+'건 · 정식 UI 사전 반영');log(j);await loadAll();}catch(e){gmPendingStatus('선택 승인 실패: '+String(e));log(String(e));}finally{btn.disabled=false;}}async function ignoreSelected(btn){const a=ids();if(!a.length)return alert('선택하세요.');btn.disabled=true;try{log(await jfetch(API+'/api/gm/builder/ui-dictionary-auto/ignore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pending_ids:a})}));await loadAll();}catch(e){log(String(e));}finally{btn.disabled=false;}}
 async function loadV2(){try{const j=await jfetch(API+'/api/gm/builder/ui-dictionary-auto/v2/status?t='+Date.now());const d=j.dictionary||{};document.getElementById('v2status').textContent='사전 '+(d.total||0)+'건 · 변수문구 '+(d.variable||0)+' · 사용 '+(d.use_count||0)+' · 번역미완성 '+(d.translation_pending||0);document.getElementById('v2rows').innerHTML=(j.recent||[]).map(x=>'<tr><td>'+esc(x.gm_code)+'</td><td>'+esc(x.kr)+'</td><td>'+esc(x.has_variable||'N')+'</td><td>'+esc(x.translation_status)+'</td><td>'+esc(x.use_count||0)+'</td><td>'+esc(x.last_used_at||'')+'</td><td>'+esc(x.updated_at||'')+'</td></tr>').join('')||'<tr><td colspan="7">V2 기록 없음</td></tr>';await loadAutomationStatus();return j;}catch(e){document.getElementById('v2status').textContent=String(e);await loadAutomationStatus();throw e;}}
 async function retryV2(btn){return startClientTranslation(btn);}
 
@@ -251,6 +251,25 @@ async function gmPendingExport(btn,format){
    gmPendingStatus('후보 JSON 백업 생성 완료 · '+j.snapshot.count+'건 · 다운로드 요청됨');log({action:'PENDING_BACKUP_JSON',count:j.snapshot.count,sha256:j.snapshot.sha256});
   }
  }catch(e){gmPendingStatus('후보 다운로드 실패 · '+String(e));log('후보 다운로드 실패: '+String(e));}finally{btn.disabled=false;}
+}
+// GM_PENDING_PROMOTE_V001: single-action promotion; server does authoritative validation.
+async function promotePendingOnce(btn){
+ if(!confirm('서버에서 Pending 후보를 재조회하여 정상 NEW/CHANGED 문구만 정식 UI 사전에 등록합니다.\\n오류·중복·REMOVED는 건너뜁니다. 계속할까요?'))return;
+ const password=await gmUiAskAdminPassword('Pending → UI 사전 일괄 등록');
+ if(!password)return;
+ btn.disabled=true;gmPendingStatus('Pending 검증 및 정식 UI 사전 등록 중...');
+ try{
+  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/approve',{
+    method:'POST',credentials:'same-origin',cache:'no-store',
+    headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},
+    body:JSON.stringify({auto_only:true})
+  });
+  const j=await r.json();
+  if(!r.ok||!j.ok)throw Error((j.error||'HTTP '+r.status)+(j.detail?' · '+j.detail:''));
+  const msg='정식 사전 등록 '+Number(j.applied||0)+'건 · 제외 '+Number(j.skipped_count||0)+'건 · Pending 남은 건수는 아래 상태를 새로고침해 확인';
+  gmPendingStatus(msg);log({action:'PENDING_PROMOTE',...j});await loadAll();await loadV2();
+ }catch(e){gmPendingStatus('정식 사전 등록 실패 · '+String(e));log('PENDING_PROMOTE_FAILED: '+String(e));}
+ finally{btn.disabled=false;}
 }
 async function gmPendingDeleteSelected(btn){
  const selected=ids();if(!selected.length)return alert('삭제할 후보를 먼저 체크하세요.');

@@ -303,15 +303,31 @@ async function nextCode(db){
 
 router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1mb'}),async(req,res)=>{
   const db=dbFrom(req);
-  const ids=(Array.isArray(req.body&&req.body.pending_ids)?req.body.pending_ids:[]).map(Number).filter(Number.isFinite);
-  if(!ids.length)return res.status(400).json({ok:false,error:'pending_ids required'});
+  const autoOnly=req.body&&req.body.auto_only===true;
+  const ids=(Array.isArray(req.body&&req.body.pending_ids)?req.body.pending_ids:[]).map(Number).filter(Number.isSafeInteger);
+  if(!autoOnly&&!ids.length)return res.status(400).json({ok:false,error:'pending_ids required'});
   const client=await db.connect();
   try{
     await client.query('BEGIN');
-    const out=[];
-    for(const id of ids){
+    // Bulk action reads the entire PENDING table, not the page's LIMIT 1000 list.
+    const out=[],skipped=[];
+    const pendingIds=autoOnly?(await client.query(`SELECT pending_id FROM gm_ui_dictionary_pending WHERE status='PENDING' ORDER BY pending_id FOR UPDATE`)).rows.map(x=>Number(x.pending_id)):ids;
+    const known=autoOnly?(await client.query(`SELECT gm_code,kr FROM gm_ui_dictionary WHERE active_yn='Y'`)).rows:[];
+    const knownKeys=new Set(known.map(x=>gmPendingMatchKey(x.kr)).filter(Boolean));
+    for(const id of pendingIds){
       const pr=(await client.query(`SELECT * FROM gm_ui_dictionary_pending WHERE pending_id=$1 AND status='PENDING' FOR UPDATE`,[id])).rows[0];
       if(!pr)continue;
+      if(autoOnly){
+        const text=gmPendingCanonicalText(pr.source_text_ko);
+        const key=gmPendingMatchKey(text);
+        const reason=(pr.change_type!=='NEW'&&pr.change_type!=='CHANGED')?'NOT_NEW_OR_CHANGED':
+          !text||!hasKo(text)?'NOT_KOREAN_UI':
+          gmUiStaticCapturePausedPath(pr.source_file||pr.page_name||'')?'BUILDER_OR_AUTO_ORDER_SOURCE':
+          gmPendingDynamicReason(pr,pr.source_text_ko)?'DYNAMIC_DATA':
+          pr.change_type==='NEW'&&knownKeys.has(key)?'ALREADY_IN_DICTIONARY':'';
+        if(reason){skipped.push({pending_id:id,reason});continue;}
+        if(pr.change_type==='NEW')knownKeys.add(key);
+      }
       let code=s(pr.gm_code).toUpperCase();
       if(pr.change_type==='NEW'){
         if(!/^GM_\d{4,}$/.test(code)||(await client.query(`SELECT 1 FROM gm_ui_dictionary WHERE gm_code=$1`,[code])).rowCount)code=await nextCode(client);
@@ -355,7 +371,7 @@ router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1m
     if(out.some(x=>x.change_type==='NEW'||x.change_type==='CHANGED')){
       require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'BUILDER_APPROVAL');
     }
-    res.json({ok:true,applied:out.length,items:out});
+    res.json({ok:true,mode:autoOnly?'AUTO_VERIFIED':'SELECTED',applied:out.length,skipped_count:skipped.length,skipped:skipped.slice(0,200),items:out});
   }catch(e){
     await client.query('ROLLBACK').catch(()=>{});
     res.status(500).json({ok:false,error:String(e&&e.message||e)});
