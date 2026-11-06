@@ -66,6 +66,10 @@ const API = location.origin;
 const tables = {
   products:'상품 gm_product',
   product_options:'상품 옵션 gm_product_option',
+  'readonly:gm_product_translation':'상품 번역 gm_product_translation',
+  'readonly:gm_option_translation':'옵션 번역 gm_option_translation',
+  'readonly:gm_product_translation_queue':'상품 번역 대기열 gm_product_translation_queue',
+  'readonly:gm_option_translation_queue':'옵션 번역 대기열 gm_option_translation_queue',
   product_image_vector:'상품 이미지 Vector gm_product_image_vector',
   image_vector_pending:'이미지 Vector 미수행 gm_image_vector_pending',
   cart:'장바구니 gm_basket',
@@ -160,7 +164,7 @@ async function loadBuilderTableSpecs(){
 const builderTableGroups = [
   {key:'CATEGORY',label:'카테고리',items:['category','category_dynamic','category_keyword']},
   {key:'LANGUAGE',label:'UI / 언어',items:['ui_dictionary','keyword_translate','keyword_relation']},
-  {key:'PRODUCT',label:'상품',items:['products','product_options','product_archive','product_image_vector','image_vector_pending','supplier','product_interest','product_upsert_queue']},
+  {key:'PRODUCT',label:'상품',items:['products','product_options','readonly:gm_product_translation','readonly:gm_option_translation','readonly:gm_product_translation_queue','readonly:gm_option_translation_queue','product_archive','product_image_vector','image_vector_pending','supplier','product_interest','product_upsert_queue']},
   {key:'ORDER',label:'주문 / 회원 / CS',items:['cart','orders','order_items','member','member_address','member_ledger','member_payment_info','member_device','member_relation_count','guest_member_link','cs','cs_messages','order_message']},
   {key:'STATS',label:'검색 / 판매 / 통계',items:['search_keyword_stat','category_search_stat','category_search_monthly','category_search_yearly','product_sales_monthly','product_sales_yearly','product_country_sales_monthly','product_country_sales_yearly','category_sales_monthly','category_sales_yearly','category_country_sales_monthly','category_country_sales_yearly','search_log','sales_aggregate_event','dashboard_snapshot']},
   {key:'MESSAGE',label:'메시지 / 네트워크',items:['network_incentive_rate','network_payment_snapshot','message_policy','message_personal','message_broadcast','message_broadcast_receive','message_share','message_share_receiver','message_counter_daily','message_broadcast_job','event_queue']},
