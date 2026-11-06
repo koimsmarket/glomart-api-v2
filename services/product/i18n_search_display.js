@@ -11,6 +11,13 @@ function langOf(v){let l=norm(v).toLowerCase().split(/[-_]/)[0];if(l==='cn')l='z
 function origin(t){return /[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(t)?'ko':/^[\x20-\x7e]+$/.test(t)?'en':null;}
 async function attach(pool,rows,items,langInput){
  const lang=langOf(langInput);
+ for(let i=0;i<items.length;i++){
+  const original=norm(rows[i]&&rows[i].product_name);
+  const sourceLang=origin(original);
+  items[i].original_lang=sourceLang;
+  items[i].server_lang=sourceLang;
+  items[i].search_lang=lang||null;
+ }
  // Do not infer a fallback language when the client did not send its language.
  if(!lang){for(let i=0;i<items.length;i++){
    items[i].original_product_name=norm(rows[i].product_name);
@@ -53,6 +60,7 @@ async function attach(pool,rows,items,langInput){
   const translated=norm(tracked.translated_name);
   if(translated&&!pending.includes(lang)){
    items[i].translated_name=translated;
+   items[i].server_lang=lang;
    items[i].productName=translated;items[i].title=translated;
    items[i].i18n_reason='SERVER_TRANSLATION';
   }else{

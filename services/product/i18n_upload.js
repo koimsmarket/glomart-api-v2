@@ -48,18 +48,26 @@ async function save(pool,input){
   const isDone=row.translation_status==='Y';
   let changed=0,skipped=0;
   for(const e of entries){
-   if(isDone&&!pending.has(e.lang)){skipped++;continue;}
-   // A recorded valid translation is immutable unless explicitly marked for review.
-   if(!pending.has(e.lang)&&norm(row[e.lang])){skipped++;continue;}
-   // A pending language with existing text is a review task; never downgrade ON to OFF.
-   if(row.translation_status!=='U'&&norm(row[e.lang])&&oldSource[e.lang]==='ON'&&e.source==='OFF'){skipped++;continue;}
+   const oldEngine=String(oldSource[e.lang]||'').toUpperCase();
+   const existing=norm(row[e.lang]);
+   // OFF is provisional for this same source_hash; a later ON may upgrade it.
+   const upgrade=(e.source==='ON'&&oldEngine==='OFF');
+   // Never replace a valid ON with OFF, including review/U status.
+   if(e.source==='OFF'&&existing&&oldEngine==='ON'){skipped++;continue;}
+   if(isDone&&!pending.has(e.lang)&&!upgrade){skipped++;continue;}
+   // An unchanged approved ON remains immutable unless marked pending for review.
+   if(!pending.has(e.lang)&&existing&&!upgrade){skipped++;continue;}
    // A new source version's previous translations are stale even if the column has content.
    await client.query(`UPDATE public.${t.table} SET "${e.lang}"=$3,translation_source=jsonb_set(COALESCE(translation_source,'{}'::jsonb),$4::text[],to_jsonb($5::text),true) WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,e.text,[e.lang],e.source]);
-   row[e.lang]=e.text;oldSource[e.lang]=e.source;pending.delete(e.lang);changed++;
+   row[e.lang]=e.text;oldSource[e.lang]=e.source;
+   // OFF stays pending until an ON translation is saved for the same source hash.
+   if(e.source==='OFF')pending.add(e.lang);else pending.delete(e.lang);
+   changed++;
   }
-  // Only current-source valid translations count; pending languages remain excluded even if old text exists.
-  // Ensure all 25 languages are filled and no pending work remains before status Y.
-  const complete=LANGS.every(l=>!!norm(row[l]))&&pending.size===0;
+  // Provisional OFF translations can be displayed but never complete an ON backfill.
+  // Source language is the original; every other language must have ON to be final.
+  for(const l of LANGS){if(l!==sourceLang&&oldSource[l]==='OFF')pending.add(l);}
+  const complete=LANGS.every(l=>l===sourceLang||(!!norm(row[l])&&oldSource[l]==='ON'))&&pending.size===0;
   const state=complete?'Y':(row.translation_status==='U'?'U':'N');
   await client.query(`UPDATE public.${t.table} SET translation_status=$3 WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,state]);
   await client.query(`UPDATE public.${t.queue} SET pending_langs=$3::jsonb,status=$4,completed_at=CASE WHEN $4='COMPLETED' THEN now() ELSE NULL END,owner_token=NULL,lease_until=NULL,updated_at=now() WHERE mall_code=$1 AND ${t.key}=$2 AND source_hash=$5`,[mall,actual,JSON.stringify([...pending]),complete?'COMPLETED':'PENDING',suppliedHash]);
