@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const VERSION = 'GM_SEARCH_LOCAL_V011_INACTIVE_STATE';
+const gmI18nSearchDisplay=require('../services/product/i18n_search_display');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):d; }
@@ -172,6 +173,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
         deliveryEtaText:x.delivery_eta_text,deliveryType:x.delivery_type,reviewCount:x.review_count,mall_sales_count:x.mall_sales_count,rating:x.product_grade,
         product_url:x.product_url||'',image:x.thumb_origin_url||'',thumb_origin_url:x.thumb_origin_url||'',__gm_server_local:1,__gm_category_code_search:1
       }));
+      await gmI18nSearchDisplay.attach(pool,rows,items,req.query.gm_lang||req.query.lang||req.query.device_lang);
       const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
       const endedAt=Date.now();
       console.log('[GM_SEARCH_LOAD] keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' count='+items.length);
@@ -206,6 +208,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
       product_url:x.product_url||'',image:x.thumb_origin_url||'',thumb_origin_url:x.thumb_origin_url||'',
       __gm_server_local:1
     }));
+    await gmI18nSearchDisplay.attach(pool,rows,items,req.query.gm_lang||req.query.lang||req.query.device_lang);
     const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
     const endedAt=Date.now();
     console.log('[GM_SEARCH_LOAD] keyword='+keyword+' count='+items.length);
