@@ -1123,4 +1123,24 @@ router.post('/api/gm/member/address/cafe24/reconcile-v015',async(req,res)=>{
 
 
 
+
+// GM_CAFE24_ADDRESS_TEST_V031_BEGIN
+// Temporary authenticated mirror for the Cafe24 personal address test panel.
+// The regular address/list API remains unchanged for existing clients.
+router.get('/api/gm/member/address/cafe24/test-list-v031', async (req,res)=>{
+  res.set('Cache-Control','no-store');
+  const memberId=s(req.query&&req.query.member_id);
+  const verified=require('./gm_member_access_guard').validate(req);
+  if(!memberId||!verified||verified!==memberId)return res.status(401).json({ok:false,error:'MEMBER_ACCESS_DENIED'});
+  const pool=db(req);
+  if(!pool)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
+  try{
+    const result=await pool.query(`SELECT address_id,cafe24_ma_idx,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,is_default
+      FROM gm_member_address WHERE member_id=$1
+      ORDER BY is_default DESC,updated_at DESC,created_at DESC`,[verified]);
+    return res.json({ok:true,items:result.rows});
+  }catch(e){console.error('[GM_CAFE24_ADDRESS_TEST_V031]',e.code||'',e.message||'');return res.status(500).json({ok:false,error:'ADDRESS_TEST_READ_FAILED'});}
+});
+// GM_CAFE24_ADDRESS_TEST_V031_END
+
 module.exports=router;
