@@ -31,9 +31,20 @@ async function current(dbh,x){
 }
 // V012: server-authoritative read-only translation work plan for BOTH products and options.
 // Source identity and version are checked before the client receives translation work.
-function requiredLanguages(row,sourceLang,pending){
- const outstanding=new Set(pending);
- return LANGS.filter(l=>l!==sourceLang && (!row||!norm(row[l])||outstanding.has(l)));
+function translationSources(row){
+ const raw=row&&row.translation_source;
+ if(raw&&typeof raw==='object'&&!Array.isArray(raw))return raw;
+ if(typeof raw==='string'){
+  try{const v=JSON.parse(raw);if(v&&typeof v==='object'&&!Array.isArray(v))return v;}catch(_e){}
+ }
+ return {};
+}
+function requiredLanguages(row,sourceLang,pending,status){
+ const outstanding=new Set(pending),sources=translationSources(row);
+ // U is a source-version refresh: every target language needs a new ON result.
+ if(status==='U')return LANGS.filter(l=>l!==sourceLang);
+ return LANGS.filter(l=>l!==sourceLang &&
+  (!row||!norm(row[l])||outstanding.has(l)||String(sources[l]||'').toUpperCase()==='OFF'));
 }
 function parsePending(value){
  if(Array.isArray(value))return value;
@@ -68,19 +79,22 @@ async function planOne(pool,x){
   return {group:'blocked',item:{type:x.type,code:x.code,reason:'SOURCE_TEXT_MISMATCH'}};
  const status=String(row.translation_status||'N').trim();
  if(!['Y','N','U'].includes(status))return {group:'blocked',item:{type:x.type,code:x.code,reason:'INVALID_STATUS'}};
- // Y means no work only when the version is current and all languages are complete.
+ // A Y row with provisional OFF is NOT final. Report the inconsistency while
+ // returning work for ON backfill; never silently declare a provisional result complete.
+ const sources=translationSources(row);
  if(status==='Y'&&pending.length===0){
   const missing=LANGS.filter(l=>!norm(row[l]));
-  if(missing.length)return {group:'blocked',item:{type:x.type,code:x.code,reason:'INCONSISTENT_COMPLETED_ROW'}};
-  return {group:'skipped',item:{type:x.type,code:x.code,reason:'Y_COMPLETE'}};
+  if(missing.length)return {group:'blocked',item:{type:x.type,mall_code:x.mall_code,code:x.code,reason:'INCONSISTENT_COMPLETED_ROW'}};
+  const provisional=LANGS.filter(l=>l!==sourceLang&&String(sources[l]||'').toUpperCase()==='OFF');
+  if(!provisional.length)return {group:'skipped',item:{type:x.type,mall_code:x.mall_code,code:x.code,reason:'Y_COMPLETE'}};
  }
- const languages=requiredLanguages(row,sourceLang,pending);
+ const languages=requiredLanguages(row,sourceLang,pending,status);
  if(!languages.length)return {group:'skipped',item:{type:x.type,code:x.code,reason:'NO_MISSING_LANGUAGE'}};
  // code is the ORIGINAL client-side identifier; translation_code is only for DB bookkeeping.
  return {group:'tasks',item:{type:x.type,mall_code:x.mall_code,code:x.code,
   translation_code:translationCode,source_text:src.text,source_hash:sourceHash,
   source_lang:sourceLang,languages,translation_status:status,
-  reason:status==='U'?'SOURCE_UPDATED_OR_RECHECK':'MISSING_OR_REVIEW'}};
+  reason:status==='U'?'SOURCE_UPDATED_OR_RECHECK':'MISSING_OFF_OR_REVIEW'}};
 }
 router.post('/api/gm/product/i18n/plan',async(req,res)=>{
  res.set('Cache-Control','no-store');
@@ -88,8 +102,11 @@ router.post('/api/gm/product/i18n/plan',async(req,res)=>{
  if(!pool)return fail(res,503,'DB_UNAVAILABLE');
  if(!Array.isArray(items)||items.length<1||items.length>100||items.some(x=>!validItem(x)))return fail(res,400,'INVALID_ITEMS');
  try{
-  const tasks=[],skipped=[],blocked=[];
+  const tasks=[],skipped=[],blocked=[],seen=new Set();
   for(const x of items){
+   const identity=[x.type,x.mall_code,x.code].join('\u0000');
+   if(seen.has(identity))continue;
+   seen.add(identity);
    const result=await planOne(pool,x);
    if(result.group==='tasks')tasks.push(result.item);
    else if(result.group==='skipped')skipped.push(result.item);
