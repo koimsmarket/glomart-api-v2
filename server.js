@@ -1824,6 +1824,8 @@ app.use(require('./routes/category_menu'));
 // GM_API_404_V001: member-bound deposit read routes; auth enforced inside routes/deposit.js.
 app.use(require('./routes/deposit'));
 console.log('[GM_SEARCH_ROUTE_RECOVERY_V001] search_keyword/search_local/category_pack registered');
+// GM_PRODUCT_I18N_V003: route mount only; logic isolated in new modules.
+app.use(require('./routes/GM_PRODUCT_I18N'));
 app.use(require('./routes/product'));
 app.use(require('./routes/basket'));
 app.use(require('./routes/interest'));

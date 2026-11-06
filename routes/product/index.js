@@ -95,4 +95,6 @@ router.post('/api/gm/product/event', async (req,res)=>{
 router.use(require('./detail_fast'));
 router.use(require('./queue'));
 console.log('[GM_PRODUCT_SPLIT_V004] routes/product/index registered (detail_fast + queue)');
+// GM_PRODUCT_I18N_RUNTIME_V006 - read-only planner, no data writes.
+router.use(require('./i18n_runtime'));
 module.exports=router;
