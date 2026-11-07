@@ -142,4 +142,52 @@ router.post('/api/gm/product/i18n/upload',async(req,res)=>{
   return fail(res,error==='STALE_SOURCE'||error==='UNTRACKED_OR_STALE_VERSION'?409:error==='UPLOAD_FAILED'?500:400,error);
  }
 });
+// V049: one authenticated HTTP request carrying several distinct product/option
+// translations. Existing i18n_upload.save remains the only source/version/ON
+// validation and writes each entity in its own proven DB transaction.
+// Partial failure is explicit, never silently acknowledged as a total success.
+router.post('/api/gm/product/i18n/upload-batch',async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ const memberAuth=require('../gm_member_access_guard');
+ if(!memberAuth.enabled())return fail(res,503,'MEMBER_AUTH_NOT_CONFIGURED');
+ const memberId=memberAuth.validate(req);
+ if(!memberId)return fail(res,401,'MEMBER_LOGIN_REQUIRED');
+ const submitted=req.body&&(req.body.member_id||req.body.memberId);
+ if(submitted!==undefined&&String(submitted)!==memberId)return fail(res,403,'MEMBER_ACCESS_DENIED');
+ const items=req.body&&req.body.items;
+ if(!Array.isArray(items)||items.length<1||items.length>20||items.some(x=>!validItem(x)))return fail(res,400,'INVALID_ITEMS');
+ const pool=db(req);if(!pool)return fail(res,503,'DB_UNAVAILABLE');
+ const seen=new Set();
+ for(const x of items){
+  if(!Array.isArray(x.translations)||x.translations.length<1||x.translations.length>25)return fail(res,400,'INVALID_TRANSLATIONS');
+  const key=[x.type,x.mall_code,x.code].join('\u0000');
+  if(seen.has(key))return fail(res,400,'DUPLICATE_ENTITY');
+  seen.add(key);
+ }
+ const save=require('../../services/product/i18n_upload').save;
+ const results=[];
+ for(let i=0;i<items.length;i++){
+  const x=items[i];
+  try{
+   // An existing validated transaction per entity; no global transaction and no
+   // claim of all-or-nothing success across unrelated products.
+   const result=await save(pool,x);
+   results.push({index:i,ok:true,type:x.type,mall_code:x.mall_code,code:x.code,
+    source_hash:x.source_hash,translation_status:result.translation_status,
+    remaining_languages:result.remaining_languages||[],changed:result.changed,skipped:result.skipped});
+  }catch(e){
+   const known=['INVALID_ITEM','INVALID_TRANSLATIONS','INVALID_SOURCE_HASH','INVALID_TRANSLATION_ENTRY',
+    'SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE',
+    'PID_VID_COLLISION','STALE_SOURCE','UNTRACKED_OR_STALE_VERSION',
+    'TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
+   const error=known.includes(e.code)?e.code:'UPLOAD_FAILED';
+   if(error==='UPLOAD_FAILED')console.error('[GM_PRODUCT_I18N_BATCH_ITEM]',i,e.code||e.message);
+   results.push({index:i,ok:false,type:x.type,mall_code:x.mall_code,code:x.code,
+    source_hash:x.source_hash,error});
+  }
+ }
+ const saved=results.filter(x=>x.ok).length;
+ return res.json({ok:true,mode:'per_entity_transactions',received:items.length,saved,
+  failed:items.length-saved,results});
+});
 module.exports=router;
