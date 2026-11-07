@@ -1126,8 +1126,17 @@ router.post('/api/gm/member/address/cafe24/reconcile-v015',async(req,res)=>{
         if(!found)found=rows.find(r=>!s(r.cafe24_ma_idx)&&!used.has(s(r.address_id))&&signature(r)===signature(a));
         const fields=[a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.cafe24_ma_idx,memberId];
         if(found){
-          await client.query(`UPDATE gm_member_address SET address_name=$1,receiver_name=$2,receiver_phone=$3,receiver_mobile=$4,zipcode=$5,address1=$6,address2=$7,address_old=$8,address_full=$9,sido=$10,sigungu=$11,eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,cafe24_ma_idx=$15,updated_at=NOW() WHERE member_id=$16 AND address_id=$17`,[...fields,found.address_id]);
-          used.add(s(found.address_id));(exact?updated:linked).push(found.address_id);
+          // Preserve the row and updated_at when nothing actually changed.
+          // This makes repeat page visits idempotent (updated_count=0).
+          const compareFields=['address_name','receiver_name','receiver_phone','receiver_mobile',
+            'zipcode','address1','address2','address_old','address_full','sido','sigungu',
+            'eup_myeon_dong','customs_clearance_code','delivery_memo','cafe24_ma_idx'];
+          const changed=compareFields.some(k=>s(found[k])!==s(a[k]));
+          if(changed){
+            await client.query(`UPDATE gm_member_address SET address_name=$1,receiver_name=$2,receiver_phone=$3,receiver_mobile=$4,zipcode=$5,address1=$6,address2=$7,address_old=$8,address_full=$9,sido=$10,sigungu=$11,eup_myeon_dong=$12,customs_clearance_code=$13,delivery_memo=$14,cafe24_ma_idx=$15,updated_at=NOW() WHERE member_id=$16 AND address_id=$17`,[...fields,found.address_id]);
+            (exact?updated:linked).push(found.address_id);
+          }
+          used.add(s(found.address_id));
         }else{
           const newId=id('GMA_');
           await client.query(`INSERT INTO gm_member_address (address_id,member_id,address_name,receiver_name,receiver_phone,receiver_mobile,zipcode,address1,address2,address_old,address_full,sido,sigungu,eup_myeon_dong,customs_clearance_code,delivery_memo,is_default,cafe24_ma_idx,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'N',$17,NOW(),NOW())`,[newId,memberId,a.address_name,a.receiver_name,a.receiver_phone,a.receiver_mobile,a.zipcode,a.address1,a.address2,a.address_old,a.address_full,a.sido,a.sigungu,a.eup_myeon_dong,a.customs_clearance_code,a.delivery_memo,a.cafe24_ma_idx]);
@@ -1143,7 +1152,7 @@ router.post('/api/gm/member/address/cafe24/reconcile-v015',async(req,res)=>{
       }
       const defaults=items.filter(a=>a.is_default==='Y');
       if(defaults.length===1){
-        await client.query("UPDATE gm_member_address SET is_default=CASE WHEN cafe24_ma_idx=$2 THEN 'Y' ELSE 'N' END,updated_at=NOW() WHERE member_id=$1",[memberId,defaults[0].cafe24_ma_idx]);
+        await client.query("UPDATE gm_member_address SET is_default=CASE WHEN cafe24_ma_idx=$2 THEN 'Y' ELSE 'N' END,updated_at=NOW() WHERE member_id=$1 AND is_default IS DISTINCT FROM CASE WHEN cafe24_ma_idx=$2 THEN 'Y' ELSE 'N' END",[memberId,defaults[0].cafe24_ma_idx]);
       }
     }
     await client.query('COMMIT');
