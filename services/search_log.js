@@ -311,6 +311,9 @@ module.exports = function installSearchLogService(deps){
     SEARCH_DETAIL: handleSearchDetail
   });
 
+  // GM_SEARCH_LOG_V001: keep existing server.js GET endpoints unchanged when mounted in server.js.
+  if (deps.logRoutesOnly === true) return;
+
   // GM_SEARCH_V053: lightweight search-result upsert policy.
   // This endpoint is intentionally separate from /api/gm/search/local so product search latency
   // never waits on this check. It reads at most 3 indexed rows for the normalized keyword.
