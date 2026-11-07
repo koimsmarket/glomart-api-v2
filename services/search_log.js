@@ -311,43 +311,87 @@ module.exports = function installSearchLogService(deps){
     SEARCH_DETAIL: handleSearchDetail
   });
 
-  // GM_SEARCH_LOG_V001: keep existing server.js GET endpoints unchanged when mounted in server.js.
-  if (deps.logRoutesOnly === true) return;
-
-  // GM_SEARCH_V053: lightweight search-result upsert policy.
-  // This endpoint is intentionally separate from /api/gm/search/local so product search latency
-  // never waits on this check. It reads at most 3 indexed rows for the normalized keyword.
+  // GM_SEARCH_LOG_V002: preserve exact V001 server.js GET handlers and response payloads.
   app.get('/api/gm/search/upsert-policy', async (req,res)=>{
     try{
-      const normalized=normalizeKeywordForStat(cleanText(req.query.keyword_normalized||req.query.keyword||''));
-      if(!normalized) return fail(res,400,'keyword_normalized is required');
-      const r=await dbQuery(`SELECT COUNT(*)::int AS today_search_count FROM (
+      const normalized = normalizeKeywordForStat(cleanText(req.query.keyword_normalized || req.query.keyword || ''));
+      if(!normalized) return fail(res, 400, 'keyword_normalized is required');
+      const r = await dbQuery(`SELECT COUNT(*)::int AS today_search_count FROM (
         SELECT 1 FROM gm_search_log
         WHERE keyword_normalized=$1
           AND search_at >= timezone(current_setting('TIMEZONE'), date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
           AND search_at <  timezone(current_setting('TIMEZONE'), (date_trunc('day', timezone('Asia/Seoul', now())) + interval '1 day') AT TIME ZONE 'Asia/Seoul')
         ORDER BY search_at DESC
         LIMIT 3
-      ) q`,[normalized]);
-      const count=toInt(r.rows[0]&&r.rows[0].today_search_count,0);
-      ok(res,{action:'search.upsert-policy',keyword_normalized:normalized,today_search_count:count,limit:3,search_result_upsert_allowed:count<3,timezone:'Asia/Seoul'});
-    }catch(e){ fail(res,500,'search upsert policy failed',{detail:String(e&&e.message||e)}); }
+      ) q`, [normalized]);
+      const count = toInt(r.rows[0] && r.rows[0].today_search_count, 0);
+      ok(res, { action:'search.upsert-policy', keyword_normalized:normalized, today_search_count:count, limit:3, search_result_upsert_allowed:count<3, timezone:'Asia/Seoul' });
+    }catch(e){
+      fail(res, 500, 'search upsert policy failed', { detail:String(e && e.message || e) });
+    }
   });
 
   app.get('/api/gm/search/summary', async (req,res)=>{
     try{
-      const limit=Math.max(1,Math.min(100,toInt(req.query.limit,20)));
-      const r=await dbQuery(`SELECT keyword_canonical,keyword_normalized,SUM(1) AS search_count,SUM(detail_enter_count) AS detail_count,MAX(search_at) AS last_search_at FROM gm_search_log GROUP BY keyword_canonical,keyword_normalized ORDER BY search_count DESC,last_search_at DESC LIMIT $1`,[limit]);
-      ok(res,{action:'search.summary',top_keywords:r.rows});
-    }catch(e){ fail(res,500,'search summary failed',{detail:String(e&&e.message||e)}); }
+      const limit = Math.max(1, Math.min(100, toInt(req.query.limit, 20)));
+      const out = {};
+      if(await tableExists('gm_search_keyword_stat')){
+        const r = await dbQuery(`
+          SELECT keyword_canonical, keyword_normalized, country_code, lang_code, category_no, category_code, mall_code, search_count, last_search_at
+          FROM gm_search_keyword_stat
+          ORDER BY search_count DESC, last_search_at DESC
+          LIMIT $1
+        `, [limit]);
+        out.top_keywords = r.rows;
+      }
+      if(await tableExists('gm_category_search_stat')){
+        const r = await dbQuery(`
+          SELECT category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+          FROM gm_category_search_stat
+          ORDER BY search_count DESC, last_search_at DESC
+          LIMIT $1
+        `, [limit]);
+        out.top_categories = r.rows;
+      }
+      if(await tableExists('gm_category_search_monthly')){
+        const ym = cleanText(req.query.yyyymm || req.query.month || '');
+        const r = await dbQuery(`
+          SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
+          FROM gm_category_search_monthly
+          WHERE ($2 = '' OR yyyymm = $2)
+          ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+          LIMIT $1
+        `, [limit, ym]);
+        out.monthly_categories = r.rows;
+      }
+      ok(res, { action:'search.summary', ...out });
+    }catch(e){
+      fail(res, 500, 'search summary failed', { detail:String(e && e.message || e) });
+    }
   });
 
   app.get('/api/gm/search/monthly', async (req,res)=>{
     try{
-      const limit=Math.max(1,Math.min(500,toInt(req.query.limit,100)));
-      const yyyymm=cleanText(req.query.yyyymm||req.query.month||'');
-      const r=await dbQuery(`SELECT TO_CHAR(search_at,'YYYYMM') AS yyyymm,category_no,category_code,category_name,country_code,lang_code,COUNT(*) AS search_count,SUM(gmkr_result_count+cpkr_result_count+alkr_result_count+smartfit_result_count) AS result_count_sum,SUM(db_insert_count) AS db_insert_count_sum,SUM(queue_send_count) AS queue_send_count_sum,MIN(search_at) AS first_search_at,MAX(search_at) AS last_search_at FROM gm_search_log WHERE ($2='' OR TO_CHAR(search_at,'YYYYMM')=$2) GROUP BY TO_CHAR(search_at,'YYYYMM'),category_no,category_code,category_name,country_code,lang_code ORDER BY yyyymm DESC,search_count DESC LIMIT $1`,[limit,yyyymm]);
-      ok(res,{action:'search.monthly',rows:r.rows});
-    }catch(e){ fail(res,500,'search monthly failed',{detail:String(e&&e.message||e)}); }
+      if(!(await tableExists('gm_category_search_monthly'))) return fail(res, 500, 'gm_category_search_monthly table not found');
+      const limit = Math.max(1, Math.min(500, toInt(req.query.limit, 100)));
+      const yyyymm = cleanText(req.query.yyyymm || req.query.month || '');
+      const country = cleanText(req.query.country_code || req.query.countryCode || '');
+      const lang = cleanText(req.query.lang_code || req.query.langCode || '');
+      const r = await dbQuery(`
+        SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code,
+               search_count, cache_used_count, cache_miss_count, result_count_sum, db_insert_count_sum, queue_send_count_sum,
+               first_search_at, last_search_at
+        FROM gm_category_search_monthly
+        WHERE ($2 = '' OR yyyymm = $2)
+          AND ($3 = '' OR country_code = $3)
+          AND ($4 = '' OR lang_code = $4)
+        ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
+        LIMIT $1
+      `, [limit, yyyymm, country, lang]);
+      ok(res, { action:'search.monthly', rows:r.rows });
+    }catch(e){
+      fail(res, 500, 'search monthly failed', { detail:String(e && e.message || e) });
+    }
   });
+
 };

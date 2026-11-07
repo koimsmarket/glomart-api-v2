@@ -966,108 +966,10 @@ async function upsertSalesAggregate(client, order, item){
   await incrementCategoryOperationalMetric(q, item, order, { sales_qty:qty, sales_amount:salesAmount, purchase_amount:purchaseAmount, is_ad:isAd });
 }
 
-async function upsertSearchStats(row){
-  if(await tableExists('gm_search_keyword_stat')){
-    await dbQuery(`
-      INSERT INTO gm_search_keyword_stat (
-        keyword_original, keyword_normalized, keyword_canonical,
-        country_code, lang_code, member_country_code,
-        category_no, category_code, category_name,
-        mall_code, search_count, cache_used_count, cache_miss_count,
-        result_count_sum, db_insert_count_sum, queue_send_count_sum,
-        first_search_at, last_search_at, updated_at
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,$12,$13,$14,$15,now(),now(),now()
-      )
-      ON CONFLICT (keyword_normalized, country_code, lang_code, category_no, mall_code) DO UPDATE SET
-        keyword_original=EXCLUDED.keyword_original,
-        keyword_canonical=EXCLUDED.keyword_canonical,
-        member_country_code=EXCLUDED.member_country_code,
-        category_code=EXCLUDED.category_code,
-        category_name=EXCLUDED.category_name,
-        search_count=gm_search_keyword_stat.search_count+1,
-        cache_used_count=gm_search_keyword_stat.cache_used_count+EXCLUDED.cache_used_count,
-        cache_miss_count=gm_search_keyword_stat.cache_miss_count+EXCLUDED.cache_miss_count,
-        result_count_sum=gm_search_keyword_stat.result_count_sum+EXCLUDED.result_count_sum,
-        db_insert_count_sum=gm_search_keyword_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
-        queue_send_count_sum=gm_search_keyword_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
-        last_search_at=now(),
-        updated_at=now()
-    `, [
-      row.keyword_original, row.keyword_normalized, row.keyword_canonical,
-      row.country_code, row.lang_code, row.member_country_code,
-      row.category_no, row.category_code, row.category_name,
-      row.mall_code, row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
-      row.result_count, row.db_insert_count, row.queue_send_count
-    ]);
-  }
-  if(row.category_no && await tableExists('gm_category_search_stat')){
-    await dbQuery(`
-      INSERT INTO gm_category_search_stat (
-        category_no, category_code, category_name,
-        country_code, lang_code, member_country_code, mall_code,
-        search_count, cache_used_count, cache_miss_count,
-        result_count_sum, db_insert_count_sum, queue_send_count_sum,
-        first_search_at, last_search_at, updated_at
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10,$11,$12,now(),now(),now()
-      )
-      ON CONFLICT (category_no, country_code, lang_code, mall_code) DO UPDATE SET
-        category_code=EXCLUDED.category_code,
-        category_name=EXCLUDED.category_name,
-        member_country_code=EXCLUDED.member_country_code,
-        search_count=gm_category_search_stat.search_count+1,
-        cache_used_count=gm_category_search_stat.cache_used_count+EXCLUDED.cache_used_count,
-        cache_miss_count=gm_category_search_stat.cache_miss_count+EXCLUDED.cache_miss_count,
-        result_count_sum=gm_category_search_stat.result_count_sum+EXCLUDED.result_count_sum,
-        db_insert_count_sum=gm_category_search_stat.db_insert_count_sum+EXCLUDED.db_insert_count_sum,
-        queue_send_count_sum=gm_category_search_stat.queue_send_count_sum+EXCLUDED.queue_send_count_sum,
-        last_search_at=now(),
-        updated_at=now()
-    `, [
-      row.category_no, row.category_code, row.category_name,
-      row.country_code, row.lang_code, row.member_country_code, row.mall_code,
-      row.cache_used ? 1 : 0, row.cache_used ? 0 : 1,
-      row.result_count, row.db_insert_count, row.queue_send_count
-    ]);
-  }
-
-  if(row.category_no){
-    const yyyymm = cleanText(row.yyyymm || currentYyyymm());
-    await incrementCategoryPeriodCounter('gm_category_search_monthly','yyyymm',yyyymm,row);
-    await incrementCategoryPeriodCounter('gm_category_search_yearly','yyyy',cleanText(row.yyyy || currentYyyy()),row);
-    if(await tableExists('gm_category')){
-      await dbQuery(`UPDATE gm_category SET search_count=COALESCE(search_count,0)+1, last_search_at=now(), updated_at=now() WHERE category_no=$1`, [cleanText(row.category_no)]);
-    }
-  }
-  if(row.product_uid && await tableExists('gm_product')){
-    await dbQuery(`UPDATE gm_product SET search_count=COALESCE(search_count,0)+1, last_search_at=now(), updated_at=now() WHERE product_uid=$1`, [cleanText(row.product_uid)]);
-  }
-}
-
 // GM_SEARCH_ROUTE_RECOVERY_V001
 // Search read/upsert-policy recovery only. Keep collection/queue/save logic unchanged.
-app.get('/api/gm/search/upsert-policy', async (req,res)=>{
-  try{
-    const normalized = normalizeKeywordForStat(cleanText(req.query.keyword_normalized || req.query.keyword || ''));
-    if(!normalized) return fail(res, 400, 'keyword_normalized is required');
-    const r = await dbQuery(`SELECT COUNT(*)::int AS today_search_count FROM (
-      SELECT 1 FROM gm_search_log
-      WHERE keyword_normalized=$1
-        AND search_at >= timezone(current_setting('TIMEZONE'), date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
-        AND search_at <  timezone(current_setting('TIMEZONE'), (date_trunc('day', timezone('Asia/Seoul', now())) + interval '1 day') AT TIME ZONE 'Asia/Seoul')
-      ORDER BY search_at DESC
-      LIMIT 3
-    ) q`, [normalized]);
-    const count = toInt(r.rows[0] && r.rows[0].today_search_count, 0);
-    ok(res, { action:'search.upsert-policy', keyword_normalized:normalized, today_search_count:count, limit:3, search_result_upsert_allowed:count<3, timezone:'Asia/Seoul' });
-  }catch(e){
-    fail(res, 500, 'search upsert policy failed', { detail:String(e && e.message || e) });
-  }
-});
-
 /* GM_SEARCH_LOG_V001: use existing V2 one-search-one-row service.
- * Register at the original POST position; keep legacy summary/monthly GET responses unchanged.
+ * Register POST and original GET handlers through the dedicated search-log service.
  * No schema creation or migration is executed here.
  */
 require('./services/search_log')({
@@ -1077,73 +979,9 @@ require('./services/search_log')({
   keywordRelationService: require('./services/keyword_relation'),
   eventService: require('./services/event_service')({
     pool, tableExists, cleanText, currentYyyymm, currentYyyy
-  }),
-  logRoutesOnly: true
+  })
 });
-console.log('[GM_SEARCH_LOG_V001] V2 search.log and search.log.detail routes registered');
-
-app.get('/api/gm/search/summary', async (req,res)=>{
-  try{
-    const limit = Math.max(1, Math.min(100, toInt(req.query.limit, 20)));
-    const out = {};
-    if(await tableExists('gm_search_keyword_stat')){
-      const r = await dbQuery(`
-        SELECT keyword_canonical, keyword_normalized, country_code, lang_code, category_no, category_code, mall_code, search_count, last_search_at
-        FROM gm_search_keyword_stat
-        ORDER BY search_count DESC, last_search_at DESC
-        LIMIT $1
-      `, [limit]);
-      out.top_keywords = r.rows;
-    }
-    if(await tableExists('gm_category_search_stat')){
-      const r = await dbQuery(`
-        SELECT category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
-        FROM gm_category_search_stat
-        ORDER BY search_count DESC, last_search_at DESC
-        LIMIT $1
-      `, [limit]);
-      out.top_categories = r.rows;
-    }
-    if(await tableExists('gm_category_search_monthly')){
-      const ym = cleanText(req.query.yyyymm || req.query.month || '');
-      const r = await dbQuery(`
-        SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code, search_count, last_search_at
-        FROM gm_category_search_monthly
-        WHERE ($2 = '' OR yyyymm = $2)
-        ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
-        LIMIT $1
-      `, [limit, ym]);
-      out.monthly_categories = r.rows;
-    }
-    ok(res, { action:'search.summary', ...out });
-  }catch(e){
-    fail(res, 500, 'search summary failed', { detail:String(e && e.message || e) });
-  }
-});
-
-app.get('/api/gm/search/monthly', async (req,res)=>{
-  try{
-    if(!(await tableExists('gm_category_search_monthly'))) return fail(res, 500, 'gm_category_search_monthly table not found');
-    const limit = Math.max(1, Math.min(500, toInt(req.query.limit, 100)));
-    const yyyymm = cleanText(req.query.yyyymm || req.query.month || '');
-    const country = cleanText(req.query.country_code || req.query.countryCode || '');
-    const lang = cleanText(req.query.lang_code || req.query.langCode || '');
-    const r = await dbQuery(`
-      SELECT yyyymm, category_no, category_code, category_name, country_code, lang_code, mall_code,
-             search_count, cache_used_count, cache_miss_count, result_count_sum, db_insert_count_sum, queue_send_count_sum,
-             first_search_at, last_search_at
-      FROM gm_category_search_monthly
-      WHERE ($2 = '' OR yyyymm = $2)
-        AND ($3 = '' OR country_code = $3)
-        AND ($4 = '' OR lang_code = $4)
-      ORDER BY yyyymm DESC, search_count DESC, last_search_at DESC
-      LIMIT $1
-    `, [limit, yyyymm, country, lang]);
-    ok(res, { action:'search.monthly', rows:r.rows });
-  }catch(e){
-    fail(res, 500, 'search monthly failed', { detail:String(e && e.message || e) });
-  }
-});
+console.log('[GM_SEARCH_LOG_V002] search log POST and legacy GET routes registered');
 
 app.get('/api/gm/sales/summary', async (req,res)=>{
   try{
