@@ -822,28 +822,7 @@ async function findCategoryKeywordMatch(keywordNormalized, langCode){
   return r.rows[0] || null;
 }
 
-const GM_LANG_COUNT_COLUMNS = ['ko', 'en', 'zh', 'vi', 'ja', 'tw', 'th', 'uz', 'ne', 'km', 'id', 'tl', 'mn', 'my', 'kk', 'si', 'ru', 'bn', 'ur', 'lo', 'hi', 'tr', 'fa', 'es', 'fr'];
-function gmCountColumnFromLang(v){
-  const s = cleanText(v || '').toLowerCase();
-  if(GM_LANG_COUNT_COLUMNS.includes(s)) return s + '_count';
-  return 'total_count';
-}
 function currentYyyy(){ return new Date().getFullYear().toString(); }
-async function incrementCategoryPeriodCounter(table, periodCol, periodVal, row, client){
-  if(!row.category_no) return;
-  const q = client || { query: dbQuery };
-  if(!(await tableExists(table))) return;
-  const countCol = gmCountColumnFromLang(row.lang_code || row.ui_lang_code || row.country_code);
-  const categoryNo = cleanText(row.category_no);
-  const mallCode = cleanText(row.mall_code || '');
-  const params = [periodVal, categoryNo, cleanText(row.category_code), cleanText(row.category_name), mallCode];
-  const updateSql = `UPDATE ${table} SET category_code=$3, category_name=$4, mall_code=$5, total_count=COALESCE(total_count,0)+1, ${countCol}=COALESCE(${countCol},0)+1, last_search_at=now(), updated_at=now() WHERE ${periodCol}=$1 AND category_no=$2 AND COALESCE(mall_code,'')=COALESCE($5,'')`;
-  const r = await q.query(updateSql, params);
-  if(!r.rowCount){
-    const insertSql = `INSERT INTO ${table} (${periodCol}, category_no, category_code, category_name, mall_code, total_count, ${countCol}, first_search_at, last_search_at, updated_at) VALUES ($1,$2,$3,$4,$5,1,1,now(),now(),now())`;
-    await q.query(insertSql, params);
-  }
-}
 
 async function incrementProductOperationalMetric(q, item, inc){
   if(!(await tableExists('gm_product'))) return;
@@ -975,7 +954,7 @@ async function upsertSalesAggregate(client, order, item){
 require('./services/search_log')({
   app, pool, dbQuery, tableExists, cleanText, toInt, ok, fail,
   normalizeKeywordForStat, findCategoryKeywordMatch,
-  incrementCategoryPeriodCounter, currentYyyymm, currentYyyy,
+  currentYyyymm, currentYyyy,
   keywordRelationService: require('./services/keyword_relation'),
   eventService: require('./services/event_service')({
     pool, tableExists, cleanText, currentYyyymm, currentYyyy

@@ -5,7 +5,7 @@ module.exports = function installSearchLogService(deps){
   const {
     app,pool,dbQuery,tableExists,cleanText,toInt,ok,fail,
     normalizeKeywordForStat,findCategoryKeywordMatch,
-    incrementCategoryPeriodCounter,currentYyyymm,currentYyyy,
+    currentYyyymm,currentYyyy,
     keywordRelationService,eventService
   } = deps;
 
