@@ -8,7 +8,7 @@ async function syncOptionName(pool,x){
  const mapped=await resolveOption(pool,x.mall_code,x.pi_ii_vi);
  if(!mapped.ok)return {skipped:mapped.reason};
  return syncName(pool,{
-  table:'gm_option_translation',queue:'gm_option_translation_queue',key:'pi_vi',
+  table:'gm_option_translation',key:'pi_vi',
   mall_code:x.mall_code,code:mapped.pi_vi,new_name:x.new_name,
   old_name:x.old_name,inserted:x.inserted,
   // Detect staleness in the authoritative original option row, not translation table.

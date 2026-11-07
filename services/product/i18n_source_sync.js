@@ -1,5 +1,5 @@
 'use strict';
-/* GM_PRODUCT_I18N_RUNTIME_V008: shared guarded translation state/queue updates.
+/* GM_PRODUCT_I18N_RUNTIME_V008: shared server-source identity checks; IndexedDB owns all pending work.
  * No DDL, no translation calls. Uses DB source versions and conservative mapping.
  */
 const crypto=require('crypto');
@@ -20,54 +20,20 @@ async function resolveOption(pool,mall,pi){
  return {ok:true,pi_vi:pid+'_'+vid};
 }
 async function syncName(pool,x){
- const {table,queue,key,currentSql}=x;
+ const {table,key,currentSql}=x;
  if(!['gm_product_translation','gm_option_translation'].includes(table)||!['product_id','pi_vi'].includes(key))throw Error('INVALID_TRANSLATION_TARGET');
  const mall=norm(x.mall_code),code=norm(x.code),name=norm(x.new_name);
  if(!mall||!code||!name)return {skipped:'SOURCE_MISSING'};
  const lang=origin(name);if(!lang)return {skipped:'SOURCE_LANGUAGE_UNKNOWN'};
- const originalCode=x.originalCode||code;
- const latest=await pool.query(currentSql,[mall,originalCode]);
+ const latest=await pool.query(currentSql,[mall,x.originalCode||code]);
  if(latest.rows.length!==1||norm(latest.rows[0].name)!==name)return {skipped:'SOURCE_SUPERSEDED'};
- const prev=await pool.query(`SELECT source_hash FROM public.${queue} WHERE mall_code=$1 AND ${key}=$2`,[mall,code]);
- const oldHash=prev.rows[0]&&String(prev.rows[0].source_hash).trim();
- const newHash=hash(name);
- const changed=(x.old_name!==null&&x.old_name!==undefined&&norm(x.old_name)!==name)||(!!oldHash&&oldHash!==newHash);
- if(!x.inserted&&!changed){
-  // If translation metadata never existed, initialize it even for old source rows.
-  const translated=await pool.query(`SELECT 1 FROM public.${table} WHERE mall_code=$1 AND ${key}=$2`,[mall,code]);
-  if(translated.rows.length)return {skipped:'SOURCE_UNCHANGED'};
+ // IndexedDB owns outstanding work. Never initialize a translation row or queue here.
+ const changed=x.old_name!==undefined&&x.old_name!==null&&norm(x.old_name)!==name;
+ if(changed){
+  // Keep existing translations for auditing, but mark stale until a matching-hash upload replaces them.
+  await pool.query(`UPDATE public.${table} SET translation_status='U'
+    WHERE mall_code=$1 AND ${key}=$2 AND source_hash IS DISTINCT FROM $3`,[mall,code,hash(name)]);
  }
- const pending=LANGS.filter(l=>l!==lang);
- // Advisory lock scoped to exact translation identity prevents concurrent bookkeeping interleaving.
- const client=typeof pool.connect==='function'?await pool.connect():null;
- const db=client||pool;
- try{
-  if(client)await db.query('BEGIN');
-  await db.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))',[table+':'+mall,code]);
-  const still=await db.query(currentSql,[mall,originalCode]);
-  if(still.rows.length!==1||norm(still.rows[0].name)!==name){if(client)await db.query('ROLLBACK');return {skipped:'SOURCE_SUPERSEDED'};}
-  const queued=await db.query(`SELECT source_hash FROM public.${queue} WHERE mall_code=$1 AND ${key}=$2 FOR UPDATE`,[mall,code]);
-  if(queued.rows.length&&String(queued.rows[0].source_hash).trim()===newHash){
-   const existing=await db.query(`SELECT 1 FROM public.${table} WHERE mall_code=$1 AND ${key}=$2`,[mall,code]);
-   if(existing.rows.length){if(client)await db.query('COMMIT');return {skipped:'VERSION_ALREADY_TRACKED'};}
-  }
-  // Do not change source on an already completed record for the identical source version.
-  const langCol='"'+lang+'"';
-  await db.query(`INSERT INTO public.${table}(mall_code,${key},${langCol},translation_status)
-   VALUES($1,$2,$3,'N') ON CONFLICT(mall_code,${key}) DO UPDATE SET
-    ${langCol}=EXCLUDED.${langCol},translation_status=$4`,[mall,code,name,changed?'U':'N']);
-  await db.query(`INSERT INTO public.${queue}
-    (mall_code,${key},source_hash,source_lang,pending_langs,status,next_retry_at,updated_at)
-    VALUES($1,$2,$3,$4,$5::jsonb,'PENDING',now(),now())
-    ON CONFLICT(mall_code,${key}) DO UPDATE SET
-    source_hash=EXCLUDED.source_hash,source_lang=EXCLUDED.source_lang,
-    pending_langs=EXCLUDED.pending_langs,status='PENDING',owner_token=NULL,
-    lease_until=NULL,next_retry_at=now(),updated_at=now(),completed_at=NULL
-    WHERE ${queue}.source_hash IS DISTINCT FROM EXCLUDED.source_hash`,
-   [mall,code,newHash,lang,JSON.stringify(pending)]);
-  if(client)await db.query('COMMIT');
-  return {status:changed?'U':'N',source_hash:newHash};
- }catch(e){if(client)try{await db.query('ROLLBACK');}catch(_){}throw e;}
- finally{if(client)client.release();}
+ return {skipped:'CLIENT_INDEXEDDB_OWNS_PENDING',source_hash:hash(name),status:changed?'U':'N'};
 }
 module.exports={LANGS,norm,hash,origin,resolveOption,syncName};

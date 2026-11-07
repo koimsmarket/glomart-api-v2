@@ -20,14 +20,14 @@ async function current(dbh,x){
  if(type==='PRODUCT'){
   const r=await dbh.query('SELECT product_name FROM public.gm_product WHERE mall_code=$1 AND product_id=$2 LIMIT 2',[mall,key]);
   if(r.rows.length!==1)return null;
-  return {text:norm(r.rows[0].product_name), table:'gm_product_translation',key:'product_id',queue:'gm_product_translation_queue'};
+  return {text:norm(r.rows[0].product_name), table:'gm_product_translation',key:'product_id'};
  }
  const r=await dbh.query('SELECT option_name FROM public.gm_product_option WHERE mall_code=$1 AND pi_ii_vi=$2 LIMIT 2',[mall,key]);
  if(r.rows.length!==1)return null;
  // Resolve only unique PID_VID identities, using the exact source row.
  const mapping=await require('../../services/product/i18n_source_sync').resolveOption(dbh,mall,key);
  if(!mapping.ok)return {blocked:mapping.reason};
- return {text:norm(r.rows[0].option_name),table:'gm_option_translation',key:'pi_vi',queue:'gm_option_translation_queue',translationCode:mapping.pi_vi};
+ return {text:norm(r.rows[0].option_name),table:'gm_option_translation',key:'pi_vi',translationCode:mapping.pi_vi};
 }
 // V012: server-authoritative read-only translation work plan for BOTH products and options.
 // Source identity and version are checked before the client receives translation work.
@@ -39,19 +39,9 @@ function translationSources(row){
  }
  return {};
 }
-function requiredLanguages(row,sourceLang,pending,status){
- const outstanding=new Set(pending),sources=translationSources(row);
- // U is a source-version refresh: every target language needs a new ON result.
- if(status==='U')return LANGS.filter(l=>l!==sourceLang);
- return LANGS.filter(l=>l!==sourceLang &&
-  (!row||!norm(row[l])||outstanding.has(l)||String(sources[l]||'').toUpperCase()==='OFF'));
-}
-function parsePending(value){
- if(Array.isArray(value))return value;
- if(typeof value==='string'){
-  try{const v=JSON.parse(value);return Array.isArray(v)?v:null;}catch(_e){return null;}
- }
- return null;
+function requiredLanguages(row,sourceLang,stale){
+ const sources=translationSources(row);
+ return LANGS.filter(l=>l!==sourceLang&&(stale||!row||!norm(row[l])||String(sources[l]||'').toUpperCase()==='OFF'));
 }
 async function planOne(pool,x){
  const src=await current(pool,x);
@@ -61,40 +51,18 @@ async function planOne(pool,x){
  const sourceLang=sourceLanguage(src.text);
  if(!sourceLang)return {group:'blocked',item:{type:x.type,code:x.code,reason:'UNSUPPORTED_SOURCE_LANG'}};
  const sourceHash=hash(src.text),translationCode=src.translationCode||x.code;
- const q=await pool.query(`SELECT source_hash,source_lang,pending_langs FROM public.${src.queue} WHERE mall_code=$1 AND ${src.key}=$2`,[x.mall_code,translationCode]);
- const tracked=q.rows[0]||null;
- // Upload rejects untracked versions: never give a client work that cannot be saved.
- if(!tracked)return {group:'blocked',item:{type:x.type,code:x.code,reason:'SOURCE_VERSION_NOT_INITIALIZED'}};
- if(String(tracked.source_hash||'').trim()!==sourceHash)
-  return {group:'blocked',item:{type:x.type,code:x.code,reason:'SOURCE_VERSION_STALE'}};
- if(tracked.source_lang&&tracked.source_lang!==sourceLang)
-  return {group:'blocked',item:{type:x.type,code:x.code,reason:'SOURCE_LANGUAGE_MISMATCH'}};
- const pending=parsePending(tracked.pending_langs);
- if(!pending||pending.some(l=>!LANGS.includes(l)||l===sourceLang))
-  return {group:'blocked',item:{type:x.type,code:x.code,reason:'INVALID_PENDING_LANGUAGES'}};
  const found=await pool.query(`SELECT * FROM public.${src.table} WHERE mall_code=$1 AND ${src.key}=$2`,[x.mall_code,translationCode]);
  const row=found.rows[0]||null;
- if(!row)return {group:'blocked',item:{type:x.type,code:x.code,reason:'TRANSLATION_ROW_NOT_INITIALIZED'}};
- if(norm(row[sourceLang])!==src.text)
-  return {group:'blocked',item:{type:x.type,code:x.code,reason:'SOURCE_TEXT_MISMATCH'}};
- const status=String(row.translation_status||'N').trim();
- if(!['Y','N','U'].includes(status))return {group:'blocked',item:{type:x.type,code:x.code,reason:'INVALID_STATUS'}};
- // A Y row with provisional OFF is NOT final. Report the inconsistency while
- // returning work for ON backfill; never silently declare a provisional result complete.
- const sources=translationSources(row);
- if(status==='Y'&&pending.length===0){
-  const missing=LANGS.filter(l=>!norm(row[l]));
-  if(missing.length)return {group:'blocked',item:{type:x.type,mall_code:x.mall_code,code:x.code,reason:'INCONSISTENT_COMPLETED_ROW'}};
-  const provisional=LANGS.filter(l=>l!==sourceLang&&String(sources[l]||'').toUpperCase()==='OFF');
-  if(!provisional.length)return {group:'skipped',item:{type:x.type,mall_code:x.mall_code,code:x.code,reason:'Y_COMPLETE'}};
- }
- const languages=requiredLanguages(row,sourceLang,pending,status);
- if(!languages.length)return {group:'skipped',item:{type:x.type,code:x.code,reason:'NO_MISSING_LANGUAGE'}};
+ const legacyMatch=!!row&&norm(row[sourceLang])===src.text;
+ const stale=!!row&&((row.source_hash&&String(row.source_hash).trim()!==sourceHash)||(!row.source_hash&&!legacyMatch)||row.translation_status==='U');
+ const status=row?String(row.translation_status||'N').trim():'N';
+ const languages=requiredLanguages(row,sourceLang,stale);
+ if(!languages.length)return {group:'skipped',item:{type:x.type,code:x.code,reason:'Y_COMPLETE'}};
  // code is the ORIGINAL client-side identifier; translation_code is only for DB bookkeeping.
  return {group:'tasks',item:{type:x.type,mall_code:x.mall_code,code:x.code,
   translation_code:translationCode,source_text:src.text,source_hash:sourceHash,
   source_lang:sourceLang,languages,translation_status:status,
-  reason:status==='U'?'SOURCE_UPDATED_OR_RECHECK':'MISSING_OFF_OR_REVIEW'}};
+  reason:stale?'SOURCE_UPDATED_OR_RECHECK':'MISSING_OFF_OR_REVIEW'}};
 }
 router.post('/api/gm/product/i18n/plan',async(req,res)=>{
  res.set('Cache-Control','no-store');
@@ -136,10 +104,10 @@ router.post('/api/gm/product/i18n/upload',async(req,res)=>{
   const result=await require('../../services/product/i18n_upload').save(pool,req.body);
   return res.json(result);
  }catch(e){
-  const known=['INVALID_ITEM','INVALID_TRANSLATIONS','INVALID_SOURCE_HASH','INVALID_TRANSLATION_ENTRY','SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE','PID_VID_COLLISION','STALE_SOURCE','UNTRACKED_OR_STALE_VERSION','TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
+  const known=['INVALID_ITEM','INVALID_TRANSLATIONS','INVALID_SOURCE_HASH','INVALID_TRANSLATION_ENTRY','SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE','PID_VID_COLLISION','STALE_SOURCE','TRANSACTION_POOL_REQUIRED'];
   const error=known.includes(e.code)?e.code:'UPLOAD_FAILED';
   if(error==='UPLOAD_FAILED')console.error('[GM_PRODUCT_I18N_UPLOAD]',e.code||e.message);
-  return fail(res,error==='STALE_SOURCE'||error==='UNTRACKED_OR_STALE_VERSION'?409:error==='UPLOAD_FAILED'?500:400,error);
+  return fail(res,error==='STALE_SOURCE'?409:error==='UPLOAD_FAILED'?500:400,error);
  }
 });
 // V049: one authenticated HTTP request carrying several distinct product/option
@@ -178,8 +146,8 @@ router.post('/api/gm/product/i18n/upload-batch',async(req,res)=>{
   }catch(e){
    const known=['INVALID_ITEM','INVALID_TRANSLATIONS','INVALID_SOURCE_HASH','INVALID_TRANSLATION_ENTRY',
     'SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE',
-    'PID_VID_COLLISION','STALE_SOURCE','UNTRACKED_OR_STALE_VERSION',
-    'TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
+    'PID_VID_COLLISION','STALE_SOURCE',
+    'TRANSACTION_POOL_REQUIRED'];
    const error=known.includes(e.code)?e.code:'UPLOAD_FAILED';
    if(error==='UPLOAD_FAILED')console.error('[GM_PRODUCT_I18N_BATCH_ITEM]',i,e.code||e.message);
    results.push({index:i,ok:false,type:x.type,mall_code:x.mall_code,code:x.code,

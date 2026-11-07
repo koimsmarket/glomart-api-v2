@@ -16,9 +16,9 @@ function writeGuard(req,res,next){
   if(a.length!==b.length||!crypto.timingSafeEqual(a,b))return res.status(401).json({ok:false,error:'UNAUTHORIZED'});
   next();
 }
-router.get('/api/gm/product-i18n/v003/lookup',(req,res)=>reply(res,()=>svc.lookup(pool(req),req.query)));
-router.post('/api/gm/product-i18n/v003/queue/register',writeGuard,(req,res)=>reply(res,()=>svc.register(pool(req),req.body||{})));
-router.post('/api/gm/product-i18n/v003/queue/claim',writeGuard,(req,res)=>reply(res,()=>svc.claim(pool(req),req.body||{})));
-router.post('/api/gm/product-i18n/v003/queue/complete',writeGuard,(req,res)=>reply(res,()=>svc.complete(pool(req),req.body||{})));
-router.post('/api/gm/product-i18n/v003/queue/fail',writeGuard,(req,res)=>reply(res,()=>svc.fail(pool(req),req.body||{})));
+router.get('/api/gm/product-i18n/v003/lookup',(_req,res)=>res.status(410).json({ok:false,error:'LEGACY_QUEUE_LOOKUP_REMOVED'}));
+// Legacy server-side queue API retired. Never recreate server pending records.
+for(const action of ['register','claim','complete','fail']){
+ router.post('/api/gm/product-i18n/v003/queue/'+action,(_req,res)=>res.status(410).json({ok:false,error:'SERVER_QUEUE_REMOVED_USE_INDEXEDDB'}));
+}
 module.exports=router;

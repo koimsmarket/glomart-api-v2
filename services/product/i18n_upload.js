@@ -2,7 +2,7 @@
 /* V009: conditional client translation save; identity must be server-verified by caller.
    No schema changes and no translation services executed here. */
 const {LANGS,norm,hash,origin,resolveOption}=require('./i18n_source_sync');
-const TARGETS={PRODUCT:{table:'gm_product_translation',queue:'gm_product_translation_queue',key:'product_id'},OPTION:{table:'gm_option_translation',queue:'gm_option_translation_queue',key:'pi_vi'}};
+const TARGETS={PRODUCT:{table:'gm_product_translation',key:'product_id'},OPTION:{table:'gm_option_translation',key:'pi_vi'}};
 const reMall=/^[A-Z0-9_]{2,16}$/;
 function invalid(error){const e=new Error(error);e.code=error;return e;}
 async function save(pool,input){
@@ -38,41 +38,46 @@ async function save(pool,input){
   const sourceLang=origin(original);
   if(!original||!sourceLang||hash(original)!==suppliedHash)throw invalid('STALE_SOURCE');
   if(entries.some(e=>e.lang===sourceLang))throw invalid('SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED');
-  const q=await client.query(`SELECT source_hash,source_lang,pending_langs FROM public.${t.queue} WHERE mall_code=$1 AND ${t.key}=$2 FOR UPDATE`,[mall,actual]);
-  if(q.rows.length!==1||String(q.rows[0].source_hash).trim()!==suppliedHash)throw invalid('UNTRACKED_OR_STALE_VERSION');
+  // The source row and its SHA-256 are authoritative. A server queue is not required.
   const rowResult=await client.query(`SELECT * FROM public.${t.table} WHERE mall_code=$1 AND ${t.key}=$2 FOR UPDATE`,[mall,actual]);
-  if(rowResult.rows.length!==1)throw invalid('TRANSLATION_ROW_NOT_INITIALIZED');
-  const row=rowResult.rows[0];
-  const pending=new Set(Array.isArray(q.rows[0].pending_langs)?q.rows[0].pending_langs:[]);
-  const oldSource=row.translation_source&&typeof row.translation_source==='object'?row.translation_source:{};
-  const isDone=row.translation_status==='Y';
-  let changed=0,skipped=0;
-  for(const e of entries){
-   const oldEngine=String(oldSource[e.lang]||'').toUpperCase();
-   const existing=norm(row[e.lang]);
-   // OFF is provisional for this same source_hash; a later ON may upgrade it.
-   const upgrade=(e.source==='ON'&&oldEngine==='OFF');
-   // Never replace a valid ON with OFF, including review/U status.
-   if(e.source==='OFF'&&existing&&oldEngine==='ON'){skipped++;continue;}
-   if(isDone&&!pending.has(e.lang)&&!upgrade){skipped++;continue;}
-   // An unchanged approved ON remains immutable unless marked pending for review.
-   if(!pending.has(e.lang)&&existing&&!upgrade){skipped++;continue;}
-   // A new source version's previous translations are stale even if the column has content.
-   await client.query(`UPDATE public.${t.table} SET "${e.lang}"=$3,translation_source=jsonb_set(COALESCE(translation_source,'{}'::jsonb),$4::text[],to_jsonb($5::text),true) WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,e.text,[e.lang],e.source]);
-   row[e.lang]=e.text;oldSource[e.lang]=e.source;
-   // OFF stays pending until an ON translation is saved for the same source hash.
-   if(e.source==='OFF')pending.add(e.lang);else pending.delete(e.lang);
-   changed++;
+  let row=rowResult.rows[0]||null;
+  const legacyMatch=!!row&&norm(row[sourceLang])===original;
+  const stale=!!row&&((row.source_hash&&String(row.source_hash).trim()!==suppliedHash)||(!row.source_hash&&!legacyMatch)||row.translation_status==='U');
+  if(!row){
+   await client.query(`INSERT INTO public.${t.table}(mall_code,${t.key},source_hash,source_lang,"${sourceLang}",translation_status)
+      VALUES($1,$2,$3,$4,$5,'N') ON CONFLICT(mall_code,${t.key}) DO NOTHING`,[mall,actual,suppliedHash,sourceLang,original]);
+   const reread=await client.query(`SELECT * FROM public.${t.table} WHERE mall_code=$1 AND ${t.key}=$2 FOR UPDATE`,[mall,actual]);
+   row=reread.rows[0];
   }
-  // Provisional OFF translations can be displayed but never complete an ON backfill.
-  // Source language is the original; every other language must have ON to be final.
-  for(const l of LANGS){if(l!==sourceLang&&oldSource[l]==='OFF')pending.add(l);}
-  const complete=LANGS.every(l=>l===sourceLang||(!!norm(row[l])&&oldSource[l]==='ON'))&&pending.size===0;
-  const state=complete?'Y':(row.translation_status==='U'?'U':'N');
+  if(stale){
+   // Old translations must never be counted as translations of a changed source.
+   const clear=LANGS.map(l=>'"'+l+'"=NULL').join(',');
+   await client.query(`UPDATE public.${t.table} SET ${clear},translation_source='{}'::jsonb,translation_review_status='{}'::jsonb,
+     source_hash=$3,source_lang=$4,translation_status='N' WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,suppliedHash,sourceLang]);
+   row={translation_source:{},translation_status:'N'};
+  }
+  let changed=0,skipped=0;
+  const oldSource=row.translation_source&&typeof row.translation_source==='object'?{...row.translation_source}:{};
+  const incoming=new Map();
+  for(const e of entries){
+   const existing=norm(row[e.lang]);
+   const oldEngine=String(oldSource[e.lang]||'').toUpperCase();
+   if(existing&&oldEngine==='ON'&&e.source==='OFF'){skipped++;continue;}
+   if(existing&&oldEngine==='ON'&&e.source==='ON'&&!stale){skipped++;continue;}
+   await client.query(`UPDATE public.${t.table} SET "${e.lang}"=$3,
+     translation_source=jsonb_set(COALESCE(translation_source,'{}'::jsonb),$4::text[],to_jsonb($5::text),true)
+     WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,e.text,[e.lang],e.source]);
+   row[e.lang]=e.text;oldSource[e.lang]=e.source;incoming.set(e.lang,e.source);changed++;
+  }
+  // The source-language column is identity metadata, not a completed translation.
+  await client.query(`UPDATE public.${t.table} SET "${sourceLang}"=$3,source_hash=$4,source_lang=$5
+    WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,original,suppliedHash,sourceLang]);
+  row[sourceLang]=original;
+  const missing=LANGS.filter(l=>l!==sourceLang&&(!norm(row[l])||oldSource[l]!=='ON'));
+  const state=missing.length?'N':'Y';
   await client.query(`UPDATE public.${t.table} SET translation_status=$3 WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,state]);
-  await client.query(`UPDATE public.${t.queue} SET pending_langs=$3::jsonb,status=$4,completed_at=CASE WHEN $4='COMPLETED' THEN now() ELSE NULL END,owner_token=NULL,lease_until=NULL,updated_at=now() WHERE mall_code=$1 AND ${t.key}=$2 AND source_hash=$5`,[mall,actual,JSON.stringify([...pending]),complete?'COMPLETED':'PENDING',suppliedHash]);
   await client.query('COMMIT');
-  return {ok:true,type:x.type,code:actual,changed,skipped,translation_status:state,remaining_languages:[...pending]};
+  return {ok:true,type:x.type,code:actual,changed,skipped,translation_status:state,remaining_languages:missing};
  }catch(e){try{await client.query('ROLLBACK');}catch(_){ }throw e;}
  finally{client.release();}
 }
