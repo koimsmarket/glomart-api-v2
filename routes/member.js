@@ -1043,7 +1043,40 @@ router.post('/api/gm/member/auth/change-password',async(req,res)=>{
 router.post('/api/gm/member/address/cafe24/reconcile-v015',async(req,res)=>{
   const pool=db(req),body=req.body||{},memberId=pick(body,['member_id']);
   if(!pool)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
-  const verified=require('./gm_member_access_guard').validate(req);
+  // GM_CAFE24_ADDRESS_SYNC_V053: reuse EXISTING signed member / agency sessions.
+  // The agency token was issued by the existing password-hash login, but must
+  // ALSO still match the member's current active G-PAY assignment. Never trust
+  // the member_id or agency_id supplied by the browser as proof of identity.
+  let verified=require('./gm_member_access_guard').validate(req);
+  if(!verified){
+    const authorization=String(req.get('authorization')||'');
+    const match=/^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.exec(authorization);
+    const agent=match?gmAgentSessionDecode(match[1]):null;
+    if(agent&&agent.sub===memberId){
+      try{
+        const assigned=await gmAgentAssignment(agent.sub);
+        if(assigned&&assigned.assigned===true&&String(assigned.agency_id)===String(agent.agent))verified=agent.sub;
+      }catch(_e){ /* fail closed if the current assignment cannot be verified */ }
+    }
+  }
+  // Existing Guppy Life session, only if the token is already available to
+  // this origin. The Life server must independently authenticate the session.
+  if(!verified){
+    const authorization=String(req.get('authorization')||'');
+    const match=/^Bearer (life_[A-Za-z0-9_-]{12,256})$/.exec(authorization);
+    if(match && memberId){
+      try{
+        const response=await fetch('https://port-0-glomart-life-api-mss6kcqn688f1333.sel3.cloudtype.app/api/life/membership/status',{
+          headers:{'X-GM-Life-Member':memberId,'X-GM-Life-Token':match[1],'Accept':'application/json'},
+          signal:AbortSignal.timeout(2500),redirect:'error',cache:'no-store'
+        });
+        if(response.ok){
+          const answer=await response.json();
+          if(answer&&answer.ok===true&&answer.member_id===memberId)verified=memberId;
+        }
+      }catch(_e){ /* fail closed */ }
+    }
+  }
   if(!verified||!memberId||verified!==memberId)return res.status(401).json({ok:false,error:'MEMBER_ACCESS_DENIED'});
   const action=s(body.action),full=body.full===true;
   if(!['add','update','delete','merge','reconcile'].includes(action)||full!==(action==='reconcile'))return res.status(400).json({ok:false,error:'INVALID_SYNC_ACTION'});
