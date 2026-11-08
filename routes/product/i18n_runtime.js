@@ -87,17 +87,10 @@ router.post('/api/gm/product/i18n/plan',async(req,res)=>{
 // Fail closed: this callback MUST validate an already authenticated user/session on the server.
 // Never accept member_id, role or an "authenticated" flag from request JSON as evidence.
 // Reuse Glomart's existing signed, member-bound, short-lived access token.
-// Validation is independent of optional GM_MEMBER_PROFILE_AUTH_ENFORCE: upload ALWAYS enforces auth.
-// A request body member_id or authenticated flag is never proof of identity.
+// V072: translation submissions are independent of member login, as search collection is.
+// Source identity, original-text validation and existing translation protection remain in save().
 router.post('/api/gm/product/i18n/upload',async(req,res)=>{
  res.set('Cache-Control','no-store');
- const memberAuth=require('../gm_member_access_guard');
- if(!memberAuth.enabled())return fail(res,503,'MEMBER_AUTH_NOT_CONFIGURED');
- const memberId=memberAuth.validate(req);
- if(!memberId)return fail(res,401,'MEMBER_LOGIN_REQUIRED');
- // An optional member_id in the payload must match the signed principal.
- const submitted=req.body&&(req.body.member_id||req.body.memberId);
- if(submitted!==undefined&&String(submitted)!==memberId)return fail(res,403,'MEMBER_ACCESS_DENIED');
  try{
   const pool=db(req);
   if(!pool)return fail(res,503,'DB_UNAVAILABLE');
@@ -110,18 +103,12 @@ router.post('/api/gm/product/i18n/upload',async(req,res)=>{
   return fail(res,error==='STALE_SOURCE'||error==='SOURCE_TEXT_MISMATCH'?409:error==='UPLOAD_FAILED'?500:400,error);
  }
 });
-// V049: one authenticated HTTP request carrying several distinct product/option
+// V072: one login-independent HTTP request carrying several distinct product/option
 // translations. Existing i18n_upload.save remains the only source/version/ON
 // validation and writes each entity in its own proven DB transaction.
 // Partial failure is explicit, never silently acknowledged as a total success.
 router.post('/api/gm/product/i18n/upload-batch',async(req,res)=>{
  res.set('Cache-Control','no-store');
- const memberAuth=require('../gm_member_access_guard');
- if(!memberAuth.enabled())return fail(res,503,'MEMBER_AUTH_NOT_CONFIGURED');
- const memberId=memberAuth.validate(req);
- if(!memberId)return fail(res,401,'MEMBER_LOGIN_REQUIRED');
- const submitted=req.body&&(req.body.member_id||req.body.memberId);
- if(submitted!==undefined&&String(submitted)!==memberId)return fail(res,403,'MEMBER_ACCESS_DENIED');
  const items=req.body&&req.body.items;
  if(!Array.isArray(items)||items.length<1||items.length>20||items.some(x=>!validItem(x)))return fail(res,400,'INVALID_ITEMS');
  const pool=db(req);if(!pool)return fail(res,503,'DB_UNAVAILABLE');

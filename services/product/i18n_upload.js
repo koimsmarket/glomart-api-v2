@@ -41,7 +41,7 @@ async function save(pool,input){
   let changed=0,skipped=0;
   for(const e of entries){
    const prior=String(sources[e.lang]||'').toUpperCase(),before=norm(row[e.lang]);
-   if(e.source==='OFF'&&before&&prior==='ON'){skipped++;continue;}
+   if(before&&(prior==='ON'||!prior)){skipped++;continue;} // Never overwrite an existing accepted/legacy translation through public upload.
    if(before===e.text&&prior===e.source&&norm(sources['__original_'+e.lang])===currentOriginal){skipped++;continue;}
    await db.query(`UPDATE public.${t.table} SET "${e.lang}"=$3,translation_source=jsonb_set(jsonb_set(COALESCE(translation_source,'{}'::jsonb),$4::text[],to_jsonb($5::text),true),$6::text[],to_jsonb($7::text),true) WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,e.text,[e.lang],e.source,['__original_'+e.lang],currentOriginal]);
    row[e.lang]=e.text;sources[e.lang]=e.source;sources['__original_'+e.lang]=currentOriginal;changed++;
