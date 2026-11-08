@@ -1,11 +1,9 @@
 'use strict';
-/* GM_PRODUCT_I18N_RUNTIME_V008: shared server-source identity checks; IndexedDB owns all pending work.
- * No DDL, no translation calls. Uses DB source versions and conservative mapping.
+/* V070: Direct translation-table source text sync; no queue or hash columns.
+ * No DDL and no translation calls. Preserve original-name comparison and option mapping.
  */
-const crypto=require('crypto');
 const LANGS=['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const norm=s=>String(s||'').trim().replace(/\s+/g,' ');
-const hash=s=>crypto.createHash('sha256').update(s,'utf8').digest('hex');
 const origin=s=>/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(s)?'ko':/^[\x20-\x7e]+$/.test(s)?'en':null;
 // No fuzzy PID_VID mapping. Verifies exactly one source row for this identifier.
 async function resolveOption(pool,mall,pi){
@@ -24,16 +22,31 @@ async function syncName(pool,x){
  if(!['gm_product_translation','gm_option_translation'].includes(table)||!['product_id','pi_vi'].includes(key))throw Error('INVALID_TRANSLATION_TARGET');
  const mall=norm(x.mall_code),code=norm(x.code),name=norm(x.new_name);
  if(!mall||!code||!name)return {skipped:'SOURCE_MISSING'};
- const lang=origin(name);if(!lang)return {skipped:'SOURCE_LANGUAGE_UNKNOWN'};
- const latest=await pool.query(currentSql,[mall,x.originalCode||code]);
- if(latest.rows.length!==1||norm(latest.rows[0].name)!==name)return {skipped:'SOURCE_SUPERSEDED'};
- // IndexedDB owns outstanding work. Never initialize a translation row or queue here.
- const changed=x.old_name!==undefined&&x.old_name!==null&&norm(x.old_name)!==name;
- if(changed){
-  // Keep existing translations for auditing, but mark stale until a matching-hash upload replaces them.
-  await pool.query(`UPDATE public.${table} SET translation_status='U'
-    WHERE mall_code=$1 AND ${key}=$2 AND source_hash IS DISTINCT FROM $3`,[mall,code,hash(name)]);
- }
- return {skipped:'CLIENT_INDEXEDDB_OWNS_PENDING',source_hash:hash(name),status:changed?'U':'N'};
+ const sourceLang=origin(name);if(!sourceLang)return {skipped:'SOURCE_LANGUAGE_UNKNOWN'};
+ const originalCode=x.originalCode||code;
+ const client=typeof pool.connect==='function'?await pool.connect():null,db=client||pool;
+ try{
+  if(client)await db.query('BEGIN');
+  await db.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))',[table+':'+mall,code]);
+  const latest=await db.query(currentSql,[mall,originalCode]);
+  if(latest.rows.length!==1||norm(latest.rows[0].name)!==name){if(client)await db.query('ROLLBACK');return {skipped:'SOURCE_SUPERSEDED'};}
+  const previous=await db.query(`SELECT * FROM public.${table} WHERE mall_code=$1 AND ${key}=$2 FOR UPDATE`,[mall,code]);
+  if(!previous.rows.length){
+   await db.query(`INSERT INTO public.${table}(mall_code,${key},"${sourceLang}",translation_status) VALUES($1,$2,$3,'0') ON CONFLICT(mall_code,${key}) DO NOTHING`,[mall,code,name]);
+   if(client)await db.query('COMMIT');return {status:'0',inserted:true};
+  }
+  const old=previous.rows[0];
+  // Compare the authoritative original language, not a translated language.
+  const oldName=norm(old[sourceLang]);
+  const changed=(x.old_name!=null&&norm(x.old_name)!==name)||!!oldName&&oldName!==name;
+  if(changed){
+   await db.query(`UPDATE public.${table} SET "${sourceLang}"=$3,translation_status='U' WHERE mall_code=$1 AND ${key}=$2`,[mall,code,name]);
+  }else if(!oldName){
+   await db.query(`UPDATE public.${table} SET "${sourceLang}"=$3 WHERE mall_code=$1 AND ${key}=$2`,[mall,code,name]);
+  }
+  if(client)await db.query('COMMIT');
+  return {status:changed?'U':String(old.translation_status||'0'),changed:changed};
+ }catch(e){if(client)try{await db.query('ROLLBACK');}catch(_){}throw e;}
+ finally{if(client)client.release();}
 }
-module.exports={LANGS,norm,hash,origin,resolveOption,syncName};
+module.exports={LANGS,norm,origin,resolveOption,syncName};

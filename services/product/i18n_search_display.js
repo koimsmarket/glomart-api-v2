@@ -1,12 +1,10 @@
  'use strict';
 /* GM_PRODUCT_I18N_V013: search display-only enrichment.
  * Never runs translation in server. Never modifies product/option source.
- * Only current-hash translations are reusable. Existing search remains the source of results.
+ * Only translations matching the current original name are reusable.
  */
-const crypto=require('crypto');
 const LANGS=new Set(['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr']);
 function norm(v){return String(v||'').trim().replace(/\s+/g,' ');}
-function hash(s){return crypto.createHash('sha256').update(s,'utf8').digest('hex');}
 function langOf(v){let l=norm(v).toLowerCase().split(/[-_]/)[0];if(l==='cn')l='zh';if(l==='jp')l='ja';if(l==='kr')l='ko';if(l==='vn')l='vi';return LANGS.has(l)?l:'';}
 function origin(t){return /[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(t)?'ko':/^[\x20-\x7e]+$/.test(t)?'en':null;}
 async function attach(pool,rows,items,langInput){
@@ -34,10 +32,10 @@ async function attach(pool,rows,items,langInput){
  try{
   // Whitelist the column name; user input must never become arbitrary SQL.
   const r=await pool.query(`SELECT t.mall_code,t.product_id,t."${lang}" AS translated_name,
-     t.source_hash,t.source_lang,t.translation_source,t.ko,t.en,t.translation_status
+     t.ko,t.en,t.translation_status,t.translation_source
      FROM UNNEST($1::text[],$2::text[]) AS k(mall_code,product_id)
      JOIN public.gm_product_translation t ON t.mall_code=k.mall_code AND t.product_id=k.product_id
-`,[malls,ids]);
+     `,[malls,ids]);
   for(const x of r.rows||[])map.set(norm(x.mall_code)+'\u0000'+norm(x.product_id),x);
  }catch(e){
   console.warn('[GM_I18N_SEARCH_LOOKUP_FAILED]',e.code||e.message);
@@ -48,17 +46,17 @@ async function attach(pool,rows,items,langInput){
   const original=items[i].original_product_name,srcLang=origin(original),tracked=map.get(keys[i]);
   if(!original||!srcLang){items[i].i18n_reason='SOURCE_UNSUPPORTED';continue;}
   if(lang===srcLang){items[i].translated_name=original;items[i].i18n_reason='SOURCE_LANGUAGE';continue;}
-  if(!tracked){items[i].translate_required='Y';items[i].source_hash=hash(original);items[i].source_lang=srcLang;items[i].translation_code=norm(rows[i].product_id);items[i].i18n_reason='CLIENT_TRANSLATION_REQUIRED';continue;}
-  const srcHash=hash(original);
-  if((tracked.source_hash&&norm(tracked.source_hash)!==srcHash)|| (!tracked.source_hash&&norm(tracked[srcLang])!==original)|| (tracked.source_lang&&tracked.source_lang!==srcLang)||tracked.translation_status==='U'){
-    items[i].translate_required='Y';items[i].source_hash=srcHash;items[i].source_lang=srcLang;items[i].i18n_reason='SOURCE_VERSION_MISMATCH';continue;
+  if(!tracked){items[i].translate_required='Y';items[i].i18n_reason='CLIENT_TRANSLATION_REQUIRED';continue;}
+  if(norm(tracked[srcLang])!==original){
+    items[i].translate_required='Y';items[i].i18n_reason='SOURCE_VERSION_MISMATCH';continue;
   }
 
-  items[i].source_hash=srcHash;
   items[i].source_lang=srcLang;
   items[i].translation_code=norm(rows[i].product_id);
   const translated=norm(tracked.translated_name);
-  if(translated){
+  const meta=tracked.translation_source&&typeof tracked.translation_source==='object'?tracked.translation_source:{};
+  const valid=String(tracked.translation_status||'')!=='U'||norm(meta['__original_'+lang])===original;
+  if(translated&&valid){
    items[i].translated_name=translated;
    items[i].server_lang=lang;
    items[i].productName=translated;items[i].title=translated;

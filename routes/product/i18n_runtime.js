@@ -3,12 +3,10 @@
  * Mount under existing authenticated product router. Does NOT run translations.
  * Source identity must be derived from authoritative product/option DB rows.
  */
-const crypto=require('crypto');
 const express=require('express');
 const router=express.Router();
 const LANGS=['ko','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const reMall=/^[A-Z0-9_]{2,16}$/;
-function hash(s){return crypto.createHash('sha256').update(s,'utf8').digest('hex');}
 function norm(s){return String(s||'').trim().replace(/\s+/g,' ');}
 function db(req){return req.app.locals.db||req.app.locals.pool;}
 function fail(res,status,error){return res.status(status).json({ok:false,error});}
@@ -39,30 +37,32 @@ function translationSources(row){
  }
  return {};
 }
-function requiredLanguages(row,sourceLang,stale){
+function requiredLanguages(row,sourceLang,status){
  const sources=translationSources(row);
- return LANGS.filter(l=>l!==sourceLang&&(stale||!row||!norm(row[l])||String(sources[l]||'').toUpperCase()==='OFF'));
+ if(status==='U')return LANGS.filter(l=>l!==sourceLang&&(!norm(row[l])||norm(sources['__original_'+l])!==norm(row[sourceLang])||String(sources[l]||'').toUpperCase()==='OFF'));
+ return LANGS.filter(l=>l!==sourceLang&&(!row||!norm(row[l])||String(sources[l]||'').toUpperCase()==='OFF'));
 }
 async function planOne(pool,x){
  const src=await current(pool,x);
  if(!src)return {group:'skipped',item:{type:x.type,code:x.code,reason:'SOURCE_NOT_FOUND_OR_AMBIGUOUS'}};
  if(src.blocked)return {group:'blocked',item:{type:x.type,code:x.code,reason:src.blocked}};
- if(!src.text)return {group:'skipped',item:{type:x.type,code:x.code,reason:'EMPTY_SOURCE'}};
  const sourceLang=sourceLanguage(src.text);
- if(!sourceLang)return {group:'blocked',item:{type:x.type,code:x.code,reason:'UNSUPPORTED_SOURCE_LANG'}};
- const sourceHash=hash(src.text),translationCode=src.translationCode||x.code;
+ if(!src.text||!sourceLang)return {group:'blocked',item:{type:x.type,code:x.code,reason:'UNSUPPORTED_SOURCE_LANG'}};
+ const translationCode=src.translationCode||x.code;
  const found=await pool.query(`SELECT * FROM public.${src.table} WHERE mall_code=$1 AND ${src.key}=$2`,[x.mall_code,translationCode]);
- const row=found.rows[0]||null;
- const legacyMatch=!!row&&norm(row[sourceLang])===src.text;
- const stale=!!row&&((row.source_hash&&String(row.source_hash).trim()!==sourceHash)||(!row.source_hash&&!legacyMatch)||row.translation_status==='U');
- const status=row?String(row.translation_status||'N').trim():'N';
- const languages=requiredLanguages(row,sourceLang,stale);
- if(!languages.length)return {group:'skipped',item:{type:x.type,code:x.code,reason:'Y_COMPLETE'}};
- // code is the ORIGINAL client-side identifier; translation_code is only for DB bookkeeping.
+ const row=found.rows[0];
+ if(!row)return {group:'blocked',item:{type:x.type,code:x.code,reason:'TRANSLATION_ROW_NOT_INITIALIZED'}};
+ if(norm(row[sourceLang])!==src.text)return {group:'blocked',item:{type:x.type,code:x.code,reason:'SOURCE_TEXT_MISMATCH'}};
+ const status=String(row.translation_status==null?'0':row.translation_status);
+ if(!['Y','U','0','1','2','3'].includes(status))return {group:'blocked',item:{type:x.type,code:x.code,reason:'INVALID_STATUS'}};
+ const langs=requiredLanguages(row,sourceLang,status);
+ if(!langs.length)return {group:'skipped',item:{type:x.type,code:x.code,reason:'NO_MISSING_LANGUAGE'}};
+ // This endpoint is read-only; the server search UPSERT owns the atomic 0..3 grant.
+ // A plan must not issue translation assignments after the cap has been exhausted.
+ if(status==='3')return {group:'blocked',item:{type:x.type,code:x.code,reason:'TRANSLATION_REQUEST_LIMIT'}};
  return {group:'tasks',item:{type:x.type,mall_code:x.mall_code,code:x.code,
-  translation_code:translationCode,source_text:src.text,source_hash:sourceHash,
-  source_lang:sourceLang,languages,translation_status:status,
-  reason:stale?'SOURCE_UPDATED_OR_RECHECK':'MISSING_OFF_OR_REVIEW'}};
+  translation_code:translationCode,source_text:src.text,source_lang:sourceLang,
+  languages:langs,translation_status:status,reason:status==='U'?'SOURCE_UPDATED_OR_RECHECK':'MISSING_OR_REVIEW'}};
 }
 router.post('/api/gm/product/i18n/plan',async(req,res)=>{
  res.set('Cache-Control','no-store');
@@ -104,10 +104,10 @@ router.post('/api/gm/product/i18n/upload',async(req,res)=>{
   const result=await require('../../services/product/i18n_upload').save(pool,req.body);
   return res.json(result);
  }catch(e){
-  const known=['INVALID_ITEM','INVALID_TRANSLATIONS','INVALID_SOURCE_HASH','INVALID_TRANSLATION_ENTRY','SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE','PID_VID_COLLISION','STALE_SOURCE','TRANSACTION_POOL_REQUIRED'];
+  const known=['INVALID_ITEM','INVALID_TRANSLATIONS','SOURCE_TEXT_REQUIRED','INVALID_TRANSLATION_ENTRY','SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE','PID_VID_COLLISION','STALE_SOURCE','SOURCE_TEXT_MISMATCH','TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
   const error=known.includes(e.code)?e.code:'UPLOAD_FAILED';
   if(error==='UPLOAD_FAILED')console.error('[GM_PRODUCT_I18N_UPLOAD]',e.code||e.message);
-  return fail(res,error==='STALE_SOURCE'?409:error==='UPLOAD_FAILED'?500:400,error);
+  return fail(res,error==='STALE_SOURCE'||error==='SOURCE_TEXT_MISMATCH'?409:error==='UPLOAD_FAILED'?500:400,error);
  }
 });
 // V049: one authenticated HTTP request carrying several distinct product/option
@@ -141,17 +141,17 @@ router.post('/api/gm/product/i18n/upload-batch',async(req,res)=>{
    // claim of all-or-nothing success across unrelated products.
    const result=await save(pool,x);
    results.push({index:i,ok:true,type:x.type,mall_code:x.mall_code,code:x.code,
-    source_hash:x.source_hash,translation_status:result.translation_status,
+    source_text:x.source_text,translation_status:result.translation_status,
     remaining_languages:result.remaining_languages||[],changed:result.changed,skipped:result.skipped});
   }catch(e){
-   const known=['INVALID_ITEM','INVALID_TRANSLATIONS','INVALID_SOURCE_HASH','INVALID_TRANSLATION_ENTRY',
+   const known=['INVALID_ITEM','INVALID_TRANSLATIONS','SOURCE_TEXT_REQUIRED','INVALID_TRANSLATION_ENTRY',
     'SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE',
-    'PID_VID_COLLISION','STALE_SOURCE',
-    'TRANSACTION_POOL_REQUIRED'];
+    'PID_VID_COLLISION','STALE_SOURCE','SOURCE_TEXT_MISMATCH',
+    'TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
    const error=known.includes(e.code)?e.code:'UPLOAD_FAILED';
    if(error==='UPLOAD_FAILED')console.error('[GM_PRODUCT_I18N_BATCH_ITEM]',i,e.code||e.message);
    results.push({index:i,ok:false,type:x.type,mall_code:x.mall_code,code:x.code,
-    source_hash:x.source_hash,error});
+    source_text:x.source_text,error});
   }
  }
  const saved=results.filter(x=>x.ok).length;
