@@ -34,6 +34,7 @@ router.use(require('./safe_update'));   // generic CSV safe update only
 router.use(require('./members'));       // Cafe24 member import/export
 router.use(require('./record_editor')); // direct record maintenance
 router.use(require('./runtime_config'));// central runtime configuration
+router.use(require('./app_update_policy')); // GM_PLAY_UPDATE_V005: public read + authorized admin write
 router.use(require('./device_lang'));   // language-pack administration
 router.use(require('./asset_pack'));    // category/UI static asset pack administration
 router.use(require('./ui_dictionary_auto')); // UI dictionary STATIC + RUNTIME discovery

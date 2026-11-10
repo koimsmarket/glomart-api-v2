@@ -15,13 +15,14 @@ async function gmStatsLoadCachedV007(){
     const j=await r.json();
     if(!j.ok) throw new Error(j.code||'snapshot unavailable');
     const list=Array.isArray(j.items)?j.items:[];
+    const bytes=n=>n==null?'-':(Number(n)/1048576).toLocaleString('ko-KR',{maximumFractionDigits:2})+' MB';
     if(state) state.textContent=j.setup_required?`통합 통계 테이블 준비 전 · 기존 스냅샷 ${list.length}개 표시`:`저장된 통계 ${list.length}개 (자동 계산 없음)`;
     if(rows){
       rows.replaceChildren();
-      if(!list.length){const tr=rows.insertRow();const td=tr.insertCell();td.colSpan=5;td.textContent='저장된 통계가 없습니다.';}
+      if(!list.length){const tr=rows.insertRow();const td=tr.insertCell();td.colSpan=7;td.textContent='저장된 통계가 없습니다.';}
       for(const v of list){
         const tr=rows.insertRow();
-        for(const value of [v.service_code,v.major_category,v.table_name,v.row_count==null?'미확인':Number(v.row_count).toLocaleString(),v.calculated_at?new Date(v.calculated_at).toLocaleString('ko-KR'):'-']){
+        for(const value of [v.service_code,v.major_category,v.table_name,v.row_count==null?'미확인':Number(v.row_count).toLocaleString('ko-KR'),v.data_bytes==null?'-':bytes(Number(v.data_bytes)+Number(v.index_bytes||0)),v.count_type||'-',v.calculated_at?new Date(v.calculated_at).toLocaleString('ko-KR'):'-']){
           const td=tr.insertCell();td.textContent=value==null?'':String(value);
         }
       }
@@ -35,6 +36,23 @@ async function gmStatsLoadCachedV007(){
 }
 async function loadDashboard(save){return gmStatsLoadCachedV007();}
 
-async function saveSnapshot(){ throw new Error('갱신 작업 미연결'); }
+// Manual only. The global fetch wrapper asks for the existing derzon password per request.
+async function saveSnapshot(){
+  const buttons=[...document.querySelectorAll('[data-gm-stats-refresh]')];
+  const state=document.getElementById('gmStatsCachedStateV007');
+  if(buttons.some(b=>b.disabled))return;
+  if(!window.confirm('전체 public 테이블의 추정 행 수와 저장용량을 계산하여 저장하시겠습니까? 실제 COUNT(*) 전체 스캔은 하지 않습니다.'))return;
+  buttons.forEach(b=>b.disabled=true);
+  if(state)state.textContent='수동 통계 계산 중…';
+  try{
+    const r=await fetch(`${API}/api/gm/builder/stats/refresh`,{method:'POST',credentials:'same-origin',cache:'no-store'});
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error(j.code||`HTTP ${r.status}`);
+    await gmStatsLoadCachedV007();
+    if(state)state.textContent=`통계 계산·저장 완료 · ${j.count}개 테이블 (행 수는 추정치)`;
+  }catch(e){
+    if(state)state.textContent='통계 계산 실패: '+String(e.message||e);
+  }finally{buttons.forEach(b=>b.disabled=false);}
+}
 
 loadDashboard(false); // no periodic statistics refresh

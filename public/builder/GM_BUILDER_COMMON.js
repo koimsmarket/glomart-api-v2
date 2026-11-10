@@ -14,6 +14,7 @@ const API = location.origin;
     if(m!=='POST')return false;
     if(p==='/api/gm/background/image-vector/mode'||p==='/api/gm/background/image-vector/pending/import')return true;
     if(p==='/api/gm/builder/safe-update')return true; // authenticate DRY_RUN and APPLY equally
+    if(p==='/api/gm/builder/stats/refresh')return true; // one derzon password per explicit manual refresh
     return p==='/api/gm/builder/cafe24-member-import'||p==='/api/gm/builder/record/update'||p==='/api/gm/builder/record/delete-selected';
   }
   function askPassword(){
