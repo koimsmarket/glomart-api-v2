@@ -33,15 +33,34 @@ async function save(pool,input){
   const currentOriginal=norm(sourceRow.rows[0].name),sourceLang=origin(currentOriginal);
   if(!currentOriginal||currentOriginal!==requestOriginal)throw invalid('STALE_SOURCE');
   if(!sourceLang||entries.some(e=>e.lang===sourceLang))throw invalid('SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED');
+  // Translation service alone initializes translation rows. The first INSERT
+  // already contains a genuine translated value: no committed source-only row.
+  const first=entries[0];
+  const firstMeta=JSON.stringify({[first.lang]:first.source,['__original_'+first.lang]:currentOriginal});
+  const inserted=await db.query(`INSERT INTO public.${t.table}
+    (mall_code,${t.key},"${sourceLang}","${first.lang}",translation_source,translation_status)
+    VALUES($1,$2,$3,$4,$5::jsonb,'0')
+    ON CONFLICT(mall_code,${t.key}) DO NOTHING
+    RETURNING ${t.key}`,[mall,actual,currentOriginal,first.text,firstMeta]);
+  const newlyCreated=inserted.rows.length===1;
   const existing=await db.query(`SELECT * FROM public.${t.table} WHERE mall_code=$1 AND ${t.key}=$2 FOR UPDATE`,[mall,actual]);
-  if(existing.rows.length!==1)throw invalid('TRANSLATION_ROW_NOT_INITIALIZED');
+  if(existing.rows.length!==1)throw invalid('TRANSLATION_ROW_NOT_FOUND_AFTER_INSERT');
   const row=existing.rows[0];
-  if(norm(row[sourceLang])!==currentOriginal)throw invalid('SOURCE_TEXT_MISMATCH');
+  const previousOriginal=norm(row[sourceLang]);
+  const sourceChanged=previousOriginal!==currentOriginal;
+  if(sourceChanged){
+   await db.query(`UPDATE public.${t.table} SET "${sourceLang}"=$3,translation_status='U'
+    WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,currentOriginal]);
+   row[sourceLang]=currentOriginal;row.translation_status='U';
+  }
   const sources=row.translation_source&&typeof row.translation_source==='object'?row.translation_source:{};
-  let changed=0,skipped=0;
+  let changed=newlyCreated?1:0,skipped=0;
   for(const e of entries){
    const prior=String(sources[e.lang]||'').toUpperCase(),before=norm(row[e.lang]);
-   if(before&&(prior==='ON'||!prior)){skipped++;continue;} // Never overwrite an existing accepted/legacy translation through public upload.
+   const oldVersion=sourceChanged||(String(row.translation_status||'')==='U'&&
+    norm(sources['__original_'+e.lang])!==currentOriginal);
+   // Keep accepted current-source ON/legacy translations; stale versions may be replaced.
+   if(before&&!oldVersion&&(prior==='ON'||!prior)){skipped++;continue;}
    if(before===e.text&&prior===e.source&&norm(sources['__original_'+e.lang])===currentOriginal){skipped++;continue;}
    await db.query(`UPDATE public.${t.table} SET "${e.lang}"=$3,translation_source=jsonb_set(jsonb_set(COALESCE(translation_source,'{}'::jsonb),$4::text[],to_jsonb($5::text),true),$6::text[],to_jsonb($7::text),true) WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,e.text,[e.lang],e.source,['__original_'+e.lang],currentOriginal]);
    row[e.lang]=e.text;sources[e.lang]=e.source;sources['__original_'+e.lang]=currentOriginal;changed++;

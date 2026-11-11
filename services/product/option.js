@@ -288,13 +288,6 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         continue;
       }
       seen.add(sig);
-      // GM_PRODUCT_I18N_RUNTIME_V008: pre-read only the exact original option identity.
-      // The translation PID_VID key is resolved separately and never guessed from PI_II_VI.
-      let oldI18nOptionName = null;
-      try{
-        const prior=await pool.query('SELECT option_name FROM public.gm_product_option WHERE mall_code=$1 AND pi_ii_vi=$2 LIMIT 2',[opt.mall_code,opt.pi_ii_vi]);
-        if(prior.rows.length===1)oldI18nOptionName=String(prior.rows[0].option_name||'');
-      }catch(e){console.warn('[GM_PRODUCT_I18N_V008_OPTION_PRECHECK]',e.code||e.message);}
       const r = await pool.query(`
         INSERT INTO gm_product_option (
           mall_code, product_id, item_id, vendor_item_id, pi_ii_vi,
@@ -338,14 +331,6 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         opt.soldout_yn, opt.sale_status, opt.active_yn,
         opt.buyable_qty, opt.min_order_qty, opt.max_order_qty
       ]);
-      // Translation metadata failures must not block the existing option UPSERT.
-      try{
-        await require('./i18n_option_sync').syncOptionName(pool,{
-          mall_code:opt.mall_code,pi_ii_vi:opt.pi_ii_vi,
-          old_name:oldI18nOptionName,new_name:opt.option_name,
-          inserted:!!(r.rows[0]&&r.rows[0].inserted)
-        });
-      }catch(e){console.warn('[GM_PRODUCT_I18N_V008_OPTION_SYNC]',e.code||e.message);}
       if(r.rows[0] && r.rows[0].inserted) result.inserted += 1;
       else result.updated += 1;
       if(result.samples.length < 5) result.samples.push({ action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated', pi_ii_vi:opt.pi_ii_vi, name:opt.option_name });

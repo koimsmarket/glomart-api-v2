@@ -46,15 +46,6 @@ async function upsertProduct(pool, raw, parent={}){
     return { ok:false, skipped:true, reason:'required field missing: ' + missing.join(','), missing, uid:id.uid||'', pi_ii_vi:id.pi||'', mall_code:id.mallCode||'', product_id:id.productId||'', source_url:pickProductUrl(p), title_sample:cleanText(p.title||p.name||p.productName||p.product_name).slice(0,120) };
   }
 
-  // GM_PRODUCT_I18N_RUNTIME_V007: read previous source before UPSERT; translation sync is isolated.
-  let i18nPreviousName = null;
-  if(id.mallCode && id.productId){
-    try{
-      const prior=await pool.query('SELECT product_name FROM public.gm_product WHERE mall_code=$1 AND product_id=$2 LIMIT 2',[id.mallCode,id.productId]);
-      if(prior.rows.length===1)i18nPreviousName=String(prior.rows[0].product_name||'');
-    }catch(e){console.warn('[GM_PRODUCT_I18N_V007_PRECHECK]',e.code||e.message);}
-  }
-
   // product_url 저장 중단: 필요 시 아래 줄을 부활한다.
   // const productUrl = normalizeUrl(buildProductUrlFromId(id) || pickProductUrl(p));
   const productUrl = '';
@@ -300,15 +291,6 @@ async function upsertProduct(pool, raw, parent={}){
     }catch(e){
       try{ console.warn('[GM_PRODUCT_UNIT_SOURCE_TEXT_WARN]', Object.assign({uid:id.uid, action:sourceUnitPriceText?'refresh':'clear', unit_price_text:sourceUnitPriceText||''}, compactError(e))); }catch(_log){}
     }
-  }
-  // Translation bookkeeping must never block normal product creation/update.
-  if(id.mallCode && id.productId){
-    try{
-      await require('./i18n_sync').syncProductName(pool,{
-        mall_code:id.mallCode,product_id:id.productId,old_name:i18nPreviousName,new_name:productName,
-        inserted:!!(r.rows[0]&&r.rows[0].inserted)
-      });
-    }catch(e){console.warn('[GM_PRODUCT_I18N_V007_SYNC]',e.code||e.message);}
   }
   let cp_learning = null;
   try{

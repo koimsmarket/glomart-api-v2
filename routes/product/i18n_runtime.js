@@ -50,19 +50,22 @@ async function planOne(pool,x){
  if(!src.text||!sourceLang)return {group:'blocked',item:{type:x.type,code:x.code,reason:'UNSUPPORTED_SOURCE_LANG'}};
  const translationCode=src.translationCode||x.code;
  const found=await pool.query(`SELECT * FROM public.${src.table} WHERE mall_code=$1 AND ${src.key}=$2`,[x.mall_code,translationCode]);
- const row=found.rows[0];
- if(!row)return {group:'blocked',item:{type:x.type,code:x.code,reason:'TRANSLATION_ROW_NOT_INITIALIZED'}};
- if(norm(row[sourceLang])!==src.text)return {group:'blocked',item:{type:x.type,code:x.code,reason:'SOURCE_TEXT_MISMATCH'}};
- const status=String(row.translation_status==null?'0':row.translation_status);
+ const row=found.rows[0]||null;
+ // A missing translation row is normal: the translation upload owns its creation.
+ // Detect source changes against the current authoritative product/option source,
+ // without writing an empty translation row during a planning request.
+ const sourceChanged=!!row&&norm(row[sourceLang])!==src.text;
+ const status=sourceChanged?'U':String(row&&row.translation_status!=null?row.translation_status:'0');
  if(!['Y','U','0','1','2','3'].includes(status))return {group:'blocked',item:{type:x.type,code:x.code,reason:'INVALID_STATUS'}};
- const langs=requiredLanguages(row,sourceLang,status);
+ const effectiveRow=row?Object.assign({},row,{[sourceLang]:src.text}):{[sourceLang]:src.text};
+ const langs=row?requiredLanguages(effectiveRow,sourceLang,status):LANGS.filter(l=>l!==sourceLang);
  if(!langs.length)return {group:'skipped',item:{type:x.type,code:x.code,reason:'NO_MISSING_LANGUAGE'}};
  // This endpoint is read-only; the server search UPSERT owns the atomic 0..3 grant.
  // A plan must not issue translation assignments after the cap has been exhausted.
  if(status==='3')return {group:'blocked',item:{type:x.type,code:x.code,reason:'TRANSLATION_REQUEST_LIMIT'}};
  return {group:'tasks',item:{type:x.type,mall_code:x.mall_code,code:x.code,
   translation_code:translationCode,source_text:src.text,source_lang:sourceLang,
-  languages:langs,translation_status:status,reason:status==='U'?'SOURCE_UPDATED_OR_RECHECK':'MISSING_OR_REVIEW'}};
+  languages:langs,translation_status:status,reason:status==='U'?'SOURCE_UPDATED_OR_RECHECK':(!row?'UNINITIALIZED_TRANSLATION':'MISSING_OR_REVIEW')}};
 }
 router.post('/api/gm/product/i18n/plan',async(req,res)=>{
  res.set('Cache-Control','no-store');
