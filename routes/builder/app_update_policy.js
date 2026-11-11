@@ -58,6 +58,19 @@ router.post('/api/gm/builder/app-update/policy',async(req,res)=>{
   const b=req.body||{},channel=cleanChannel(b.channel),pool=db(req);
   if(!channel)return res.status(400).json({ok:false,error:'INVALID_CHANNEL'});
   if(!pool)return res.status(503).json({ok:false,error:'DB_UNAVAILABLE'});
+  // V009 safety override: reauthenticated OFF cannot be blocked by invalid form
+  // fields (version range / URLs) and cannot accidentally publish a new policy.
+  if(b.disable_only===true){
+    try{
+      const r=await pool.query(`UPDATE gm_android_update_policy
+        SET enabled=false,force_update=false,updated_at=now()
+        WHERE channel=$1 RETURNING *`,[channel]);
+      return res.json({ok:true,disabled:true,item:r.rows[0]||null});
+    }catch(e){
+      console.warn('[GM_PLAY_UPDATE_V009 POLICY_OFF]',e&&e.code||'FAILED');
+      return res.status(e&&e.code==='42P01'?409:503).json({ok:false,error:e&&e.code==='42P01'?'MIGRATION_REQUIRED':'POLICY_OFF_FAILED'});
+    }
+  }
   const enabled=b.enabled===true,ready=b.release_ready===true,forced=b.force_update===true;
   const latest=b.latest_version_code,minimum=b.minimum_version_code;
   const apk=String(b.apk_url||'').trim(),play=String(b.play_url||'').trim(),version=String(b.latest_version||'').trim(),message=String(b.message||'').trim();

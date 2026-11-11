@@ -349,7 +349,7 @@
     }catch(e){status('검증 실패: '+e.message);}
   };
   w.gmUpdDisableV006=function(){
-    try{if(current!==channel())throw Error('먼저 해당 채널 정책을 조회하세요');const x=parsePolicy();x.enabled=false;x.force_update=false;if(!w.confirm(channel()+' 업데이트 정책을 OFF로 저장할까요?'))return;submit(x);}catch(e){status('검증 실패: '+e.message);}
+    try{if(current!==channel())throw Error('먼저 해당 채널 정책을 조회하세요');if(!w.confirm(channel()+' 업데이트 정책을 OFF로 저장할까요?'))return;submit({channel:channel(),disable_only:true,enabled:false,force_update:false});}catch(e){status('검증 실패: '+e.message);}
   };
   $('gmUpdChannel').addEventListener('change',()=>{current='';setPolicy({});w.gmUpdLoadV006();});
 })(window,document);
