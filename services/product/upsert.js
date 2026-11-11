@@ -35,6 +35,24 @@ async function upsertProduct(pool, raw, parent={}){
   const sourceUnitPrice = resolveUnitPriceSource(raw,parent);
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
+  // GM_CPKR_POLICY_V011: confirmed stopped-product signal from collector.
+  // Update only the existing product state, never overwrite historical details.
+  if(id.mallCode==='CPKR' && /^\d{5,}$/.test(id.productId) &&
+     cleanText(p.source)==='connector-detail-coupang-unavailable' &&
+     cleanText(p.sale_status||p.saleStatus).toLowerCase()==='inactive' &&
+     cleanText(p.product_removed||p.productRemoved||'N').toUpperCase()!=='Y'){
+    const stopped=await pool.query(`
+      UPDATE gm_product SET sale_status='inactive', soldout_yn='N', updated_at=now()
+       WHERE mall_code='CPKR' AND product_id=$1
+       RETURNING product_uid, mall_code, product_id, sale_status, soldout_yn`,[id.productId]);
+    console.log('[GM_CPKR_SALE_STOPPED_V011]',{
+      product_id:id.productId,updated:stopped.rowCount||0,source:'collector-final-unavailable'
+    });
+    return {ok:true,action:'updated',item:{
+      mall_code:'CPKR',product_id:id.productId,sale_status:'inactive',soldout_yn:'N',
+      updated:stopped.rowCount||0,option_result:{received:0,inserted:0,updated:0,skipped:0,nonactive:0,balance_ok:true}
+    }};
+  }
   const sourceUnitPriceText = sourceUnitPrice.text;
   const sourceUnitPriceSeen = sourceUnitPrice.seen;
   const missing = [];
