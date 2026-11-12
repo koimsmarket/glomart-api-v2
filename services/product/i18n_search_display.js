@@ -28,6 +28,43 @@ async function attach(pool,rows,items,langInput){
   items[i].translate_required='N';items[i].i18n_lang=lang;items[i].i18n_reason='NOT_TRACKED';
  }
  if(!rows.length)return;
+ // Search results must carry their known VID options, including the representative VID.
+ // Read-only; no source writes, translation queue or detail-page dependency.
+ try{
+  const rr=await pool.query(`SELECT o.mall_code,o.product_id,o.pi_ii_vi,o.option_name,
+        o.vendor_item_id,o.item_id,o.option_sort_no,
+        t."${lang}" AS translated_option_name,t.ko,t.en,t.translation_status,t.translation_source
+      FROM (SELECT DISTINCT mall_code,product_id FROM UNNEST($1::text[],$2::text[]) AS k(mall_code,product_id)) k
+      JOIN public.gm_product_option o ON o.mall_code=k.mall_code AND o.product_id=k.product_id
+      LEFT JOIN public.gm_option_translation t
+        ON t.mall_code=o.mall_code AND t.pi_vi=o.product_id||'_'||o.vendor_item_id
+      WHERE COALESCE(o.active_yn,'Y')='Y'
+      ORDER BY o.mall_code,o.product_id,o.option_sort_no NULLS LAST,o.pi_ii_vi`,[malls,ids]);
+  const grouped=new Map();
+  for(const o of rr.rows||[]){
+   const key=norm(o.mall_code)+'\u0000'+norm(o.product_id);
+   const original=norm(o.option_name),srcLang=origin(original);
+   const opt={pi_ii_vi:norm(o.pi_ii_vi),product_id:norm(o.product_id),
+    vendorItemId:norm(o.vendor_item_id),itemId:norm(o.item_id),
+    option_name:original,original_option_name:original,
+    translated_option_name:null,translate_required:'N',i18n_lang:lang};
+   if(original&&srcLang&&srcLang!==lang){
+    const sourceStored=norm(o[srcLang]);
+    const meta=o.translation_source&&typeof o.translation_source==='object'?o.translation_source:{};
+    const valid=sourceStored===original&&
+     (String(o.translation_status||'')!=='U'||norm(meta['__original_'+lang])===original);
+    if(valid&&norm(o.translated_option_name)){
+     opt.translated_option_name=norm(o.translated_option_name);
+    }else opt.translate_required='Y';
+   }
+   if(!grouped.has(key))grouped.set(key,[]);
+   grouped.get(key).push(opt);
+  }
+  for(let i=0;i<items.length;i++)items[i].options=grouped.get(keys[i])||[];
+ }catch(e){
+  console.warn('[GM_I18N_SEARCH_OPTIONS_LOOKUP_FAILED]',e.code||e.message);
+  for(const it of items)it.options=[];
+ }
  const map=new Map();
  try{
   // Whitelist the column name; user input must never become arbitrary SQL.
