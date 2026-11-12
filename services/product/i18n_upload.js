@@ -21,17 +21,16 @@ async function save(pool,input){
  try{
   await db.query('BEGIN');
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))',[t.table+':'+mall,code]);
-  let actual=code,sourceRow;
-  if(x.type==='PRODUCT'){
-   sourceRow=await db.query('SELECT product_name AS name FROM public.gm_product WHERE mall_code=$1 AND product_id=$2 LIMIT 2 FOR SHARE',[mall,code]);
-  }else{
-   const mapping=await resolveOption(db,mall,code);if(!mapping.ok)throw invalid(mapping.reason);
+  // V014: translation-table UPSERT is independent of the supplier product
+  // UPSERT. Do not read gm_product/gm_product_option to compare source names.
+  // The supplied source_text is the translation job's original text.
+  let actual=code;
+  if(x.type==='OPTION'){
+   const mapping=await resolveOption(db,mall,code);
+   if(!mapping.ok)throw invalid(mapping.reason);
    actual=mapping.pi_vi;
-   sourceRow=await db.query('SELECT option_name AS name FROM public.gm_product_option WHERE mall_code=$1 AND pi_ii_vi=$2 LIMIT 2 FOR SHARE',[mall,code]);
   }
-  if(sourceRow.rows.length!==1)throw invalid('SOURCE_NOT_UNIQUE');
-  const currentOriginal=norm(sourceRow.rows[0].name),sourceLang=origin(currentOriginal);
-  if(!currentOriginal||currentOriginal!==requestOriginal)throw invalid('STALE_SOURCE');
+  const currentOriginal=requestOriginal,sourceLang=origin(requestOriginal);
   if(!sourceLang||entries.some(e=>e.lang===sourceLang))throw invalid('SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED');
   // Translation service alone initializes translation rows. The first INSERT
   // already contains a genuine translated value: no committed source-only row.
@@ -57,10 +56,8 @@ async function save(pool,input){
   let changed=newlyCreated?1:0,skipped=0;
   for(const e of entries){
    const prior=String(sources[e.lang]||'').toUpperCase(),before=norm(row[e.lang]);
-   const oldVersion=sourceChanged||(String(row.translation_status||'')==='U'&&
-    norm(sources['__original_'+e.lang])!==currentOriginal);
-   // Keep accepted current-source ON/legacy translations; stale versions may be replaced.
-   if(before&&!oldVersion&&(prior==='ON'||!prior)){skipped++;continue;}
+   // V014: the translated value is UPSERTed even if a prior ON translation exists.
+   // Only identical same-source values are idempotently skipped.
    if(before===e.text&&prior===e.source&&norm(sources['__original_'+e.lang])===currentOriginal){skipped++;continue;}
    await db.query(`UPDATE public.${t.table} SET "${e.lang}"=$3,translation_source=jsonb_set(jsonb_set(COALESCE(translation_source,'{}'::jsonb),$4::text[],to_jsonb($5::text),true),$6::text[],to_jsonb($7::text),true) WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,e.text,[e.lang],e.source,['__original_'+e.lang],currentOriginal]);
    row[e.lang]=e.text;sources[e.lang]=e.source;sources['__original_'+e.lang]=currentOriginal;changed++;
