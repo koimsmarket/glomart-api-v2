@@ -76,11 +76,11 @@ const ACTIVE_WHERE=`
   AND COALESCE(soldout_yn,'N')<>'Y'
 `;
 
-async function keywordIndexStage(pool,keyword,mall,limit){
+async function keywordIndexStage(pool,keyword,mall,limit,excluded){
   // Fair rotation and exact MAIN/SUB token lookup belong to GM_SEARCH_RANKER.
   return timedPoolQuery(pool,
     gmSearchRanker.keywordRotationQuery(PRODUCT_COLS, ACTIVE_WHERE.replace(/\b(mall_code|sale_status|soldout_yn)\b/g,'p.$1')),
-    [keyword,mall,limit], 'keyword_index_'+mall);
+    [keyword,mall,limit+1,excluded||[]], 'keyword_index_'+mall);
 }
 
 function categoryScopePrefix(code){
@@ -117,15 +117,16 @@ async function categoryStage(pool,categoryCode,virtualKeyword,limit){
 }
 
 
-router.get('/api/gm/search/local', async (req,res)=>{
-  const gmSource=String((req.query&&req.query.gm_source)||'UNKNOWN').trim().slice(0,80)||'UNKNOWN';
-  const gmReason=String((req.query&&req.query.gm_reason)||'').trim().slice(0,120);
+async function handleLocalSearch(req,res){
+  const query=req.method==='POST' ? Object.assign({},req.query||{},req.body||{}) : (req.query||{});
+  const gmSource=String((query&&query.gm_source)||'UNKNOWN').trim().slice(0,80)||'UNKNOWN';
+  const gmReason=String((query&&query.gm_reason)||'').trim().slice(0,120);
   const pool=db(req); if(!pool) return res.status(500).json({ok:false,version:VERSION,error:'DB pool is not attached'});
-  const keyword=C(req.query.keyword||req.query.q||'');
-  const categoryCode=C(req.query.category_code||req.query.gm_category_code||'').toUpperCase();
-  const categoryVirtualKeyword=C(req.query.category_keyword||'');
-  const categorySearch=C(req.query.category_search)==='1'&&!!categoryCode;
-  const limit=Math.max(1,Math.min(200,toInt(req.query.limit,150)||150));
+  const keyword=C(query.keyword||query.q||'');
+  const categoryCode=C(query.category_code||query.gm_category_code||'').toUpperCase();
+  const categoryVirtualKeyword=C(query.category_keyword||'');
+  const categorySearch=C(query.category_search)==='1'&&!!categoryCode;
+  const limit=Math.max(1,Math.min(200,toInt(query.limit,150)||150));
   if(!keyword&&!categorySearch) return res.json({ok:true,version:VERSION,keyword:'',count:0,items:[],groups:{CPKR:0,ALKR:0}});
 
   priorityEnter(pool);
@@ -163,7 +164,7 @@ router.get('/api/gm/search/local', async (req,res)=>{
         deliveryEtaText:x.delivery_eta_text,deliveryType:x.delivery_type,reviewCount:x.review_count,mall_sales_count:x.mall_sales_count,rating:x.product_grade,
         product_url:x.product_url||'',image:x.thumb_origin_url||'',thumb_origin_url:x.thumb_origin_url||'',__gm_server_local:1,__gm_category_code_search:1
       }));
-      await gmI18nSearchDisplay.attach(pool,rows,items,req.query.gm_lang||req.query.lang||req.query.device_lang);
+      await gmI18nSearchDisplay.attach(pool,rows,items,query.gm_lang||query.lang||query.device_lang);
       const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
       const endedAt=Date.now();
       console.log('[GM_SEARCH_LOAD] keyword='+(keyword||categoryVirtualKeyword||categoryCode)+' count='+items.length);
@@ -175,13 +176,19 @@ router.get('/api/gm/search/local', async (req,res)=>{
     // One index lookup per mall, parallelized. MAIN and SUB are indexed once
     // per product/keyword; no expensive keyword LIKE or pipe-array scan.
     const exactStarted=Date.now();
+    const rawExclude=query.exclude_uids&&typeof query.exclude_uids==='object' ? query.exclude_uids : {};
+    function safeExclude(mall){
+      const arr=rawExclude[mall];
+      return (Array.isArray(arr)?arr:[]).filter(v=>typeof v==='string' && v.length>0 && v.length<=256).slice(0,3000);
+    }
     const [exactKeywordTimed,exactCategoryTimed]=await Promise.all([
-      keywordIndexStage(pool,keyword,'CPKR',limit),
-      keywordIndexStage(pool,keyword,'ALKR',limit)
+      keywordIndexStage(pool,keyword,'CPKR',limit,safeExclude('CPKR')),
+      keywordIndexStage(pool,keyword,'ALKR',limit,safeExclude('ALKR'))
     ]);
+    const hasMore={CPKR:exactKeywordTimed.result.rows.length>limit,ALKR:exactCategoryTimed.result.rows.length>limit};
     const exactParallelMs=ms(exactStarted);
-    merge(exactKeywordTimed.result.rows);
-    merge(exactCategoryTimed.result.rows);
+    merge(exactKeywordTimed.result.rows.slice(0,limit));
+    merge(exactCategoryTimed.result.rows.slice(0,limit));
 
     const rows=[...byMall.CPKR,...byMall.ALKR];
     const items=rows.map(x=>({
@@ -197,20 +204,22 @@ router.get('/api/gm/search/local', async (req,res)=>{
       product_url:x.product_url||'',image:x.thumb_origin_url||'',thumb_origin_url:x.thumb_origin_url||'',
       __gm_server_local:1
     }));
-    await gmI18nSearchDisplay.attach(pool,rows,items,req.query.gm_lang||req.query.lang||req.query.device_lang);
+    await gmI18nSearchDisplay.attach(pool,rows,items,query.gm_lang||query.lang||query.device_lang);
     const groups={CPKR:byMall.CPKR.length,ALKR:byMall.ALKR.length};
     const endedAt=Date.now();
     console.log('[GM_SEARCH_LOAD] keyword='+keyword+' count='+items.length);
     const ps=poolState(pool);
     console.log('[GM_SEARCH_LOCAL_TIMING] phase=END source='+gmSource+' reason='+(gmReason||'-')+' keyword='+keyword+' category_search=N count='+items.length+' keyword_ms='+exactKeywordTimed.total_ms+' keyword_acquire_ms='+exactKeywordTimed.acquire_ms+' keyword_sql_ms='+exactKeywordTimed.sql_ms+' category_keyword_ms='+exactCategoryTimed.total_ms+' category_keyword_acquire_ms='+exactCategoryTimed.acquire_ms+' category_keyword_sql_ms='+exactCategoryTimed.sql_ms+' parallel_ms='+exactParallelMs+' pool_total='+ps.total+' pool_idle='+ps.idle+' pool_waiting='+ps.waiting+' total_ms='+(endedAt-totalStarted)+' ts_ms='+endedAt);
-    res.json({ok:true,version:VERSION,keyword,count:items.length,groups,items});
+    res.json({ok:true,version:VERSION,keyword,count:items.length,groups,has_more:hasMore,items});
   }catch(e){
     console.error('[GM_SEARCH_LOAD_ERROR] keyword='+keyword+' ms='+ms(totalStarted)+' error='+String(e&&e.message||e));
     res.status(500).json({ok:false,version:VERSION,error:'local search failed'});
   }finally{
     priorityLeave(pool);
   }
-});
+}
+router.get('/api/gm/search/local',handleLocalSearch);
+router.post('/api/gm/search/local',handleLocalSearch);
 // Called by the display layer only after product cards have actually appeared.
 // Search response delivery itself is not a verified impression.
 router.post('/api/gm/search/local/impression', async (req,res)=>{

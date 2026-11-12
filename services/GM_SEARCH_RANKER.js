@@ -58,6 +58,7 @@ function keywordRotationQuery(productCols, activeWhere) {
 ` +
     `WHERE k.keyword=$1 AND p.mall_code=$2 AND ${activeWhere}
 ` +
+    `  AND NOT (k.product_uid = ANY($4::text[]))\n` +
     `ORDER BY k.showed_at ASC NULLS FIRST, k.product_uid ASC
 ` +
     `LIMIT $3`;
