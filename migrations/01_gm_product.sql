@@ -97,7 +97,8 @@ ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_fix_code TEXT;
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS cp_match TEXT NOT NULL DEFAULT 'F';
 ALTER TABLE gm_product ADD COLUMN IF NOT EXISTS pi_ii_vi TEXT;
 
-CREATE INDEX IF NOT EXISTS idx_gm_product_keyword ON gm_product(keyword);
+-- GM_PRODUCT_KEYWORD_INDEX_V002: retired idx_gm_product_keyword; use gm_product_keyword_index instead.
+-- Existing installations: remove separately with MANUAL_DROP_OLD_KEYWORD_INDEXES.sql after cutover.
 CREATE INDEX IF NOT EXISTS idx_gm_product_mall_code ON gm_product(mall_code);
 CREATE INDEX IF NOT EXISTS idx_gm_product_cp_selected_code ON gm_product(cp_selected_code);
 CREATE INDEX IF NOT EXISTS idx_gm_product_cp_fix_code ON gm_product(cp_fix_code);

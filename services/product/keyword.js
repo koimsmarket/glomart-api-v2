@@ -300,7 +300,7 @@ async function saveProductKeywordMeta(pool, productUid, mallCode, keyword, relat
     return { keyword_ko:'', input_keyword:meta.inputKeyword, original_keyword:meta.originalKeyword, corrected_keyword:meta.correctedKeyword, related_count:0, saved:0, skipped:0, reason:'NO_CANONICAL_KEYWORD' };
   }
   if(productUid){
-    try{ await pool.query('UPDATE gm_product SET keyword=$1, updated_at=now() WHERE product_uid=$2', [keywordKo, productUid]); }catch(e){}
+    try{ await pool.query('UPDATE gm_product SET keyword=gm_product_keyword_merge(keyword,$1), updated_at=now() WHERE product_uid=$2', [keywordKo, productUid]); }catch(e){}
   }
   return saveKeywordMetaPayload(pool, Object.assign({}, payload, { mainKeyword:keywordKo, normalizedKeyword:keywordKo, keyword_ko:keywordKo, relatedKeywords:meta.relatedKeywords }));
 }

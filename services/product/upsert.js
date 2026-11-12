@@ -163,7 +163,7 @@ async function upsertProduct(pool, raw, parent={}){
             ) q
         )
       END,
-      keyword=COALESCE(NULLIF(EXCLUDED.keyword,''), gm_product.keyword),
+      keyword=gm_product_keyword_merge(gm_product.keyword, EXCLUDED.keyword),
       mall_category=COALESCE(NULLIF(EXCLUDED.mall_category,''), gm_product.mall_category),
       mall_category_json=CASE WHEN EXCLUDED.mall_category_json <> '[]'::jsonb THEN EXCLUDED.mall_category_json ELSE gm_product.mall_category_json END,
       cp_selected_code=CASE
