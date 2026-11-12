@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const VERSION = 'GM_SEARCH_LOCAL_V011_INACTIVE_STATE';
 const gmI18nSearchDisplay=require('../services/product/i18n_search_display');
+const gmSearchRanker=require('../services/GM_SEARCH_RANKER');
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
 function toInt(v,d){ const n=Number(v); return Number.isFinite(n)?Math.trunc(n):d; }
@@ -75,22 +76,11 @@ const ACTIVE_WHERE=`
   AND COALESCE(soldout_yn,'N')<>'Y'
 `;
 
-async function exactStage(pool,column,keyword,limit){
-  return timedPoolQuery(pool,`
-    WITH ranked AS (
-      SELECT ${PRODUCT_COLS},
-             ROW_NUMBER() OVER (
-               PARTITION BY mall_code
-               ORDER BY COALESCE(hit_count,0) DESC,
-                        COALESCE(updated_at,last_seen_at) DESC NULLS LAST
-             ) AS rn
-      FROM gm_product
-      WHERE ${ACTIVE_WHERE}
-        AND ${column} = $1
-    )
-    SELECT * FROM ranked WHERE rn <= $2
-    ORDER BY mall_code, rn
-  `,[keyword,limit],column);
+async function keywordIndexStage(pool,keyword,mall,limit){
+  // Fair rotation and exact MAIN/SUB token lookup belong to GM_SEARCH_RANKER.
+  return timedPoolQuery(pool,
+    gmSearchRanker.keywordRotationQuery(PRODUCT_COLS, ACTIVE_WHERE.replace(/\b(mall_code|sale_status|soldout_yn)\b/g,'p.$1')),
+    [keyword,mall,limit], 'keyword_index_'+mall);
 }
 
 function categoryScopePrefix(code){
@@ -110,7 +100,7 @@ async function categoryStage(pool,categoryCode,virtualKeyword,limit){
   if(!scopeCodes.includes(categoryCode)) scopeCodes.unshift(categoryCode);
   const params=[scopeCodes,limit];
   let virtualSql='';
-  if(virtualKeyword){params.push(virtualKeyword);virtualSql=` AND (keyword=$3 OR category_keyword=$3)`;}
+  if(virtualKeyword){params.push(virtualKeyword);virtualSql=` AND EXISTS (SELECT 1 FROM gm_product_keyword_index ki WHERE ki.product_uid=gm_product.product_uid AND ki.keyword=$3)`;}
   const qTimed=await timedPoolQuery(pool,`
     WITH ranked AS (
       SELECT ${PRODUCT_COLS},
@@ -182,17 +172,16 @@ router.get('/api/gm/search/local', async (req,res)=>{
       return res.json({ok:true,version:VERSION,keyword,category_search:true,category_code:categoryCode,category_keyword:categoryVirtualKeyword||'',scope_count:categoryResult.scope_codes.length,count:items.length,groups,items});
     }
 
-    // PRIORITY EXACT: 두 인덱스 조회는 서로 독립이므로 병렬 실행한다.
-    // 결과 병합 순서는 keyword -> category_keyword로 유지해 기존 우선순위를 보존한다.
+    // One index lookup per mall, parallelized. MAIN and SUB are indexed once
+    // per product/keyword; no expensive keyword LIKE or pipe-array scan.
     const exactStarted=Date.now();
-    const keywordPromise=exactStage(pool,'keyword',keyword,limit);
-    const categoryKeywordPromise=exactStage(pool,'category_keyword',keyword,limit);
-    const [exactKeywordTimed,exactCategoryTimed]=await Promise.all([keywordPromise,categoryKeywordPromise]);
+    const [exactKeywordTimed,exactCategoryTimed]=await Promise.all([
+      keywordIndexStage(pool,keyword,'CPKR',limit),
+      keywordIndexStage(pool,keyword,'ALKR',limit)
+    ]);
     const exactParallelMs=ms(exactStarted);
-    const exactKeyword=exactKeywordTimed.result;
-    const exactCategory=exactCategoryTimed.result;
-    merge(exactKeyword.rows);
-    merge(exactCategory.rows);
+    merge(exactKeywordTimed.result.rows);
+    merge(exactCategoryTimed.result.rows);
 
     const rows=[...byMall.CPKR,...byMall.ALKR];
     const items=rows.map(x=>({
@@ -220,6 +209,26 @@ router.get('/api/gm/search/local', async (req,res)=>{
     res.status(500).json({ok:false,version:VERSION,error:'local search failed'});
   }finally{
     priorityLeave(pool);
+  }
+});
+// Called by the display layer only after product cards have actually appeared.
+// Search response delivery itself is not a verified impression.
+router.post('/api/gm/search/local/impression', async (req,res)=>{
+  const pool=db(req);
+  if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  const body=req.body||{};
+  const keyword=C(body.keyword);
+  const uids=body.product_uids;
+  if(!keyword || keyword.length>300 || !Array.isArray(uids) || uids.length>200 ||
+     uids.some(v=>typeof v!=='string'||!v||v.length>256)) {
+    return res.status(400).json({ok:false,error:'keyword and product_uids (max 200) required'});
+  }
+  try{
+    const updated=await gmSearchRanker.recordShown(pool,keyword,uids);
+    return res.json({ok:true,updated});
+  }catch(e){
+    console.error('[GM_KEYWORD_EXPOSURE_UPDATE_FAIL]',String(e&&e.message||e));
+    return res.status(500).json({ok:false,error:'impression update failed'});
   }
 });
 module.exports=router;

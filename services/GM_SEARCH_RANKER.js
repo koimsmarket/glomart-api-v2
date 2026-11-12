@@ -1,8 +1,8 @@
-/* GM_SEARCH_RANKER_V001 | Server-only pure post-search relevance ordering.
+/* GM_SEARCH_RANKER_V002 | Search-only ranking and keyword exposure rotation.
  * NEVER use this module in collector, upsert, queue or image OCR paths.
- * No I/O, no async work, no mutation of input objects. */
+ * rankResults remains a pure compatibility helper; recordShown is DB-backed. */
 'use strict';
-const VERSION = 'GM_SEARCH_RANKER_V001';
+const VERSION = 'GM_SEARCH_RANKER_V002_KEYWORD_ROTATION';
 function tokens(s) {
   return String(s == null ? '' : s).normalize('NFKC').toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
@@ -46,4 +46,37 @@ function rankResults(keyword, items, options={}) {
       .sort((a,b)=>b.score-a.score || a.index-b.index).map(x=>x.item);
   } catch (_) { return items; }
 }
-module.exports={VERSION,rankResults,relevance,tokens};
+// GM_PRODUCT_KEYWORD_INDEX_V003: one row per product+keyword; no keyword-only UNIQUE.
+// The keyword is matched exactly to the separately indexed MAIN/SUB tokens.
+// Only this ranking module chooses exposure order. Search routes merely execute its query.
+function keywordRotationQuery(productCols, activeWhere) {
+  return `SELECT ${productCols.split(',').map(c => 'p.' + c.trim()).join(',')}
+` +
+    `FROM gm_product_keyword_index k
+` +
+    `JOIN gm_product p ON p.product_uid = k.product_uid
+` +
+    `WHERE k.keyword=$1 AND p.mall_code=$2 AND ${activeWhere}
+` +
+    `ORDER BY k.showed_at ASC NULLS FIRST, k.product_uid ASC
+` +
+    `LIMIT $3`;
+}
+// No implicit impression on search or pagination. Call only after a client has
+// actually rendered the product cards, and only for the requested keyword.
+async function recordShown(pool, searchKeyword, productUids) {
+  const keyword=String(searchKeyword||'').trim();
+  const uids=[...new Set((Array.isArray(productUids)?productUids:[])
+    .map(v=>String(v||'').trim()).filter(Boolean))].slice(0,200);
+  if(!keyword || !uids.length) return 0;
+  const result=await pool.query(`UPDATE gm_product_keyword_index k
+     SET showed_at=NOW()
+     FROM gm_product p
+     WHERE k.keyword=$1 AND k.product_uid=ANY($2::text[])
+       AND p.product_uid=k.product_uid
+       AND p.mall_code IN ('CPKR','ALKR')
+       AND COALESCE(p.sale_status,'active')='active'
+       AND COALESCE(p.soldout_yn,'N')<>'Y'`,[keyword,uids]);
+  return result.rowCount||0;
+}
+module.exports={VERSION,rankResults,relevance,tokens,keywordRotationQuery,recordShown};
