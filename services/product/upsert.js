@@ -91,7 +91,10 @@ async function upsertProduct(pool, raw, parent={}){
   const detailJsonRaw = normalizeDetailJson(p);
   const detailJsonHasData = !!(detailJsonRaw && ((detailJsonRaw.image_count||0) + (detailJsonRaw.block_count||0) + (detailJsonRaw.text_count||0) > 0));
   const detailJson = detailJsonHasData ? detailJsonRaw : null;
-  const optionCount = optionJson.option_count || toInt(p.option_count || p.optionCount, 0);
+  // Search collection is a partial sample, never the verified total number of options.
+  // CPKR totals are committed only AFTER a complete, successful detail option UPSERT.
+  const isCpkr = cleanText(id.mallCode).toUpperCase()==='CPKR';
+  const optionCount = isCpkr ? 0 : (optionJson.option_count || toInt(p.option_count || p.optionCount, 0));
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
 
@@ -180,8 +183,11 @@ async function upsertProduct(pool, raw, parent={}){
         ELSE COALESCE(gm_product.cp_match,'F') END,
       product_name=EXCLUDED.product_name,
       mall_product_name=EXCLUDED.mall_product_name,
-      option_count=CASE WHEN COALESCE(EXCLUDED.option_count,0) > 0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
-      option_json=CASE WHEN COALESCE(EXCLUDED.option_count,0) >= 2 THEN EXCLUDED.option_json WHEN COALESCE(EXCLUDED.option_count,0)=1 THEN NULL ELSE gm_product.option_json END,
+      option_count=CASE WHEN EXCLUDED.mall_code='CPKR' THEN gm_product.option_count
+        WHEN COALESCE(EXCLUDED.option_count,0)>0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
+      option_json=CASE WHEN EXCLUDED.mall_code='CPKR' THEN gm_product.option_json
+        WHEN COALESCE(EXCLUDED.option_count,0)>=2 THEN EXCLUDED.option_json
+        WHEN COALESCE(EXCLUDED.option_count,0)=1 THEN NULL ELSE gm_product.option_json END,
       thumb_json=CASE
         WHEN jsonb_typeof(EXCLUDED.thumb_json)='array'
          AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) ELSE 0 END,0)
@@ -308,6 +314,24 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
   }
 
+  // Only an authoritative, fully persisted CPKR detail collection can write a total.
+  // Do not infer completeness from option rows in a search batch or from stored row count.
+  if(isCpkr && option_result.complete_for_count && option_result.received>0){
+    try{
+      const fullCount=option_result.received;
+      const linkJson=fullCount>=2 ? makeProductOptionLinkJson(optionJson,id) : null;
+      await pool.query(`UPDATE gm_product
+        SET option_count=$3, option_count_verified_at=NOW(),
+            option_json=CASE WHEN $3>=2 THEN $4::jsonb ELSE NULL END,
+            updated_at=NOW()
+        WHERE mall_code=$1 AND product_id=$2`,
+        [id.mallCode,id.productId,fullCount,linkJson ? safeJsonString(linkJson) : null]);
+      option_result.confirmed_count=fullCount;
+    }catch(e){
+      option_result.count_update_error=compactError(e);
+      console.error('[GM_OPTION_COUNT_CONFIRMED_ERROR]',Object.assign({product_id:id.productId},compactError(e)));
+    }
+  }
   let detail_patch = null;
   try{
     detail_patch = await applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson || {}, returnFee);
@@ -329,7 +353,7 @@ async function upsertProduct(pool, raw, parent={}){
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:optionCount, option_result, detail_patch, detail_stats, unit_result })
+    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:option_result.confirmed_count || (r.rows[0] && r.rows[0].option_count) || 0, option_result, detail_patch, detail_stats, unit_result })
   };
 }
 

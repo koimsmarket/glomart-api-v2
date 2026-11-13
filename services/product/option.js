@@ -28,6 +28,20 @@ function isDetailOptionPayload(p,parent){
   if(src.indexOf('detail') >= 0 || src.indexOf('collector') >= 0) return true;
   return !!(p && (p.detail_json || p.detailJson || p.detailBlocks || p.detailImages || p.__gmStrictOptionSource));
 }
+function isCompleteCoupangDetail(p,parent,rows){
+  if(cleanText(p && (p.mall_code || p.mallCode || (parent && parent.mall_code))).toUpperCase()==='ALKR') return false;
+  if(!isDetailOptionPayload(p,parent)) return false;
+  if(!(p && p.optionCollectionComplete === true && p.optionAuthoritative === true)) return false;
+  if(Number(p.optionTotalCountVerified) !== rows.length) return false;
+  if(!Array.isArray(rows) || !rows.length) return false;
+  const seen=new Set();
+  for(const row of rows){
+    if(!row || !cleanText(row.product_id) || !cleanText(row.item_id) || !cleanText(row.vendor_item_id) || !cleanText(row.pi_ii_vi)) return false;
+    if(seen.has(row.pi_ii_vi)) return false;
+    seen.add(row.pi_ii_vi);
+  }
+  return true;
+}
 function optionPi(o){return [cleanText(o&&o.product_id),cleanText(o&&o.item_id),cleanText(o&&o.vendor_item_id)].filter(Boolean).join('_');}
 function optionIsRepresentativeCandidate(o){
   if(!o) return false;
@@ -271,8 +285,17 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
   const result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[], representative:null };
   const detailPayload=isDetailOptionPayload(p,parent);
   const optionRows = optionRowsFromOptionJson(optionJson, id, p);
+  const authoritative = cleanText(id.mallCode).toUpperCase()==='CPKR' && isCompleteCoupangDetail(p,parent,optionRows);
+  result.authoritative=authoritative;
   result.received = optionRows.length;
   if(!optionRows.length) return result;
+  // Product name is not a fixed option boundary. Use only its FIRST comma-separated
+  // title segment, never the longest common prefix across currently collected options.
+  const parentRow = await pool.query(
+    'SELECT product_name FROM gm_product WHERE mall_code=$1 AND product_id=$2 ORDER BY updated_at DESC NULLS LAST LIMIT 1',
+    [cleanText(id.mallCode).toUpperCase(), cleanText(id.productId)]
+  );
+  const parentProductName = cleanText(parentRow.rows[0] && parentRow.rows[0].product_name);
   const seen = new Set();
   for(const opt of optionRows){
     try{
@@ -291,20 +314,32 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       const r = await pool.query(`
         INSERT INTO gm_product_option (
           mall_code, product_id, item_id, vendor_item_id, pi_ii_vi,
-          option_name, option_image_url, option_sort_no,
+          option_name, option_display_name, option_image_url, option_sort_no,
           mall_sale_price, final_supply_price, normal_price, discount_price,
           delivery_fee, delivery_eta_text, delivery_type,
           soldout_yn, sale_status, active_yn,
           buyable_qty, min_order_qty, max_order_qty,
           sales_qty, last_seen_at, created_at, updated_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
+          $1,$2,$3,$4,$5,$6,
+          CASE WHEN $22::boolean THEN $6 ELSE public.gm_option_display_from_title($23::text,$6::text) END,
+          $7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
         )
         ON CONFLICT (mall_code, pi_ii_vi) DO UPDATE SET
           product_id=EXCLUDED.product_id,
           item_id=EXCLUDED.item_id,
           vendor_item_id=EXCLUDED.vendor_item_id,
-          option_name=EXCLUDED.option_name,
+          -- Detail labels are short option texts; do not overwrite the full search title.
+          option_name=CASE WHEN $22::boolean
+            THEN COALESCE(NULLIF(gm_product_option.option_name,''),EXCLUDED.option_name)
+            ELSE EXCLUDED.option_name END,
+          option_display_name=CASE
+            WHEN $22::boolean THEN EXCLUDED.option_display_name
+            WHEN NULLIF(gm_product_option.option_display_name,'') IS NULL THEN EXCLUDED.option_display_name
+            -- Refresh a previously derived search label if its source title changed.
+            WHEN gm_product_option.option_display_name = public.gm_option_display_from_title($23::text,gm_product_option.option_name)
+              THEN EXCLUDED.option_display_name
+            ELSE gm_product_option.option_display_name END,
           option_image_url=COALESCE(NULLIF(EXCLUDED.option_image_url,''), gm_product_option.option_image_url),
           option_sort_no=EXCLUDED.option_sort_no,
           mall_sale_price=EXCLUDED.mall_sale_price,
@@ -329,7 +364,8 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         opt.mall_sale_price, opt.final_supply_price, opt.normal_price, opt.discount_price,
         opt.delivery_fee, opt.delivery_eta_text, opt.delivery_type,
         opt.soldout_yn, opt.sale_status, opt.active_yn,
-        opt.buyable_qty, opt.min_order_qty, opt.max_order_qty
+        opt.buyable_qty, opt.min_order_qty, opt.max_order_qty,
+        detailPayload, parentProductName
       ]);
       if(r.rows[0] && r.rows[0].inserted) result.inserted += 1;
       else result.updated += 1;
@@ -343,7 +379,8 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
   }
   // 수집 payload가 2개 이상 옵션을 갖고 있을 때만 전체 옵션리스트로 보고 누락 옵션을 NonActive 처리한다.
   // 검색결과의 대표 옵션 1개 저장이 기존 옵션 전체를 죽이는 것을 방지한다.
-  if(seen.size > 1 || (detailPayload && seen.size >= 1)){
+  if((cleanText(id.mallCode).toUpperCase()==='CPKR' ? authoritative : (seen.size > 1 || (detailPayload && seen.size >= 1)))
+      && result.errors.length===0 && result.skipped===0){
     try{
       const livePi = Array.from(seen).map(x=>x.split('|').slice(1).join('|'));
       const nr = await pool.query(`
@@ -354,11 +391,12 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       result.nonactive = nr.rowCount || 0;
     }catch(e){ result.errors.push(compactError(e)); }
   }
-  if(detailPayload && optionRows.length){
+  if(authoritative && result.errors.length===0 && result.skipped===0){
     try{result.representative=await syncCoupangRepresentative(pool,id,optionRows,p,parent);}
     catch(e){result.representative={applied:false,error:compactError(e)};result.errors.push(compactError(e));}
   }
-  result.balance_ok = result.received === (result.inserted + result.updated + result.skipped);
+  result.balance_ok = result.received === (result.inserted + result.updated + result.skipped) && result.errors.length===0;
+  result.complete_for_count = authoritative && result.balance_ok && result.skipped===0;
   return result;
 }
 

@@ -91,7 +91,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     const storedSoldout=String(p.soldout_yn||'N').toUpperCase()==='Y';
     const storedSaleStatus=C(p.sale_status).toLowerCase()||'active';
     const or=await pool.query(`
-      SELECT product_id,item_id,vendor_item_id,pi_ii_vi,option_name,option_image_url,
+      SELECT product_id,item_id,vendor_item_id,pi_ii_vi,option_name,option_display_name,option_image_url,
              normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
              soldout_yn,sale_status,buyable_qty,min_order_qty,max_order_qty
         FROM gm_product_option
@@ -106,7 +106,9 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       const sold=String(o.soldout_yn||'N').toUpperCase()==='Y';
       const saleStatus=C(o.sale_status).toLowerCase();
       return {
-        name:o.option_name||'기본상품', optionName:o.option_name||'기본상품',
+        name:o.option_display_name||o.option_name||'기본상품',
+        optionName:o.option_display_name||o.option_name||'기본상품',
+        option_display_name:o.option_display_name||'',
         productId:o.product_id, itemId:o.item_id, vendorItemId:o.vendor_item_id,
         key:o.pi_ii_vi, pi_ii_vi:o.pi_ii_vi,
         selected:exact,
