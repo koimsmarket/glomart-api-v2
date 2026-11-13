@@ -17,6 +17,7 @@ function protectedOperation(req) {
   if (method !== 'POST') return false;
   if (path === '/api/gm/background/image-vector/mode' || path === '/api/gm/background/image-vector/pending/import') return true;
   if (path === '/api/gm/builder/safe-update') return true;
+  if (path === '/api/gm/builder/translation-qa/scan' || path === '/api/gm/builder/translation-qa/clear-selected') return true;
   if (path === '/api/gm/builder/app-update/policy') return true;
   if (path === '/api/gm/builder/stats/refresh') return true;
   if (path === '/api/gm/builder/ui-dictionary-auto/approve') return true;

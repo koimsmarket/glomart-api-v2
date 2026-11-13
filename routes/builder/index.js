@@ -40,6 +40,7 @@ router.use(require('./asset_pack'));    // category/UI static asset pack adminis
 router.use(require('./ui_dictionary_auto')); // UI dictionary STATIC + RUNTIME discovery
 router.use(require('./multilingual')); // V002 admin-only dictionary completion
 router.use(require('./translation_backfill')); // manual 25-language missing-cell backfill
+router.use(require('./translation_qa')); // manual product/option translation data QA
 router.use(require('./product_queue')); // product queue adaptive-concurrency monitor only
 router.use(require('./product_gm_code')); // gm_category.gm_code -> gm_product.glomart_code reconciliation
 router.use(require('./category_unit')); // category unit rule + product/option recalculation

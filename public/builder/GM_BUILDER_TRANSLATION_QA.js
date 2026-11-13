@@ -1,0 +1,17 @@
+(function(){
+'use strict';
+const LANGS=['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
+let current=[],offset=0,more=false,scope='';
+const $=id=>document.getElementById(id);
+function status(s){$('gmQaState').textContent=s;}
+function pwd(){const s=prompt('관리자 derzon 비밀번호를 입력하세요. (매 작업 재인증)');return s===null?null:s;}
+function config(){return {type:$('gmQaType').value,lang:$('gmQaLang').value,limit:Number($('gmQaLimit').value)};}
+function fingerprint(c){return [c.type,c.lang,c.limit].join('|');}
+async function request(endpoint,body,password){const r=await fetch('/api/gm/builder/translation-qa/'+endpoint,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);return j;}
+function cell(tr,value){const td=document.createElement('td');td.textContent=value==null?'':String(value);tr.appendChild(td);return td;}
+function render(){const tbody=$('gmQaRows');tbody.replaceChildren();for(const x of current){const tr=document.createElement('tr');const td=document.createElement('td');const cb=document.createElement('input');cb.type='checkbox';cb.className='gmQaCheck';cb.addEventListener('change',()=>x.checked=cb.checked);cb.checked=!!x.checked;td.appendChild(cb);tr.appendChild(td);for(const val of [x.type==='product'?'상품':'옵션',x.mall_code,x.item_key,x.lang,x.ko,x.translation_value,x.translation_status])cell(tr,val);tbody.appendChild(tr);}if(!current.length){const tr=document.createElement('tr');const td=cell(tr,'해당 페이지에서 확정 오류 없음');td.colSpan=8;tbody.appendChild(tr);}}
+window.gmQaScan=async function(next){const c=config(),key=fingerprint(c);if(next&&(!more||scope!==key)){status('다음 페이지가 없거나 조건이 변경되었습니다. 먼저 오류 검사를 실행하세요.');return;}const password=pwd();if(password===null)return;const start=next?offset+c.limit:0;status('조회 중…');try{const j=await request('scan',{...c,offset:start},password);current=j.groups.flatMap(g=>g.rows.map(r=>({...r,type:g.type,checked:false})));offset=start;more=j.groups.some(g=>g.has_more);scope=key;render();status('현재 페이지 '+current.length+'건 · 페이지 시작 '+offset+' · 다음 페이지 '+(more?'있음':'없음')+' · DB 변경 없음');}catch(e){status('검사 실패: '+e.message);}};
+window.gmQaSelect=function(v){document.querySelectorAll('.gmQaCheck').forEach(cb=>{cb.checked=v;cb.dispatchEvent(new Event('change'));});};
+window.gmQaClear=async function(){const selected=current.filter(x=>x.checked).map(x=>({type:x.type,lang:x.lang,mall_code:x.mall_code,item_key:x.item_key,translation_value:x.translation_value}));if(!selected.length){status('선택된 오류가 없습니다.');return;}if(!confirm('선택한 오류 번역 '+selected.length+'개 언어 셀을 NULL로 비우겠습니까? 정상 번역/원문은 보존합니다.'))return;const password=pwd();if(password===null)return;status('선택한 셀 정리 중…');try{const j=await request('clear-selected',{items:selected},password);status('정리 완료 '+j.cleared+'/'+selected.length+'건 · 다른 언어 정상값 보존 · 다시 검사해 확인하세요.');current=[];more=false;render();}catch(e){status('정리 실패: '+e.message+' · 재검사 후 현재 DB 상태를 확인하세요.');}};
+document.addEventListener('DOMContentLoaded',()=>{const sel=$('gmQaLang');if(sel)for(const l of LANGS){const opt=document.createElement('option');opt.value=l;opt.textContent=l;sel.appendChild(opt);}for(const id of ['gmQaType','gmQaLang','gmQaLimit'])$(id).addEventListener('change',()=>{more=false;current=[];render();status('조건 변경됨 · 새로 검사하세요.');});});
+})();

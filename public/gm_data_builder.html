@@ -36,6 +36,17 @@
 <button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V079</span>
 </div>
 </div>
+<div class="card" data-builder-tab="translationqa" id="gmTranslationQaCard" style="display:none">
+<h2>상품·옵션 번역 오류 검사 및 정리</h2>
+<div class="small">관리자 요청시에만 검색합니다. 번역값 전체가 문장부호인 경우만 확정 오류로 판정하며 정상 언어값은 보존합니다. 검색 시 고객 화면 필터/자동 수정을 추가하지 않습니다.</div>
+<p><label>대상 <select id="gmQaType"><option value="both">상품 + 옵션</option><option value="product">상품</option><option value="option">옵션</option></select></label>
+<label>언어 <select id="gmQaLang"><option value="all">전체 24개 번역 언어</option></select></label>
+<label>한 번에 <select id="gmQaLimit"><option>20</option><option selected>50</option><option>100</option></select>건 / 대상</label></p>
+<p><button type="button" onclick="gmQaScan(false)">오류 검사</button> <button type="button" onclick="gmQaScan(true)">다음 페이지</button> <button type="button" onclick="gmQaSelect(true)">현재 페이지 전체 선택</button> <button type="button" onclick="gmQaSelect(false)">선택 해제</button> <button type="button" class="red" onclick="gmQaClear()">선택한 오류 번역값 비우기</button></p>
+<div id="gmQaState" class="status">검사 전 · 변경 없음</div>
+<div class="small">정리 전 관리자 비밀번호를 다시 입력해야 합니다. DB에서 <b>선택된 언어 값만 NULL</b>로 처리합니다. 행 전체를 삭제하거나 외부 번역 API를 실행하지 않습니다.</div>
+<div style="overflow:auto;max-height:650px"><table><thead><tr><th>선택</th><th>유형</th><th>쇼핑몰</th><th>상품 ID / 옵션 PI_VI</th><th>언어</th><th>한국어 원문</th><th>오류값</th><th>STATUS</th></tr></thead><tbody id="gmQaRows"><tr><td colspan="8">검사 전</td></tr></tbody></table></div>
+</div>
 <div class="card" data-builder-tab="translation" id="gmTranslationBackfillCard">
 <h2>25개국 미완료 번역 관리</h2>
 <div class="small">키워드 · 카테고리 · UI의 미완료 언어를 조회하고, 기존 정상 번역을 보존하며 누락분을 온라인으로 순차 보완합니다. 429 발생 시 즉시 중단합니다.</div>
@@ -282,6 +293,7 @@
 <script src="/builder/GM_BUILDER_AI_USAGE.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_PURCHASE_CONFIRM.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_TRANSLATION_BACKFILL.js?v=gm_translation_v003"></script>
+<script src="/builder/GM_BUILDER_TRANSLATION_QA.js?v=gm_translation_qa_v001"></script>
 
 <script>
 /* GM_PLAY_UPDATE_V006: existing server V005 policy API; no automatic publish. */
