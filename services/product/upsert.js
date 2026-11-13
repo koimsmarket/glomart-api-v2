@@ -32,6 +32,27 @@ function normalizeProductSaleState(p){
 }
 const {pickSearchKeyword,pickCategoryKeyword,pickRelatedKeywords,pickKeywordMeta,uniqClean,ensureKeywordRelationSchema,saveKeywordTranslatePayload,saveProductKeywordMeta,updateSearchLogCategoryByKeyword}=keyword;
 async function upsertProduct(pool, raw, parent={}){
+  // GM_CPKR_IDENTITY_V001: HTTP 403 and transport errors are NEVER sale stops.
+  const rawState=raw||{};
+  const errorText=cleanText([rawState.status,rawState.detailStatus,rawState.reason,rawState.stopReason,rawState.statusText].filter(Boolean).join(' '));
+  if(/\b403\b|ACCESS_DENIED|CODE_ERROR|FORBIDDEN|BLOCKED|NETWORK_ERROR|TIMEOUT/i.test(errorText)){
+    return {ok:false,skipped:true,reason:'access_error_not_sale_stop'};
+  }
+  // The collector's explicit terminal finding is independent of thumbnails/name.
+  // Mark the PID's existing product and ALL options inactive without inventing
+  // empty detail metadata or inserting a synthetic option.
+  if(cleanText(rawState.source)==='connector-detail-coupang-unavailable' &&
+     cleanText(rawState.status).toUpperCase()==='STOPPED' &&
+     cleanText(rawState.sale_status||rawState.saleStatus).toLowerCase()==='inactive'){
+    const pid=cleanText(rawState.productId||rawState.product_id||'') || cleanText(rawState.key).split('_')[0];
+    if(!/^\d{5,}$/.test(pid))return {ok:false,skipped:true,reason:'invalid_stopped_pid'};
+    const updated=await pool.query(`UPDATE gm_product SET sale_status='inactive',soldout_yn='N',updated_at=now()
+       WHERE mall_code='CPKR' AND product_id=$1 RETURNING product_uid`,[pid]);
+    const opts=await pool.query(`UPDATE gm_product_option SET active_yn='N',sale_status='inactive',updated_at=now()
+       WHERE mall_code='CPKR' AND product_id=$1`,[pid]);
+    try{console.log('[GM_CPKR_STOPPED_DEACTIVATED]',{product_id:pid,products:updated.rowCount,options:opts.rowCount});}catch(_e){}
+    return {ok:true,action:'stopped_deactivated',item:{product_uid:updated.rows[0]&&updated.rows[0].product_uid,product_id:pid,products_inactive:updated.rowCount,options_inactive:opts.rowCount}};
+  }
   const sourceUnitPrice = resolveUnitPriceSource(raw,parent);
   const n = normalizeProductPayload(raw, parent);
   const p = n.p, id = n.id, productName = n.productName;
@@ -140,11 +161,19 @@ async function upsertProduct(pool, raw, parent={}){
     '$56','$57','$58','$59','$60','$61','$62','$63',
     'now()','now()','now()'
   ];
+  const detailIdentityTrusted=id.mallCode==='CPKR' && /detail|collector/i.test(cleanText(p.source||p.collector_source||p.collectorSource||'')) &&
+    !!(id.productId&&id.itemId&&id.vendorItemId);
   const sql = `
     INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
+      -- Search rows may contain old Cafe24 IID. Only confirmed detail payload
+      -- may replace the representative identity established by a prior detail.
+      product_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.product_id ELSE gm_product.product_id END,
+      item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.item_id ELSE gm_product.item_id END,
+      vendor_item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.vendor_item_id ELSE gm_product.vendor_item_id END,
+      pi_ii_vi=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.pi_ii_vi ELSE gm_product.pi_ii_vi END,
       glomart_code=CASE
         WHEN NULLIF(EXCLUDED.glomart_code,'') IS NULL THEN gm_product.glomart_code
         WHEN NULLIF(gm_product.glomart_code,'') IS NULL THEN EXCLUDED.glomart_code
@@ -227,8 +256,8 @@ async function upsertProduct(pool, raw, parent={}){
       -- product_url 저장 중단: 필요 시 위 insert 값과 함께 부활
       product_url=gm_product.product_url,
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
-      soldout_yn=EXCLUDED.soldout_yn,
-      sale_status=EXCLUDED.sale_status,
+      soldout_yn=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.soldout_yn ELSE EXCLUDED.soldout_yn END,
+      sale_status=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.sale_status ELSE EXCLUDED.sale_status END,
       product_grade=EXCLUDED.product_grade,
       buyable_qty=COALESCE(EXCLUDED.buyable_qty, gm_product.buyable_qty),
       min_order_qty=COALESCE(EXCLUDED.min_order_qty, gm_product.min_order_qty),

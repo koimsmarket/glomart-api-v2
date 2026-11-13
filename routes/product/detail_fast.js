@@ -92,16 +92,16 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     const storedSoldout=String(p.soldout_yn||'N').toUpperCase()==='Y';
     const storedSaleStatus=C(p.sale_status).toLowerCase()||'active';
     const or=await pool.query(`
-      SELECT product_id,item_id,vendor_item_id,pi_ii_vi,option_name,option_display_name,option_image_url,
+      SELECT product_id,item_id,vendor_item_id,pi_ii_vi,updated_at,option_name,option_display_name,option_image_url,
              normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
              soldout_yn,sale_status,buyable_qty,min_order_qty,max_order_qty
         FROM gm_product_option
        WHERE mall_code=$1
          AND product_id=$2
          AND COALESCE(active_yn,'Y')='Y'
-       ORDER BY option_sort_no ASC,pi_ii_vi ASC`,[p.mall_code,p.product_id]);
+       ORDER BY updated_at DESC NULLS LAST,option_sort_no ASC,pi_ii_vi ASC`,[p.mall_code,p.product_id]);
 
-    // Read only display-name translations for this language; never translate the long search option_name.
+    // Preserve the existing option display-name i18n logic.
     let optionTranslations=new Map();
     const targetLang=C(req.query.gm_lang||'').toLowerCase().replace(/_/g,'-').split('-')[0];
     if(OPTION_LANGS.has(targetLang)&&or.rows.length){
@@ -117,9 +117,18 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
         if(C(row.translated))optionTranslations.set(C(row.pi_ii_vi),C(row.translated));
       }
     }
-    const requireExact=(mall==='CPKR' && !!iid && !!vid);
-    const options=(or.rows||[]).map(o=>{
-      const exact=(!requireExact) ? false : (String(o.item_id||'')===iid && String(o.vendor_item_id||'')===vid);
+    // Select the latest server IID for the same PID + vendor-item ID.
+    const requireExact=(mall==='CPKR' && !!vid);
+    const seenVendorIds=new Set();
+    const currentOptionRows=(or.rows||[]).filter(o=>{
+      if(mall!=='CPKR')return true;
+      const vidKey=C(o.vendor_item_id);
+      if(!vidKey||seenVendorIds.has(vidKey))return false;
+      seenVendorIds.add(vidKey);
+      return true;
+    });
+    const options=currentOptionRows.map(o=>{
+      const exact=(!requireExact) ? false : (String(o.vendor_item_id||'')===vid);
       const sold=String(o.soldout_yn||'N').toUpperCase()==='Y';
       const saleStatus=C(o.sale_status).toLowerCase();
       return {
@@ -145,7 +154,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     const images=thumbList(p);
     const requestKey=[pid,iid,vid].filter(Boolean).join('_')||pid;
 
-    // exact option이 있을 때만 옵션별 가격/배송으로 덮는다.
+    // Selected by VID for CPKR; price and delivery belong to that exact vendor item.
     // exact miss에서는 대표행 가격으로 임의 옵션을 선택한 것처럼 만들지 않는다.
     const sale=sel ? Number(sel.normal_price||0) : Number(p.normal_price||0);
     const fee=sel ? Number(sel.delivery_fee||0) : Number(p.delivery_fee||0);
@@ -158,9 +167,9 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       product_uid:p.product_uid, mall_code:p.mall_code, mallCode:p.mall_code,
       productId:p.product_id, product_id:p.product_id,
       // 요청 identity는 유지하되 selected 여부는 gm_product_option exact match로만 결정한다.
-      itemId:sel?sel.itemId:(iid||p.item_id||''), item_id:sel?sel.itemId:(iid||p.item_id||''),
+      itemId:sel?sel.itemId:(p.item_id||iid||''), item_id:sel?sel.itemId:(p.item_id||iid||''),
       vendorItemId:sel?sel.vendorItemId:(vid||p.vendor_item_id||''), vendor_item_id:sel?sel.vendorItemId:(vid||p.vendor_item_id||''),
-      pi_ii_vi:sel?sel.pi_ii_vi:requestKey,
+      pi_ii_vi:sel?sel.pi_ii_vi:(p.pi_ii_vi||requestKey),
       title:p.product_name||p.mall_product_name||'', productName:p.product_name||p.mall_product_name||'', mallProductName:p.mall_product_name||'',
       price:sale, priceText:sale, normal_price:sale,
       discount_price:sel?sel.discount_price:(p.discount_price||0),

@@ -315,7 +315,7 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
   const changed=repPi!==currentPi;
   await pool.query(`
     UPDATE gm_product SET
-      product_id=$2,item_id=$3,vendor_item_id=$4,
+      product_id=$2,item_id=$3,vendor_item_id=$4,pi_ii_vi=$14,
       mall_sale_price=$5,
       final_supply_price=COALESCE($6,final_supply_price),
       normal_price=COALESCE($7,normal_price),
@@ -331,7 +331,7 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
   `,[cleanText(id.uid),cleanText(representative.product_id),cleanText(representative.item_id),cleanText(representative.vendor_item_id),
       representative.mall_sale_price,representative.final_supply_price,representative.normal_price,representative.discount_price,
       representative.delivery_fee,cleanText(representative.delivery_eta_text),cleanText(representative.delivery_type),
-      representative.buyable_qty,cleanText(representative.option_image_url)]);
+      representative.buyable_qty,cleanText(representative.option_image_url),repPi]);
   // The representative itself is a valid sale option: never delete its row.
   result.applied=true;result.changed=changed;result.representative_pi=repPi;result.removed_duplicate=0;
   result.reason=changed?'representative_replaced':'representative_kept';
@@ -365,6 +365,15 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
   result.authoritative=authoritative;
   result.verified_count=authoritative ? Number(expected) : null;
   result.received = optionRows.length;
+  // A search hit cannot revive a product/option already confirmed stopped.
+  if(mall==='CPKR' && !detailPayload){
+    const state=await pool.query(`SELECT sale_status FROM gm_product WHERE mall_code='CPKR' AND product_id=$1 LIMIT 1`,[cleanText(id.productId)]);
+    if(cleanText(state.rows[0] && state.rows[0].sale_status).toLowerCase()==='inactive'){
+      result.skipped=optionRows.length;
+      result.reason='stopped_product_search_ignored';
+      return result;
+    }
+  }
   if(!optionRows.length) return result;
   // Snapshot the search-derived names before adding newly discovered variants.
   // They are needed to avoid overwriting independently captured detail labels.
@@ -382,6 +391,30 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         result.skipped += 1;
         if(result.samples.length < 5) result.samples.push({ action:'skip', reason:'required option field missing', opt });
         continue;
+      }
+      // GM_CPKR_IDENTITY_V001: preserve a single option row per PID+VID.
+      // Search rows must not roll back a newer IID learned from detail.
+      if(mall==='CPKR' && opt.product_id && opt.vendor_item_id){
+        const old=await pool.query(`
+          SELECT item_id,pi_ii_vi FROM gm_product_option
+          WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
+          ORDER BY updated_at DESC LIMIT 1`,[opt.product_id,opt.vendor_item_id]);
+        if(old.rows.length){
+          if(!detailPayload){
+            opt.item_id=cleanText(old.rows[0].item_id);
+            opt.pi_ii_vi=cleanText(old.rows[0].pi_ii_vi);
+          }else if(opt.item_id && opt.pi_ii_vi!==cleanText(old.rows[0].pi_ii_vi)){
+            // Update the old key in place, avoiding a duplicate for changed IID.
+            // If the new key already exists, the authoritative option upsert below
+            // handles it and full-list reconciliation can retire the old key.
+            await pool.query(`UPDATE gm_product_option
+              SET product_id=$1,item_id=$3,vendor_item_id=$2,pi_ii_vi=$4,updated_at=now()
+              WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
+                AND pi_ii_vi<>$4
+                AND NOT EXISTS(SELECT 1 FROM gm_product_option WHERE mall_code='CPKR' AND pi_ii_vi=$4)`,
+              [opt.product_id,opt.vendor_item_id,opt.item_id,opt.pi_ii_vi]);
+          }
+        }
       }
       const sig = opt.mall_code + '|' + opt.pi_ii_vi;
       if(seen.has(sig)){
