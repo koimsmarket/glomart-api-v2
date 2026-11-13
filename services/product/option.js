@@ -45,16 +45,61 @@ function isCompleteCoupangDetail(p,parent,rows){
 // Display-name extraction belongs to the server, not a PostgreSQL function.
 // Never infer an option boundary from the currently known sibling options:
 // additional variants may appear later and change their common prefix.
-function optionDisplayFromTitle(productName, optionName){
-  const raw=cleanText(optionName);
-  if(!raw) return '';
-  const base=cleanText(productName).split(',')[0].trim();
-  if(base && raw.startsWith(base+',')){
-    const suffix=raw.slice(base.length+1).replace(/^[\s,]+|[\s,]+$/g,'');
-    return suffix || raw;
+// Search-only display extraction: all known options for one PID must share
+// exactly the same leading comma-separated segments after excluding 1..3 tail
+// segments. If no common prefix is established, retain the complete raw title.
+// One observed option cannot establish a common product prefix.
+function inferCoupangSearchDisplay(rows){
+  const entries=(Array.isArray(rows)?rows:[]).filter(r=>r && cleanText(r.option_name));
+  const names=entries.map(r=>cleanText(r.option_name));
+  if(names.length<2) return {dimension:0, productName:'', names:names.map(x=>x)};
+  const chunks=names.map(n=>n.split(',').map(x=>x.trim()));
+  for(let dimension=1;dimension<=3;dimension++){
+    if(!chunks.every(a=>a.length>dimension)) continue;
+    const prefixes=chunks.map(a=>a.slice(0,-dimension).join(','));
+    if(!prefixes[0] || !prefixes.every(v=>v===prefixes[0])) continue;
+    const suffixes=chunks.map(a=>a.slice(-dimension).join(', '));
+    if(suffixes.some(v=>!v) || new Set(suffixes).size!==suffixes.length) continue;
+    return {dimension,productName:chunks[0].slice(0,-dimension).join(', '),names:suffixes};
   }
-  return raw;
+  return {dimension:0,productName:'',names};
 }
+
+async function refreshCoupangSearchDisplays(pool,productId,previous){
+  const qr=await pool.query(`SELECT pi_ii_vi,option_name,option_display_name
+    FROM gm_product_option WHERE mall_code='CPKR' AND product_id=$1
+    ORDER BY pi_ii_vi`,[productId]);
+  const rows=qr.rows||[];
+  if(!rows.length) return {updated:0,dimension:0};
+  const inferred=inferCoupangSearchDisplay(rows);
+  const priorRows=Array.isArray(previous)?previous:[];
+  const prior=inferCoupangSearchDisplay(priorRows);
+  const priorByPi=new Map(priorRows.map((r,i)=>[cleanText(r.pi_ii_vi),{
+    display:r.option_display_name, expected:prior.names[i]
+  }]));
+  let updated=0;
+  for(let i=0;i<rows.length;i++){
+    const row=rows[i], proposed=inferred.names[i];
+    const old=priorByPi.get(cleanText(row.pi_ii_vi));
+    const existing=cleanText(row.option_display_name);
+    if(!proposed || existing===proposed) continue;
+    // No provenance column exists. Never overwrite nonempty values unless they
+    // match our previous deterministic SEARCH extraction or the original title
+    // (fallback for an as-yet-unclassified single variant).
+    const editable=!existing || (old && (
+      existing===cleanText(old.expected) || existing===cleanText(row.option_name)
+    ));
+    if(!editable) continue;
+    const result=await pool.query(`UPDATE gm_product_option
+      SET option_display_name=$3,updated_at=now()
+      WHERE mall_code='CPKR' AND product_id=$1 AND pi_ii_vi=$2
+        AND option_display_name IS NOT DISTINCT FROM $4`,
+      [productId,row.pi_ii_vi,proposed,row.option_display_name]);
+    updated+=result.rowCount||0;
+  }
+  return {updated,dimension:inferred.dimension,productName:inferred.productName};
+}
+
 function optionPi(o){return [cleanText(o&&o.product_id),cleanText(o&&o.item_id),cleanText(o&&o.vendor_item_id)].filter(Boolean).join('_');}
 function optionIsRepresentativeCandidate(o){
   if(!o) return false;
@@ -321,13 +366,15 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
   result.verified_count=authoritative ? Number(expected) : null;
   result.received = optionRows.length;
   if(!optionRows.length) return result;
-  // Product name is not a fixed option boundary. Use only its FIRST comma-separated
-  // title segment, never the longest common prefix across currently collected options.
-  const parentRow = await pool.query(
-    'SELECT product_name FROM gm_product WHERE mall_code=$1 AND product_id=$2 ORDER BY updated_at DESC NULLS LAST LIMIT 1',
-    [cleanText(id.mallCode).toUpperCase(), cleanText(id.productId)]
-  );
-  const parentProductName = cleanText(parentRow.rows[0] && parentRow.rows[0].product_name);
+  // Snapshot the search-derived names before adding newly discovered variants.
+  // They are needed to avoid overwriting independently captured detail labels.
+  let priorSearchOptions=[];
+  if(mall==='CPKR' && !detailPayload){
+    const before=await pool.query(`SELECT pi_ii_vi,option_name,option_display_name
+      FROM gm_product_option WHERE mall_code='CPKR' AND product_id=$1
+      ORDER BY pi_ii_vi`,[cleanText(id.productId)]);
+    priorSearchOptions=before.rows||[];
+  }
   const seen = new Set();
   for(const opt of optionRows){
     try{
@@ -402,10 +449,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         opt.soldout_yn, opt.sale_status, opt.active_yn,
         opt.buyable_qty, opt.min_order_qty, opt.max_order_qty,
         detailPayload,
-        verifiedZero ? null : (detailPayload
-          ? cleanText(opt.option_name)
-          : (mall==='ALKR'
-              ? null : optionDisplayFromTitle(parentProductName,opt.option_name))),
+        detailPayload && !verifiedZero ? cleanText(opt.option_name) : null,
         verifiedZero || (mall==='ALKR' && !detailPayload)
       ]);
       if(r.rows[0] && r.rows[0].inserted) result.inserted += 1;
@@ -417,6 +461,11 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       if(result.samples.length < 5) result.samples.push({ action:'error', pi_ii_vi:opt.pi_ii_vi, error:String(e && e.message || e) });
       if(e && e.code === '42P01') break;
     }
+  }
+  if(mall==='CPKR' && !detailPayload && result.errors.length===0 && result.skipped===0){
+    try{
+      result.search_display=await refreshCoupangSearchDisplays(pool,cleanText(id.productId),priorSearchOptions);
+    }catch(e){result.errors.push(compactError(e));}
   }
   // 수집 payload가 2개 이상 옵션을 갖고 있을 때만 전체 옵션리스트로 보고 누락 옵션을 NonActive 처리한다.
   // 검색결과의 대표 옵션 1개 저장이 기존 옵션 전체를 죽이는 것을 방지한다.
