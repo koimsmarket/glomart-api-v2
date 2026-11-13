@@ -58,4 +58,39 @@ router.post('/api/gm/builder/translation-qa/clear-selected',express.json({limit:
   res.set('Cache-Control','no-store');return res.json({ok:true,results:out,cleared:out.filter(x=>x.result==='CLEARED').length});
  }catch(e){console.error('[TRANSLATION_QA_CLEAR]',e.code||e.message);return res.status(500).json({ok:false,error:'CLEAR_FAILED',results:out});}
 });
+
+// V002: single-action, entire-table administrative cleanup. Each table is scanned once
+// in one UPDATE, not once per language and not one page at a time.
+const QA_RE = "^[[:space:][:punct:]…·•。！？、，]+$";
+let bulkJob={id:0,state:'idle',started_at:null,finished_at:null,results:[],error:null};
+function fullCleanupSQL(type){
+ const cfg=TYPES[type];
+ const invalid=l=>`(t."${l}" IS NOT NULL AND BTRIM(t."${l}")<>'' AND BTRIM(t."${l}") ~ '${QA_RE}')`;
+ const sets=LANGS.map(l=>`"${l}"=CASE WHEN ${invalid(l)} THEN NULL ELSE t."${l}" END`);
+ const keyArray=`ARRAY_REMOVE(ARRAY[${LANGS.map(l=>`CASE WHEN ${invalid(l)} THEN '${l}'::text ELSE NULL::text END`).join(',')}],NULL)`;
+ sets.push(`translation_source=COALESCE(t.translation_source,'{}'::jsonb) - (${keyArray})`);
+ // translation_review_status may not exist in upgraded databases: skip it here.
+ sets.push("translation_status=CASE WHEN t.translation_status='Y' THEN '0' ELSE t.translation_status END");
+ return `UPDATE public.${cfg.table} AS t SET ${sets.join(', ')} WHERE (${LANGS.map(invalid).join(' OR ')})`;
+}
+router.post('/api/gm/builder/translation-qa/clear-all',express.json({limit:'2kb'}),async(req,res)=>{
+ if(bulkJob.state==='running')return res.status(409).json({ok:false,error:'QA_JOB_RUNNING'});
+ const type=String(req.body?.type||'both'); const lang=String(req.body?.lang||'all');
+ if(!['both','product','option'].includes(type)||lang!=='all')return res.status(400).json({ok:false,error:'INVALID_FILTER'});
+ const db=dbFrom(req),id=bulkJob.id+1;
+ bulkJob={id,state:'running',started_at:new Date().toISOString(),finished_at:null,results:[],error:null};
+ res.set('Cache-Control','no-store').status(202).json({ok:true,job_id:id,state:'running'});
+ // Intentionally do not hold a client HTTP request open for a large-table UPDATE.
+ (async()=>{
+   for(const t of (type==='both'?['product','option']:[type])){
+     const result=await db.query(fullCleanupSQL(t));
+     bulkJob.results.push({type:t,cleared_rows:result.rowCount});
+   }
+   bulkJob.state='done'; bulkJob.finished_at=new Date().toISOString();
+ })().catch(e=>{console.error('[TRANSLATION_QA_BULK]',e.code||e.message);bulkJob.state='failed';bulkJob.error=e.code||'QA_BULK_FAILED';bulkJob.finished_at=new Date().toISOString();});
+});
+router.get('/api/gm/builder/translation-qa/job-status',(req,res)=>{
+ res.set('Cache-Control','no-store').json({ok:true,...bulkJob});
+});
+
 module.exports=router;

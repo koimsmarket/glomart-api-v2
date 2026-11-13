@@ -37,15 +37,19 @@
 </div>
 </div>
 <div class="card" data-builder-tab="translationqa" id="gmTranslationQaCard" style="display:none">
-<h2>상품·옵션 번역 오류 검사 및 정리</h2>
-<div class="small">관리자 요청시에만 검색합니다. 번역값 전체가 문장부호인 경우만 확정 오류로 판정하며 정상 언어값은 보존합니다. 검색 시 고객 화면 필터/자동 수정을 추가하지 않습니다.</div>
-<p><label>대상 <select id="gmQaType"><option value="both">상품 + 옵션</option><option value="product">상품</option><option value="option">옵션</option></select></label>
-<label>언어 <select id="gmQaLang"><option value="all">전체 24개 번역 언어</option></select></label>
-<label>한 번에 <select id="gmQaLimit"><option>20</option><option selected>50</option><option>100</option></select>건 / 대상</label></p>
-<p><button type="button" onclick="gmQaScan(false)">오류 검사</button> <button type="button" onclick="gmQaScan(true)">다음 페이지</button> <button type="button" onclick="gmQaSelect(true)">현재 페이지 전체 선택</button> <button type="button" onclick="gmQaSelect(false)">선택 해제</button> <button type="button" class="red" onclick="gmQaClear()">선택한 오류 번역값 비우기</button></p>
-<div id="gmQaState" class="status">검사 전 · 변경 없음</div>
-<div class="small">정리 전 관리자 비밀번호를 다시 입력해야 합니다. DB에서 <b>선택된 언어 값만 NULL</b>로 처리합니다. 행 전체를 삭제하거나 외부 번역 API를 실행하지 않습니다.</div>
-<div style="overflow:auto;max-height:650px"><table><thead><tr><th>선택</th><th>유형</th><th>쇼핑몰</th><th>상품 ID / 옵션 PI_VI</th><th>언어</th><th>한국어 원문</th><th>오류값</th><th>STATUS</th></tr></thead><tbody id="gmQaRows"><tr><td colspan="8">검사 전</td></tr></tbody></table></div>
+<h2>상품·옵션 번역 오류 전체 검사 및 정리</h2>
+<div class="small">대량 데이터 전체를 서버에서 일괄 검사합니다. 마침표·문장부호만 존재하는 번역만 해당 언어 NULL 처리합니다. 정상 번역과 원문, 상품·옵션 레코드는 유지합니다.</div>
+<p><label>대상 <select id="gmQaType"><option value="both">상품 + 옵션 전체</option><option value="product">상품 전체</option><option value="option">옵션 전체</option></select></label></p>
+<p><button type="button" class="red" id="gmQaBulkBtn" onclick="gmQaBulk()">전체 오류 검사 + 일괄 정리 실행</button> <button type="button" onclick="gmQaJobStatus()">진행 상태 확인</button></p>
+<div id="gmQaState" class="status" aria-live="polite">실행 전 · DB 변경 없음</div>
+<div class="small">실행 시 derzon 관리자 비밀번호를 1회 입력합니다. 관리자 세션이 만료되었다면 같은 인증으로 세션을 갱신합니다. 전체 테이블을 각 1회 검사하므로 대량 DB에서는 완료까지 시간이 걸릴 수 있습니다. 서버가 재시작되면 진행 중 SQL은 중단될 수 있어 재검사해야 합니다.</div>
+<div id="gmQaAuthOverlay" hidden style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center">
+ <form id="gmQaAuthForm" style="background:white;border-radius:12px;padding:22px;max-width:420px;width:90%;box-shadow:0 4px 30px #0005">
+  <h3 style="margin-top:0">관리자 재인증</h3><p>derzon 비밀번호 (입력 내용 숨김)</p>
+  <input id="gmQaPassword" type="password" autocomplete="off" maxlength="256" required style="width:100%;box-sizing:border-box;padding:12px">
+  <p style="display:flex;gap:8px"><button type="submit">인증 후 전체 정리</button><button type="button" onclick="gmQaAuthCancel()">취소</button></p>
+ </form>
+</div>
 </div>
 <div class="card" data-builder-tab="translation" id="gmTranslationBackfillCard">
 <h2>25개국 미완료 번역 관리</h2>
@@ -293,7 +297,7 @@
 <script src="/builder/GM_BUILDER_AI_USAGE.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_PURCHASE_CONFIRM.js?v=gm_builder_v001"></script>
 <script src="/builder/GM_BUILDER_TRANSLATION_BACKFILL.js?v=gm_translation_v003"></script>
-<script src="/builder/GM_BUILDER_TRANSLATION_QA.js?v=gm_translation_qa_v001"></script>
+<script src="/builder/GM_BUILDER_TRANSLATION_QA.js?v=gm_translation_qa_v002"></script>
 
 <script>
 /* GM_PLAY_UPDATE_V006: existing server V005 policy API; no automatic publish. */
