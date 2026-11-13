@@ -29,6 +29,10 @@ async function save(pool,input){
    const mapping=await resolveOption(db,mall,code);
    if(!mapping.ok)throw invalid(mapping.reason);
    actual=mapping.pi_vi;
+   const sourceRow=await db.query('SELECT option_display_name FROM public.gm_product_option WHERE mall_code=$1 AND pi_ii_vi=$2 LIMIT 1',[mall,code]);
+   const displayName=norm(sourceRow.rows[0]&&sourceRow.rows[0].option_display_name);
+   if(!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(displayName))throw invalid('OPTION_NO_HANGUL');
+   if(displayName!==requestOriginal)throw invalid('SOURCE_TEXT_MISMATCH');
   }
   const currentOriginal=requestOriginal,sourceLang=origin(requestOriginal);
   if(!sourceLang||entries.some(e=>e.lang===sourceLang))throw invalid('SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED');
@@ -56,8 +60,8 @@ async function save(pool,input){
   let changed=newlyCreated?1:0,skipped=0;
   for(const e of entries){
    const prior=String(sources[e.lang]||'').toUpperCase(),before=norm(row[e.lang]);
-   // V014: the translated value is UPSERTed even if a prior ON translation exists.
-   // Only identical same-source values are idempotently skipped.
+   // Preserve an existing translation already confirmed for the same display name.
+   if(!sourceChanged&&before&&prior==='ON'&&norm(sources['__original_'+e.lang])===currentOriginal){skipped++;continue;}
    if(before===e.text&&prior===e.source&&norm(sources['__original_'+e.lang])===currentOriginal){skipped++;continue;}
    await db.query(`UPDATE public.${t.table} SET "${e.lang}"=$3,translation_source=jsonb_set(jsonb_set(COALESCE(translation_source,'{}'::jsonb),$4::text[],to_jsonb($5::text),true),$6::text[],to_jsonb($7::text),true) WHERE mall_code=$1 AND ${t.key}=$2`,[mall,actual,e.text,[e.lang],e.source,['__original_'+e.lang],currentOriginal]);
    row[e.lang]=e.text;sources[e.lang]=e.source;sources['__original_'+e.lang]=currentOriginal;changed++;

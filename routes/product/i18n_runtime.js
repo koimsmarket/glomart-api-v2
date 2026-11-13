@@ -20,12 +20,12 @@ async function current(dbh,x){
   if(r.rows.length!==1)return null;
   return {text:norm(r.rows[0].product_name), table:'gm_product_translation',key:'product_id'};
  }
- const r=await dbh.query('SELECT option_name FROM public.gm_product_option WHERE mall_code=$1 AND pi_ii_vi=$2 LIMIT 2',[mall,key]);
+ const r=await dbh.query('SELECT option_display_name FROM public.gm_product_option WHERE mall_code=$1 AND pi_ii_vi=$2 LIMIT 2',[mall,key]);
  if(r.rows.length!==1)return null;
  // Resolve only unique PID_VID identities, using the exact source row.
  const mapping=await require('../../services/product/i18n_source_sync').resolveOption(dbh,mall,key);
  if(!mapping.ok)return {blocked:mapping.reason};
- return {text:norm(r.rows[0].option_name),table:'gm_option_translation',key:'pi_vi',translationCode:mapping.pi_vi};
+ return {text:norm(r.rows[0].option_display_name),table:'gm_option_translation',key:'pi_vi',translationCode:mapping.pi_vi};
 }
 // V012: server-authoritative read-only translation work plan for BOTH products and options.
 // Source identity and version are checked before the client receives translation work.
@@ -47,6 +47,7 @@ async function planOne(pool,x){
  if(!src)return {group:'skipped',item:{type:x.type,code:x.code,reason:'SOURCE_NOT_FOUND_OR_AMBIGUOUS'}};
  if(src.blocked)return {group:'blocked',item:{type:x.type,code:x.code,reason:src.blocked}};
  const sourceLang=sourceLanguage(src.text);
+ if(x.type==='OPTION'&&!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(src.text))return {group:'skipped',item:{type:x.type,code:x.code,reason:'OPTION_NO_HANGUL'}};
  if(!src.text||!sourceLang)return {group:'blocked',item:{type:x.type,code:x.code,reason:'UNSUPPORTED_SOURCE_LANG'}};
  const translationCode=src.translationCode||x.code;
  const found=await pool.query(`SELECT * FROM public.${src.table} WHERE mall_code=$1 AND ${src.key}=$2`,[x.mall_code,translationCode]);
@@ -100,7 +101,7 @@ router.post('/api/gm/product/i18n/upload',async(req,res)=>{
   const result=await require('../../services/product/i18n_upload').save(pool,req.body);
   return res.json(result);
  }catch(e){
-  const known=['INVALID_ITEM','INVALID_TRANSLATIONS','SOURCE_TEXT_REQUIRED','INVALID_TRANSLATION_ENTRY','SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE','PID_VID_COLLISION','STALE_SOURCE','SOURCE_TEXT_MISMATCH','TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
+  const known=['INVALID_ITEM','INVALID_TRANSLATIONS','SOURCE_TEXT_REQUIRED','INVALID_TRANSLATION_ENTRY','SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','OPTION_NO_HANGUL','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE','PID_VID_COLLISION','STALE_SOURCE','SOURCE_TEXT_MISMATCH','TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
   const error=known.includes(e.code)?e.code:'UPLOAD_FAILED';
   if(error==='UPLOAD_FAILED')console.error('[GM_PRODUCT_I18N_UPLOAD]',e.code||e.message);
   return fail(res,error==='STALE_SOURCE'||error==='SOURCE_TEXT_MISMATCH'?409:error==='UPLOAD_FAILED'?500:400,error);
@@ -135,7 +136,7 @@ router.post('/api/gm/product/i18n/upload-batch',async(req,res)=>{
     remaining_languages:result.remaining_languages||[],changed:result.changed,skipped:result.skipped});
   }catch(e){
    const known=['INVALID_ITEM','INVALID_TRANSLATIONS','SOURCE_TEXT_REQUIRED','INVALID_TRANSLATION_ENTRY',
-    'SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE',
+    'SOURCE_LANGUAGE_CANNOT_BE_TRANSLATED','OPTION_NO_HANGUL','SOURCE_NOT_UNIQUE','PID_VID_NOT_PROVABLE',
     'PID_VID_COLLISION','STALE_SOURCE','SOURCE_TEXT_MISMATCH',
     'TRANSLATION_ROW_NOT_INITIALIZED','TRANSACTION_POOL_REQUIRED'];
    const error=known.includes(e.code)?e.code:'UPLOAD_FAILED';

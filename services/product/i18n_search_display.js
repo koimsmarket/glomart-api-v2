@@ -31,7 +31,7 @@ async function attach(pool,rows,items,langInput){
  // Search results must carry their known VID options, including the representative VID.
  // Read-only; no source writes, translation queue or detail-page dependency.
  try{
-  const rr=await pool.query(`SELECT o.mall_code,o.product_id,o.pi_ii_vi,o.option_name,
+  const rr=await pool.query(`SELECT o.mall_code,o.product_id,o.pi_ii_vi,o.option_name,o.option_display_name,
         o.vendor_item_id,o.item_id,o.option_sort_no,
         t."${lang}" AS translated_option_name,t.ko,t.en,t.translation_status,t.translation_source
       FROM (SELECT DISTINCT mall_code,product_id FROM UNNEST($1::text[],$2::text[]) AS k(mall_code,product_id)) k
@@ -43,12 +43,12 @@ async function attach(pool,rows,items,langInput){
   const grouped=new Map();
   for(const o of rr.rows||[]){
    const key=norm(o.mall_code)+'\u0000'+norm(o.product_id);
-   const original=norm(o.option_name),srcLang=origin(original);
+   const original=norm(o.option_display_name),srcLang=origin(original);
    const opt={pi_ii_vi:norm(o.pi_ii_vi),product_id:norm(o.product_id),
     vendorItemId:norm(o.vendor_item_id),itemId:norm(o.item_id),
-    option_name:original,original_option_name:original,
+    option_name:norm(o.option_name),option_display_name:original,original_option_name:original,
     translated_option_name:null,translate_required:'N',i18n_lang:lang};
-   if(original&&srcLang&&srcLang!==lang){
+   if(original&&/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(original)&&srcLang!==lang){
     const sourceStored=norm(o[srcLang]);
     const meta=o.translation_source&&typeof o.translation_source==='object'?o.translation_source:{};
     const valid=sourceStored===original&&

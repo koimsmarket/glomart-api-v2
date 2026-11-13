@@ -14,7 +14,8 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_DETAIL_FAST_SERVER_V005_INACTIVE_STATE';
+const VERSION = 'GM_DETAIL_FAST_SERVER_V006_OPTION_DISPLAY_I18N';
+const OPTION_LANGS=new Set(['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr']);
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 function C(v){ return String(v == null ? '' : v).replace(/[\u00A0\u200B-\u200D\uFEFF]/g,' ').replace(/\s+/g,' ').trim(); }
@@ -100,6 +101,22 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
          AND COALESCE(active_yn,'Y')='Y'
        ORDER BY option_sort_no ASC,pi_ii_vi ASC`,[p.mall_code,p.product_id]);
 
+    // Read only display-name translations for this language; never translate the long search option_name.
+    let optionTranslations=new Map();
+    const targetLang=C(req.query.gm_lang||'').toLowerCase().replace(/_/g,'-').split('-')[0];
+    if(OPTION_LANGS.has(targetLang)&&or.rows.length){
+      const labels=await pool.query(`SELECT o.pi_ii_vi,o.option_display_name,t.ko,t."${targetLang}" AS translated,
+        t.translation_source,t.translation_status
+        FROM gm_product_option o LEFT JOIN gm_option_translation t
+        ON t.mall_code=o.mall_code AND t.pi_vi=o.product_id||'_'||o.vendor_item_id
+        WHERE o.mall_code=$1 AND o.product_id=$2 AND COALESCE(o.active_yn,'Y')='Y'`,[p.mall_code,p.product_id]);
+      for(const row of labels.rows){
+        const source=C(row.option_display_name),meta=row.translation_source||{};
+        if(!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(source)||C(row.ko)!==source)continue;
+        if(C(row.translation_status)==='U'&&C(meta['__original_'+targetLang])!==source)continue;
+        if(C(row.translated))optionTranslations.set(C(row.pi_ii_vi),C(row.translated));
+      }
+    }
     const requireExact=(mall==='CPKR' && !!iid && !!vid);
     const options=(or.rows||[]).map(o=>{
       const exact=(!requireExact) ? false : (String(o.item_id||'')===iid && String(o.vendor_item_id||'')===vid);
@@ -109,6 +126,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
         name:o.option_display_name||o.option_name||'기본상품',
         optionName:o.option_display_name||o.option_name||'기본상품',
         option_display_name:o.option_display_name||'',
+        gm_option_translation:optionTranslations.get(C(o.pi_ii_vi))||'',
         productId:o.product_id, itemId:o.item_id, vendorItemId:o.vendor_item_id,
         key:o.pi_ii_vi, pi_ii_vi:o.pi_ii_vi,
         selected:exact,
