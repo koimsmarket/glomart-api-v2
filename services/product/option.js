@@ -287,8 +287,8 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
       representative.mall_sale_price,representative.final_supply_price,representative.normal_price,representative.discount_price,
       representative.delivery_fee,cleanText(representative.delivery_eta_text),cleanText(representative.delivery_type),
       representative.buyable_qty,cleanText(representative.option_image_url)]);
-  const dr=await pool.query(`DELETE FROM gm_product_option WHERE mall_code='CPKR' AND product_id=$1 AND pi_ii_vi=$2`,[cleanText(representative.product_id),repPi]);
-  result.applied=true;result.changed=changed;result.representative_pi=repPi;result.removed_duplicate=dr.rowCount||0;
+  // The representative itself is a valid sale option: never delete its row.
+  result.applied=true;result.changed=changed;result.representative_pi=repPi;result.removed_duplicate=0;
   result.reason=changed?'representative_replaced':'representative_kept';
   try{console.log('[GM_CPKR_REPRESENTATIVE_SYNC]',{product_uid:id.uid,old_pi:currentPi,new_pi:repPi,changed,removed_duplicate:result.removed_duplicate,buyable_qty:representative.buyable_qty});}catch(_e){}
   return result;
@@ -298,8 +298,27 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
   const result = { received:0, inserted:0, updated:0, skipped:0, nonactive:0, balance_ok:true, samples:[], errors:[], representative:null };
   const detailPayload=isDetailOptionPayload(p,parent);
   const optionRows = optionRowsFromOptionJson(optionJson, id, p);
-  const authoritative = cleanText(id.mallCode).toUpperCase()==='CPKR' && isCompleteCoupangDetail(p,parent,optionRows);
+  const mall=cleanText(id.mallCode).toUpperCase();
+  const expected=p && p.optionTotalCountVerified;
+  const hasVerifiedTotal=expected !== undefined && expected !== null && expected !== ''
+    && Number.isInteger(Number(expected)) && Number(expected)>=0;
+  // No selectable options: normalizeOptionJson still inserts a synthetic
+  // sale-row with source='search-row'. It is NOT a selectable option.
+  const syntheticOnly=Array.isArray(optionJson && optionJson.rows)
+    && optionJson.rows.length===1
+    && Array.isArray(optionJson.rows[0])
+    && cleanText(optionJson.rows[0][12])==='search-row';
+  const complete=detailPayload && p.optionCollectionComplete===true
+    && p.optionAuthoritative===true && hasVerifiedTotal;
+  const verifiedZero=complete && Number(expected)===0 && syntheticOnly;
+  const verifiedPositive=complete && Number(expected)>0
+    && Number(expected)===optionRows.length
+    && (mall==='CPKR' ? isCompleteCoupangDetail(p,parent,optionRows)
+      : optionRows.every(o=>cleanText(o.product_id)&&cleanText(o.pi_ii_vi)))
+    && new Set(optionRows.map(o=>o.pi_ii_vi)).size===optionRows.length;
+  const authoritative=verifiedZero || verifiedPositive;
   result.authoritative=authoritative;
+  result.verified_count=authoritative ? Number(expected) : null;
   result.received = optionRows.length;
   if(!optionRows.length) return result;
   // Product name is not a fixed option boundary. Use only its FIRST comma-separated
@@ -343,15 +362,19 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           item_id=EXCLUDED.item_id,
           vendor_item_id=EXCLUDED.vendor_item_id,
           -- Detail labels are short option texts; do not overwrite the full search title.
+          -- Detail provides a display label, not a replacement for the original search title.
           option_name=CASE WHEN $22::boolean
             THEN COALESCE(NULLIF(gm_product_option.option_name,''),EXCLUDED.option_name)
             ELSE EXCLUDED.option_name END,
           option_display_name=CASE
-            -- A completed detail collection supplies the short option label.
-            WHEN $22::boolean THEN EXCLUDED.option_display_name
-            -- Search observations only initialize an empty display name; never
-            -- overwrite a detail-verified label or infer new sibling prefixes.
-            WHEN NULLIF(gm_product_option.option_display_name,'') IS NULL THEN EXCLUDED.option_display_name
+            -- Only a nonempty detail label may replace an existing display label.
+            WHEN $22::boolean AND NULLIF(BTRIM(EXCLUDED.option_display_name),'') IS NOT NULL
+              THEN EXCLUDED.option_display_name
+            -- Ali search must never populate the display column.
+            WHEN $24::boolean THEN gm_product_option.option_display_name
+            -- Coupang search initializes only an empty display column.
+            WHEN NULLIF(BTRIM(gm_product_option.option_display_name),'') IS NULL
+              THEN EXCLUDED.option_display_name
             ELSE gm_product_option.option_display_name END,
           option_image_url=COALESCE(NULLIF(EXCLUDED.option_image_url,''), gm_product_option.option_image_url),
           option_sort_no=EXCLUDED.option_sort_no,
@@ -378,7 +401,12 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         opt.delivery_fee, opt.delivery_eta_text, opt.delivery_type,
         opt.soldout_yn, opt.sale_status, opt.active_yn,
         opt.buyable_qty, opt.min_order_qty, opt.max_order_qty,
-        detailPayload, detailPayload ? cleanText(opt.option_name) : optionDisplayFromTitle(parentProductName,opt.option_name)
+        detailPayload,
+        verifiedZero ? null : (detailPayload
+          ? cleanText(opt.option_name)
+          : (mall==='ALKR'
+              ? null : optionDisplayFromTitle(parentProductName,opt.option_name))),
+        verifiedZero || (mall==='ALKR' && !detailPayload)
       ]);
       if(r.rows[0] && r.rows[0].inserted) result.inserted += 1;
       else result.updated += 1;
@@ -392,8 +420,9 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
   }
   // 수집 payload가 2개 이상 옵션을 갖고 있을 때만 전체 옵션리스트로 보고 누락 옵션을 NonActive 처리한다.
   // 검색결과의 대표 옵션 1개 저장이 기존 옵션 전체를 죽이는 것을 방지한다.
-  if((cleanText(id.mallCode).toUpperCase()==='CPKR' ? authoritative : (seen.size > 1 || (detailPayload && seen.size >= 1)))
-      && result.errors.length===0 && result.skipped===0){
+  // Only a verified complete detail snapshot can deactivate missing options.
+  // For zero selectable options, retain the synthetic sale-row instead.
+  if(verifiedPositive && result.errors.length===0 && result.skipped===0){
     try{
       const livePi = Array.from(seen).map(x=>x.split('|').slice(1).join('|'));
       const nr = await pool.query(`
@@ -404,7 +433,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       result.nonactive = nr.rowCount || 0;
     }catch(e){ result.errors.push(compactError(e)); }
   }
-  if(authoritative && result.errors.length===0 && result.skipped===0){
+  if(mall==='CPKR' && verifiedPositive && result.errors.length===0 && result.skipped===0){
     try{result.representative=await syncCoupangRepresentative(pool,id,optionRows,p,parent);}
     catch(e){result.representative={applied:false,error:compactError(e)};result.errors.push(compactError(e));}
   }

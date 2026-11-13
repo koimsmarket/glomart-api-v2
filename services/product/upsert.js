@@ -91,10 +91,9 @@ async function upsertProduct(pool, raw, parent={}){
   const detailJsonRaw = normalizeDetailJson(p);
   const detailJsonHasData = !!(detailJsonRaw && ((detailJsonRaw.image_count||0) + (detailJsonRaw.block_count||0) + (detailJsonRaw.text_count||0) > 0));
   const detailJson = detailJsonHasData ? detailJsonRaw : null;
-  // Search collection is a partial sample, never the verified total number of options.
-  // CPKR totals are committed only AFTER a complete, successful detail option UPSERT.
-  const isCpkr = cleanText(id.mallCode).toUpperCase()==='CPKR';
-  const optionCount = isCpkr ? 0 : (optionJson.option_count || toInt(p.option_count || p.optionCount, 0));
+  // Search rows are partial for both malls. A verified detail snapshot is the only
+  // authority for the option total, including the explicit zero-option case.
+  const optionCount = 0;
   const taxType = pickTaxType(p) || cleanText(p.tax_type || p.taxType || '');
   const returnFee = pickReturnShippingFee(p, mallSalePrice);
 
@@ -183,11 +182,9 @@ async function upsertProduct(pool, raw, parent={}){
         ELSE COALESCE(gm_product.cp_match,'F') END,
       product_name=EXCLUDED.product_name,
       mall_product_name=EXCLUDED.mall_product_name,
-      option_count=CASE WHEN EXCLUDED.mall_code='CPKR' THEN gm_product.option_count
-        WHEN COALESCE(EXCLUDED.option_count,0)>0 THEN EXCLUDED.option_count ELSE gm_product.option_count END,
-      option_json=CASE WHEN EXCLUDED.mall_code='CPKR' THEN gm_product.option_json
-        WHEN COALESCE(EXCLUDED.option_count,0)>=2 THEN EXCLUDED.option_json
-        WHEN COALESCE(EXCLUDED.option_count,0)=1 THEN NULL ELSE gm_product.option_json END,
+      -- Base UPSERT (including search results) never changes a verified total.
+      option_count=gm_product.option_count,
+      option_json=gm_product.option_json,
       thumb_json=CASE
         WHEN jsonb_typeof(EXCLUDED.thumb_json)='array'
          AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) ELSE 0 END,0)
@@ -250,7 +247,8 @@ async function upsertProduct(pool, raw, parent={}){
     RETURNING product_uid, pi_ii_vi, mall_code, cp_selected_code, cp_fix_code, cp_match, hit_count, option_count, (xmax = 0) AS inserted
   `;
 
-  const productOptionLinkJson = optionCount >= 2 ? makeProductOptionLinkJson(optionJson, id) : null;
+  // Keep the existing JSONB NOT NULL schema and its empty link marker.
+  const productOptionLinkJson = null;
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const saleState = normalizeProductSaleState(p);
 
@@ -260,7 +258,7 @@ async function upsertProduct(pool, raw, parent={}){
     id.mallCode, sourceMallStored, sourceUid, mallCategoryStored, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
-    productOptionLinkJson ? safeJsonString(productOptionLinkJson) : null, safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
+    productOptionLinkJson ? safeJsonString(productOptionLinkJson) : '{"iid_vid":""}', safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
     cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
@@ -314,19 +312,21 @@ async function upsertProduct(pool, raw, parent={}){
     console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
   }
 
-  // Only an authoritative, fully persisted CPKR detail collection can write a total.
-  // Do not infer completeness from option rows in a search batch or from stored row count.
-  if(isCpkr && option_result.complete_for_count && option_result.received>0){
+  // Commit the LAST successfully completed detail collection, including 0.
+  // Incomplete detail/search visits must not change the verified option total.
+  if(option_result.complete_for_count){
     try{
-      const fullCount=option_result.received;
+      const fullCount=option_result.verified_count;
       const linkJson=fullCount>=2 ? makeProductOptionLinkJson(optionJson,id) : null;
-      await pool.query(`UPDATE gm_product
-        SET option_count=$3, option_count_verified_at=NOW(),
-            option_json=CASE WHEN $3>=2 THEN $4::jsonb ELSE NULL END,
+      if(fullCount>=2 && !linkJson) throw new Error('DETAIL_OPTION_LINKS_INCOMPLETE');
+      const updated=await pool.query(`UPDATE gm_product
+        SET option_count=$3,
+            option_json=$4::jsonb,
             updated_at=NOW()
-        WHERE mall_code=$1 AND product_id=$2`,
-        [id.mallCode,id.productId,fullCount,linkJson ? safeJsonString(linkJson) : null]);
-      option_result.confirmed_count=fullCount;
+        WHERE mall_code=$1 AND product_id=$2
+        RETURNING option_count, updated_at`,
+        [id.mallCode,id.productId,fullCount,linkJson ? safeJsonString(linkJson) : '{"iid_vid":""}']);
+      if(updated.rowCount>0) option_result.confirmed_count=fullCount;
     }catch(e){
       option_result.count_update_error=compactError(e);
       console.error('[GM_OPTION_COUNT_CONFIRMED_ERROR]',Object.assign({product_id:id.productId},compactError(e)));
@@ -353,7 +353,7 @@ async function upsertProduct(pool, raw, parent={}){
   return {
     ok:true,
     action:(r.rows[0] && r.rows[0].inserted) ? 'inserted' : 'updated',
-    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:option_result.confirmed_count || (r.rows[0] && r.rows[0].option_count) || 0, option_result, detail_patch, detail_stats, unit_result })
+    item:Object.assign({}, r.rows[0] || {}, { cp_match:cpMatch, category_dynamic, cp_learning, option_count:option_result.confirmed_count ?? (r.rows[0] && r.rows[0].option_count) ?? 0, option_result, detail_patch, detail_stats, unit_result })
   };
 }
 

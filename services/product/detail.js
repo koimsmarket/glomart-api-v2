@@ -28,41 +28,39 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
   if(!hasDetail || !id || !id.uid) return { applied:false, reason:'no detail signal', stats, id };
   const q = `
     UPDATE gm_product SET
-      option_count = CASE WHEN $2::int > 0 THEN $2::int ELSE option_count END,
-      option_json = CASE WHEN $3::jsonb IS NOT NULL THEN option_json ELSE option_json END,
       thumb_json = CASE
-        WHEN $4::int > 0 AND $4::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
-        THEN $5::jsonb ELSE thumb_json END,
-      detail_json = CASE WHEN $6::int > 0 THEN $7::jsonb ELSE detail_json END,
+        WHEN $2::int > 0 AND $2::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
+        THEN $3::jsonb ELSE thumb_json END,
+      detail_json = CASE WHEN $4::int > 0 THEN $5::jsonb ELSE detail_json END,
       cp_selected_code = CASE
-        WHEN COALESCE(cp_selected_code,'')='' AND NULLIF($8,'') IS NOT NULL THEN $8
+        WHEN COALESCE(cp_selected_code,'')='' AND NULLIF($6,'') IS NOT NULL THEN $6
         ELSE cp_selected_code END,
       cp_fix_code = CASE
-        WHEN NULLIF($9,'') IS NULL THEN cp_fix_code
-        WHEN COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$9 THEN cp_fix_code
-        ELSE $9 END,
+        WHEN NULLIF($7,'') IS NULL THEN cp_fix_code
+        WHEN COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$7 THEN cp_fix_code
+        ELSE $7 END,
       cp_match = CASE
-        WHEN NULLIF($9,'') IS NOT NULL AND COALESCE(cp_match,'')<>'T' THEN 'F'
+        WHEN NULLIF($7,'') IS NOT NULL AND COALESCE(cp_match,'')<>'T' THEN 'F'
         ELSE cp_match END,
-      mall_category = COALESCE(NULLIF($10,''), mall_category),
-      mall_category_json = CASE WHEN $11::jsonb <> '[]'::jsonb THEN $11::jsonb ELSE mall_category_json END,
-      supplier_id = COALESCE(NULLIF($12,''), supplier_id),
-      supplier_name = COALESCE(NULLIF($13,''), supplier_name),
-      business_number = COALESCE(NULLIF($14,''), business_number),
-      online_sales_number = COALESCE(NULLIF($15,''), online_sales_number),
-      ceo_name = COALESCE(NULLIF($16,''), ceo_name),
-      supplier_mobile = COALESCE(NULLIF($17,''), supplier_mobile),
-      supplier_phone = COALESCE(NULLIF($18,''), supplier_phone),
-      supplier_email = COALESCE(NULLIF($19,''), supplier_email),
-      supplier_address = COALESCE(NULLIF($20,''), supplier_address),
-      buyable_qty = COALESCE($21::int, buyable_qty),
-      min_order_qty = COALESCE($22::int, min_order_qty),
-      max_order_qty = COALESCE($23::int, max_order_qty),
-      return_policy_text = COALESCE(NULLIF($24,''), return_policy_text),
-      exchange_policy_text = COALESCE(NULLIF($25,''), exchange_policy_text),
-      return_shipping_fee = CASE WHEN $26::int > 0 THEN $26::int ELSE return_shipping_fee END,
+      mall_category = COALESCE(NULLIF($8,''), mall_category),
+      mall_category_json = CASE WHEN $9::jsonb <> '[]'::jsonb THEN $9::jsonb ELSE mall_category_json END,
+      supplier_id = COALESCE(NULLIF($10,''), supplier_id),
+      supplier_name = COALESCE(NULLIF($11,''), supplier_name),
+      business_number = COALESCE(NULLIF($12,''), business_number),
+      online_sales_number = COALESCE(NULLIF($13,''), online_sales_number),
+      ceo_name = COALESCE(NULLIF($14,''), ceo_name),
+      supplier_mobile = COALESCE(NULLIF($15,''), supplier_mobile),
+      supplier_phone = COALESCE(NULLIF($16,''), supplier_phone),
+      supplier_email = COALESCE(NULLIF($17,''), supplier_email),
+      supplier_address = COALESCE(NULLIF($18,''), supplier_address),
+      buyable_qty = COALESCE($19::int, buyable_qty),
+      min_order_qty = COALESCE($20::int, min_order_qty),
+      max_order_qty = COALESCE($21::int, max_order_qty),
+      return_policy_text = COALESCE(NULLIF($22,''), return_policy_text),
+      exchange_policy_text = COALESCE(NULLIF($23,''), exchange_policy_text),
+      return_shipping_fee = CASE WHEN $24::int > 0 THEN $24::int ELSE return_shipping_fee END,
       updated_at = now()
-    WHERE product_uid = $1 OR (mall_code=$27 AND pi_ii_vi=$28)
+    WHERE product_uid = $1 OR (mall_code=$25 AND pi_ii_vi=$26)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
       CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
@@ -72,7 +70,6 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
   const vals = [
     id.uid,
-    stats.option_count || 0, safeJsonString(optionJson || {headers:[],rows:[],option_count:0}),
     stats.thumb_count || 0, safeJsonString(thumbJson || []),
     stats.detail_count || 0, safeJsonString(detailJson || {}),
     pickCpSelectedCode(p), pickCpFixCode(p), pickMallCategoryLeaf(p, normalizeMallCategoryJson(p)), safeJsonString(normalizeMallCategoryJson(p)),
