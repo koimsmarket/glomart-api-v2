@@ -1,6 +1,6 @@
--- GM_PRODUCT_OPTION_DISPLAY_V003 | additive, repeatable schema migration.
--- This file MUST be included in recovered server archives alongside
--- migrations/01_gm_product.sql and migrations/29_gm_product_option.sql.
+-- GM_PRODUCT_OPTION_DISPLAY_V004 | additive, repeatable schema migration.
+-- Run after the existing 01 and 29 migrations on a new server.
+-- Do NOT modify or re-run 01_gm_product.sql or 29_gm_product_option.sql on an existing server.
 -- Live/production execution: ADMINISTRATOR-MANUAL ONLY.
 -- This migration never rewrites option_name, option_count, or existing records.
 BEGIN;

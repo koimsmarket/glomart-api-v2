@@ -322,7 +322,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           sales_qty, last_seen_at, created_at, updated_at
         ) VALUES (
           $1,$2,$3,$4,$5,$6,
-          CASE WHEN $22::boolean THEN $6 ELSE public.gm_option_display_from_title($23::text,$6::text) END,
+          public.gm_option_display_from_title($23::text,$6::text),
           $7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
         )
         ON CONFLICT (mall_code, pi_ii_vi) DO UPDATE SET
@@ -334,11 +334,10 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
             THEN COALESCE(NULLIF(gm_product_option.option_name,''),EXCLUDED.option_name)
             ELSE EXCLUDED.option_name END,
           option_display_name=CASE
+            -- Detail collection is allowed to replace a provisional search label.
             WHEN $22::boolean THEN EXCLUDED.option_display_name
+            -- A later search may fill an empty label, never overwrite a verified detail label.
             WHEN NULLIF(gm_product_option.option_display_name,'') IS NULL THEN EXCLUDED.option_display_name
-            -- Refresh a previously derived search label if its source title changed.
-            WHEN gm_product_option.option_display_name = public.gm_option_display_from_title($23::text,gm_product_option.option_name)
-              THEN EXCLUDED.option_display_name
             ELSE gm_product_option.option_display_name END,
           option_image_url=COALESCE(NULLIF(EXCLUDED.option_image_url,''), gm_product_option.option_image_url),
           option_sort_no=EXCLUDED.option_sort_no,
