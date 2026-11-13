@@ -42,6 +42,19 @@ function isCompleteCoupangDetail(p,parent,rows){
   }
   return true;
 }
+// Display-name extraction belongs to the server, not a PostgreSQL function.
+// Never infer an option boundary from the currently known sibling options:
+// additional variants may appear later and change their common prefix.
+function optionDisplayFromTitle(productName, optionName){
+  const raw=cleanText(optionName);
+  if(!raw) return '';
+  const base=cleanText(productName).split(',')[0].trim();
+  if(base && raw.startsWith(base+',')){
+    const suffix=raw.slice(base.length+1).replace(/^[\s,]+|[\s,]+$/g,'');
+    return suffix || raw;
+  }
+  return raw;
+}
 function optionPi(o){return [cleanText(o&&o.product_id),cleanText(o&&o.item_id),cleanText(o&&o.vendor_item_id)].filter(Boolean).join('_');}
 function optionIsRepresentativeCandidate(o){
   if(!o) return false;
@@ -322,7 +335,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           sales_qty, last_seen_at, created_at, updated_at
         ) VALUES (
           $1,$2,$3,$4,$5,$6,
-          public.gm_option_display_from_title($23::text,$6::text),
+          $23,
           $7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
         )
         ON CONFLICT (mall_code, pi_ii_vi) DO UPDATE SET
@@ -334,9 +347,10 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
             THEN COALESCE(NULLIF(gm_product_option.option_name,''),EXCLUDED.option_name)
             ELSE EXCLUDED.option_name END,
           option_display_name=CASE
-            -- Detail collection is allowed to replace a provisional search label.
+            -- A completed detail collection supplies the short option label.
             WHEN $22::boolean THEN EXCLUDED.option_display_name
-            -- A later search may fill an empty label, never overwrite a verified detail label.
+            -- Search observations only initialize an empty display name; never
+            -- overwrite a detail-verified label or infer new sibling prefixes.
             WHEN NULLIF(gm_product_option.option_display_name,'') IS NULL THEN EXCLUDED.option_display_name
             ELSE gm_product_option.option_display_name END,
           option_image_url=COALESCE(NULLIF(EXCLUDED.option_image_url,''), gm_product_option.option_image_url),
@@ -364,7 +378,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         opt.delivery_fee, opt.delivery_eta_text, opt.delivery_type,
         opt.soldout_yn, opt.sale_status, opt.active_yn,
         opt.buyable_qty, opt.min_order_qty, opt.max_order_qty,
-        detailPayload, parentProductName
+        detailPayload, detailPayload ? cleanText(opt.option_name) : optionDisplayFromTitle(parentProductName,opt.option_name)
       ]);
       if(r.rows[0] && r.rows[0].inserted) result.inserted += 1;
       else result.updated += 1;
