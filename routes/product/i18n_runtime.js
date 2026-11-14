@@ -70,6 +70,9 @@ async function planOne(pool,x){
 }
 router.post('/api/gm/product/i18n/plan',async(req,res)=>{
  res.set('Cache-Control','no-store');
+ // V033: do not allocate pool connections or grant 24-language plans to old clients.
+ return res.json({ok:true,translation_required:[],skipped:[],blocked:[],retired:true,
+  counts:{requested:Array.isArray(req.body&&req.body.items)?req.body.items.length:0,required:0,skipped:0,blocked:0}});
  const pool=db(req),items=req.body&&req.body.items;
  if(!pool)return fail(res,503,'DB_UNAVAILABLE');
  if(!Array.isArray(items)||items.length<1||items.length>100||items.some(x=>!validItem(x)))return fail(res,400,'INVALID_ITEMS');
