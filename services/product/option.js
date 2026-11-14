@@ -392,18 +392,15 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         if(result.samples.length < 5) result.samples.push({ action:'skip', reason:'required option field missing', opt });
         continue;
       }
-      // GM_CPKR_IDENTITY_V001: preserve a single option row per PID+VID.
-      // Search rows must not roll back a newer IID learned from detail.
+      // GM_CPKR_IID_SYNC_V001: search and detail collections both refresh IID for the SAME PID+VID.
+      // The vendor item identity stays unchanged; only item_id and its composite pi_ii_vi move.
       if(mall==='CPKR' && opt.product_id && opt.vendor_item_id){
         const old=await pool.query(`
           SELECT item_id,pi_ii_vi FROM gm_product_option
           WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
           ORDER BY updated_at DESC LIMIT 1`,[opt.product_id,opt.vendor_item_id]);
         if(old.rows.length){
-          if(!detailPayload){
-            opt.item_id=cleanText(old.rows[0].item_id);
-            opt.pi_ii_vi=cleanText(old.rows[0].pi_ii_vi);
-          }else if(opt.item_id && opt.pi_ii_vi!==cleanText(old.rows[0].pi_ii_vi)){
+          if(opt.item_id && opt.pi_ii_vi!==cleanText(old.rows[0].pi_ii_vi)){
             // Update the old key in place, avoiding a duplicate for changed IID.
             // If the new key already exists, the authoritative option upsert below
             // handles it and full-list reconciliation can retire the old key.
@@ -413,6 +410,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
                 AND pi_ii_vi<>$4
                 AND NOT EXISTS(SELECT 1 FROM gm_product_option WHERE mall_code='CPKR' AND pi_ii_vi=$4)`,
               [opt.product_id,opt.vendor_item_id,opt.item_id,opt.pi_ii_vi]);
+            try{console.log('[GM_CPKR_IID_SYNC_OPTION]',{source:detailPayload?'detail':'search',pid:opt.product_id,vid:opt.vendor_item_id,old_iid:cleanText(old.rows[0].item_id),new_iid:opt.item_id});}catch(_log){}
           }
         }
       }

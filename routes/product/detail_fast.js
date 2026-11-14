@@ -153,6 +153,9 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     const sel=options.find(o=>o.selected)||null;
     const images=thumbList(p);
     const requestKey=[pid,iid,vid].filter(Boolean).join('_')||pid;
+    // GM_CPKR_IID_SYNC_V001: never return the caller's stale IID in an accepted FAST key.
+    const resolvedKey=(mall==='CPKR' && sel)
+      ? [pid,C(sel.itemId),vid].join('_') : requestKey;
 
     // Selected by VID for CPKR; price and delivery belong to that exact vendor item.
     // exact miss에서는 대표행 가격으로 임의 옵션을 선택한 것처럼 만들지 않는다.
@@ -163,7 +166,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
 
     const item={
       __gmPayloadSource:'SERVER_FAST', __gmServerFast:true, __gmPartial:true, partial:true, phase:'SERVER_FAST',
-      gm_key:requestKey, key:requestKey,
+      gm_key:resolvedKey, key:resolvedKey,
       product_uid:p.product_uid, mall_code:p.mall_code, mallCode:p.mall_code,
       productId:p.product_id, product_id:p.product_id,
       // 요청 identity는 유지하되 selected 여부는 gm_product_option exact match로만 결정한다.
@@ -186,6 +189,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       selected_found:!!sel,
       selected_item_id:sel?sel.itemId:'', selected_vendor_item_id:sel?sel.vendorItemId:'',
       requested_item_id:iid, requested_vendor_item_id:vid,
+      iid_source:(mall==='CPKR'?(sel?'MATCHED_SERVER_OPTION':'UNVERIFIED'):'SERVER_PRODUCT'),
       server_updated_at:p.updated_at||null
     };
 

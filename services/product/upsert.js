@@ -163,17 +163,24 @@ async function upsertProduct(pool, raw, parent={}){
   ];
   const detailIdentityTrusted=id.mallCode==='CPKR' && /detail|collector/i.test(cleanText(p.source||p.collector_source||p.collectorSource||'')) &&
     !!(id.productId&&id.itemId&&id.vendorItemId);
+  // Search collection can refresh IID only for the representative's existing PID+VID.
+  // It must never replace the representative VID with a different search option.
+  const searchIdentityTrusted=id.mallCode==='CPKR' && !detailIdentityTrusted &&
+    !!(id.productId&&id.itemId&&id.vendorItemId) &&
+    /search|connector-tab|ldjson/i.test(cleanText(p.source||p.collector_source||p.collectorSource||''));
+  const refreshRepresentativeIid=searchIdentityTrusted ?
+    "gm_product.product_id=EXCLUDED.product_id AND gm_product.vendor_item_id=EXCLUDED.vendor_item_id" : 'FALSE';
   const sql = `
     INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
-      -- Search rows may contain old Cafe24 IID. Only confirmed detail payload
-      -- may replace the representative identity established by a prior detail.
+      -- Search refreshes IID for SAME PID+VID only; VID must not change through search.
+      -- Detail representative selection remains under the existing verified-detail policy.
       product_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.product_id ELSE gm_product.product_id END,
-      item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.item_id ELSE gm_product.item_id END,
+      item_id=CASE WHEN ${detailIdentityTrusted} OR (${refreshRepresentativeIid}) THEN EXCLUDED.item_id ELSE gm_product.item_id END,
       vendor_item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.vendor_item_id ELSE gm_product.vendor_item_id END,
-      pi_ii_vi=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.pi_ii_vi ELSE gm_product.pi_ii_vi END,
+      pi_ii_vi=CASE WHEN ${detailIdentityTrusted} OR (${refreshRepresentativeIid}) THEN EXCLUDED.pi_ii_vi ELSE gm_product.pi_ii_vi END,
       glomart_code=CASE
         WHEN NULLIF(EXCLUDED.glomart_code,'') IS NULL THEN gm_product.glomart_code
         WHEN NULLIF(gm_product.glomart_code,'') IS NULL THEN EXCLUDED.glomart_code
