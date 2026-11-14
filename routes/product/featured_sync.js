@@ -1,9 +1,10 @@
 'use strict';
-/* GM_FEATURED_V002: homepage recommendation/new product bulk lookup.
+/* GM_FEATURED_V003: homepage recommendation/new product bulk lookup.
  * Cafe24 can INSERT an absent PID; it can NEVER UPDATE an existing PID/IID/VID/status/price.
  */
 const express=require('express'),router=express.Router();
-const LANGS=new Set('ko en zh vi ja tw th uz ne km id tl mn my kk si ru bn ur lo hi tr fa es fr'.split(' '));
+const TRANSLATION_LANGS='ko en zh vi ja tw th uz ne km id tl mn my kk si ru bn ur lo hi tr fa es fr'.split(' ');
+const LANGS=new Set(TRANSLATION_LANGS);
 const C=x=>String(x==null?'':x).trim().replace(/\s+/g,' ');
 function parse(x){
  if(!x||typeof x!=='object')return null;
@@ -39,19 +40,27 @@ router.post('/api/gm/product/featured-sync',async(req,res)=>{
    inserted+=ins.rowCount||0; found.add(x.pid);
   }
   r=await get();const best=new Map();r.rows.forEach(x=>{if(!best.has(x.product_id))best.set(x.product_id,x);});
-  const tr=await pool.query(`SELECT product_id,source_lang,ko,en,${lang} AS translated_text FROM gm_product_translation
+  // Return all *existing* translations with the product/status/price lookup.
+  // Column names are a fixed whitelist, never derived from request input.
+  const tr=await pool.query(`SELECT product_id,source_lang,${TRANSLATION_LANGS.join(',')} FROM gm_product_translation
     WHERE mall_code='CPKR' AND product_id=ANY($1::text[])`,[pids]);
   const ts=new Map(tr.rows.map(x=>[x.product_id,x]));
   const out=items.map(x=>{
    const p=best.get(x.pid);if(!p)return {requested_source_uid:x.source_uid,error:'NOT_FOUND'};
-   const t=ts.get(x.pid),source=t?C(t.source_lang==='en'?t.en:t.ko):'';
+   const t=ts.get(x.pid),sourceLang=t?C(t.source_lang).toLowerCase():'',
+    source=t?C(t[sourceLang]||''):'';
+   // An older translation record must never be attached to a changed product name.
+   const sourceValid=!!t&&!!source&&source===C(p.product_name);
+   const translations={};
+   if(sourceValid)TRANSLATION_LANGS.forEach(l=>{const value=C(t[l]);if(value)translations[l]=value;});
    return {requested_source_uid:x.source_uid,product_uid:p.product_uid,product_id:p.product_id,
     source_mall:p.source_mall||'',source_uid:p.source_uid||'',product_name:p.product_name,
     sale_status:C(p.sale_status).toLowerCase()||'unknown',price:Number(p.normal_price)>0?Number(p.normal_price):Number(p.mall_sale_price)||0,
     price_known:Number(p.normal_price)>0||Number(p.mall_sale_price)>0,
-    translated_text:source&&source===C(p.product_name)&&t?C(t.translated_text):'',lang,updated_at:p.updated_at};
+    translations,translation_server_checked:true,
+    translated_text:translations[lang]||'',lang,updated_at:p.updated_at};
   });
-  res.json({ok:true,version:'GM_FEATURED_V002',inserted,complete:out.every(x=>!x.error),items:out});
+  res.json({ok:true,version:'GM_FEATURED_V003',inserted,complete:out.every(x=>!x.error),items:out});
  }catch(e){console.error('[GM_FEATURED_SYNC_V002]',{code:e.code||'',column:e.column||'',table:e.table||'',constraint:e.constraint||'',detail:e.detail||'',message:e.message||''});res.status(500).json({ok:false,error:'FEATURED_SYNC_FAILED'});}
 });
 module.exports=router;
