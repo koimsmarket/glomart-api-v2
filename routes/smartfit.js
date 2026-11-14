@@ -408,6 +408,7 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     const q=s(req.query.q || req.query.keyword || '');
     const category=s(req.query.category_no || req.query.category_code || req.query.category || '');
     const member=s(req.query.member_id || req.query.memberId || '');
+    const viewer=s(req.query.viewer_member_id || req.query.viewerMemberId || '');
     const mine=s(req.query.mine || '')==='1' || s(req.query.scope)==='mine' || !!member;
     const root=s(req.query.root || '')==='1';
     const spaceId=nullableId(req.query.space_id || req.query.spaceId);
@@ -456,8 +457,17 @@ router.get('/api/gm/smartfit/template/list', async (req,res)=>{
     if(spaceId !== null){ params.push(spaceId); where.push(`t.space_id=$${params.length}`); }
     else if(root) where.push(`t.space_id IS NULL`);
     where.push(`t.visibility='public'`); where.push(`COALESCE(t.search_visible,'T')='T'`);
+    // gm_smartfit_collection is keyed by the ORIGINAL template_id, not a page copy.
+    // Do not use member_id here: it selects the separate My Fit list branch above.
+    let membershipSql='NULL::boolean AS is_collected';
+    if(viewer){
+      params.push(viewer);
+      const viewerParam=params.length;
+      where.push(`t.creator_member_id<>$${viewerParam}`);
+      membershipSql=`EXISTS (SELECT 1 FROM gm_smartfit_collection c WHERE c.template_id=t.template_id AND c.member_id=$${viewerParam} AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T') AS is_collected`;
+    }
     params.push(limit);
-    const r=await pool.query(`${selectSql}, 'PUBLIC'::text AS list_type, NULL::timestamp AS collected_at${joinSql}
+    const r=await pool.query(`${selectSql}, 'PUBLIC'::text AS list_type, NULL::timestamp AS collected_at, ${membershipSql}${joinSql}
       WHERE ${where.join(' AND ')} ORDER BY t.ranking_score DESC, t.updated_at DESC LIMIT $${params.length}`, params);
     ok(res,{ items:r.rows.map(x=>addImageUrls(Object.assign({},x,{ title:coalesceTitle(x), author:displayAuthor(x) }),'template')), count:r.rowCount, limit });
   }catch(e){ console.error('[SMARTFIT_TEMPLATE_LIST_ERROR_V070]', e && (e.stack || e.message || e)); fail(res,500,'template list failed',{ detail:String(e.message||e) }); }
@@ -729,7 +739,21 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
     const member=s(req.query.member_id || req.query.memberId || '');
     if(!member) return fail(res,401,'login required');
     if(!id) return fail(res,400,'template_id required');
-    const r=await pool.query("SELECT * FROM gm_smartfit_template WHERE template_id=$1 AND creator_member_id=$2 AND is_active='T' AND COALESCE(is_deleted,'F')<>'T' LIMIT 1",[id,member]);
+    // Owner, active collector or public viewer may read a template; only public
+    // viewers can use the new collect button. Mutable membership is returned live.
+    const r=await pool.query(`SELECT t.*, EXISTS (
+      SELECT 1 FROM gm_smartfit_collection c
+      WHERE c.template_id=t.template_id AND c.member_id=$2
+        AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'
+    ) AS is_collected
+      FROM gm_smartfit_template t
+      WHERE t.template_id=$1 AND t.is_active='T' AND COALESCE(t.is_deleted,'F')<>'T'
+        AND (t.creator_member_id=$2 OR
+             (t.visibility='public' AND COALESCE(t.search_visible,'T')='T') OR
+             EXISTS(SELECT 1 FROM gm_smartfit_collection c
+               WHERE c.template_id=t.template_id AND c.member_id=$2
+                 AND c.is_active='T' AND COALESCE(c.is_deleted,'F')<>'T'))
+      LIMIT 1`,[id,member]);
     const template=r.rows[0]; if(!template) return fail(res,404,'template not found');
     const lock=await getTemplateCollectionLock(pool,id);
     template.collection_count=lock.collection_count;
