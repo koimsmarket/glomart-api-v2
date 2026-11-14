@@ -31,7 +31,7 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
       thumb_json = CASE
         WHEN $2::int > 0 AND $2::int >= CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END
         THEN $3::jsonb ELSE thumb_json END,
-      detail_json = CASE WHEN $4::int > 0 THEN $5::jsonb ELSE detail_json END,
+      detail_json = detail_json, /* GM_DETAIL_CONTENT_V002: content stored separately */
       cp_selected_code = CASE
         WHEN COALESCE(cp_selected_code,'')='' AND NULLIF($6,'') IS NOT NULL THEN $6
         ELSE cp_selected_code END,

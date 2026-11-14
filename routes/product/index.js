@@ -94,6 +94,7 @@ router.post('/api/gm/product/event', async (req,res)=>{
 
 router.use(require('./featured_sync'));
 router.use(require('./detail_fast'));
+router.use(require('./detail_content')); // GM_DETAIL_CONTENT_V002 403 read only
 router.use(require('./queue'));
 console.log('[GM_PRODUCT_SPLIT_V004] routes/product/index registered (detail_fast + queue)');
 // GM_PRODUCT_I18N_RUNTIME_V006 - read-only planner, no data writes.

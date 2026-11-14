@@ -225,19 +225,7 @@ async function upsertProduct(pool, raw, parent={}){
         WHEN jsonb_typeof(EXCLUDED.thumb_json)='array'
          AND jsonb_array_length(EXCLUDED.thumb_json) > COALESCE(CASE WHEN jsonb_typeof(gm_product.thumb_json)='array' THEN jsonb_array_length(gm_product.thumb_json) ELSE 0 END,0)
         THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
-      detail_json=CASE
-        WHEN jsonb_typeof(EXCLUDED.detail_json)='object'
-         AND (
-          COALESCE(NULLIF(EXCLUDED.detail_json->>'block_count','')::int,0)
-        + COALESCE(NULLIF(EXCLUDED.detail_json->>'image_count','')::int,0)
-        + COALESCE(NULLIF(EXCLUDED.detail_json->>'text_count','')::int,0)
-        + CASE WHEN jsonb_typeof(EXCLUDED.detail_json->'blocks')='array' THEN jsonb_array_length(EXCLUDED.detail_json->'blocks') ELSE 0 END
-        + CASE WHEN jsonb_typeof(EXCLUDED.detail_json->'images')='array' THEN jsonb_array_length(EXCLUDED.detail_json->'images') ELSE 0 END
-        + CASE WHEN jsonb_typeof(EXCLUDED.detail_json->'texts')='array' THEN jsonb_array_length(EXCLUDED.detail_json->'texts') ELSE 0 END
-        ) > 0
-        THEN EXCLUDED.detail_json
-        WHEN EXCLUDED.detail_json IS NULL THEN gm_product.detail_json
-        ELSE gm_product.detail_json END,
+      detail_json=gm_product.detail_json,
       seasonal_text=COALESCE(NULLIF(EXCLUDED.seasonal_text,''), gm_product.seasonal_text),
       mall_sale_price=EXCLUDED.mall_sale_price,
       final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product.final_supply_price),
@@ -294,7 +282,7 @@ async function upsertProduct(pool, raw, parent={}){
     id.mallCode, sourceMallStored, sourceUid, mallCategoryStored, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
     id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
-    productOptionLinkJson ? safeJsonString(productOptionLinkJson) : '{"iid_vid":""}', safeJsonString(thumbJson), detailJson ? safeJsonString(detailJson) : null, cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
+    productOptionLinkJson ? safeJsonString(productOptionLinkJson) : '{"iid_vid":""}', safeJsonString(thumbJson), '{}', cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
     pickDeliveryFee(p), pickDeliveryText(p), pickDeliveryType(p), taxType,
     cleanText(p.overseas_direct_yn || p.overseasDirectYn || 'N'), pickReviewCount(p), pickMallSalesCount(p),
@@ -366,6 +354,25 @@ async function upsertProduct(pool, raw, parent={}){
     }catch(e){
       option_result.count_update_error=compactError(e);
       console.error('[GM_OPTION_COUNT_CONFIRMED_ERROR]',Object.assign({product_id:id.productId},compactError(e)));
+    }
+  }
+  // GM_DETAIL_CONTENT_V002: the EXISTING product/upsert request already carries
+  // the complete detail JSON. No second upload from the mobile runtime.
+  // Do not overwrite a successful snapshot with search, blocked or empty data.
+  if(detailJsonHasData && detailJson && (id.mallCode==='CPKR'||id.mallCode==='ALKR') && id.productId
+     && !p.partial && !p.__gmPartial && !p.__gmAliDetailDeferred
+     && !/403|ACCESS_DENIED|FORBIDDEN|REQUEST_BLOCKED|COLLECT_FAIL|ERROR/i.test(cleanText([p.status,p.reason,p.stopReason,p.error].join(' ')))){
+    try{
+      const tbl=id.mallCode==='CPKR'?'gm_cpkr_detail_content':'gm_alkr_detail_content';
+      const contentText=safeJsonString(detailJson);
+      if(Buffer.byteLength(contentText,'utf8')<=1024*1024){
+        await pool.query(`INSERT INTO ${tbl}(product_id,content_json,updated_at) VALUES($1,$2::jsonb,NOW())
+          ON CONFLICT(product_id) DO UPDATE SET content_json=EXCLUDED.content_json,updated_at=NOW()`,
+          [id.productId,contentText]);
+      }
+    }catch(e){
+      // Content backup errors may never interrupt product, option or detail handling.
+      console.warn('[GM_DETAIL_CONTENT_SAVE_WARN]',Object.assign({mall_code:id.mallCode,product_id:id.productId},compactError(e)));
     }
   }
   let detail_patch = null;
