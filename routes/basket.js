@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+// GM_BASKET_I18N_V001: reuse the verified search translation lookup for current GM_LANG.
+const basketI18n = require('../services/product/i18n_search_display');
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
 
@@ -302,8 +304,46 @@ router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
     dbMs=Number(process.hrtime.bigint()-queryStarted)/1e6;
     rowCount=r.rows.length;
     const external_count=r.rows.reduce((sum,row)=>sum+Math.max(0,n(row.quantity,1)),0);
+    // The existing basket response also carries validated current-language translations.
+    // No Google call, no translation source write and no extra client API round trip.
+    const basketLang=basketI18n.langOf(req.query&&req.query.gm_lang);
+    const basketItems=r.rows.map(row=>Object.assign({},row));
+    if(basketLang && basketItems.length){
+      const references=r.rows.map(row=>{
+        const mall=s(row.mall_code,'').toUpperCase();
+        const pi=s(row.pi_ii_vi,'');
+        // CPKR product identity is PID; OPTION identity is full PID_IID_VID.
+        // Do not manufacture identifiers for other/unknown malls.
+        const pid=mall==='CPKR'&&/^\d+_\d+_\d+$/.test(pi)?pi.split('_')[0]:
+          (mall==='ALKR'&&/^\d+$/.test(pi)?pi:'');
+        return {mall_code:mall,product_id:pid,product_name:s(row.product_name,'')};
+      });
+      const active=references.map((ref,i)=>ref.product_id?i:-1).filter(i=>i>=0);
+      if(active.length){
+        const source=active.map(i=>references[i]);
+        const enriched=active.map(i=>Object.assign({},basketItems[i]));
+        try{
+          await basketI18n.attach(pool,source,enriched,basketLang);
+          active.forEach((index,j)=>{
+            const t=enriched[j],orig=basketItems[index],options=Array.isArray(t.options)?t.options:[];
+            const chosen=options.find(o=>String(o.pi_ii_vi||'')===String(orig.pi_ii_vi||''));
+            orig.product_id=source[j].product_id;
+            orig.i18n_lang=basketLang;
+            orig.original_product_name=source[j].product_name;
+            orig.translated_name=t.translated_name||null;
+            orig.translate_required=t.translate_required||'N';
+            if(chosen){
+              orig.original_option_name=chosen.original_option_name||'';
+              orig.translated_option_name=chosen.translated_option_name||null;
+              orig.option_translate_required=chosen.translate_required||'N';
+            }
+          });
+        }catch(e){console.warn('[GM_BASKET_I18N_LOOKUP_FAIL]',String(e&&e.message||e));}
+      }
+    }
+
     const jsonStarted=process.hrtime.bigint();
-    res.json({ok:true,items:r.rows,external_count});
+    res.json({ok:true,items:basketItems,external_count});
     responseMs=Number(process.hrtime.bigint()-jsonStarted)/1e6;
   }
   catch(e){ res.status(500).json({ok:false,error:e.message}); }
