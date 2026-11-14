@@ -92,6 +92,7 @@ router.post('/api/gm/product/event', async (req,res)=>{
   }catch(e){return fail(res,500,'product event failed',{detail:String(e&&e.message||e)});}
 });
 
+router.use(require('./featured_sync'));
 router.use(require('./detail_fast'));
 router.use(require('./queue'));
 console.log('[GM_PRODUCT_SPLIT_V004] routes/product/index registered (detail_fast + queue)');
