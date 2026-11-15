@@ -276,24 +276,55 @@ router.get('/api/gm/builder/ui-dictionary-auto/pending',async(req,res)=>{
 router.post('/api/gm/builder/ui-dictionary-auto/scan-static',(_req,res)=>res.status(410).json({ok:false,error:'STATIC_SOURCE_SCAN_REMOVED'}));
 
 // Compatibility endpoint: use the same V2 canonical path instead of writing dropped source columns.
+// GM_UI_CAPTURE_PENDING_ONLY_V001: runtime capture MUST NOT mutate gm_ui_dictionary.
+// Both compatibility and V2 routes use the existing reviewable pending table.
+async function captureRuntimeToPending(db,items){
+  await ensure(db);
+  const existing=(await db.query('SELECT gm_code,kr FROM gm_ui_dictionary')).rows;
+  const known=new Set(existing.map(x=>gmPendingMatchKey(x.kr)));
+  const seen=new Set();
+  const stats={received:items.length,created:0,changed:0,reused:0,skipped:0,ambiguous_number:0,translation_queued:0};
+  for(const item of items){
+    const x=item||{};
+    const app=s(x.source_app||x.sourceApp||'').toUpperCase();
+    const page=s(x.page||x.page_name||'');
+    const surface=s(x.source_surface||x.sourceSurface||page);
+    if(/(?:^|\/)(?:builder|admin|administer|manage)(?:\/|$)|ui_dictionary_auto|ui_dictionary_admin/i.test(page+' '+surface)){
+      stats.skipped++;continue;
+    }
+    const raw=cleanUiText(x.source_text_ko||x.text||x.kr||x.value||'');
+    const code=s(x.gm_code||x.gmCode).toUpperCase();
+    const locator=s(x.locator||x.source_locator||'').slice(0,500);
+    const row={gm_code:code,source_text_ko:raw,page_name:page,source_file:'RUNTIME:'+app,
+      source_locator:locator,source_type:'RUNTIME_V2',source_app:app,source_surface:surface,_gmKnownDictionary:existing};
+    const clean=gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
+    if(!clean||!hasKo(clean)||!key||gmPendingDynamicReason(row,raw)){
+      stats.skipped++;continue;
+    }
+    const uniq=[code,key,page,locator].join('|');
+    if(seen.has(uniq)){stats.skipped++;continue;}
+    seen.add(uniq);
+    if(!code&&known.has(key)){stats.reused++;continue;}
+    const result=await observe(db,row);
+    if(result.new)stats.created++;
+    else if(result.changed)stats.changed++;
+    else if(result.same||result.sameText)stats.reused++;
+    else stats.skipped++;
+  }
+  return stats;
+}
+
 router.post('/api/gm/ui-dictionary/runtime-capture',express.json({limit:'256kb'}),async(req,res)=>{
   if(!captureAllowed(req))return res.json({ok:true,skipped:'NOT_DERZON'});
-  const db=dbFrom(req);
   try{
-    await ensure(db);
-    await ensureRuntimeSchema(db);
     const body=req.body||{},baseApp=s(body.source_app||body.sourceApp||'').toUpperCase();
-    const items=(Array.isArray(body.items)?body.items:[]).slice(0,200).map(x=>Object.assign({},x||{}, {
+    const items=(Array.isArray(body.items)?body.items:[]).slice(0,200).map(x=>({...x,
       source_app:(x&&x.source_app)||(x&&x.sourceApp)||baseApp||'GLOMART',
       source_surface:(x&&x.source_surface)||(x&&x.sourceSurface)||(x&&x.page)||'RUNTIME'
     }));
-    const stats=await uiV2.captureMany(db,items.map(gmPendingV2Input),{incrementUsage:true});
-    uiV2.queueTranslations(db,stats.translate_codes);
-    if(stats.created||stats.changed){
-      require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
-    }
+    const stats=await captureRuntimeToPending(dbFrom(req),items);
     res.json({ok:true,stats});
-  }catch(e){runtimeCaptureError('compat',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+  }catch(e){runtimeCaptureError('compat-pending',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
 async function nextCode(db){
@@ -488,21 +519,15 @@ router.get('/api/gm/ui-dictionary/v2/auto/:lang/:version.json',async(req,res)=>{
 
 router.post('/api/gm/ui-dictionary/v2/runtime-capture',express.json({limit:'256kb'}),async(req,res)=>{
   if(!captureAllowed(req))return res.json({ok:true,skipped:'NOT_DERZON'});
-  const db=dbFrom(req);
   try{
-    await ensureRuntimeSchema(db);
     const body=req.body||{},baseApp=s(body.source_app||body.sourceApp||'').toUpperCase();
-    const items=(Array.isArray(body.items)?body.items:[]).slice(0,160).map(x=>Object.assign({},x||{}, {
+    const items=(Array.isArray(body.items)?body.items:[]).slice(0,160).map(x=>({...x,
       source_app:(x&&x.source_app)||(x&&x.sourceApp)||baseApp||'GLOMART',
       source_surface:(x&&x.source_surface)||(x&&x.sourceSurface)||(x&&x.page)||'RUNTIME'
     }));
-    const stats=await uiV2.captureMany(db,items.map(gmPendingV2Input),{incrementUsage:true});
-    uiV2.queueTranslations(db,stats.translate_codes);
-    if(stats.created||stats.changed){
-      require('../../services/multilingual/ui/ui_dictionary_auto_publish').scheduleAutomation(db,'NEW_UI_WORD');
-    }
-    res.json({ok:true,stats:{received:stats.received,created:stats.created,changed:stats.changed,reused:stats.reused,skipped:stats.skipped,ambiguous_number:stats.ambiguous_number,translation_queued:stats.translate_codes.length}});
-  }catch(e){runtimeCaptureError('v2',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
+    const stats=await captureRuntimeToPending(dbFrom(req),items);
+    res.json({ok:true,stats});
+  }catch(e){runtimeCaptureError('v2-pending',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
 
 router.get('/api/gm/builder/ui-dictionary-auto/v2/automation-status',(req,res)=>{
