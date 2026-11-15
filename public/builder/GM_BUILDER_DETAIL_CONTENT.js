@@ -162,6 +162,7 @@ function collectorStatusText(d){
  hasCollector()?'':'시작하려면 PC Chrome 수집 실행기 연결이 필요합니다.'].join('\n');
 }
 async function status(){
+ if(dcRunning)return;
  try{const session=await collectorApi('session');dcAccount=session.authenticated?session.account:'';
   if(!dcAccount){msg('수집 전용 로그인이 필요합니다. 시작 버튼에서 로그인하세요.\nPC 수집 실행기: '+(hasCollector()?'연결됨':'미연결'));return;}
   const d=await collectorApi('status');msg(collectorStatusText(d));

@@ -31,4 +31,24 @@ $('logout').onclick=async()=>{try{await fetch(root+'logout',{method:'POST',crede
   ready=true;$('account').textContent='수집 전용 로그인: '+s.account;
   await load();await status();
  }catch(e){$('account').textContent='인증 상태 확인 실패';$('status').textContent=e.message;}
-})();})();
+})();
+// V009: same PC executor shared with existing Builder tab. Standalone login remains collector-only.
+let collecting=false,startedAt='',progress={processed:0,saved:0,failed:0,skipped:0,last_pid:''};
+const installed=()=>{const x=window.GM_DETAIL_PC_EXECUTOR;return x&&x.ready===true&&typeof x.start==='function'&&typeof x.stop==='function'?x:null;};
+const readyEl=$('executorReady');
+function readyText(){if(readyEl)readyEl.textContent=installed()?'PC Chrome 수집 실행기: 연결됨':'PC Chrome 수집 실행기: 미연결 · V009 사용자 스크립트를 이 PC에 설치하세요';}
+readyText();setInterval(readyText,3000);
+$('start').onclick=async()=>{
+ if(collecting){$('status').textContent='이미 이 PC에서 수집 중입니다.';return;}
+ if(!ready){$('status').textContent='먼저 수집 전용 계정으로 로그인하세요.';return;}
+ if(!sel.size){$('status').textContent='카테고리를 선택하세요.';return;}
+ const x=installed();if(!x){readyText();$('status').textContent='PC 수집 실행기가 없습니다. V009 사용자 스크립트 설치가 필요합니다.';return;}
+ collecting=true;startedAt=new Date().toISOString();progress={processed:0,saved:0,failed:0,skipped:0,last_pid:''};
+ $('status').textContent='PC 수집 시작 준비 중';
+ try{await x.start({category_codes:[...sel],max_items:Math.max(1,Math.min(10000,Number($('max').value)||50)),skip_saved:$('skip').checked,api_root:root,
+ onProgress:p=>{progress={...progress,...p};$('status').textContent='PC 수집 중\n처리: '+progress.processed+' / 저장: '+progress.saved+' / 실패: '+progress.failed+'\n마지막 PID: '+(progress.last_pid||'-');},
+ onFinished:async p=>{collecting=false;progress={...progress,...p};$('status').textContent='작업 종료: '+(p.error||p.stopped?'중지/오류':'완료')+'\n처리: '+progress.processed+' / 저장: '+progress.saved+' / 실패: '+progress.failed+'\n'+(p.reason||'');}});}
+ catch(e){collecting=false;$('status').textContent='수집 시작 실패: '+e.message;}
+};
+$('stop').onclick=async()=>{const x=installed();if(!x||!collecting){$('status').textContent='이 PC에서 진행 중인 수집이 없습니다.';return;}try{await x.stop();$('status').textContent='중지 요청됨 (현재 작업 정리 중)';}catch(e){$('status').textContent='중지 실패: '+e.message;}};
+})();
