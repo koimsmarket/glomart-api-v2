@@ -115,14 +115,24 @@ router.post('/api/gm/detail-collector/claim',writeSafe,permitted,async(req,res)=
  trimIidPending();
  try{
   // SQL uses the existing category code assignments and ignores already stored detail content.
-  const candidates=await pool.query(`SELECT DISTINCT ON (p.product_id) p.product_id,p.item_id,p.vendor_item_id,p.glomart_code
-    FROM gm_product p WHERE p.mall_code='CPKR' AND p.product_id~'^[0-9]{5,}$'
-      AND LOWER(COALESCE(NULLIF(BTRIM(p.sale_status),''),'active')) <> 'inactive'
-      AND string_to_array(COALESCE(p.glomart_code,''),'|') && $1::text[]
-      AND NOT EXISTS (SELECT 1 FROM gm_product inactive WHERE inactive.mall_code='CPKR' AND inactive.product_id=p.product_id AND LOWER(COALESCE(inactive.sale_status,''))='inactive')
-      AND NOT EXISTS(SELECT 1 FROM gm_cpkr_detail_content d WHERE d.product_id=p.product_id)
-      AND NOT EXISTS(SELECT 1 FROM gm_detail_collector_claim l WHERE l.product_id=p.product_id AND (l.state='completed' OR (l.state='leased' AND l.lease_until>now())))
-    ORDER BY p.product_id,p.product_uid LIMIT 150`,[codes]);
+  const candidates=await pool.query(`WITH eligible AS (
+     SELECT DISTINCT ON (p.product_id) p.product_id,p.item_id,p.vendor_item_id,p.glomart_code,
+       NULLIF(BTRIM(p.keyword),'') AS search_keyword,COALESCE(p.review_count,0)::int AS review_count
+     FROM gm_product p WHERE p.mall_code='CPKR' AND p.product_id~'^[0-9]{5,}$'
+       AND LOWER(COALESCE(NULLIF(BTRIM(p.sale_status),''),'active')) <> 'inactive'
+       AND string_to_array(COALESCE(p.glomart_code,''),'|') && $1::text[]
+       AND NOT EXISTS (SELECT 1 FROM gm_product inactive WHERE inactive.mall_code='CPKR' AND inactive.product_id=p.product_id AND LOWER(COALESCE(inactive.sale_status,''))='inactive')
+     ORDER BY p.product_id,COALESCE(p.review_count,0) DESC,p.product_uid
+   ), ranked AS (
+     SELECT e.*,ROW_NUMBER() OVER (ORDER BY e.review_count DESC,e.product_id ASC) AS position
+     FROM eligible e
+   )
+   SELECT r.product_id,r.item_id,r.vendor_item_id,r.glomart_code,r.search_keyword,r.review_count,
+     ((r.position-1)%60+1)::int AS search_rank,60::int AS items_count
+   FROM ranked r
+   WHERE NOT EXISTS(SELECT 1 FROM gm_cpkr_detail_content d WHERE d.product_id=r.product_id)
+     AND NOT EXISTS(SELECT 1 FROM gm_detail_collector_claim l WHERE l.product_id=r.product_id AND (l.state='completed' OR (l.state='leased' AND l.lease_until>now())))
+   ORDER BY r.position LIMIT 150`,[codes]);
   for(const row of candidates.rows){
    const q=await pool.query(`INSERT INTO gm_detail_collector_claim(product_id,account_id,client_id,token_hash,lease_until,state,updated_at)
     VALUES($1,$2,$3,$4,now()+interval '300 seconds','leased',now())
