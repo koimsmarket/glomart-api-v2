@@ -36,6 +36,18 @@
 <button class="builder-tab-btn" data-tab="runtime" onclick="openBuilderTab('runtime')" title="운영 설정">⚙ 설정</button><span class="builder-version">V079</span>
 </div>
 </div>
+<div class="card" data-builder-tab="detailcontent" id="gmDetailContentCard" style="display:none">
+<h2>상품 상세 콘텐츠 수집</h2>
+<div class="small">서버에 등록된 전체 GM 카테고리에서 수집 대상을 고릅니다. 해당 카테고리에 속한 쿠팡 상품 중 저장되지 않은 PID만 순서대로 수집합니다. 기존 모바일 수집기 알고리즘을 서버 브라우저 실행 환경에서 재사용합니다.</div>
+<p><label>쇼핑몰 <select id="gmDcMall"><option value="CPKR">쿠팡 (CPKR)</option></select></label>
+<label>최대 처리 건수 <input id="gmDcMax" type="number" min="1" max="1000" value="50" style="width:90px"></label></p>
+<p><input id="gmDcFilter" placeholder="전체 카테고리 검색" style="min-width:230px"> <button type="button" id="gmDcAll">전체 선택</button> <button type="button" id="gmDcNone">선택 해제</button> <button type="button" id="gmDcRefresh">새로고침</button></p>
+<div id="gmDcTree" style="max-height:390px;overflow:auto;border:1px solid #ccc;border-radius:6px;padding:10px">카테고리 불러오기 전</div>
+<p><label><input id="gmDcSkip" type="checkbox" checked> 이미 저장된 PID 제외</label> <label><input id="gmDcStop403" type="checkbox" checked disabled> 403 감지 시 자동 중지 (필수)</label></p>
+<p><button type="button" id="gmDcStart">수집 시작</button> <button type="button" id="gmDcStop">수집 중지</button> <button type="button" id="gmDcStatus">진행 상태 조회</button></p>
+<div id="gmDcProgress" class="status" style="white-space:pre-wrap" aria-live="polite">대기 중</div>
+<div class="small">한 번에 1건씩, 기본 15초 간격. 서버에 Chromium 실행 파일과 puppeteer-core가 준비되어 있어야 시작합니다. 브라우저 실행 환경이 없으면 실제 수집 없이 오류로 안내합니다. 알리 수집기는 이 버전에 포함하지 않습니다. 서버 재시작 시 진행 중 작업은 중단됩니다.</div>
+</div>
 <div class="card" data-builder-tab="translationqa" id="gmTranslationQaCard" style="display:none">
 <h2>상품·옵션 번역 오류 전체 검사 및 정리</h2>
 <div class="small">대량 데이터 전체를 서버에서 일괄 검사합니다. 마침표·문장부호만 존재하는 번역만 해당 언어 NULL 처리합니다. 정상 번역과 원문, 상품·옵션 레코드는 유지합니다.</div>
@@ -371,5 +383,6 @@
 })(window,document);
 </script>
 
+<script src="/builder/GM_BUILDER_DETAIL_CONTENT.js?v=gm_detail_builder_v001"></script>
 <script src="/builder/GM_BUILDER_TABS.js?v=gm_play_update_v006"></script>
 </body></html>

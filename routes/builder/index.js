@@ -42,6 +42,7 @@ router.use(require('./multilingual')); // V002 admin-only dictionary completion
 router.use(require('./translation_backfill')); // manual 25-language missing-cell backfill
 router.use(require('./translation_qa')); // manual product/option translation data QA
 router.use(require('./product_queue')); // product queue adaptive-concurrency monitor only
+router.use(require('./detail_content')); // selected-category detail content collection
 router.use(require('./product_gm_code')); // gm_category.gm_code -> gm_product.glomart_code reconciliation
 router.use(require('./category_unit')); // category unit rule + product/option recalculation
 router.use(require('./ai_usage'));      // monthly AI/API token + cost monitor (read-only)
