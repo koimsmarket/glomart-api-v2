@@ -72,6 +72,8 @@ app.use((req, res, next) => {
 app.use(cors({ origin: true, credentials: false }));
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+// GM_DETAIL_COLLECTOR_ACCESS_V006: scoped collector login; cannot grant Builder admin privileges.
+app.use(require('./routes/detail_collector_access'));
 // GM_ADMIN_SESSION_GATE_V001: authenticate BEFORE exposing static Builder files or API routes.
 app.use(require('./routes/admin_session_gate').middleware);
 app.use(express.static('public'));
