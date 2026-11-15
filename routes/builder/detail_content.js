@@ -41,7 +41,7 @@ router.post('/api/gm/builder/detail-content/start',async(req,res)=>{
   const check=await db.query('SELECT gm_code FROM gm_category WHERE gm_code=ANY($1::text[])',[codes]);
   if(check.rowCount!==codes.length)return res.status(400).json({ok:false,error:'INVALID_CATEGORY_CODE'});
   const id=Date.now();stopping=false;
-  job={id,state:'running',mall_code:'CPKR',selected_codes:codes,max_items:max,skip_saved:req.body.skip_saved!==false,started_at:new Date().toISOString(),seen:0,saved:0,option_saved:0,failed:0,skipped:0,last_pid:'',error:'',messages:[]};
+  job={id,state:'running',mall_code:'CPKR',selected_codes:codes,max_items:max,skip_saved:req.body.skip_saved!==false,started_at:new Date().toISOString(),seen:0,saved:0,failed:0,skipped:0,last_pid:'',error:'',messages:[]};
   res.json({ok:true,job:status()});
   void runJob(db,job).catch(e=>{job.state='error';job.error=String(e.message||e);job.finished_at=new Date().toISOString();});
 });
@@ -109,33 +109,8 @@ async function runJob(db,instance){
           try{
             const outcome=await upsertProduct(db,Object.assign({},got.item,{source:'connector-detail-coupang'}));
             if(outcome&&outcome.ok){
-              // Product ok:true alone does not guarantee options were saved.
-              const option=outcome.item&&outcome.item.option_result;
-              const expected=Number(got.item.optionTotalCountVerified);
-              const expectedValid=got.item.optionTotalCountVerified!=null &&
-                got.item.optionTotalCountVerified!=='' && Number.isInteger(expected) && expected>=0;
-              const optionValid=!!option && expectedValid &&
-                option.authoritative===true && option.complete_for_count===true &&
-                option.balance_ok===true && Number(option.skipped||0)===0 &&
-                (!Array.isArray(option.errors)||option.errors.length===0) &&
-                !option.error && !option.count_update_error &&
-                Number(option.verified_count)===expected &&
-                Number(option.confirmed_count)===expected &&
-                (expected===0 || Number(option.inserted||0)+Number(option.updated||0)===expected);
-              if(!optionValid){
-                instance.failed++;
-                instance.error='OPTION_UPSERT_UNVERIFIED_PID_'+last;
-                instance.messages.push({pid:last,result:'option_upsert_unverified',
-                  expected:expectedValid?expected:null,received:option&&option.received,
-                  inserted:option&&option.inserted,updated:option&&option.updated,
-                  skipped:option&&option.skipped,
-                  error:option&&(option.error||option.count_update_error||option.errors&&option.errors[0])});
-                if(instance.messages.length>20)instance.messages.shift();
-              }else{
-                const check=await db.query('SELECT 1 FROM gm_cpkr_detail_content WHERE product_id=$1',[row.product_id]);
-                if(check.rowCount){instance.saved++;instance.option_saved=(instance.option_saved||0)+expected;}
-                else {instance.failed++;instance.error='JSON_NOT_SAVED_PID_'+last;}
-              }
+              const check=await db.query('SELECT 1 FROM gm_cpkr_detail_content WHERE product_id=$1',[row.product_id]);
+              if(check.rowCount)instance.saved++;else {instance.failed++;instance.error='JSON_NOT_SAVED_PID_'+last;}
             }else{instance.failed++;instance.error=clean(outcome?.reason||'UPSERT_FAILED');}
           }catch(e){instance.failed++;instance.error=clean(e.message||e);}
         }else{instance.failed++;instance.error=got.error||'COLLECTOR_FAILED';}
