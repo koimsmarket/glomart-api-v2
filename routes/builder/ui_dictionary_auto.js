@@ -108,9 +108,9 @@ async function pendingUpsert(db,row){
     `SELECT pending_id FROM gm_ui_dictionary_pending
      WHERE status='PENDING' AND change_type=$1
        AND COALESCE(gm_code,'')=COALESCE($2,'')
-       AND source_locator=$3 AND source_text_ko=$4
-     ORDER BY pending_id DESC LIMIT 1`,
-    [row.change_type,row.gm_code||null,row.source_locator||'',row.source_text_ko]
+       AND source_text_ko=$3
+     ORDER BY pending_id ASC LIMIT 1`,
+    [row.change_type,row.gm_code||null,row.source_text_ko]
   );
   if(q.rowCount){
     await db.query(
@@ -301,7 +301,7 @@ async function captureRuntimeToPending(db,items){
     if(!clean||!hasKo(clean)||!key||gmPendingDynamicReason(row,raw)){
       stats.skipped++;continue;
     }
-    const uniq=[code,key,page,locator].join('|');
+    const uniq=[app,code,key].join('|');
     if(seen.has(uniq)){stats.skipped++;continue;}
     seen.add(uniq);
     if(!code&&known.has(key)){stats.reused++;continue;}
@@ -323,6 +323,7 @@ router.post('/api/gm/ui-dictionary/runtime-capture',express.json({limit:'256kb'}
       source_surface:(x&&x.source_surface)||(x&&x.sourceSurface)||(x&&x.page)||'RUNTIME'
     }));
     const stats=await captureRuntimeToPending(dbFrom(req),items);
+    console.info('[GM_UI_CAPTURE_V004]',JSON.stringify({route:'compat',...stats}));
     res.json({ok:true,stats});
   }catch(e){runtimeCaptureError('compat-pending',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
@@ -526,6 +527,7 @@ router.post('/api/gm/ui-dictionary/v2/runtime-capture',express.json({limit:'256k
       source_surface:(x&&x.source_surface)||(x&&x.sourceSurface)||(x&&x.page)||'RUNTIME'
     }));
     const stats=await captureRuntimeToPending(dbFrom(req),items);
+    console.info('[GM_UI_CAPTURE_V004]',JSON.stringify({route:'v2',...stats}));
     res.json({ok:true,stats});
   }catch(e){runtimeCaptureError('v2-pending',e);res.status(500).json({ok:false,error:String(e&&e.message||e)});}
 });
