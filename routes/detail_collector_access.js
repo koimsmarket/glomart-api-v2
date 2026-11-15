@@ -53,7 +53,9 @@ router.post('/api/gm/detail-collector/claim',writeSafe,permitted,async(req,res)=
   // SQL uses the existing category code assignments and ignores already stored detail content.
   const candidates=await pool.query(`SELECT DISTINCT ON (p.product_id) p.product_id,p.item_id,p.vendor_item_id
     FROM gm_product p WHERE p.mall_code='CPKR' AND p.product_id~'^[0-9]{5,}$'
+      AND LOWER(COALESCE(NULLIF(BTRIM(p.sale_status),''),'active')) <> 'inactive'
       AND string_to_array(COALESCE(p.glomart_code,''),'|') && $1::text[]
+      AND NOT EXISTS (SELECT 1 FROM gm_product inactive WHERE inactive.mall_code='CPKR' AND inactive.product_id=p.product_id AND LOWER(COALESCE(inactive.sale_status,''))='inactive')
       AND NOT EXISTS(SELECT 1 FROM gm_cpkr_detail_content d WHERE d.product_id=p.product_id)
       AND NOT EXISTS(SELECT 1 FROM gm_detail_collector_claim l WHERE l.product_id=p.product_id AND (l.state='completed' OR (l.state='leased' AND l.lease_until>now())))
     ORDER BY p.product_id,p.product_uid LIMIT 150`,[codes]);
@@ -78,8 +80,11 @@ router.post('/api/gm/detail-collector/result',writeSafe,permitted,async(req,res)
  try{
   const r=await pool.query("SELECT 1 FROM gm_detail_collector_claim WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased' AND lease_until>now()",[pid,req.collectorAccount,client,hash(token)]);
   if(!r.rowCount)return response(res,409,'LEASE_EXPIRED_OR_NOT_OWNED');
+  const inactive=await pool.query("SELECT 1 FROM gm_product WHERE mall_code='CPKR' AND product_id=$1 AND LOWER(COALESCE(sale_status,''))='inactive' LIMIT 1",[pid]);
+  if(inactive.rowCount)return response(res,409,'PRODUCT_INACTIVE_EXCLUDED');
   const content=[item.detailBlocks,item.detailImages,item.detailTexts,item.detail_blocks,item.detail_images];
   if(!content.some(x=>Array.isArray(x)&&x.length))return response(res,400,'DETAIL_CONTENT_MISSING');
+  if(!/^\d{5,}$/.test(clean(item.itemId||item.item_id)) || !/^\d{5,}$/.test(clean(item.vendorItemId||item.vendor_item_id||item.venderItemId)))return response(res,422,'DETAIL_ITEM_IDENTITY_MISSING');
   const outcome=await upsertProduct(pool,{...item,source:'connector-detail-coupang'});
   if(!outcome?.ok)return response(res,422,'UPSERT_FAILED');
   const saved=await pool.query('SELECT 1 FROM gm_cpkr_detail_content WHERE product_id=$1',[pid]);
