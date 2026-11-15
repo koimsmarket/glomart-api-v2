@@ -106,11 +106,17 @@ router.post('/api/gm/detail-collector/result',writeSafe,permitted,async(req,res)
   if(!outcome?.ok)return response(res,422,'UPSERT_FAILED');
   const saved=await pool.query('SELECT 1 FROM gm_cpkr_detail_content WHERE product_id=$1',[pid]);
   if(!saved.rowCount)return response(res,422,'DETAIL_JSON_NOT_SAVED');
-  // Do not count a partially saved option set as a completed job.
+  // Same successful upsert criterion as the Glomart app: option-count
+  // certification is independent of whether the received rows were saved.
+  // Keep actual option write errors fatal; leave unverified option_count unchanged
+  // (existing services/product/option.js and upsert.js already enforce that).
   const opt=outcome.item?.option_result||{};
-  if(opt.error||opt.balance_ok===false||opt.complete_for_count===false)return response(res,422,'OPTION_UPSERT_INCOMPLETE');
-  await pool.query("UPDATE gm_detail_collector_claim SET state='completed',lease_until=now(),updated_at=now() WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased'",[pid,req.collectorAccount,client,hash(token)]);
-  return res.set('Cache-Control','no-store').json({ok:true,product_id:pid,option_result:opt});
+  if(opt.error||opt.balance_ok===false||opt.count_update_error||
+     (Array.isArray(opt.errors)&&opt.errors.length>0)||Number(opt.skipped||0)>0)
+    return response(res,422,'OPTION_UPSERT_FAILED');
+  const completed=await pool.query("UPDATE gm_detail_collector_claim SET state='completed',lease_until=now(),updated_at=now() WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased' RETURNING product_id",[pid,req.collectorAccount,client,hash(token)]);
+  if(completed.rowCount!==1)return response(res,409,'LEASE_COMPLETE_FAILED');
+  return res.set('Cache-Control','no-store').json({ok:true,product_id:pid,action:'saved',detail_saved:true,option_result:opt});
  }catch(e){console.error('[DETAIL_COLLECTOR_RESULT]',e.code||'ERROR');return response(res,503,'RESULT_SAVE_FAILED');}
 });
 router.post('/api/gm/detail-collector/release',writeSafe,permitted,async(req,res)=>{
