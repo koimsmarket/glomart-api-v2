@@ -78,7 +78,7 @@ function elapsedText(sec){if(sec==null||!Number.isFinite(Number(sec)))return '-'
 async function refreshHistory(force=false){
  if(!ready||historyBusy)return;
  const leaves=historyTree();
- if(!leaves.length){$('historyMessage').textContent='최하위 카테고리를 선택하면 이력이 표시됩니다.';historyEmpty('historyCategories',5,'선택된 최하위 카테고리 없음');historyEmpty('historyRows',5,'조회 대상 없음');return;}
+ if(!leaves.length){$('historyMessage').textContent='최하위 카테고리를 선택하면 이력이 표시됩니다.';historyEmpty('historyCategories',6,'선택된 최하위 카테고리 없음');historyEmpty('historyRows',5,'조회 대상 없음');return;}
  if(!force&&Date.now()-historyLastAt<12000)return;
  historyBusy=true;
  try{
@@ -91,11 +91,11 @@ async function refreshHistory(force=false){
   const byCode=new Map((data.categories||[]).map(x=>[x.category_code,x]));
   const labelByCode=new Map(leaves.map(x=>[x.code,x.path]));
   const catHost=$('historyCategories');catHost.replaceChildren();
-  let total=0,performed=0;
+  let total=0,performed=0,iidChangedTotal=0;
   for(const leaf of leaves){const c=byCode.get(leaf.code)||{},tr=document.createElement('tr');
-   const n=Number(c.total)||0,d=Number(c.performed)||0;total+=n;performed+=d;
+   const n=Number(c.total)||0,d=Number(c.performed)||0;total+=n;performed+=d;const changed=Number(data.iid_changed_by_category?.[leaf.code])||0;iidChangedTotal+=changed;
    if(n&&d<n)tr.className='active';
-   [leaf.path+' ('+leaf.code+')',n+' / '+d+'건',c.first_kst||'-',c.last_kst||'-',elapsedText(c.elapsed_seconds)].forEach(v=>historyTd(tr,v));catHost.append(tr);
+   [leaf.path+' ('+leaf.code+')',n+' / '+d+'건',changed+'건',c.first_kst||'-',c.last_kst||'-',elapsedText(c.elapsed_seconds)].forEach(v=>historyTd(tr,v));catHost.append(tr);
   }
   const rows=$('historyRows');rows.replaceChildren();
   for(const item of data.items||[]){const tr=document.createElement('tr');
@@ -103,7 +103,7 @@ async function refreshHistory(force=false){
   }
   if(!rows.children.length)historyEmpty('historyRows',5,'작업 이력 없음');
   const kst=new Intl.DateTimeFormat('ko-KR',{timeZone:'Asia/Seoul',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date());
-  $('historyMessage').textContent='최하위 카테고리 '+leaves.length+'개 · 전체 / 수행 '+total+' / '+performed+'건 (카테고리별 합산) · 최근 이력 '+(data.items||[]).length+'건 · '+kst+' KST 조회';
+  $('historyMessage').textContent='최하위 카테고리 '+leaves.length+'개 · 전체 / 수행 '+total+' / '+performed+'건 · IID 변경 '+iidChangedTotal+'건 (메모리·카테고리별 합산) · 최근 이력 '+(data.items||[]).length+'건 · '+kst+' KST 조회';
  }catch(e){$('historyMessage').textContent='서버 작업 이력 조회 실패: '+e.message;}
  finally{historyBusy=false;}
 }

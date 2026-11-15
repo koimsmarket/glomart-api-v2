@@ -8,6 +8,12 @@ const ALLOWED=new Set(['derzon','derzon1287','msoon']);
 const COOKIE='__Host-gm_dc';
 const SESSION_MS=8*3600000,IDLE_MS=3600000,LEASE_SEC=300;
 const sessions=new Map(), failures=new Map();
+// V020: volatile IID checks only. Never write an IID audit row/column to DB.
+const iidPending=new Map(),iidChanges=new Map();
+function iidCodes(v,selected){const wanted=new Set(selected);return [...new Set(clean(v).split('|').map(x=>x.trim()).filter(x=>wanted.has(x)))];}
+function iidCounts(codes){const result=Object.create(null),selected=new Set(codes);for(const x of iidChanges.values())for(const code of x.codes)if(selected.has(code))result[code]=(result[code]||0)+1;return result;}
+function trimIidPending(){const now=Date.now();for(const [pid,x] of iidPending)if(x.expires<now)iidPending.delete(pid);}
+
 function db(req){return req.app.locals.pool||req.app.locals.db;}
 function response(res,status,error){return res.status(status).set('Cache-Control','no-store').json({ok:false,error});}
 function sameOrigin(req){try{const origin=new URL(req.get('origin')||'');return origin.protocol==='https:'&&origin.host===req.get('host');}catch(_){return false;}}
@@ -95,6 +101,7 @@ router.post('/api/gm/detail-collector/history',writeSafe,permitted,async(req,res
    ORDER BY l.updated_at DESC,l.product_id ASC LIMIT 200`,[codes]);
   return res.set('Cache-Control','no-store').json({
     ok:true,timezone:'Asia/Seoul',items:rows.rows,categories:groups.rows,
+    iid_changed_by_category:iidCounts(codes),iid_memory_only:true,
     limited_to_latest:200,
     time_basis:'first/last retained claim updated_at; exact historical start not available'
   });
@@ -105,9 +112,10 @@ router.post('/api/gm/detail-collector/claim',writeSafe,permitted,async(req,res)=
  const codes=Array.isArray(req.body?.category_codes)?[...new Set(req.body.category_codes.map(clean).filter(x=>/^[A-Z0-9-]{2,64}$/.test(x)))]:[];
  const client=clean(req.body?.client_id);if(!codes.length||codes.length>19000||!/^[-\w]{8,100}$/.test(client))return response(res,400,'INVALID_SELECTION_OR_CLIENT');
  const pool=db(req),token=crypto.randomBytes(32).toString('hex');
+ trimIidPending();
  try{
   // SQL uses the existing category code assignments and ignores already stored detail content.
-  const candidates=await pool.query(`SELECT DISTINCT ON (p.product_id) p.product_id,p.item_id,p.vendor_item_id
+  const candidates=await pool.query(`SELECT DISTINCT ON (p.product_id) p.product_id,p.item_id,p.vendor_item_id,p.glomart_code
     FROM gm_product p WHERE p.mall_code='CPKR' AND p.product_id~'^[0-9]{5,}$'
       AND LOWER(COALESCE(NULLIF(BTRIM(p.sale_status),''),'active')) <> 'inactive'
       AND string_to_array(COALESCE(p.glomart_code,''),'|') && $1::text[]
@@ -122,7 +130,10 @@ router.post('/api/gm/detail-collector/claim',writeSafe,permitted,async(req,res)=
     token_hash=EXCLUDED.token_hash,lease_until=EXCLUDED.lease_until,state='leased',updated_at=now()
     WHERE gm_detail_collector_claim.state<>'completed' AND gm_detail_collector_claim.lease_until<now()
     RETURNING product_id`,[row.product_id,req.collectorAccount,client,hash(token)]);
-   if(q.rowCount)return res.set('Cache-Control','no-store').json({ok:true,claim:{...row,lease_token:token,expires_in_seconds:LEASE_SEC}});
+   if(q.rowCount){
+    iidPending.set(clean(row.product_id),{token_hash:hash(token),old_iid:clean(row.item_id),codes:iidCodes(row.glomart_code,codes),expires:Date.now()+LEASE_SEC*1000});
+    return res.set('Cache-Control','no-store').json({ok:true,claim:{...row,lease_token:token,expires_in_seconds:LEASE_SEC}});
+   }
   }
   return res.set('Cache-Control','no-store').json({ok:true,claim:null,reason:'NONE_AVAILABLE_IN_BATCH'});
  }catch(e){console.error('[DETAIL_COLLECTOR_CLAIM]',e.code||'ERROR');return response(res,503,e.code==='42P01'?'MIGRATION_145_REQUIRED':'CLAIM_FAILED');}
@@ -172,13 +183,22 @@ router.post('/api/gm/detail-collector/result',writeSafe,permitted,async(req,res)
     return response(res,422,'OPTION_UPSERT_FAILED');
   const completed=await pool.query("UPDATE gm_detail_collector_claim SET state='completed',lease_until=now(),updated_at=now() WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased' RETURNING product_id",[pid,req.collectorAccount,client,hash(token)]);
   if(completed.rowCount!==1)return response(res,409,'LEASE_COMPLETE_FAILED');
-  return res.set('Cache-Control','no-store').json({ok:true,product_id:pid,action:'saved',detail_saved:true,option_result:opt});
+  const pending=iidPending.get(pid),newIid=clean(item.itemId||item.item_id);
+  let iidChanged=null;
+  if(pending&&pending.token_hash===hash(token)){
+   if(pending.old_iid&&newIid){
+    iidChanged=pending.old_iid!==newIid;
+    if(iidChanged&&!iidChanges.has(pid))iidChanges.set(pid,{codes:pending.codes});
+   }
+   iidPending.delete(pid);
+  }
+  return res.set('Cache-Control','no-store').json({ok:true,product_id:pid,action:'saved',detail_saved:true,iid_changed:iidChanged,option_result:opt});
  }catch(e){console.error('[DETAIL_COLLECTOR_RESULT]',e.code||'ERROR');return response(res,503,'RESULT_SAVE_FAILED');}
 });
 router.post('/api/gm/detail-collector/release',writeSafe,permitted,async(req,res)=>{
  const pid=clean(req.body?.product_id),token=clean(req.body?.lease_token),client=clean(req.body?.client_id);
  if(!/^\d{5,}$/.test(pid)||!/^[a-f0-9]{64}$/.test(token))return response(res,400,'INVALID_LEASE');
- try{await db(req).query("UPDATE gm_detail_collector_claim SET lease_until=now(),state='released',updated_at=now() WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased'",[pid,req.collectorAccount,client,hash(token)]);return res.json({ok:true});}
+ try{await db(req).query("UPDATE gm_detail_collector_claim SET lease_until=now(),state='released',updated_at=now() WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased'",[pid,req.collectorAccount,client,hash(token)]);if(iidPending.get(pid)?.token_hash===hash(token))iidPending.delete(pid);return res.json({ok:true});}
  catch(_){return response(res,503,'RELEASE_FAILED');}
 });
 // Keep collector API failures within this scoped router. Never fall through to an HTML admin login page.
