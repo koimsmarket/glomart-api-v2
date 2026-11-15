@@ -82,6 +82,23 @@ router.post('/api/gm/detail-collector/result',writeSafe,permitted,async(req,res)
   if(!r.rowCount)return response(res,409,'LEASE_EXPIRED_OR_NOT_OWNED');
   const inactive=await pool.query("SELECT 1 FROM gm_product WHERE mall_code='CPKR' AND product_id=$1 AND LOWER(COALESCE(sale_status,''))='inactive' LIMIT 1",[pid]);
   if(inactive.rowCount)return response(res,409,'PRODUCT_INACTIVE_EXCLUDED');
+  // Existing GM product UPSERT is the sole authority for a collector-confirmed
+  // terminal sale stop. This is NOT a generic empty-detail or sold-out fallback.
+  // No synthetic option/detail is written here; upsertProduct's existing
+  // connector-detail-coupang-unavailable branch updates product + options.
+  if(req.body?.phase==='coupang-sale-stopped' &&
+     clean(item.source)==='connector-detail-coupang-unavailable' &&
+     clean(item.status).toUpperCase()==='STOPPED' &&
+     clean(item.sale_status||item.saleStatus).toLowerCase()==='inactive' &&
+     item.unavailable===true){
+    const result=await upsertProduct(pool,item);
+    if(!result?.ok||result.action!=='stopped_deactivated')return response(res,422,'EXISTING_STOP_DEACTIVATION_FAILED');
+    if(!Number(result.item?.products_inactive))return response(res,409,'PRODUCT_NOT_FOUND_FOR_STOP');
+    await pool.query("UPDATE gm_detail_collector_claim SET state='completed',lease_until=now(),updated_at=now() WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased'",[pid,req.collectorAccount,client,hash(token)]);
+    return res.set('Cache-Control','no-store').json({ok:true,product_id:pid,action:'stopped_deactivated',detail_saved:false});
+  }
+  // For all other outcomes (including a merely missing DOM, sold-out hint,
+  // 403/404 or network error), never invent an inactive product status.
   const content=[item.detailBlocks,item.detailImages,item.detailTexts,item.detail_blocks,item.detail_images];
   if(!content.some(x=>Array.isArray(x)&&x.length))return response(res,400,'DETAIL_CONTENT_MISSING');
   if(!/^\d{5,}$/.test(clean(item.itemId||item.item_id)) || !/^\d{5,}$/.test(clean(item.vendorItemId||item.vendor_item_id||item.venderItemId)))return response(res,422,'DETAIL_ITEM_IDENTITY_MISSING');
