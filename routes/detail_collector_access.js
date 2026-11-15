@@ -22,7 +22,7 @@ function page(req,res){const s=session(req);res.set('Cache-Control','no-store');
 router.get(['/detail_collector.html','/detail_collector.js','/detail_collector_login.html','/public/detail_collector.html','/public/detail_collector.js','/public/detail_collector_login.html'],(req,res)=>res.sendStatus(404));
 router.get(['/detail-collector','/detail-collector/'],page);
 router.get('/detail-collector/app.js',(req,res)=>{if(!session(req))return res.sendStatus(401);res.set('Cache-Control','no-store').type('js').sendFile(path.join(__dirname,'../public/detail_collector.js'));});
-router.get('/api/gm/detail-collector/session',(req,res)=>res.set('Cache-Control','no-store').json({ok:true,account:session(req)?.id||null,allowed:['derzon','derzon1287','msoon']}));
+router.get('/api/gm/detail-collector/session',(req,res)=>{const s=session(req);return res.set('Cache-Control','no-store').json({ok:true,authenticated:!!s,account:s?.id||null,allowed:['derzon','derzon1287','msoon']});});
 router.post('/api/gm/detail-collector/login',writeSafe,async(req,res)=>{
  const id=clean(req.body?.account),password=typeof req.body?.password==='string'?req.body.password:'';
  if(!ALLOWED.has(id)||!password||password.length>256)return response(res,401,'INVALID_CREDENTIALS');
@@ -97,4 +97,6 @@ router.post('/api/gm/detail-collector/release',writeSafe,permitted,async(req,res
  try{await db(req).query("UPDATE gm_detail_collector_claim SET lease_until=now(),state='released',updated_at=now() WHERE product_id=$1 AND account_id=$2 AND client_id=$3 AND token_hash=$4 AND state='leased'",[pid,req.collectorAccount,client,hash(token)]);return res.json({ok:true});}
  catch(_){return response(res,503,'RELEASE_FAILED');}
 });
+// Keep collector API failures within this scoped router. Never fall through to an HTML admin login page.
+router.all(/^\/api\/gm\/detail-collector(?:\/.*)?$/,(req,res)=>response(res,404,'COLLECTOR_API_NOT_FOUND'));
 module.exports=router;

@@ -1,4 +1,14 @@
-(()=>{'use strict';const $=id=>document.getElementById(id);let cats=[],sel=new Set();async function get(p){const r=await fetch('/api/gm/detail-collector/'+p,{credentials:'same-origin',cache:'no-store'});const d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||'HTTP '+r.status);return d;}
+(()=>{'use strict';const $=id=>document.getElementById(id);let cats=[],sel=new Set(),ready=false;
+const root='/api/gm/detail-collector/';
+async function get(p){
+ const r=await fetch(root+p,{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}});
+ const ct=String(r.headers.get('content-type')||'').toLowerCase();
+ if(!ct.includes('application/json'))throw Error('API 응답 형식 오류: '+p+' / HTTP '+r.status+' / '+(ct||'Content-Type 없음')+' (서버가 JSON 대신 HTML 등을 반환했습니다. 인증 게이트 또는 API 라우트 확인 필요)');
+ let d;try{d=await r.json();}catch(_){throw Error('API JSON 파싱 실패: '+p+' / HTTP '+r.status);}
+ if(r.status===401){ready=false;location.replace('/detail-collector/');throw Error('로그인 세션 만료: 다시 로그인하세요.');}
+ if(!r.ok||!d.ok)throw Error('API '+p+' / HTTP '+r.status+' / '+(d.error||'UNKNOWN'));
+ return d;
+}
 function parentCandidates(code){const p=String(code).toUpperCase().split('-'),out=[];for(let i=p.length-1;i>=1;i--){if(!/^0+$/.test(p[i])){let v=p.slice();for(let j=i;j<v.length;j++)v[j]='0'.repeat(v[j].length);out.push(v.join('-'));}}return out;}
 let openNodes=new Set();
 function draw(){const q=$('filter').value.toLowerCase(),host=$('tree');host.replaceChildren();const map=new Map(cats.map(c=>[c.gm_code,{...c,children:[],parent:''}])),roots=[];
@@ -10,4 +20,15 @@ function line(c,depth){if(q&&!visible.has(c.gm_code))return;const row=document.c
 for(const r of roots)line(r,0);$('picked').textContent='전체 '+map.size+'개 · 선택 '+sel.size+'개 · 최상위 '+roots.length+'개';}
 async function load(){try{const x=await get('categories');cats=x.categories||[];draw();}catch(e){$('status').textContent=e.message;}}
 async function status(){try{const s=await get('status');$('status').textContent='계정: '+s.account+'\n할당 이력: '+s.statistics.claims+'\n현재 작업권: '+s.statistics.active+'\n완료: '+s.statistics.complete;}catch(e){$('status').textContent=e.message;}}
-$('reload').onclick=load;$('filter').oninput=draw;$('refresh').onclick=status;$('logout').onclick=async()=>{await fetch('/api/gm/detail-collector/logout',{method:'POST',credentials:'same-origin'});location.reload();};get('session').then(x=>{$('account').textContent='로그인: '+x.account;});load();status();})();
+$('reload').onclick=()=>{if(ready)load();};$('filter').oninput=()=>{if(ready)draw();};$('refresh').onclick=()=>{if(ready)status();};
+$('logout').onclick=async()=>{try{await fetch(root+'logout',{method:'POST',credentials:'same-origin',headers:{Accept:'application/json'}});}finally{location.replace('/detail-collector/');}};
+(async()=>{
+ $('account').textContent='수집 전용 계정 확인 중…';
+ $('status').textContent='수집 전용 로그인 상태 확인 중…';
+ try{
+  const s=await get('session');
+  if(!s.authenticated||!s.account){location.replace('/detail-collector/');return;}
+  ready=true;$('account').textContent='수집 전용 로그인: '+s.account;
+  await load();await status();
+ }catch(e){$('account').textContent='인증 상태 확인 실패';$('status').textContent=e.message;}
+})();})();
