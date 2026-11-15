@@ -136,15 +136,91 @@ function render(){const host=$('gmDcTree');if(!host)return;host.replaceChildren(
 async function load(){try{const d=await api('/categories');cats=d.categories||[];rebuildTree(cats);
  selected=new Set([...selected].filter(id=>nodes.has(id)));render();msg('전체 카테고리 '+nodes.size+'개 · 선택 '+selected.size+'개');
  }catch(e){msg('카테고리 조회 실패: '+e.message);}}
-async function status(){try{const d=await api('/status');const j=d.job||{};void historyRecord(j);msg(['서버 실행기: '+(d.worker_ready?'준비':'미준비 ('+d.worker_error+')'),'상태: '+(j.state||'idle'),'선택 카테고리: '+(j.selected_codes||0),'처리: '+(j.seen||0)+' / '+(j.max_items||0),'저장: '+(j.saved||0),'실패: '+(j.failed||0),'마지막 PID: '+(j.last_pid||'-'),'메시지: '+(j.error||'-')].join('\n'));}catch(e){msg('상태 조회 실패: '+e.message);}}
-async function write(path,body){const password=prompt('derzon 관리자 비밀번호 (이번 작업 인증)');if(password==null)return;try{await api(path,{method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify(body||{})});await status();}catch(e){msg(path+' 실패: '+e.message);}}
+// V008: browser-only collector controls, never invoke the retired server Chromium worker.
+const CLIENT_API='/api/gm/detail-collector/';
+let dcAccount='',dcRunning=false,dcStopped=false,dcProcessed=0,dcSaved=0,dcFailed=0,dcStartedAt='',dcLastPid='';
+async function collectorApi(path,opts={}){
+ const r=await fetch(CLIENT_API+path,Object.assign({credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}},opts));
+ const ct=String(r.headers.get('content-type')||'').toLowerCase();
+ if(!ct.includes('application/json'))throw Error('API '+path+' / HTTP '+r.status+' / JSON 대신 HTML 응답');
+ const d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||('HTTP '+r.status));return d;
+}
+function executor(){const x=window.GM_DETAIL_PC_EXECUTOR;return x&&typeof x.start==='function'&&typeof x.stop==='function'&&x.ready===true?x:null;}
+function hasCollector(){return !!executor();}
+function collectorStatusText(d){
+ const stats=d?.statistics||{};
+ return ['실행 방식: 관리자 PC Chrome (서버 Chromium 사용 안 함)',
+ '로그인: '+(dcAccount||'필요'),
+ 'PC 수집 실행기: '+(hasCollector()?'연결됨':'미연결'),
+ '상태: '+(dcRunning?'수집 중':dcStopped?'중지됨':'대기'),
+ '선택 카테고리: '+selected.size,
+ '처리: '+dcProcessed, '저장: '+dcSaved,'실패: '+dcFailed,
+ '서버 전체 할당 이력: '+(stats.claims??'-'),
+ '서버 활성 작업권: '+(stats.active??'-'),
+ '서버 완료: '+(stats.complete??'-'),
+ '마지막 PID: '+(dcLastPid||'-'),
+ hasCollector()?'':'시작하려면 PC Chrome 수집 실행기 연결이 필요합니다.'].join('\n');
+}
+async function status(){
+ try{const session=await collectorApi('session');dcAccount=session.authenticated?session.account:'';
+  if(!dcAccount){msg('수집 전용 로그인이 필요합니다. 시작 버튼에서 로그인하세요.\nPC 수집 실행기: '+(hasCollector()?'연결됨':'미연결'));return;}
+  const d=await collectorApi('status');msg(collectorStatusText(d));
+ }catch(e){msg('PC 수집 상태 조회 실패: '+e.message);}
+}
+function collectorLogin(){return new Promise(resolve=>{
+ const wrap=document.createElement('div');wrap.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:2147483000';
+ const form=document.createElement('form');form.style.cssText='background:#fff;color:#111;padding:20px;border-radius:10px;width:min(390px,92vw);box-sizing:border-box;display:grid;gap:10px';
+ const h=document.createElement('h3');h.textContent='상세 콘텐츠 수집 전용 로그인';h.style.margin='0';
+ const account=document.createElement('select');account.style.cssText='padding:10px;width:100%';
+ ['derzon','derzon1287','msoon'].forEach(id=>{const op=document.createElement('option');op.value=id;op.textContent=id;account.append(op);});
+ const password=document.createElement('input');password.type='password';password.autocomplete='current-password';password.required=true;password.maxLength=256;password.placeholder='비밀번호';password.style.cssText='padding:10px;width:100%;box-sizing:border-box';
+ const error=document.createElement('div');error.style.color='#b91c1c';error.setAttribute('role','alert');
+ const btns=document.createElement('div');btns.style.cssText='display:flex;gap:10px';
+ const cancel=document.createElement('button');cancel.type='button';cancel.textContent='취소';
+ const submit=document.createElement('button');submit.type='submit';submit.textContent='인증 후 진행';
+ btns.append(cancel,submit);form.append(h,account,password,error,btns);wrap.append(form);document.body.append(wrap);
+ let settled=false;function done(v){if(settled)return;settled=true;password.value='';wrap.remove();resolve(v);}
+ cancel.onclick=()=>done(false);
+ form.onsubmit=async e=>{e.preventDefault();submit.disabled=true;error.textContent='';
+  const pw=password.value;password.value='';
+  try{await collectorApi('login',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({account:account.value,password:pw})});dcAccount=account.value;done(true);}
+  catch(err){error.textContent='인증 실패: '+err.message;submit.disabled=false;}
+ };
+ password.focus();
+ });}
+async function ensureLogin(){
+ const session=await collectorApi('session');if(session.authenticated&&session.account){dcAccount=session.account;return true;}
+ dcAccount='';return collectorLogin();
+}
+async function startClient(){
+ if(dcRunning){msg('이 PC에서 이미 수집 중입니다.');return;}
+ if(!selected.size){msg('먼저 카테고리를 선택하세요.');return;}
+ try{
+  if(!await ensureLogin()){msg('수집 로그인이 취소되었습니다.');return;}
+  // Refuse to claim products before a browser-side collector actually exists.
+  const x=executor();if(!x){msg('로그인: '+dcAccount+'\nPC 수집 실행기 미연결: 기존 서버 Chromium 수집은 호출하지 않습니다.\n브라우저 실행기를 연결해야 수집을 시작할 수 있습니다.');return;}
+  dcStopped=false;dcRunning=true;dcProcessed=0;dcSaved=0;dcFailed=0;dcLastPid='';dcStartedAt=new Date().toISOString();
+  msg('이 PC의 수집 실행기에 작업을 전달했습니다.');
+  const maxItems=Math.max(1,Math.min(10000,Number($('gmDcMax')?.value)||50));
+  await x.start({category_codes:[...selected],max_items:maxItems,skip_saved:!!$('gmDcSkip')?.checked,
+   api_root:CLIENT_API,account:dcAccount,
+   onProgress:state=>{if(!dcRunning)return;dcProcessed=Number(state?.processed)||0;dcSaved=Number(state?.saved)||0;dcFailed=Number(state?.failed)||0;dcLastPid=String(state?.last_pid||'');msg(['로그인: '+dcAccount,'PC 수집 진행 중','처리: '+dcProcessed+' / '+maxItems,'저장: '+dcSaved,'실패: '+dcFailed,'마지막 PID: '+(dcLastPid||'-')].join('\n'));},
+   onFinished:async state=>{dcRunning=false;dcStopped=!!state?.stopped;await historyRecord({id:'pc-'+Date.now(),state:dcStopped?'stopped':state?.error?'error':'completed',started_at:dcStartedAt,finished_at:new Date().toISOString(),seen:dcProcessed,saved:dcSaved,failed:dcFailed,skipped:Number(state?.skipped)||0,last_pid:dcLastPid,mall_code:'CPKR'});await status();}});
+ }catch(e){dcRunning=false;msg('PC 수집 시작 실패: '+e.message);}
+}
+async function stopClient(){
+ if(!dcRunning){msg('이 PC에서 진행 중인 작업이 없습니다.');return;}
+ const x=executor();if(!x){dcRunning=false;msg('수집 실행기 연결이 끊겼습니다.');return;}
+ try{await x.stop();dcStopped=true;msg('이 PC에 수집 중지를 요청했습니다.');}
+ catch(e){msg('수집 중지 실패: '+e.message);}
+}
 function init(){if(!$('gmDcTree'))return;
  const host=$('gmDcTree');const summary=document.createElement('div');summary.id='gmDcTreeSummary';summary.style.cssText='font-size:12px;color:#475569;margin:0 0 8px';host.parentNode.insertBefore(summary,host);
  $('gmDcFilter').addEventListener('input',render);$('gmDcRefresh').addEventListener('click',load);
  $('gmDcAll').addEventListener('click',()=>{selected=new Set(nodes.keys());render();});$('gmDcNone').addEventListener('click',()=>{selected.clear();render();});
  $('gmDcStatus').addEventListener('click',status);
- $('gmDcStart').addEventListener('click',()=>{if(!selected.size){msg('카테고리를 선택하세요');return;}write('/start',{mall_code:'CPKR',category_codes:[...selected],skip_saved:$('gmDcSkip').checked,max_items:Number($('gmDcMax').value)||50});});
- $('gmDcStop').addEventListener('click',()=>write('/stop',{}));
+ $('gmDcStart').addEventListener('click',startClient);
+ $('gmDcStop').addEventListener('click',stopClient);
  historyPanel();void historyRefresh();load();status();interval=setInterval(()=>{if(!document.hidden&&$('gmDetailContentCard')?.style.display!=='none')status();},5000);
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
