@@ -1,5 +1,5 @@
  'use strict';
-// GM_DETAIL_CONTENT_BUILDER_V001: administrator-driven single worker; no automatic background startup.
+// GM_DETAIL_CONTENT_BUILDER_V003: administrator-driven single worker; hard stop on HTTP 403/404.
 const express=require('express');
 const fs=require('fs');
 const path=require('path');
@@ -63,7 +63,7 @@ async function collectOne(browser,row,source){
     const url='https://www.coupang.com/vp/products/'+encodeURIComponent(row.product_id)+
       (row.vendor_item_id?'?vendorItemId='+encodeURIComponent(row.vendor_item_id)+(row.item_id?'&itemId='+encodeURIComponent(row.item_id):''):'');
     const response=await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000});
-    if(response&&response.status()===403)return {blocked:true,error:'HTTP_403'};
+    if(response&&[403,404].includes(response.status()))return {blocked:true,error:'HTTP_'+response.status()};
     await page.evaluate(identity=>{
       const cache={GM_LAST_GLOMART_DETAIL_QUERY:JSON.stringify(identity)};
       window.GM_getValue=(key,fallback)=>Object.prototype.hasOwnProperty.call(cache,key)?cache[key]:fallback;
@@ -75,7 +75,7 @@ async function collectOne(browser,row,source){
     while(Date.now()<end){
       const data=await page.evaluate(()=>window.__GM_BUILDER_COLLECTOR_STATE__||{}).catch(()=>({}));
       const st=(()=>{try{return JSON.parse(data.GM_STATUS_LAST||'{}');}catch(_){return {};}})();
-      if(/403|ACCESS_DENIED|FORBIDDEN|BLOCKED/i.test([st.reason,st.stage].join(' ')))return {blocked:true,error:st.reason||'ACCESS_DENIED'};
+      if(/\b(?:403|404)\b|HTTP[_ -]?(?:403|404)|ACCESS_DENIED|FORBIDDEN|BLOCKED|PAGE_NOT_FOUND|NOT_FOUND/i.test([st.reason,st.stage,st.status,st.statusCode,st.httpStatus].join(' ')))return {blocked:true,error:st.reason||st.stage||'HTTP_403_OR_404'};
       const v=(()=>{try{return JSON.parse(data.GM_LAST_DETAIL_RESULT||'null');}catch(_){return null;}})();
       if(v&&v.final===true&&v.partial!==true&&v.ok===true&&v.item){
         const item=v.item;
@@ -84,7 +84,7 @@ async function collectOne(browser,row,source){
         if(!d.some(a=>Array.isArray(a)&&a.length))return {error:'NO_DETAIL_CONTENT'};
         return {item};
       }
-      if(st.stage==='CODE_ERROR'||st.stage==='STOPPED'||st.stage==='PAGE_NOT_FOUND')return {error:st.reason||st.stage};
+      if(st.stage==='CODE_ERROR'||st.stage==='STOPPED')return {error:st.reason||st.stage};
       await wait(400);
     }
     return {error:'COLLECTOR_TIMEOUT'};
@@ -104,7 +104,7 @@ async function runJob(db,instance){
         last=row.product_id;instance.last_pid=last;instance.seen++;
         let got;
         try{got=await collectOne(browser,row,source);}catch(e){got={error:String(e.message||e)};}
-        if(got.blocked){instance.failed++;instance.error='403 차단: '+got.error;stopping=true;break;}
+        if(got.blocked){instance.failed++;instance.error='403/404 자동 중지: '+got.error;stopping=true;break;}
         if(got.item){
           try{
             const outcome=await upsertProduct(db,Object.assign({},got.item,{source:'connector-detail-coupang'}));

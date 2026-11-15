@@ -1,4 +1,4 @@
-// GM_DETAIL_CONTENT_BUILDER_UI_V002 - indexed, collapsible GM category tree; collection API unchanged.
+// GM_DETAIL_CONTENT_BUILDER_UI_V003 - fixed-width tree controls; restores category labels under Builder global CSS.
 (()=>{'use strict';
 const $=id=>document.getElementById(id),API='/api/gm/builder/detail-content';
 let cats=[],selected=new Set(),expanded=new Set(),nodes=new Map(),roots=[],interval=null;
@@ -45,17 +45,17 @@ function render(){const host=$('gmDcTree');if(!host)return;host.replaceChildren(
  }}
  const line=(n,indent,index)=>{
    if(kw&&!visible.has(n.code))return;
-   const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:7px;min-height:31px;padding:2px 4px 2px '+(6+indent*21)+'px;border-bottom:1px solid #f3f4f6';
+   const row=document.createElement('div');row.style.cssText='display:flex;flex-direction:row;align-items:center;gap:7px;min-height:31px;width:100%;box-sizing:border-box;padding:2px 4px 2px '+(6+indent*21)+'px;border-bottom:1px solid #f3f4f6';
    const open=expanded.has(n.code)||forcedOpen.has(n.code);
-   const arrow=document.createElement('button');arrow.type='button';arrow.style.cssText='width:25px;height:25px;flex:none;padding:0;background:transparent;color:#334155;border:0;cursor:pointer;font-size:16px';
+   const arrow=document.createElement('button');arrow.type='button';arrow.style.cssText='display:inline-flex;align-items:center;justify-content:center;width:25px;min-width:25px;max-width:25px;height:25px;flex:0 0 25px;padding:0;margin:0;background:transparent;color:#334155;border:0;cursor:pointer;font-size:16px';
    arrow.textContent=n.children.length?(open?'▾':'▸'):'·';arrow.disabled=!n.children.length;
    arrow.title=n.children.length?(open?'하위 접기':'하위 펼치기'):'하위 카테고리 없음';
    arrow.addEventListener('click',()=>{if(expanded.has(n.code))expanded.delete(n.code);else expanded.add(n.code);render();});row.appendChild(arrow);
-   const check=document.createElement('input');check.type='checkbox';check.style.cssText='flex:none;min-width:15px;min-height:15px;margin:0';
+   const check=document.createElement('input');check.type='checkbox';check.style.cssText='display:block;appearance:auto;width:16px;min-width:16px;max-width:16px;height:16px;min-height:16px;max-height:16px;flex:0 0 16px;padding:0;margin:0;box-sizing:border-box';
    const counts=countSelected(n);check.checked=counts.marked===counts.total;check.indeterminate=counts.marked>0&&counts.marked<counts.total;
    check.title='이 항목과 하위 모든 카테고리 선택/해제';check.addEventListener('change',()=>{
      for(const id of allDescendants(n.code)){if(check.checked)selected.add(id);else selected.delete(id);}render();});row.appendChild(check);
-   const text=document.createElement('span');text.style.cssText='font-size:13px;line-height:1.5;cursor:pointer;overflow-wrap:anywhere';
+   const text=document.createElement('span');text.style.cssText='display:inline-block;flex:1 1 auto;min-width:0;width:auto;font-size:13px;line-height:1.5;color:#202c3b;cursor:pointer;overflow-wrap:anywhere';
    const number=document.createElement('strong');number.textContent=index+' ';number.style.color='#2563eb';
    text.appendChild(number);text.append(document.createTextNode(n.name+' ('+n.code+')'));
    text.addEventListener('click',()=>{if(n.children.length){if(expanded.has(n.code))expanded.delete(n.code);else expanded.add(n.code);render();}});
