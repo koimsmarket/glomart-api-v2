@@ -33,34 +33,34 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
         THEN $3::jsonb ELSE thumb_json END,
       detail_json = detail_json, /* GM_DETAIL_CONTENT_V002: content stored separately */
       cp_selected_code = CASE
-        WHEN COALESCE(cp_selected_code,'')='' AND NULLIF($6,'') IS NOT NULL THEN $6
+        WHEN COALESCE(cp_selected_code,'')='' AND NULLIF($4,'') IS NOT NULL THEN $4
         ELSE cp_selected_code END,
       cp_fix_code = CASE
-        WHEN NULLIF($7,'') IS NULL THEN cp_fix_code
-        WHEN COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$7 THEN cp_fix_code
-        ELSE $7 END,
+        WHEN NULLIF($5,'') IS NULL THEN cp_fix_code
+        WHEN COALESCE(cp_match,'')='T' AND COALESCE(cp_fix_code,'')<>'' AND COALESCE(cp_fix_code,'')<>$5 THEN cp_fix_code
+        ELSE $5 END,
       cp_match = CASE
-        WHEN NULLIF($7,'') IS NOT NULL AND COALESCE(cp_match,'')<>'T' THEN 'F'
+        WHEN NULLIF($5,'') IS NOT NULL AND COALESCE(cp_match,'')<>'T' THEN 'F'
         ELSE cp_match END,
-      mall_category = COALESCE(NULLIF($8,''), mall_category),
-      mall_category_json = CASE WHEN $9::jsonb <> '[]'::jsonb THEN $9::jsonb ELSE mall_category_json END,
-      supplier_id = COALESCE(NULLIF($10,''), supplier_id),
-      supplier_name = COALESCE(NULLIF($11,''), supplier_name),
-      business_number = COALESCE(NULLIF($12,''), business_number),
-      online_sales_number = COALESCE(NULLIF($13,''), online_sales_number),
-      ceo_name = COALESCE(NULLIF($14,''), ceo_name),
-      supplier_mobile = COALESCE(NULLIF($15,''), supplier_mobile),
-      supplier_phone = COALESCE(NULLIF($16,''), supplier_phone),
-      supplier_email = COALESCE(NULLIF($17,''), supplier_email),
-      supplier_address = COALESCE(NULLIF($18,''), supplier_address),
-      buyable_qty = COALESCE($19::int, buyable_qty),
-      min_order_qty = COALESCE($20::int, min_order_qty),
-      max_order_qty = COALESCE($21::int, max_order_qty),
-      return_policy_text = COALESCE(NULLIF($22,''), return_policy_text),
-      exchange_policy_text = COALESCE(NULLIF($23,''), exchange_policy_text),
-      return_shipping_fee = CASE WHEN $24::int > 0 THEN $24::int ELSE return_shipping_fee END,
+      mall_category = COALESCE(NULLIF($6,''), mall_category),
+      mall_category_json = CASE WHEN $7::jsonb <> '[]'::jsonb THEN $7::jsonb ELSE mall_category_json END,
+      supplier_id = COALESCE(NULLIF($8,''), supplier_id),
+      supplier_name = COALESCE(NULLIF($9,''), supplier_name),
+      business_number = COALESCE(NULLIF($10,''), business_number),
+      online_sales_number = COALESCE(NULLIF($11,''), online_sales_number),
+      ceo_name = COALESCE(NULLIF($12,''), ceo_name),
+      supplier_mobile = COALESCE(NULLIF($13,''), supplier_mobile),
+      supplier_phone = COALESCE(NULLIF($14,''), supplier_phone),
+      supplier_email = COALESCE(NULLIF($15,''), supplier_email),
+      supplier_address = COALESCE(NULLIF($16,''), supplier_address),
+      buyable_qty = COALESCE($17::int, buyable_qty),
+      min_order_qty = COALESCE($18::int, min_order_qty),
+      max_order_qty = COALESCE($19::int, max_order_qty),
+      return_policy_text = COALESCE(NULLIF($20,''), return_policy_text),
+      exchange_policy_text = COALESCE(NULLIF($21,''), exchange_policy_text),
+      return_shipping_fee = CASE WHEN $22::int > 0 THEN $22::int ELSE return_shipping_fee END,
       updated_at = now()
-    WHERE product_uid = $1 OR (mall_code=$25 AND pi_ii_vi=$26)
+    WHERE product_uid = $1 OR (mall_code=$23 AND pi_ii_vi=$24)
     RETURNING product_uid, option_count, jsonb_typeof(thumb_json) AS thumb_type,
       CASE WHEN jsonb_typeof(thumb_json)='array' THEN jsonb_array_length(thumb_json) ELSE 0 END AS thumb_count,
       COALESCE(NULLIF(detail_json->>'image_count','')::int,0) AS detail_image_count,
@@ -71,7 +71,6 @@ async function applyDetailPatch(pool, id, p, optionJson, thumbJson, detailJson, 
   const vals = [
     id.uid,
     stats.thumb_count || 0, safeJsonString(thumbJson || []),
-    stats.detail_count || 0, safeJsonString(detailJson || {}),
     pickCpSelectedCode(p), pickCpFixCode(p), pickMallCategoryLeaf(p, normalizeMallCategoryJson(p)), safeJsonString(normalizeMallCategoryJson(p)),
     standardCoupangSupplier ? '' : pickSupplierId(p), standardCoupangSupplier ? '' : pickSupplierName(p),
     standardCoupangSupplier ? '' : pickAny(p,['business_number','businessNumber','seller_business_number','sellerBusinessNumber','supplierBizNo']),
