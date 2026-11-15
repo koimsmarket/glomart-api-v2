@@ -40,7 +40,9 @@ function appLikeGuppyDynamic(input,locator){
   const app=s(input.source_app||input.sourceApp).toUpperCase();
   if(app!=='GUPPY')return false;
   const loc=String(locator||'').toLowerCase();
-  return /(?:chat|message|bubble|conversation|transcript|translation|nickname|profile|member|contact|history|text-content)/.test(loc);
+  // Restrict filtering to actual authored content containers, not generic UI controls
+  // such as .gm-message-delete, #member-settings or .conversation-close-button.
+  return /(?:^|[.#\s>])(?:chat-bubble|chat-message|message-item|gm-message-content|gm-chat-bubble|conversation-message|message-body|transcript-text|translation-output|profile-value|nickname-value|contact-name|history-item|text-content)(?=$|[.#\s>:])/.test(loc);
 }
 
 function dynamicNonUiReason(input,norm){

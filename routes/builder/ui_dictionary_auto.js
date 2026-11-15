@@ -13,7 +13,7 @@ function hasKo(v){return /[가-힣]/.test(String(v||''));}
 // UI dictionary runtime capture is only enabled for derzon; no DB access for others.
 function captureAllowed(req){return s((req.body||{}).member_id||'')==='derzon';}
 function pageNameFromFile(f){return String(f||'').replace(/\\/g,'/').replace(/^.*?public\//,'').replace(/\.[^.]+$/,'').slice(0,240);}
-function cleanUiText(v){let x=s(v).replace(/<[^>]+>/g,' ').replace(/\{\$[^}]+\}/g,' ').replace(/\{[^}]{0,120}\}/g,' ').replace(/\s+/g,' ').trim();return x.length>500?'':x;}
+function cleanUiText(v){let x=s(v).replace(/<[^>]+>/g,' ').replace(/\{\$[^}]+\}/g,' ').replace(/\{[^}]{0,120}\}/g,' ').replace(/\s+/g,' ').trim();return x.length>2000?'':x;}
 function hasVariable(text){return /%[dsm]/.test(String(text||''))?'Y':'N';}
 
 // GM_UI_PENDING_MATCH_V004: mirror the verified GM_MATCH_ENGINE comparison-key
