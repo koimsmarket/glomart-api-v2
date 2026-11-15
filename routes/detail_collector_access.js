@@ -45,6 +45,62 @@ router.get('/api/gm/detail-collector/status',permitted,async(req,res)=>{
  catch(e){return response(res,503,e.code==='42P01'?'MIGRATION_145_REQUIRED':'STATUS_QUERY_FAILED');}
 });
 // Atomic lease: same PID can belong to at most one PC while unexpired. No server-side website collection.
+
+// GM_DETAIL_CONTENT_HISTORY_V018: read-only history for administrator-selected LEAF categories.
+// Existing claim timestamps describe the latest state update per PID. MIN(updated_at)
+// is earliest retained claim-record update, not a recoverable historical start event.
+router.post('/api/gm/detail-collector/history',writeSafe,permitted,async(req,res)=>{
+ const codes=Array.isArray(req.body?.leaf_codes)
+  ? [...new Set(req.body.leaf_codes.map(clean).filter(x=>/^[A-Z0-9-]{2,64}$/.test(x)))]:[];
+ if(!codes.length||codes.length>19000)return response(res,400,'INVALID_LEAF_CATEGORY_SELECTION');
+ const pool=db(req);
+ try{
+  // Count all currently eligible distinct PIDs in each selected lowest-level category.
+  // Existing detailed content (even if stored by the app) counts as performed.
+  const groups=await pool.query(`WITH target AS (
+    SELECT DISTINCT p.product_id, assigned.code AS category_code
+    FROM gm_product p
+    CROSS JOIN LATERAL unnest(string_to_array(COALESCE(p.glomart_code,''),'|')) AS assigned(code)
+    WHERE p.mall_code='CPKR' AND p.product_id~'^[0-9]{5,}$'
+      AND assigned.code=ANY($1::text[])
+      AND LOWER(COALESCE(NULLIF(BTRIM(p.sale_status),''),'active'))<>'inactive'
+      AND NOT EXISTS(SELECT 1 FROM gm_product inactive
+          WHERE inactive.mall_code='CPKR' AND inactive.product_id=p.product_id
+            AND LOWER(COALESCE(inactive.sale_status,''))='inactive')
+   )
+   SELECT t.category_code,
+     COUNT(*)::int AS total,
+     COUNT(d.product_id)::int AS performed,
+     COUNT(*) FILTER (WHERE l.state='completed')::int AS claim_completed,
+     COUNT(*) FILTER (WHERE l.state='leased' AND l.lease_until>now())::int AS active,
+     COUNT(*) FILTER (WHERE l.state='released')::int AS released,
+     to_char(MIN(l.updated_at) AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS') AS first_kst,
+     to_char(MAX(l.updated_at) AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS') AS last_kst,
+     ROUND(EXTRACT(EPOCH FROM (MAX(l.updated_at)-MIN(l.updated_at)))::numeric,0)::bigint AS elapsed_seconds
+   FROM target t
+   LEFT JOIN gm_cpkr_detail_content d ON d.product_id=t.product_id
+   LEFT JOIN gm_detail_collector_claim l ON l.product_id=t.product_id
+   GROUP BY t.category_code`,[codes]);
+  const rows=await pool.query(`SELECT l.product_id,l.state,l.account_id,l.client_id,
+    to_char(l.updated_at AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS') AS updated_kst,
+    cat.code AS category_code
+   FROM gm_detail_collector_claim l
+   JOIN LATERAL (
+    SELECT assigned.code FROM gm_product p
+    CROSS JOIN LATERAL unnest(string_to_array(COALESCE(p.glomart_code,''),'|')) AS assigned(code)
+    WHERE p.mall_code='CPKR' AND p.product_id=l.product_id
+      AND assigned.code=ANY($1::text[])
+    ORDER BY array_position($1::text[],assigned.code) LIMIT 1
+   ) cat ON true
+   ORDER BY l.updated_at DESC,l.product_id ASC LIMIT 200`,[codes]);
+  return res.set('Cache-Control','no-store').json({
+    ok:true,timezone:'Asia/Seoul',items:rows.rows,categories:groups.rows,
+    limited_to_latest:200,
+    time_basis:'first/last retained claim updated_at; exact historical start not available'
+  });
+ }catch(e){console.error('[DETAIL_COLLECTOR_HISTORY_V018]',e.code||e.message||'ERROR');return response(res,503,'HISTORY_QUERY_FAILED');}
+});
+
 router.post('/api/gm/detail-collector/claim',writeSafe,permitted,async(req,res)=>{
  const codes=Array.isArray(req.body?.category_codes)?[...new Set(req.body.category_codes.map(clean).filter(x=>/^[A-Z0-9-]{2,64}$/.test(x)))]:[];
  const client=clean(req.body?.client_id);if(!codes.length||codes.length>19000||!/^[-\w]{8,100}$/.test(client))return response(res,400,'INVALID_SELECTION_OR_CLIENT');

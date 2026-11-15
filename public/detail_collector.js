@@ -36,13 +36,13 @@ $('logout').onclick=async()=>{try{await fetch(root+'logout',{method:'POST',crede
 let collecting=false,startedAt='',progress={processed:0,saved:0,failed:0,skipped:0,last_pid:''};
 const installed=()=>{const x=window.GM_DETAIL_PC_EXECUTOR;return x&&x.ready===true&&typeof x.start==='function'&&typeof x.stop==='function'?x:null;};
 const readyEl=$('executorReady');
-function readyText(){if(readyEl)readyEl.textContent=installed()?'PC Chrome 수집 실행기: 연결됨':'PC Chrome 수집 실행기: 미연결 · V009 사용자 스크립트를 이 PC에 설치하세요';}
+function readyText(){if(readyEl)readyEl.textContent=installed()?'PC Chrome 수집 실행기: 연결됨':'PC Chrome 수집 실행기: 미연결 · V015 사용자 스크립트를 이 PC에 설치하세요';}
 readyText();setInterval(readyText,3000);
 $('start').onclick=async()=>{
  if(collecting){$('status').textContent='이미 이 PC에서 수집 중입니다.';return;}
  if(!ready){$('status').textContent='먼저 수집 전용 계정으로 로그인하세요.';return;}
  if(!sel.size){$('status').textContent='카테고리를 선택하세요.';return;}
- const x=installed();if(!x){readyText();$('status').textContent='PC 수집 실행기가 없습니다. V009 사용자 스크립트 설치가 필요합니다.';return;}
+ const x=installed();if(!x){readyText();$('status').textContent='PC 수집 실행기가 없습니다. V015 사용자 스크립트 설치가 필요합니다.';return;}
  collecting=true;startedAt=new Date().toISOString();progress={processed:0,saved:0,failed:0,skipped:0,last_pid:''};
  $('status').textContent='PC 수집 시작 준비 중';
  try{await x.start({category_codes:[...sel],max_items:Math.max(1,Math.min(10000,Number($('max').value)||50)),skip_saved:$('skip').checked,api_root:root,
@@ -51,4 +51,64 @@ $('start').onclick=async()=>{
  catch(e){collecting=false;$('status').textContent='수집 시작 실패: '+e.message;}
 };
 $('stop').onclick=async()=>{const x=installed();if(!x||!collecting){$('status').textContent='이 PC에서 진행 중인 수집이 없습니다.';return;}try{await x.stop();$('status').textContent='중지 요청됨 (현재 작업 정리 중)';}catch(e){$('status').textContent='중지 실패: '+e.message;}};
+
+// GM_DETAIL_CONTENT_HISTORY_V018: leaf categories only; read-only server reporting.
+// Display rows by category tree order, then count and retained claim timestamps.
+let historyBusy=false,historyLastAt=0;
+function historyTd(tr,value){const td=document.createElement('td');td.textContent=String(value==null?'':value);tr.append(td);}
+function historyEmpty(id,n,msg){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=n;td.textContent=msg;tr.append(td);$(id).replaceChildren(tr);}
+function historyTree(){
+ const map=new Map(cats.map(c=>[c.gm_code,{...c,children:[],parent:''}])),roots=[];
+ for(const c of map.values()){
+  const derived=parentCandidates(c.gm_code).find(p=>map.has(p));
+  const fallback=map.has(c.gm_parent_code)?c.gm_parent_code:'';
+  c.parent=derived||fallback;
+  if(c.parent&&c.parent!==c.gm_code)map.get(c.parent).children.push(c);else roots.push(c);
+ }
+ const sort=(a,b)=>(Number(a.sort_order)||0)-(Number(b.sort_order)||0)||a.gm_code.localeCompare(b.gm_code);
+ roots.sort(sort);for(const c of map.values())c.children.sort(sort);
+ const leaves=[];function walk(c,parents){const path=[...parents,String(c.name_ko||c.gm_code)];
+  if(!c.children.length){if(sel.has(c.gm_code))leaves.push({code:c.gm_code,path:path.join(' > ')});return;}
+  for(const child of c.children)walk(child,path);
+ }
+ for(const r of roots)walk(r,[]);
+ return leaves;
+}
+function elapsedText(sec){if(sec==null||!Number.isFinite(Number(sec)))return '-';let s=Math.max(0,Number(sec));const h=Math.floor(s/3600);s%=3600;const m=Math.floor(s/60);s%=60;return(h?h+'시간 ':'')+(m?m+'분 ':'')+s+'초';}
+async function refreshHistory(force=false){
+ if(!ready||historyBusy)return;
+ const leaves=historyTree();
+ if(!leaves.length){$('historyMessage').textContent='최하위 카테고리를 선택하면 이력이 표시됩니다.';historyEmpty('historyCategories',5,'선택된 최하위 카테고리 없음');historyEmpty('historyRows',5,'조회 대상 없음');return;}
+ if(!force&&Date.now()-historyLastAt<12000)return;
+ historyBusy=true;
+ try{
+  const response=await fetch(root+'history',{method:'POST',credentials:'same-origin',cache:'no-store',
+    headers:{Accept:'application/json','Content-Type':'application/json'},body:JSON.stringify({leaf_codes:leaves.map(x=>x.code)})});
+  const data=await response.json();
+  if(response.status===401){ready=false;location.replace('/detail-collector/');return;}
+  if(!response.ok||!data.ok)throw Error('HTTP '+response.status+' / '+(data.error||'UNKNOWN'));
+  historyLastAt=Date.now();
+  const byCode=new Map((data.categories||[]).map(x=>[x.category_code,x]));
+  const labelByCode=new Map(leaves.map(x=>[x.code,x.path]));
+  const catHost=$('historyCategories');catHost.replaceChildren();
+  let total=0,performed=0;
+  for(const leaf of leaves){const c=byCode.get(leaf.code)||{},tr=document.createElement('tr');
+   const n=Number(c.total)||0,d=Number(c.performed)||0;total+=n;performed+=d;
+   if(n&&d<n)tr.className='active';
+   [leaf.path+' ('+leaf.code+')',n+' / '+d+'건',c.first_kst||'-',c.last_kst||'-',elapsedText(c.elapsed_seconds)].forEach(v=>historyTd(tr,v));catHost.append(tr);
+  }
+  const rows=$('historyRows');rows.replaceChildren();
+  for(const item of data.items||[]){const tr=document.createElement('tr');
+    [labelByCode.get(item.category_code)||item.category_code||'-',item.product_id,item.state,item.client_id||'-',item.updated_kst||'-'].forEach(v=>historyTd(tr,v));rows.append(tr);
+  }
+  if(!rows.children.length)historyEmpty('historyRows',5,'작업 이력 없음');
+  const kst=new Intl.DateTimeFormat('ko-KR',{timeZone:'Asia/Seoul',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date());
+  $('historyMessage').textContent='최하위 카테고리 '+leaves.length+'개 · 전체 / 수행 '+total+' / '+performed+'건 (카테고리별 합산) · 최근 이력 '+(data.items||[]).length+'건 · '+kst+' KST 조회';
+ }catch(e){$('historyMessage').textContent='서버 작업 이력 조회 실패: '+e.message;}
+ finally{historyBusy=false;}
+}
+$('historyRefresh').onclick=()=>{if(ready)void refreshHistory(true);};
+// Refresh only when visible; never pause the collector's claim/result hot path.
+setInterval(()=>{if(ready&&!document.hidden)void refreshHistory();},15000);
+setTimeout(()=>{if(ready)void refreshHistory(true);},1200);
 })();
