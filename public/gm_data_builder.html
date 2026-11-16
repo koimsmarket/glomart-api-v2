@@ -180,6 +180,20 @@
       <button type="button" class="gray" onclick="specialLeafClear()">전체 해제</button>
       <button type="button" class="green" onclick="saveSpecialLeafTree()">최말단 선택 저장</button></p>
       <div id="specialLeafSummary" class="small">선택 목록 조회 전</div>
+      <style>
+        /* V004: SPECIAL leaf tree only; keep checkboxes next to names, not floated by builder-wide label styles. */
+        #specialLeafTree {font-size:13px;line-height:1.4;}
+        #specialLeafTree .gm-special-node {margin:0;padding:0;min-width:0;}
+        #specialLeafTree .gm-special-branch > summary {display:list-item;cursor:pointer;padding:2px 0;}
+        #specialLeafTree .gm-special-children {margin-left:18px;border-left:1px solid #e5e7eb;padding-left:9px;}
+        #specialLeafTree .gm-special-leaf {padding:2px 0;}
+        #specialLeafTree label.gm-special-leaf-row {display:inline-flex!important;align-items:center!important;justify-content:flex-start!important;flex-direction:row!important;gap:7px!important;width:auto!important;max-width:100%;margin:0!important;padding:0!important;cursor:pointer;font-weight:400;vertical-align:middle;}
+        #specialLeafTree .gm-special-leaf-row input[type="checkbox"] {position:static!important;display:inline-block!important;flex:0 0 auto!important;width:15px!important;height:15px!important;margin:0!important;accent-color:#2563eb;}
+        #specialLeafTree .gm-special-leaf-label {display:inline-flex;align-items:baseline;gap:5px;flex-wrap:wrap;min-width:0;text-align:left;}
+        #specialLeafTree .gm-special-leaf-title {font-weight:600;}
+        #specialLeafTree .gm-special-leaf-code {font-size:11px;color:#64748b;overflow-wrap:anywhere;}
+        #specialLeafTree .gm-special-leaf-count {font-size:11px;color:#64748b;}
+      </style>
       <div id="specialLeafTree" style="max-height:420px;overflow:auto;border:1px solid #ddd;border-radius:7px;padding:8px">트리 조회 전</div>
     </section>
     <div id="specialCategoryPlanPreview" class="status" style="margin-top:8px">실행순서 조회 전</div>

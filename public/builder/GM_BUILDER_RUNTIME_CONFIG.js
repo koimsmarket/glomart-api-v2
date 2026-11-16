@@ -93,11 +93,12 @@ function specialLeafNodeMarkup(n,depth=0){
   const code=String(n.gm_code||''),leaf=String(n.leaf_yn||'').toUpperCase()==='Y';
   const descendants=specialLeafDesc(code);const total=descendants.length;
   const checked=total>0&&descendants.every(id=>specialLeafSelected.has(id));
-  const label=`${specialPlanEsc(n.name_ko||code)} <small>${specialPlanEsc(code)}</small>`;
+  const label=`<span class="gm-special-leaf-title">${specialPlanEsc(n.name_ko||code)}</span><small class="gm-special-leaf-code">${specialPlanEsc(code)}</small>`;
   const box=`<input type="checkbox" data-special-leaf="${specialPlanEsc(code)}" ${checked?'checked':''} ${!total?'disabled':''}>`;
-  if(leaf)return `<div class="gm-special-node" data-name="${specialPlanEsc((n.name_ko||'')+' '+code)}" style="padding:4px 0 4px 20px"><label>${box} ${label}</label></div>`;
+  const row=`<label class="gm-special-leaf-row" onclick="event.stopPropagation()">${box}<span class="gm-special-leaf-label">${label}${!leaf?`<small class="gm-special-leaf-count">(${total})</small>`:''}</span></label>`;
+  if(leaf)return `<div class="gm-special-node gm-special-leaf" data-name="${specialPlanEsc((n.name_ko||'')+' '+code)}">${row}</div>`;
   const kids=specialLeafChildren(code).map(x=>specialLeafNodeMarkup(x,depth+1)).join('');
-  return `<details class="gm-special-node" data-name="${specialPlanEsc((n.name_ko||'')+' '+code)}" ${depth===0?'open':''} style="margin:4px 0 4px 12px"><summary><label onclick="event.stopPropagation()">${box} ${label} <small>(${total})</small></label></summary>${kids}</details>`;
+  return `<details class="gm-special-node gm-special-branch" data-name="${specialPlanEsc((n.name_ko||'')+' '+code)}" ${depth===0?'open':''}><summary>${row}</summary><div class="gm-special-children">${kids}</div></details>`;
 }
 function renderSpecialLeafTree(){
   const el=document.getElementById('specialLeafTree');if(!el)return;
