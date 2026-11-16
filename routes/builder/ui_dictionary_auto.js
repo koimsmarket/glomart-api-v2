@@ -440,13 +440,13 @@ router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile',
    const dictionary=(await client.query('SELECT gm_code,kr FROM gm_ui_dictionary')).rows;
    const dictKeys=new Set(dictionary.map(r=>gmPendingMatchKey(r.kr)).filter(Boolean));
    const report=[],csvIds=new Set(),csvKeys=new Set();
-   const totals={received:items.length,verified_approved:0,verified_pending:0,matched_existing:0,inserted:0,would_insert:0,dictionary_reused:0,invalid:0};
+   const totals={received:items.length,verified_approved:0,verified_pending:0,matched_existing:0,inserted:0,would_insert:0,dictionary_reused:0,invalid:0,held:0};
    for(let i=0;i<items.length;i++){
     const item=items[i],id=s(item.pending_id),status=s(item.status).toUpperCase(),kind=s(item.change_type).toUpperCase();
     const raw=cleanUiText(item.source_text_ko),canonical=gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
     const code=s(item.gm_code).toUpperCase();
     const reportRow={row:i+2,pending_id:id,source_text_ko:raw,canonical,result:'',reason:''};
-    const fail=reason=>{reportRow.result='INVALID';reportRow.reason=reason;totals.invalid++;};
+    const fail=reason=>{reportRow.result='HELD';reportRow.reason=reason;totals.held++;};
     if(!['PENDING','APPROVED'].includes(status))fail('UNSUPPORTED_STATUS');
     else if(!['NEW','CHANGED','REMOVED'].includes(kind))fail('INVALID_CHANGE_TYPE');
     else if(!key||!hasKo(raw))fail('INVALID_KOREAN_TEXT');
@@ -499,14 +499,13 @@ router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile',
     }
     report.push(reportRow);
    }
-   if(totals.invalid){await client.query('ROLLBACK');transaction=false;
-     return res.status(409).json({ok:false,error:'CSV_HAS_CONFLICTS_NO_CHANGES',...totals,report});}
    if(apply){await client.query('COMMIT');transaction=false;}
    else{await client.query('ROLLBACK');transaction=false;}
+   console.info('[GM_UI_PENDING_RECONCILE_V012]',JSON.stringify({received:items.length,applied:apply,inserted:totals.inserted,held:totals.held}));
    const accounted=totals.verified_approved+totals.verified_pending+totals.matched_existing+
-       totals.dictionary_reused+(apply?totals.inserted:totals.would_insert);
+       totals.dictionary_reused+totals.held+(apply?totals.inserted:totals.would_insert);
    return res.set('Cache-Control','no-store').json({ok:true,mode:apply?'APPLY':'DRY_RUN',
-     ...totals,accounted,all_rows_accounted:accounted===items.length,report,
+     ...totals,accounted,all_rows_accounted:accounted===items.length,held_count:totals.held,report,
      canonical_dictionary_unchanged:true});
   }catch(e){if(client&&transaction)await client.query('ROLLBACK').catch(()=>{});
    return res.status(500).json({ok:false,error:'PENDING_CSV_RECONCILE_FAILED',detail:String(e.message||e)});

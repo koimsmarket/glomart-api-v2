@@ -11,17 +11,17 @@ async function gmPendingSafeReconcile(file,apply){
   method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({rows,apply})});
  const j=await response.json();
- if(!response.ok||!j.ok)throw Error('HTTP '+response.status+': '+(j.error||'')+' '+(j.detail||'')+' · 충돌 '+(j.invalid||0)+'건');
+ if(!response.ok||!j.ok)throw Error('HTTP '+response.status+': '+(j.error||'')+' '+(j.detail||'')+' · 보류 '+(j.held||0)+'건');
  if(j.accounted!==rows.length||!j.all_rows_accounted)throw Error('전체 행 수량 검증 불일치');
  const names=['row','pending_id','source_text_ko','canonical','result','reason','new_pending_id'];
  const csv='\ufeff'+names.join(',')+'\r\n'+(j.report||[]).map(x=>names.map(k=>'"'+String(x[k]??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
  const a=document.createElement('a'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
  a.href=url;a.download='gm_pending_all_'+(apply?'apply':'dryrun')+'_result.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
- const counts={UPDATED:0,VALID_UPDATE:0,INSERTED:j.inserted||0,VALID_INSERT:j.would_insert||0,FAIL:j.invalid||0,
+ const counts={UPDATED:0,VALID_UPDATE:0,INSERTED:j.inserted||0,VALID_INSERT:j.would_insert||0,FAIL:j.held||0,
   SKIP:(j.verified_approved||0)+(j.verified_pending||0)+(j.matched_existing||0)+(j.dictionary_reused||0),SKIP_CELL:0,STOPPED:0,OTHER:0};
  return {table:'gm_ui_dictionary_pending',mode:apply?'APPLY':'DRY_RUN',processed:j.accounted,
   updated:0,skipped:counts.SKIP,invalid:counts.FAIL,result_counts:counts,report_file:a.download,
-  status:apply?'SERVER_APPLY_REPORTED':'VALIDATION_ONLY',details:j};
+  status:j.held?'PARTIAL_OR_FAILED':(apply?'SERVER_APPLY_REPORTED':'VALIDATION_ONLY'),details:j};
 }
 async function uploadSafe(tableKey,file,apply,leafOnly=false){
   if(tableKey==='gm_ui_dictionary_pending'||tableKey==='ui_dictionary_pending')return gmPendingSafeReconcile(file,apply);

@@ -318,7 +318,13 @@ function gmUiCsvParse(src){
  if(new Set(keys).size!==keys.length)throw Error('CSV 중복 컬럼');
  return lines.map((r,i)=>{if(r.length!==keys.length)throw Error('CSV 컬럼 수 불일치: '+(i+2)+'행');return Object.fromEntries(keys.map((k,j)=>[k,r[j]]));});
 }
-// GM_UI_PENDING_FULL_V011: all rows, including approved history, are counted and reconciled.
+// V012: report ALL CSV rows (including held entries) with original Korean and reason.
+function gmUiPendingReconcileReport(data,stage){
+ const columns=['row','pending_id','source_text_ko','canonical','result','reason','new_pending_id'];
+ const csv='\ufeff'+columns.join(',')+'\r\n'+(data.report||[]).map(r=>columns.map(k=>'"'+String(r[k]??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
+ gmPendingFileDownload(csv,'text/csv;charset=utf-8','gm_ui_pending_'+stage+'_V012.csv');
+}
+// GM_UI_PENDING_FULL_V012: all rows, including approved history, are counted and reconciled.
 async function gmUiUploadPendingCsv(btn){
  const input=document.getElementById('gmUiPendingCsvFile'),file=input&&input.files&&input.files[0];
  if(!file)return alert('CSV 파일을 선택하세요.');btn.disabled=true;
@@ -340,16 +346,17 @@ async function gmUiUploadPendingCsv(btn){
    return j;
   }
   const check=await run(false);
-  const stats='전체 '+check.received+'건 · 승인 이력 확인 '+check.verified_approved+
+  const stats='전체 '+check.received+'건 · 보류 '+check.held+'건 · 승인 이력 확인 '+check.verified_approved+
    ' · 대기 후보 확인 '+check.verified_pending+' · 기타 기존 일치 '+check.matched_existing+
    ' · 기존 사전 재사용 '+check.dictionary_reused+' · 신규 추가 예정 '+check.would_insert;
   gmPendingStatus('검증 완료 (DB 변경 없음) · '+stats);log(check);
+  gmUiPendingReconcileReport(check,'dryrun');
   if(!confirm(stats+'\n전체 '+check.accounted+'건을 확인했습니다. 누락된 '+check.would_insert+'건을 반영할까요?'))return;
   const applied=await run(true);
-  const done='전체 '+applied.received+'건 확인 완료 · 기존 승인 '+applied.verified_approved+
+  const done='전체 '+applied.received+'건 확인 완료 · 보류 '+applied.held+'건 · 기존 승인 '+applied.verified_approved+
    ' · 기존 대기 '+applied.verified_pending+' · 기타 기존 '+applied.matched_existing+
    ' · 사전 재사용 '+applied.dictionary_reused+' · 새로 추가 '+applied.inserted;
-  gmPendingStatus(done);log(applied);await loadAll();alert(done);
+  gmPendingStatus(done);log(applied);gmUiPendingReconcileReport(applied,'apply');await loadAll();alert(done);
  }catch(e){gmPendingStatus('PENDING CSV 검증/업로드 실패: '+String(e));log(String(e));}
  finally{btn.disabled=false;}
 }
