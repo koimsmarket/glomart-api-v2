@@ -4,6 +4,8 @@
 const productService = require('../services/product/upsert');
 const searchCategory = require('../services/product/search_category');
 const searchController = require('../services/search_controller');
+const i18nUpload = require('../services/product/i18n_upload');
+const {norm:translationNorm} = require('../services/product/i18n_source_sync');
 
 let started = false;
 let scheduling = false;
@@ -74,9 +76,9 @@ async function fetchQueueRows(pool, limit){
   try{
     await client.query('BEGIN');
     const r = await client.query(`
-      SELECT queue_id, request_id, mall_code, keyword, items_json, retry_count
+      SELECT queue_id, request_id, mall_code, keyword, items_json, retry_count, status, result_json
       FROM gm_product_upsert_queue
-      WHERE status = 'pending'
+      WHERE status IN ('pending','translation_pending')
       ORDER BY created_at ASC
       LIMIT $1
       FOR UPDATE SKIP LOCKED
@@ -102,7 +104,11 @@ async function fetchQueueRows(pool, limit){
 async function markDone(pool, row, result){
   await pool.query(`
     UPDATE gm_product_upsert_queue
-    SET status='done', processed_at=now(), error_message=NULL, result_json=$2::jsonb
+    SET status=CASE WHEN COALESCE(($2::jsonb->>'translation_failed')::int,0)>0
+        THEN 'translation_pending' ELSE 'done' END,
+        processed_at=CASE WHEN COALESCE(($2::jsonb->>'translation_failed')::int,0)>0
+          THEN NULL ELSE now() END,
+        locked_at=NULL,error_message=NULL, result_json=$2::jsonb
     WHERE queue_id=$1
   `, [row.queue_id, JSON.stringify(result || {})]);
 }
@@ -168,6 +174,60 @@ async function applyUnclassifiedCategoryKeywordBatch(pool, productUids, incoming
   return { applied:true, checked:uids.length, updated:r.rowCount || 0, keyword:newKeyword };
 }
 
+// GM_PRODUCT_QUEUE_BUNDLE_V002: validate and persist translations transported in
+// the SAME items_json job as the original product. Product/option tables always
+// win source-identity checks; no guessed PID/VID or stale translation may land.
+function collectBundleTranslations(sourceItems){
+  const jobs=[]; const seen=new Set();
+  (Array.isArray(sourceItems)?sourceItems:[]).forEach(item=>{
+    const rows=Array.isArray(item&&item.__gm_queue_translations)?item.__gm_queue_translations:[];
+    rows.forEach(x=>{
+      if(!x||!['PRODUCT','OPTION'].includes(x.type)||!['CPKR','ALKR'].includes(x.mall_code)||
+         typeof x.code!=='string'||!translationNorm(x.source_text)||!Array.isArray(x.translations))return;
+      const sig=[x.type,x.mall_code,x.code,translationNorm(x.source_text)].join('\u0000');
+      if(seen.has(sig))return;seen.add(sig);jobs.push(x);
+    });
+  });
+  return jobs;
+}
+async function saveBundleTranslation(pool,x){
+  if(x.type==='PRODUCT'){
+    const result=await pool.query(`SELECT product_name FROM public.gm_product
+      WHERE mall_code=$1 AND product_id=$2 LIMIT 2`,[x.mall_code,x.code]);
+    if(result.rows.length!==1||translationNorm(result.rows[0].product_name)!==translationNorm(x.source_text))
+      throw new Error('QUEUE_PRODUCT_SOURCE_MISMATCH');
+  }
+  // OPTION is checked against the exact saved option_display_name and pi_vi
+  // identity by the unchanged authoritative i18n_upload.save implementation.
+  return i18nUpload.save(pool,x);
+}
+async function processBundleTranslations(pool,jobs){
+  const failures=[];let saved=0;
+  for(const x of jobs){
+    await waitForSearchPriority(pool,'queue-translation');
+    try{await saveBundleTranslation(pool,x);saved++;}
+    catch(e){failures.push(Object.assign({},x,{__last_error:String(e&&e.code||e&&e.message||e).slice(0,200)}));}
+  }
+  return {received:jobs.length,saved,failed:failures.length,pending:failures};
+}
+async function retryBundleTranslations(pool,row,maxRetry){
+  const result=row.result_json&&typeof row.result_json==='object'?row.result_json:{};
+  const pending=Array.isArray(result.translation_pending)?result.translation_pending:[];
+  const retried=await processBundleTranslations(pool,pending);
+  result.translation_saved=Number(result.translation_saved||0)+retried.saved;
+  result.translation_failed=retried.failed;
+  result.translation_pending=retried.pending;
+  const retryCount=Number(row.retry_count||0)+1;
+  const status=retried.failed===0?'done':retryCount>=maxRetry?'failed':'translation_pending';
+  await pool.query(`UPDATE gm_product_upsert_queue
+    SET status=$2,retry_count=$3,result_json=$4::jsonb,
+        error_message=CASE WHEN $2='failed' THEN $5 ELSE NULL END,
+        locked_at=NULL,processed_at=CASE WHEN $2 IN ('done','failed') THEN now() ELSE NULL END
+    WHERE queue_id=$1`,[row.queue_id,status,retryCount,JSON.stringify(result),
+     'translation_upsert_incomplete: '+retried.failed]);
+  console.log('[GM_QUEUE_TRANSLATION_RETRY]',{queue_id:row.queue_id,status,received:retried.received,saved:retried.saved,pending:retried.failed});
+}
+
 async function processRow(pool, row){
   const raw = row.items_json;
   const sourceItems = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : []);
@@ -229,6 +289,11 @@ async function processRow(pool, row){
       if(samples.length < 8) samples.push({ action:'error', reason });
     }
   }
+  const bundleJobs=collectBundleTranslations(sourceItems);
+  const bundle=await processBundleTranslations(pool,bundleJobs);
+  if(bundleJobs.length)console.log('[GM_QUEUE_TRANSLATION_SAVE]',{
+    queue_id:row.queue_id,requested:bundle.received,saved:bundle.saved,failed:bundle.failed
+  });
   option_balance_ok = option_balance_ok && option_received === (option_inserted + option_updated + option_skipped);
   let category_keyword_batch = { applied:false, reason:'not_run', updated:0 };
   try{
@@ -251,7 +316,12 @@ async function processRow(pool, row){
     option_nonactive,
     option_balance_ok
   };
-  const result = { received: items.length, saved, inserted, updated, skipped, audit, category_keyword_batch, skip_reason_count, samples, errors: errors.slice(0, 5) };
+  audit.translation_received=bundle.received;
+  audit.translation_saved=bundle.saved;
+  audit.translation_failed=bundle.failed;
+  const result = { received: items.length, saved, inserted, updated, skipped, audit, category_keyword_batch,
+    translation_received:bundle.received,translation_saved:bundle.saved,translation_failed:bundle.failed,
+    translation_pending:bundle.pending,skip_reason_count, samples, errors: errors.slice(0, 5) };
   queueSearchSaveSummary(row, items.length, inserted, updated, skipped);
   if(errors.length){ console.warn('[GM_SEARCH_SAVE_ERROR] keyword='+String(row.keyword||'').trim()+' errors='+errors.length+' first='+String(errors[0]||'')); }
   if(items.length && saved === 0){
@@ -266,6 +336,10 @@ async function processRow(pool, row){
 async function runClaimed(pool, row, opts){
   active += 1;
   try{
+    if(row.status==='translation_pending'){
+      await retryBundleTranslations(pool,row,opts.maxRetry);
+      return;
+    }
     const result = await processRow(pool, row);
     await waitForSearchPriority(pool,'mark-done');
     await markDone(pool, row, result);
