@@ -116,7 +116,6 @@ async function runJob(db,instance){
         }else{instance.failed++;instance.error=got.error||'COLLECTOR_FAILED';}
         instance.messages.push({pid:last,result:got.item?'saved_or_checked':got.error||'unknown'});
         if(instance.messages.length>20)instance.messages.shift();
-        if(!stopping&&instance.seen<instance.max_items)await wait(15000);
       }
     }
     instance.state=stopping?'stopped':'completed';
