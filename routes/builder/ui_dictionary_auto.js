@@ -417,6 +417,78 @@ router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/upload',require('../
  finally{client.release();}
 });
 
+
+// GM_UI_PENDING_CSV_V010: independent, review-only import. Never write the canonical dictionary.
+// The legacy 162-row translated CSV route above remains unchanged.
+router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile',
+ require('../admin_session_gate').middleware,express.json({limit:'8mb'}),async(req,res)=>{
+  const rows=req.body&&req.body.rows;
+  const apply=req.body&&req.body.apply===true;
+  if(!Array.isArray(rows)||!rows.length||rows.length>5000)
+    return res.status(400).json({ok:false,error:'INVALID_PENDING_CSV_ROWS'});
+  const required=['source_text_ko','change_type','status'];
+  if(rows.some(r=>!r||typeof r!=='object'||Array.isArray(r)||required.some(k=>!(k in r))))
+    return res.status(400).json({ok:false,error:'PENDING_CSV_COLUMNS_REQUIRED'});
+  const db=dbFrom(req);let client=null;let inTx=false;
+  try{
+   client=await db.connect();await client.query('BEGIN');inTx=true;
+   if(apply)await client.query('LOCK TABLE gm_ui_dictionary_pending IN SHARE ROW EXCLUSIVE MODE');
+   const dict=(await client.query('SELECT gm_code,kr FROM gm_ui_dictionary')).rows;
+   const dictionaryKeys=new Set(dict.map(x=>gmPendingMatchKey(x.kr)).filter(Boolean));
+   const knownCode=new Map(dict.map(x=>[s(x.gm_code).toUpperCase(),gmPendingMatchKey(x.kr)]));
+   const current=(await client.query("SELECT gm_code,source_text_ko,change_type FROM gm_ui_dictionary_pending WHERE status='PENDING'")).rows;
+   const currentKeys=new Set(current.map(x=>[s(x.gm_code).toUpperCase(),s(x.change_type).toUpperCase(),gmPendingMatchKey(x.source_text_ko)].join('|')));
+   const fileKeys=new Set();const report=[];
+   let inserted=0,already=0,approvedHistory=0,dictionaryReuse=0,rejected=0;
+   for(let i=0;i<rows.length;i++){
+    const r=rows[i],status=s(r.status).toUpperCase(),change=s(r.change_type).toUpperCase();
+    const raw=cleanUiText(r.source_text_ko),clean=gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
+    const code=s(r.gm_code).toUpperCase();
+    const entry={row:i+2,pending_id:s(r.pending_id),source_text_ko:raw,canonical:clean,result:'',reason:''};
+    if(status!=='PENDING'){entry.result='SKIP_HISTORY';approvedHistory++;}
+    else if(!['NEW','CHANGED'].includes(change)||!key||!clean||!hasKo(clean)){
+      entry.result='INVALID';entry.reason='INVALID_PENDING_CANDIDATE';rejected++;
+    }else if(code&&!/^GM_\d{4,}$/.test(code)){
+      entry.result='INVALID';entry.reason='INVALID_GM_CODE';rejected++;
+    }else if(change==='CHANGED'&&(!code||!knownCode.has(code))){
+      entry.result='INVALID';entry.reason='CHANGED_CODE_NOT_FOUND';rejected++;
+    }else if(change==='NEW'&&code&&knownCode.has(code)){
+      entry.result='INVALID';entry.reason='NEW_CODE_ALREADY_EXISTS';rejected++;
+    }else if(change==='NEW'&&dictionaryKeys.has(key)){
+      entry.result='SKIP_DICTIONARY';dictionaryReuse++;
+    }else{
+      const row={gm_code:code,source_text_ko:raw,page_name:s(r.page_name),source_file:s(r.source_file)||'CSV_PENDING_RECONCILE',source_locator:s(r.source_locator).slice(0,500),source_type:s(r.source_type)||'RUNTIME'};
+      const reason=gmUiStaticCapturePausedPath(row.source_file+' '+row.page_name)?'BUILDER_SOURCE':gmPendingDynamicReason(row,raw);
+      const identity=[code,change,key].join('|');
+      if(reason){entry.result='INVALID';entry.reason=reason;rejected++;}
+      else if(currentKeys.has(identity)||fileKeys.has(identity)){
+        entry.result='SKIP_EXISTING';already++;
+      }else{
+        entry.result=apply?'INSERTED':'WOULD_INSERT';
+        fileKeys.add(identity);
+        if(apply){
+          await client.query(`INSERT INTO gm_ui_dictionary_pending
+             (gm_code,source_text_ko,previous_text_ko,page_name,source_file,source_locator,source_type,change_type)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+             [code||null,clean,s(r.previous_text_ko).slice(0,2000),row.page_name,row.source_file,row.source_locator,row.source_type,change]);
+          inserted++;currentKeys.add(identity);
+        }
+      }
+    }
+    report.push(entry);
+   }
+   if(apply&&rejected){await client.query('ROLLBACK');inTx=false;return res.status(409).json({ok:false,error:'INVALID_ROWS_NO_CHANGES_APPLIED',rejected,report});}
+   if(apply){await client.query('COMMIT');inTx=false;}
+   else {await client.query('ROLLBACK');inTx=false;}
+   res.set('Cache-Control','no-store').json({ok:true,mode:apply?'APPLY':'DRY_RUN',received:rows.length,
+     inserted,will_insert:report.filter(r=>r.result==='WOULD_INSERT').length,
+     already,approved_history_skipped:approvedHistory,dictionary_reused:dictionaryReuse,rejected,report,
+     canonical_dictionary_unchanged:true});
+  }catch(e){if(client&&inTx)await client.query('ROLLBACK').catch(()=>{});
+    res.status(500).json({ok:false,error:'PENDING_CSV_RECONCILE_FAILED',detail:String(e.message||e)});
+  }finally{if(client)client.release();}
+});
+
 router.post('/api/gm/builder/ui-dictionary-auto/approve',express.json({limit:'1mb'}),async(req,res)=>{
   const db=dbFrom(req);
   const autoOnly=req.body&&req.body.auto_only===true;

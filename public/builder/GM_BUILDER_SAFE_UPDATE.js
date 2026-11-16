@@ -1,4 +1,23 @@
+// GM_UI_PENDING_CSV_V010: pending is not a generic safe-update table.
+// Route only this table to review-only reconcile with the existing admin password gate.
+async function uploadPendingReconcile(file,apply){
+ const text=await readCsvText(file);const parser=window.XLSX;
+ if(!parser)throw Error('CSV/Excel 파서가 없습니다');
+ const wb=parser.read(text,{type:'string',raw:true});const ws=wb.Sheets[wb.SheetNames[0]];
+ const rows=parser.utils.sheet_to_json(ws,{defval:'',raw:true});
+ if(!rows.length||!rows.every(r=>'source_text_ko' in r && 'status' in r && 'change_type' in r))
+   throw Error('PENDING 원본 CSV가 아닙니다. source_text_ko/status/change_type 컬럼이 필요합니다');
+ const url=location.origin+'/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile';
+ const r=await fetch(url,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows,apply})});
+ const j=await r.json();if(!r.ok||!j.ok)throw Error('HTTP '+r.status+': '+j.error+' '+(j.detail||'')+' '+JSON.stringify((j.report||[]).filter(x=>x.result==='INVALID').slice(0,5)));
+ const counts={UPDATED:0,VALID_UPDATE:0,INSERTED:j.inserted||0,VALID_INSERT:j.will_insert||0,FAIL:j.rejected||0,SKIP:(j.already||0)+(j.approved_history_skipped||0)+(j.dictionary_reused||0),SKIP_CELL:0,STOPPED:0,OTHER:0};
+ const report=j.report||[];const keys=['row','pending_id','source_text_ko','canonical','result','reason'];
+ const csv='\ufeff'+keys.join(',')+'\r\n'+report.map(x=>keys.map(k=>'"'+String(x[k]??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
+ const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='gm_pending_'+(apply?'apply':'dryrun')+'_result.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+ return {table:'gm_ui_dictionary_pending',mode:apply?'APPLY':'DRY_RUN',processed:j.received,updated:0,skipped:counts.SKIP,invalid:counts.FAIL,result_counts:counts,report_file:a.download,status:apply?'SERVER_APPLY_REPORTED':'VALIDATION_ONLY',details:j};
+}
 async function uploadSafe(tableKey,file,apply,leafOnly=false){
+  if(tableKey==='gm_ui_dictionary_pending'||tableKey==='ui_dictionary_pending')return uploadPendingReconcile(file,apply);
   const text=await readCsvText(file);
   if((tableKey==='member' || tableKey==='gm_member' || !tableKey) && isCafe24MemberCsvText(text)){
     await uploadCafe24MemberText(text,file.name,apply);

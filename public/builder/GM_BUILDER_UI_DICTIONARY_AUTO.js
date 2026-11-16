@@ -324,6 +324,18 @@ async function gmUiUploadPendingCsv(btn){
  try{
   if(file.size>4*1024*1024)throw Error('CSV 파일이 너무 큽니다');
   const rows=gmUiCsvParse(await file.text());
+  if(rows.length&&Object.prototype.hasOwnProperty.call(rows[0],'source_text_ko')&&Object.prototype.hasOwnProperty.call(rows[0],'status')){
+    if(!confirm('PENDING CSV '+rows.length+'행을 검증한 후 미등록 후보만 추가합니다. 승인 이력은 건너뜁니다. 계속할까요?'))return;
+    const password=await gmUiAskAdminPassword('PENDING CSV 검증 및 업로드');if(!password)return;
+    const endpoint=API+'/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile';
+    async function submit(apply){const r=await fetch(endpoint,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({rows,apply})});
+      const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error+': '+(j.detail||'')+' '+JSON.stringify((j.report||[]).filter(x=>x.result==='INVALID').slice(0,5)));return j;}
+    const check=await submit(false);if(check.rejected)throw Error('검증 오류 '+check.rejected+'건: '+JSON.stringify(check.report.filter(x=>x.result==='INVALID').slice(0,5)));
+    gmPendingStatus('검증: 신규 '+check.will_insert+' · 이미 존재 '+check.already+' · 승인 이력 제외 '+check.approved_history_skipped+' · 사전 중복 '+check.dictionary_reused);
+    if(!check.will_insert){log(check);await loadAll();return;}
+    if(!confirm('검증 완료. 미등록 PENDING '+check.will_insert+'건만 추가할까요?'))return;
+    const j=await submit(true);gmPendingStatus('업로드 완료: 추가 '+j.inserted+' · 기존 '+j.already+' · 승인 이력 건너뜀 '+j.approved_history_skipped);log(j);await loadAll();return;
+  }
   const required=['gm_code','kr','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
   if(!rows.length||rows.length>500||rows.some(r=>required.some(key=>!String(r[key]||'').trim())))throw Error('CSV 필수 값 또는 24개 언어 누락');
   if(!confirm('CSV '+rows.length+'건을 기존 Pending 테이블에 업로드할까요? 업로드 후 기존 Pending 목록에서 검토할 수 있습니다.'))return;
