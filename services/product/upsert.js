@@ -7,6 +7,7 @@ const shared=require('./shared');
 const keyword=require('./keyword');
 const {normalizeMallCategoryJson,pickMallCategoryLeaf}=require('./search_category');
 const {normalizeOptionJson,makeProductOptionLinkJson,upsertProductOptions}=require('./option');
+const {recordCoupangIids}=require('./iid_history');
 const {normalizeThumbJson,normalizeDetailJson,detailSignalStats,applyDetailPatch}=require('./detail');
 const {cleanText,toInt,resolveUnitPriceSource,normalizeProductPayload,pickPrice,pickNormalPrice,pickFinalSupplyPrice,pickDiscountPrice,pickDeliveryFee,pickDeliveryText,pickDeliveryType,pickReviewCount,pickMallSalesCount,pickRatingScore,cleanDupMallProductName,pickProductUrl,buildProductUrlFromId,pickThumbUrl,pickSupplierName,pickSupplierId,isStandardCoupangSupplier,pickAny,sourceMallFrom,sourceUidFrom,safeJsonString,compactError,pickTaxType,ensureProductLightJsonColumns,pickBuyableQty,pickMinOrderQty,pickMaxOrderQty,pickReturnShippingFee,normalizeUrl}=shared;
 
@@ -318,6 +319,18 @@ async function upsertProduct(pool, raw, parent={}){
     p.return_period_days == null && p.returnPeriodDays == null ? null : toInt(p.return_period_days || p.returnPeriodDays, 0),
     p.exchange_period_days == null && p.exchangePeriodDays == null ? null : toInt(p.exchange_period_days || p.exchangePeriodDays, 0)
   ];
+  // Preserve the previous representative IID before an eligible UPSERT replaces it.
+  // All observed search/detail IID values are retained independently of the current representative.
+  if(id.mallCode==='CPKR' && id.productId && id.vendorItemId && id.itemId){
+    const former=await pool.query(`SELECT product_id,item_id,vendor_item_id FROM gm_product
+      WHERE product_uid=$1 AND mall_code='CPKR' AND product_id=$2
+        AND vendor_item_id=$3 AND item_id IS DISTINCT FROM $4 LIMIT 1`,
+      [id.uid,id.productId,id.vendorItemId,id.itemId]);
+    await recordCoupangIids(pool,[
+      former.rows[0],
+      {product_id:id.productId,vendor_item_id:id.vendorItemId,item_id:id.itemId}
+    ],detailIdentityTrusted?'detail_product':'search_product');
+  }
   let r;
   try{
     r = await pool.query(sql, vals);

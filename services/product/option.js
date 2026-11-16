@@ -1,6 +1,7 @@
 'use strict';
 // GM_PRODUCT_SPLIT_V003_OPTION
 const {cleanText,parseMoney,parseMaybeJsonAny,collectPayloadContainers,normalizeUrl,pickPrice,pickNormalPrice,pickDeliveryType,pickDeliveryFee,pickDeliveryText,pickBuyableQty,pickMinOrderQty,pickMaxOrderQty,compactError,toInt}=require('./shared');
+const {recordCoupangIids}=require('./iid_history');
 
 // The search-result href belongs to its PID+VID option; IID may change later.
 // Keep the original href bytes, including its actual search context.
@@ -19,12 +20,12 @@ function verifiedSearchOptionHref(p,opt){
   const found=coupangHrefParts(p.url || p.detailHref || p.product_url || p.productUrl || '');
   return found && found.pid===cleanText(opt.product_id) && found.vid===cleanText(opt.vendor_item_id) && found.iid===cleanText(opt.item_id) ? found.value : '';
 }
-function replaceStoredItemId(oldHref,pid,vid,newIid){
-  const found=coupangHrefParts(oldHref);
-  if(!found || found.pid!==cleanText(pid) || found.vid!==cleanText(vid) || !/^\d+$/.test(cleanText(newIid))) return cleanText(oldHref);
-  // Replace only the value, not the order/encoding of search context parameters.
-  if(!/(?:[?&])itemId=/i.test(found.value)) return found.value;
-  return found.value.replace(/([?&]itemId=)[^&#]*/i,(_all,key)=>key+newIid);
+// Never invent a Coupang URL by replacing an old observed itemId.
+// A URL is usable only for the exact PID+IID+VID that was observed.
+function validatedStoredHref(raw,pid,vid,iid){
+  const found=coupangHrefParts(raw);
+  return found && found.pid===cleanText(pid) && found.vid===cleanText(vid)
+    && found.iid===cleanText(iid) ? found.value : '';
 }
 
 function pickOptPrice(row, names){
@@ -339,7 +340,14 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
   if(!representative){result.reason='no_buyable_candidate';return result;}
   const repPi=optionPi(representative);
   const changed=repPi!==currentPi;
-  const representativeUrl=replaceStoredItemId(current.product_url,representative.product_id,representative.vendor_item_id,representative.item_id);
+  let representativeUrl=validatedStoredHref(current.product_url,representative.product_id,representative.vendor_item_id,representative.item_id);
+  if(!representativeUrl){
+    const observed=await pool.query(`SELECT product_url FROM gm_product_option
+      WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2 AND item_id=$3
+      LIMIT 1`,[representative.product_id,representative.vendor_item_id,representative.item_id]);
+    representativeUrl=validatedStoredHref(observed.rows[0]&&observed.rows[0].product_url,
+      representative.product_id,representative.vendor_item_id,representative.item_id);
+  }
   await pool.query(`
     UPDATE gm_product SET
       product_id=$2,item_id=$3,vendor_item_id=$4,pi_ii_vi=$14,
@@ -353,7 +361,7 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
       soldout_yn='N',sale_status='active',
       buyable_qty=COALESCE($12,buyable_qty),
       thumb_origin_url=COALESCE(NULLIF($13,''),thumb_origin_url),
-      product_url=COALESCE(NULLIF($15,''),product_url),
+      product_url=$15,
       updated_at=now()
     WHERE product_uid=$1 AND mall_code='CPKR' AND product_id=$2
   `,[cleanText(id.uid),cleanText(representative.product_id),cleanText(representative.item_id),cleanText(representative.vendor_item_id),
@@ -421,27 +429,36 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         continue;
       }
       const incomingOptionUrl=verifiedSearchOptionHref(p,opt);
-      // GM_CPKR_IID_SYNC_V001: search and detail collections both refresh IID for the SAME PID+VID.
-      // The vendor item identity stays unchanged; only item_id and its composite pi_ii_vi move.
-      if(mall==='CPKR' && opt.product_id && opt.vendor_item_id){
+      // GM_CPKR_IID_HISTORY_V001: observe IID without discarding older PID+VID+IID.
+      // Update only the exact former option row; never rewrite a source URL's itemId.
+      if(mall==='CPKR' && opt.product_id && opt.vendor_item_id && opt.item_id){
         const old=await pool.query(`
           SELECT item_id,pi_ii_vi,product_url FROM gm_product_option
           WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
-          ORDER BY updated_at DESC LIMIT 1`,[opt.product_id,opt.vendor_item_id]);
-        if(old.rows.length){
-          if(opt.item_id && opt.pi_ii_vi!==cleanText(old.rows[0].pi_ii_vi)){
-            // Update the old key in place, avoiding a duplicate for changed IID.
-            // If the new key already exists, the authoritative option upsert below
-            // handles it and full-list reconciliation can retire the old key.
-            const oldOptionUrl=replaceStoredItemId(old.rows[0].product_url,opt.product_id,opt.vendor_item_id,opt.item_id);
+          ORDER BY updated_at DESC NULLS LAST LIMIT 1`,[opt.product_id,opt.vendor_item_id]);
+        const former=old.rows[0]||null;
+        await recordCoupangIids(pool,[
+          former&&{product_id:opt.product_id,vendor_item_id:opt.vendor_item_id,item_id:former.item_id},
+          {product_id:opt.product_id,vendor_item_id:opt.vendor_item_id,item_id:opt.item_id}
+        ],detailPayload?'detail_option':'search_option');
+        if(former && opt.pi_ii_vi!==cleanText(former.pi_ii_vi)){
+          const exists=await pool.query(`SELECT 1 FROM gm_product_option
+            WHERE mall_code='CPKR' AND pi_ii_vi=$1 LIMIT 1`,[opt.pi_ii_vi]);
+          if(!exists.rows.length){
             await pool.query(`UPDATE gm_product_option
-              SET product_id=$1,item_id=$3,vendor_item_id=$2,pi_ii_vi=$4,product_url=$5,updated_at=now()
-              WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
-                AND pi_ii_vi<>$4
-                AND NOT EXISTS(SELECT 1 FROM gm_product_option WHERE mall_code='CPKR' AND pi_ii_vi=$4)`,
-              [opt.product_id,opt.vendor_item_id,opt.item_id,opt.pi_ii_vi,oldOptionUrl]);
-            try{console.log('[GM_CPKR_IID_SYNC_OPTION]',{source:detailPayload?'detail':'search',pid:opt.product_id,vid:opt.vendor_item_id,old_iid:cleanText(old.rows[0].item_id),new_iid:opt.item_id});}catch(_log){}
+              SET item_id=$4,pi_ii_vi=$5,product_url=$6,updated_at=now()
+              WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2 AND pi_ii_vi=$3
+                AND NOT EXISTS(SELECT 1 FROM gm_product_option WHERE mall_code='CPKR' AND pi_ii_vi=$5)`,
+              [opt.product_id,opt.vendor_item_id,former.pi_ii_vi,opt.item_id,opt.pi_ii_vi,incomingOptionUrl]);
+          }else{
+            // New composite key already exists: keep old identity in history,
+            // but prevent its former option from remaining selectable.
+            await pool.query(`UPDATE gm_product_option
+              SET active_yn='N',updated_at=now()
+              WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2 AND pi_ii_vi=$3`,
+              [opt.product_id,opt.vendor_item_id,former.pi_ii_vi]);
           }
+          try{console.log('[GM_CPKR_IID_SYNC_OPTION]',{source:detailPayload?'detail':'search',pid:opt.product_id,vid:opt.vendor_item_id,old_iid:cleanText(former.item_id),new_iid:opt.item_id});}catch(_log){}
         }
       }
       const sig = opt.mall_code + '|' + opt.pi_ii_vi;
