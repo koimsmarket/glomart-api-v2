@@ -72,7 +72,86 @@ async function saveSpecialCategoryPlan(){
   await loadSpecialCategoryPlan();
 }
 
-window.addEventListener('DOMContentLoaded',()=>{loadRuntimeConfig();loadSpecialCategoryPlan();});
+
+// GM_CATEGORY_BATCH_BUILDER_V002: existing SPECIAL order is unchanged; persist exact leaf IDs separately.
+let specialLeafNodes=[],specialLeafSelected=new Set(),specialLeafLoaded=false;
+const specialLeafMap=new Map(),specialLeafKids=new Map(),specialLeafDescCache=new Map();
+function specialLeafChildren(id){return specialLeafKids.get(String(id))||[];}
+function specialLeafDesc(code,seen=new Set()){
+  if(specialLeafDescCache.has(code))return specialLeafDescCache.get(code);
+  if(seen.has(code))return [];seen.add(code);
+  const n=specialLeafMap.get(code);if(!n)return [];
+  const ids=String(n.leaf_yn||'').toUpperCase()==='Y'?[Number(n.category_id)]:specialLeafChildren(code).flatMap(c=>specialLeafDesc(c.gm_code,new Set(seen)));
+  specialLeafDescCache.set(code,ids);return ids;
+}
+function specialLeafAll(){return specialLeafNodes.filter(n=>String(n.leaf_yn||'').toUpperCase()==='Y');}
+function specialLeafCount(){
+  const el=document.getElementById('specialLeafSummary');if(el)el.textContent='선택한 최말단 '+specialLeafSelected.size+'개 / 전체 '+specialLeafAll().length+'개 · 선택한 대상만 수집합니다.';
+}
+function specialLeafNodeMarkup(n,depth=0){
+  if(depth>12)return '';
+  const code=String(n.gm_code||''),leaf=String(n.leaf_yn||'').toUpperCase()==='Y';
+  const descendants=specialLeafDesc(code);const total=descendants.length;
+  const checked=total>0&&descendants.every(id=>specialLeafSelected.has(id));
+  const label=`${specialPlanEsc(n.name_ko||code)} <small>${specialPlanEsc(code)}</small>`;
+  const box=`<input type="checkbox" data-special-leaf="${specialPlanEsc(code)}" ${checked?'checked':''} ${!total?'disabled':''}>`;
+  if(leaf)return `<div class="gm-special-node" data-name="${specialPlanEsc((n.name_ko||'')+' '+code)}" style="padding:4px 0 4px 20px"><label>${box} ${label}</label></div>`;
+  const kids=specialLeafChildren(code).map(x=>specialLeafNodeMarkup(x,depth+1)).join('');
+  return `<details class="gm-special-node" data-name="${specialPlanEsc((n.name_ko||'')+' '+code)}" ${depth===0?'open':''} style="margin:4px 0 4px 12px"><summary><label onclick="event.stopPropagation()">${box} ${label} <small>(${total})</small></label></summary>${kids}</details>`;
+}
+function renderSpecialLeafTree(){
+  const el=document.getElementById('specialLeafTree');if(!el)return;
+  const codes=new Set(specialLeafNodes.map(x=>String(x.gm_code||'')));
+  const roots=specialLeafNodes.filter(n=>!codes.has(String(n.gm_parent_code||'')));
+  el.innerHTML=roots.map(n=>specialLeafNodeMarkup(n)).join('')||'카테고리 없음';
+  el.onchange=e=>{const t=e.target;if(!t.matches('input[data-special-leaf]'))return;
+    const ids=specialLeafDesc(t.getAttribute('data-special-leaf'));ids.forEach(id=>t.checked?specialLeafSelected.add(id):specialLeafSelected.delete(id));
+    // Preserve the expanded tree while updating checkbox states.
+    el.querySelectorAll('input[data-special-leaf]').forEach(c=>{const a=specialLeafDesc(c.dataset.specialLeaf);c.checked=a.length>0&&a.every(id=>specialLeafSelected.has(id));});
+    specialLeafCount();
+  };
+  specialLeafCount();filterSpecialLeafTree();
+}
+async function loadSpecialLeafTree(){
+  const status=document.getElementById('specialLeafSummary');if(status)status.textContent='서버 카테고리 트리 조회 중…';
+  try{
+    const r=await fetch(`${API}/api/gm/builder/config/special-category-leaves?t=${Date.now()}`,{cache:'no-store'});
+    const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
+    specialLeafNodes=j.categories||[];specialLeafMap.clear();specialLeafKids.clear();specialLeafDescCache.clear();
+    specialLeafNodes.forEach(n=>{specialLeafMap.set(String(n.gm_code),n);const p=String(n.gm_parent_code||'');if(!specialLeafKids.has(p))specialLeafKids.set(p,[]);specialLeafKids.get(p).push(n);});
+    specialLeafSelected=new Set(j.selected_ids||[]);specialLeafLoaded=true;
+    renderSpecialLeafTree();
+    if(!j.configured&&status)status.textContent+=' · 선택 설정 미등록: 앱 배정은 안전하게 중지됩니다.';
+  }catch(e){specialLeafLoaded=false;if(status)status.textContent='트리 조회 실패: '+String(e.message||e);}
+}
+function filterSpecialLeafTree(){
+  const input=document.getElementById('specialLeafFilter'),q=String(input&&input.value||'').trim().toLowerCase();
+  document.querySelectorAll('#specialLeafTree .gm-special-node').forEach(el=>{
+    // Keep ancestors of matches; do not change any saved checkbox selection.
+    const own=String(el.dataset.name||'').toLowerCase().includes(q);
+    const child=!!(q&&Array.from(el.querySelectorAll('.gm-special-node')).some(x=>String(x.dataset.name||'').toLowerCase().includes(q)));
+    el.style.display=(!q||own||child)?'':'none';
+    if(q&&child&&el.tagName==='DETAILS')el.open=true;
+  });
+}
+function specialLeafClear(){specialLeafSelected.clear();renderSpecialLeafTree();}
+async function saveSpecialLeafTree(){
+  if(!specialLeafLoaded)return alert('먼저 트리를 조회하세요.');
+  const ids=Array.from(specialLeafSelected).sort((a,b)=>a-b);
+  if(!confirm(ids.length?`최말단 카테고리 ${ids.length}개만 SPECIAL 수집 대상으로 저장할까요?`:'수집 대상 0개입니다. SPECIAL 앱 수집을 중지하도록 저장할까요?'))return;
+  const password=prompt('derzon 관리자 비밀번호를 다시 입력하세요. 이 요청에만 사용됩니다.');
+  if(password===null||!password)return;
+  const st=document.getElementById('specialLeafSummary');
+  try{
+    const r=await fetch(`${API}/api/gm/builder/config/special-category-leaves`,{method:'POST',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({category_ids:ids})});
+    const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'HTTP '+r.status);
+    await loadSpecialLeafTree();if(st)st.textContent='저장 완료 · 최말단 '+j.selected_count+'개 · 저장된 대상만 앱에 배정됩니다.';
+  }catch(e){if(st)st.textContent='저장 실패: '+String(e.message||e);}
+}
+window.loadSpecialLeafTree=loadSpecialLeafTree;window.filterSpecialLeafTree=filterSpecialLeafTree;
+window.specialLeafClear=specialLeafClear;window.saveSpecialLeafTree=saveSpecialLeafTree;
+
+window.addEventListener('DOMContentLoaded',()=>{loadRuntimeConfig();loadSpecialCategoryPlan();loadSpecialLeafTree();});
 
 function currentKoreaYm(){
   const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit'}).formatToParts(new Date());

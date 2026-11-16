@@ -141,6 +141,40 @@ router.post('/api/gm/builder/config/special-category-plan',async(req,res)=>{
   }catch(e){fail(res,500,'special category plan save failed',{detail:String(e&&e.message||e)});}
 });
 
+// GM_CATEGORY_BATCH_BUILDER_V002: independent explicit leaf whitelist. Never infer ALL from empty.
+const SPECIAL_LEAF_KEY='special_category_leaf_ids';
+function parseSpecialLeafIds(value){
+  let arr=value;
+  if(typeof arr==='string'){try{arr=JSON.parse(arr);}catch(_e){arr=[];}}
+  return Array.isArray(arr)?[...new Set(arr.map(Number).filter(x=>Number.isSafeInteger(x)&&x>0))]:[];
+}
+router.get('/api/gm/builder/config/special-category-leaves',async(req,res)=>{
+  const db=dbFrom(req);
+  try{
+    const q=await db.query(`SELECT category_id,gm_code,gm_parent_code,depth,leaf_yn,name_ko,sort_order FROM gm_category WHERE COALESCE(gm_code,'')<>'' ORDER BY depth,sort_order,category_id`);
+    const v=await db.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1',[SPECIAL_LEAF_KEY]);
+    const saved=parseSpecialLeafIds(v.rows[0]&&v.rows[0].config_value);
+    const leaves=new Set(q.rows.filter(x=>String(x.leaf_yn||'').toUpperCase()==='Y').map(x=>Number(x.category_id)));
+    ok(res,{categories:q.rows,selected_ids:saved.filter(id=>leaves.has(id)),configured:v.rowCount>0});
+  }catch(e){fail(res,500,'special leaf scope read failed',{detail:String(e&&e.message||e)});}
+});
+router.post('/api/gm/builder/config/special-category-leaves',async(req,res)=>{
+  const db=dbFrom(req),ids=req.body&&req.body.category_ids;
+  if(!Array.isArray(ids)||ids.length>100000)return fail(res,400,'category_ids array required');
+  if(ids.some(x=>!Number.isSafeInteger(x)||x<=0))return fail(res,400,'invalid category_id');
+  const selected=[...new Set(ids)];
+  try{
+    const valid=await db.query(`SELECT category_id FROM gm_category WHERE UPPER(COALESCE(leaf_yn,''))='Y' AND category_id=ANY($1::bigint[])`,[selected]);
+    if(valid.rowCount!==selected.length)return fail(res,400,'unknown or non-leaf category_id');
+    await db.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
+      VALUES($1,$2,'JSON','SPECIAL','AUTO',TRUE,'SPECIAL 명시적 최말단 카테고리 허용목록 (빈 목록=중지)',now())
+      ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,value_type=EXCLUDED.value_type,
+        category=EXCLUDED.category,mode=EXCLUDED.mode,enabled=TRUE,description=EXCLUDED.description,updated_at=now()`,
+      [SPECIAL_LEAF_KEY,JSON.stringify(selected)]);
+    ok(res,{selected_count:selected.length});
+  }catch(e){fail(res,500,'special leaf scope save failed',{detail:String(e&&e.message||e)});}
+});
+
 // Manual version stamps are independent from UI dictionary/category pack publishers.
 // gm_v1 is deliberately a shadow value: do not modify the live gm_v1 config.
 const MANUAL_VERSION_KEYS=Object.freeze({gm_v1:'gm_v1_builder_pending',gm_v2:'gm_v2',gm_v3:'gm_v3',ui_dictionary:'gm_builder_manual_ui_dictionary',category_base:'gm_builder_manual_category_base',category_delta:'gm_builder_manual_category_delta'});

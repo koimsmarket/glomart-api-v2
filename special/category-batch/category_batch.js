@@ -15,6 +15,7 @@ const control={mode:'STOPPED',batch_date:'',updated_at:null,updated_by:'',comman
 const CONTROL_CONFIG_KEY='special_category_batch_control';
 const APPLY_YM_CONFIG_KEY='special_category_apply_ym';
 const ORDER_CONFIG_KEY='special_category_order';
+const LEAF_IDS_CONFIG_KEY='special_category_leaf_ids';
 const DEFAULT_APPLY_YM='2026-08';
 const DEFAULT_ORDER=[
  {no:1,prefix:'FD',name:'식품'},
@@ -101,11 +102,12 @@ async function ensureSpecialConfig(p){
 }
 async function loadSpecialPlan(p){
  await ensureSpecialConfig(p);
- const q=await p.query('SELECT config_key,config_value FROM gm_runtime_config WHERE config_key=ANY($1::text[])',[ [APPLY_YM_CONFIG_KEY,ORDER_CONFIG_KEY] ]);
+ const q=await p.query('SELECT config_key,config_value FROM gm_runtime_config WHERE config_key=ANY($1::text[])',[ [APPLY_YM_CONFIG_KEY,ORDER_CONFIG_KEY,LEAF_IDS_CONFIG_KEY] ]);
  const m={};for(const r of q.rows)m[S(r.config_key)]=S(r.config_value);
  const apply_ym=/^\d{4}-\d{2}$/.test(m[APPLY_YM_CONFIG_KEY])?m[APPLY_YM_CONFIG_KEY]:DEFAULT_APPLY_YM;
  const order=normalizeOrder(m[ORDER_CONFIG_KEY]);
- return {apply_ym,cutoff:applyYmCutoffIso(apply_ym),order};
+ let leafIds=[];try{const ids=JSON.parse(m[LEAF_IDS_CONFIG_KEY]||'[]');if(Array.isArray(ids))leafIds=[...new Set(ids.map(Number).filter(n=>Number.isSafeInteger(n)&&n>0))];}catch(_e){}
+  return {apply_ym,cutoff:applyYmCutoffIso(apply_ym),order,leaf_count:leafIds.length,leaf_ids:leafIds};
 }
 function pruneLeases(){
  const now=Date.now();
@@ -177,19 +179,23 @@ router.post('/api/special/category-batch/next',async(req,res)=>{
   if(control.mode!=='RUN')return res.json({ok:true,state:control.mode,category:null,batch_date:bd,plan});
   pruneLeases();
   if(leases.has(deviceId)){
-   const l=leases.get(deviceId);l.expires_at=Date.now()+CLAIM_TTL_MS;
+   const l=leases.get(deviceId);
+   if(!plan.leaf_ids.includes(Number(l.category_id))){leases.delete(deviceId);return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});}
+   l.expires_at=Date.now()+CLAIM_TTL_MS;
    const r=await refreshLeaseCategory(p,l);
    return res.json({ok:true,state:'LEASED',batch_date:bd,category:categoryPayload(r),plan});
   }
   const prefixes=plan.order.map(x=>x.prefix);
-  if(!prefixes.length)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
+  if(!prefixes.length||!plan.leaf_ids.length)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
   const caseSql=plan.order.map((x,i)=>`WHEN gm_code LIKE $${i+3} THEN ${Number(x.no)}`).join(' ');
-  const params=[plan.cutoff,prefixes].concat(prefixes.map(x=>x+'-%'));
+  const params=[plan.cutoff,prefixes].concat(prefixes.map(x=>x+'-%'));params.push(plan.leaf_ids);
+  const leafParam='$'+params.length;
   const q=await p.query(`SELECT category_id,gm_code,name_ko,keyword,leaf_yn,depth,sort_order,created_at,updated_at,last_search_at
     FROM gm_category
     WHERE COALESCE(name_ko,'')<>''
       AND UPPER(COALESCE(leaf_yn,''))='Y'
       AND split_part(gm_code,'-',1)=ANY($2::text[])
+      AND category_id=ANY(${leafParam}::bigint[])
       -- SPECIAL 진행상태는 last_search_at만 본다.
       AND (NULLIF(BTRIM(last_search_at),'') IS NULL OR NULLIF(BTRIM(last_search_at),'')::timestamptz < $1::timestamptz)
       -- 기준시각 이후 일반 단건/카테고리 갱신은 이번 회차에서 건너뛴다.

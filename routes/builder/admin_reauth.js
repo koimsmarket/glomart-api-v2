@@ -20,6 +20,7 @@ function protectedOperation(req) {
   if (path === '/api/gm/builder/detail-content/start' || path === '/api/gm/builder/detail-content/stop') return true;
   if (path === '/api/gm/builder/translation-qa/scan' || path === '/api/gm/builder/translation-qa/clear-selected') return true;
   if (path === '/api/gm/builder/app-update/policy') return true;
+  if (path === '/api/gm/builder/config/special-category-leaves') return true;
   if (path === '/api/gm/builder/stats/refresh') return true;
   if (path === '/api/gm/builder/ui-dictionary-auto/approve') return true;
   if (path === '/api/gm/builder/ui-dictionary-auto/pending-csv/upload') return true;
