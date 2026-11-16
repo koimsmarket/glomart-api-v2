@@ -10,6 +10,11 @@ const SESSION_MS=8*3600000,IDLE_MS=3600000,LEASE_SEC=300;
 const sessions=new Map(), failures=new Map();
 // V020: volatile IID checks only. Never write an IID audit row/column to DB.
 const iidPending=new Map(),iidChanges=new Map();
+// V022: server-process-only ranked work plans. Never persist ranking/failed PID lists.
+const rankedPlans=new Map(),PLAN_TTL_MS=2*3600000;
+function planKey(account,client){return String(account)+'|'+String(client);}
+function prunePlans(){const now=Date.now();for(const [k,p] of rankedPlans)if(p.expires<now)rankedPlans.delete(k);}
+
 function iidCodes(v,selected){const wanted=new Set(selected);return [...new Set(clean(v).split('|').map(x=>x.trim()).filter(x=>wanted.has(x)))];}
 function iidCounts(codes){const result=Object.create(null),selected=new Set(codes);for(const x of iidChanges.values())for(const code of x.codes)if(selected.has(code))result[code]=(result[code]||0)+1;return result;}
 function trimIidPending(){const now=Date.now();for(const [pid,x] of iidPending)if(x.expires<now)iidPending.delete(pid);}
@@ -108,45 +113,55 @@ router.post('/api/gm/detail-collector/history',writeSafe,permitted,async(req,res
  }catch(e){console.error('[DETAIL_COLLECTOR_HISTORY_V018]',e.code||e.message||'ERROR');return response(res,503,'HISTORY_QUERY_FAILED');}
 });
 
-router.post('/api/gm/detail-collector/claim',writeSafe,permitted,async(req,res)=>{
+// V022: compute review-descending order once per explicit collector run.
+router.post('/api/gm/detail-collector/plan',writeSafe,permitted,async(req,res)=>{
  const codes=Array.isArray(req.body?.category_codes)?[...new Set(req.body.category_codes.map(clean).filter(x=>/^[A-Z0-9-]{2,64}$/.test(x)))]:[];
- const client=clean(req.body?.client_id);if(!codes.length||codes.length>19000||!/^[-\w]{8,100}$/.test(client))return response(res,400,'INVALID_SELECTION_OR_CLIENT');
- const pool=db(req),token=crypto.randomBytes(32).toString('hex');
- trimIidPending();
+ const client=clean(req.body?.client_id);
+ if(!codes.length||codes.length>19000||!/^[-\w]{8,100}$/.test(client))return response(res,400,'INVALID_SELECTION_OR_CLIENT');
+ prunePlans();
  try{
-  // SQL uses the existing category code assignments and ignores already stored detail content.
-  const candidates=await pool.query(`WITH eligible AS (
-     SELECT DISTINCT ON (p.product_id) p.product_id,p.item_id,p.vendor_item_id,p.glomart_code,
-       NULLIF(BTRIM(p.keyword),'') AS search_keyword,COALESCE(p.review_count,0)::int AS review_count
-     FROM gm_product p WHERE p.mall_code='CPKR' AND p.product_id~'^[0-9]{5,}$'
-       AND LOWER(COALESCE(NULLIF(BTRIM(p.sale_status),''),'active')) <> 'inactive'
-       AND string_to_array(COALESCE(p.glomart_code,''),'|') && $1::text[]
-       AND NOT EXISTS (SELECT 1 FROM gm_product inactive WHERE inactive.mall_code='CPKR' AND inactive.product_id=p.product_id AND LOWER(COALESCE(inactive.sale_status,''))='inactive')
-     ORDER BY p.product_id,COALESCE(p.review_count,0) DESC,p.product_uid
-   ), ranked AS (
-     SELECT e.*,ROW_NUMBER() OVER (ORDER BY e.review_count DESC,e.product_id ASC) AS position
-     FROM eligible e
-   )
-   SELECT r.product_id,r.item_id,r.vendor_item_id,r.glomart_code,r.search_keyword,r.review_count,
-     ((r.position-1)%60+1)::int AS search_rank,60::int AS items_count
-   FROM ranked r
-   WHERE NOT EXISTS(SELECT 1 FROM gm_cpkr_detail_content d WHERE d.product_id=r.product_id)
-     AND NOT EXISTS(SELECT 1 FROM gm_detail_collector_claim l WHERE l.product_id=r.product_id AND (l.state='completed' OR (l.state='leased' AND l.lease_until>now())))
-   ORDER BY r.position LIMIT 150`,[codes]);
-  for(const row of candidates.rows){
+  // Keep the existing eligibility/category predicates; eliminate claim-time ROW_NUMBER.
+  const result=await db(req).query(`SELECT DISTINCT ON (p.product_id)
+      p.product_id,p.item_id,p.vendor_item_id,p.glomart_code,
+      NULLIF(BTRIM(p.keyword),'') AS search_keyword,
+      COALESCE(p.review_count,0)::int AS review_count
+    FROM gm_product p WHERE p.mall_code='CPKR' AND p.product_id~'^[0-9]{5,}$'
+      AND LOWER(COALESCE(NULLIF(BTRIM(p.sale_status),''),'active')) <> 'inactive'
+      AND string_to_array(COALESCE(p.glomart_code,''),'|') && $1::text[]
+      AND NOT EXISTS (SELECT 1 FROM gm_product inactive WHERE inactive.mall_code='CPKR' AND inactive.product_id=p.product_id AND LOWER(COALESCE(inactive.sale_status,''))='inactive')
+      AND NOT EXISTS (SELECT 1 FROM gm_cpkr_detail_content d WHERE d.product_id=p.product_id)
+      AND NOT EXISTS (SELECT 1 FROM gm_detail_collector_claim l WHERE l.product_id=p.product_id AND l.state='completed')
+    ORDER BY p.product_id,COALESCE(p.review_count,0) DESC,p.product_uid`,[codes]);
+  const rows=result.rows.sort((a,b)=>(Number(b.review_count)||0)-(Number(a.review_count)||0)||String(a.product_id).localeCompare(String(b.product_id),'en',{numeric:true}));
+  for(let i=0;i<rows.length;i++){rows[i].search_rank=i%60+1;rows[i].items_count=60;}
+  rankedPlans.set(planKey(req.collectorAccount,client),{rows,index:0,seen:new Set(),codes,expires:Date.now()+PLAN_TTL_MS});
+  return res.set('Cache-Control','no-store').json({ok:true,planned:rows.length,ranking:'review_count_desc_once',memory_only:true});
+ }catch(e){console.error('[DETAIL_COLLECTOR_PLAN_V022]',e.code||e.message||'ERROR');return response(res,503,'PLAN_FAILED');}
+});
+router.post('/api/gm/detail-collector/claim',writeSafe,permitted,async(req,res)=>{
+ const client=clean(req.body?.client_id),codes=Array.isArray(req.body?.category_codes)?[...new Set(req.body.category_codes.map(clean).filter(x=>/^[A-Z0-9-]{2,64}$/.test(x)))]:[];
+ if(!/^[-\w]{8,100}$/.test(client)||!codes.length)return response(res,400,'INVALID_SELECTION_OR_CLIENT');
+ prunePlans();trimIidPending();
+ const plan=rankedPlans.get(planKey(req.collectorAccount,client));
+ if(!plan||plan.codes.length!==codes.length||plan.codes.some(x=>!codes.includes(x)))return response(res,409,'COLLECTOR_PLAN_REQUIRED');
+ const pool=db(req);
+ try{
+  while(plan.index<plan.rows.length){
+   const row=plan.rows[plan.index++],pid=clean(row.product_id);
+   if(plan.seen.has(pid))continue;plan.seen.add(pid); // once per run, even after release/failure
+   const token=crypto.randomBytes(32).toString('hex');
    const q=await pool.query(`INSERT INTO gm_detail_collector_claim(product_id,account_id,client_id,token_hash,lease_until,state,updated_at)
-    VALUES($1,$2,$3,$4,now()+interval '300 seconds','leased',now())
-    ON CONFLICT(product_id) DO UPDATE SET account_id=EXCLUDED.account_id,client_id=EXCLUDED.client_id,
-    token_hash=EXCLUDED.token_hash,lease_until=EXCLUDED.lease_until,state='leased',updated_at=now()
-    WHERE gm_detail_collector_claim.state<>'completed' AND gm_detail_collector_claim.lease_until<now()
-    RETURNING product_id`,[row.product_id,req.collectorAccount,client,hash(token)]);
-   if(q.rowCount){
-    iidPending.set(clean(row.product_id),{token_hash:hash(token),old_iid:clean(row.item_id),codes:iidCodes(row.glomart_code,codes),expires:Date.now()+LEASE_SEC*1000});
-    return res.set('Cache-Control','no-store').json({ok:true,claim:{...row,lease_token:token,expires_in_seconds:LEASE_SEC}});
-   }
+     VALUES($1,$2,$3,$4,now()+interval '300 seconds','leased',now())
+     ON CONFLICT(product_id) DO UPDATE SET account_id=EXCLUDED.account_id,client_id=EXCLUDED.client_id,
+     token_hash=EXCLUDED.token_hash,lease_until=EXCLUDED.lease_until,state='leased',updated_at=now()
+     WHERE gm_detail_collector_claim.state<>'completed' AND gm_detail_collector_claim.lease_until<now()
+     RETURNING product_id`,[pid,req.collectorAccount,client,hash(token)]);
+   if(!q.rowCount)continue;
+   iidPending.set(pid,{token_hash:hash(token),old_iid:clean(row.item_id),codes:iidCodes(row.glomart_code,codes),expires:Date.now()+LEASE_SEC*1000});
+   return res.set('Cache-Control','no-store').json({ok:true,claim:{...row,lease_token:token,expires_in_seconds:LEASE_SEC}});
   }
-  return res.set('Cache-Control','no-store').json({ok:true,claim:null,reason:'NONE_AVAILABLE_IN_BATCH'});
- }catch(e){console.error('[DETAIL_COLLECTOR_CLAIM]',e.code||'ERROR');return response(res,503,e.code==='42P01'?'MIGRATION_145_REQUIRED':'CLAIM_FAILED');}
+  return res.set('Cache-Control','no-store').json({ok:true,claim:null,reason:'PLAN_EXHAUSTED'});
+ }catch(e){console.error('[DETAIL_COLLECTOR_CLAIM_V022]',e.code||e.message||'ERROR');return response(res,503,'CLAIM_FAILED');}
 });
 router.post('/api/gm/detail-collector/result',writeSafe,permitted,async(req,res)=>{
  const pid=clean(req.body?.product_id),token=clean(req.body?.lease_token),client=clean(req.body?.client_id),item=req.body?.item;
