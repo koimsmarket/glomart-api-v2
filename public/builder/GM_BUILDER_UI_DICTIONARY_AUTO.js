@@ -318,33 +318,38 @@ function gmUiCsvParse(src){
  if(new Set(keys).size!==keys.length)throw Error('CSV 중복 컬럼');
  return lines.map((r,i)=>{if(r.length!==keys.length)throw Error('CSV 컬럼 수 불일치: '+(i+2)+'행');return Object.fromEntries(keys.map((k,j)=>[k,r[j]]));});
 }
+// GM_UI_PENDING_FULL_V011: all rows, including approved history, are counted and reconciled.
 async function gmUiUploadPendingCsv(btn){
  const input=document.getElementById('gmUiPendingCsvFile'),file=input&&input.files&&input.files[0];
  if(!file)return alert('CSV 파일을 선택하세요.');btn.disabled=true;
  try{
-  if(file.size>4*1024*1024)throw Error('CSV 파일이 너무 큽니다');
+  if(file.size>8*1024*1024)throw Error('CSV 파일이 너무 큽니다');
   const rows=gmUiCsvParse(await file.text());
-  if(rows.length&&Object.prototype.hasOwnProperty.call(rows[0],'source_text_ko')&&Object.prototype.hasOwnProperty.call(rows[0],'status')){
-    if(!confirm('PENDING CSV '+rows.length+'행을 검증한 후 미등록 후보만 추가합니다. 승인 이력은 건너뜁니다. 계속할까요?'))return;
-    const password=await gmUiAskAdminPassword('PENDING CSV 검증 및 업로드');if(!password)return;
-    const endpoint=API+'/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile';
-    async function submit(apply){const r=await fetch(endpoint,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({rows,apply})});
-      const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error+': '+(j.detail||'')+' '+JSON.stringify((j.report||[]).filter(x=>x.result==='INVALID').slice(0,5)));return j;}
-    const check=await submit(false);if(check.rejected)throw Error('검증 오류 '+check.rejected+'건: '+JSON.stringify(check.report.filter(x=>x.result==='INVALID').slice(0,5)));
-    gmPendingStatus('검증: 신규 '+check.will_insert+' · 이미 존재 '+check.already+' · 승인 이력 제외 '+check.approved_history_skipped+' · 사전 중복 '+check.dictionary_reused);
-    if(!check.will_insert){log(check);await loadAll();return;}
-    if(!confirm('검증 완료. 미등록 PENDING '+check.will_insert+'건만 추가할까요?'))return;
-    const j=await submit(true);gmPendingStatus('업로드 완료: 추가 '+j.inserted+' · 기존 '+j.already+' · 승인 이력 건너뜀 '+j.approved_history_skipped);log(j);await loadAll();return;
+  if(!rows.length)throw Error('CSV에 데이터가 없습니다');
+  if(!rows.every(r=>['pending_id','source_text_ko','change_type','status'].every(k=>k in r)))
+   throw Error('PENDING CSV에는 pending_id/source_text_ko/change_type/status 컬럼이 모두 필요합니다.');
+  const password=await gmUiAskAdminPassword('PENDING CSV 전체 검증');if(!password)return;
+  const url=API+'/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile';
+  async function run(apply){
+   const r=await fetch(url,{method:'POST',credentials:'same-origin',cache:'no-store',
+    headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},
+    body:JSON.stringify({rows,apply})});
+   const j=await r.json();
+   if(!r.ok||!j.ok){log(j);throw Error((j.error||'HTTP '+r.status)+' '+(j.detail||'')+' · 불일치 '+(j.invalid||0)+'건 (로그 참조)');}
+   if(j.accounted!==rows.length||!j.all_rows_accounted)throw Error('전체 행 검증 수량 불일치: '+JSON.stringify(j));
+   return j;
   }
-  const required=['gm_code','kr','en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
-  if(!rows.length||rows.length>500||rows.some(r=>required.some(key=>!String(r[key]||'').trim())))throw Error('CSV 필수 값 또는 24개 언어 누락');
-  if(!confirm('CSV '+rows.length+'건을 기존 Pending 테이블에 업로드할까요? 업로드 후 기존 Pending 목록에서 검토할 수 있습니다.'))return;
-  const password=await gmUiAskAdminPassword('CSV → 기존 Pending 업로드');if(!password)return;
-  gmPendingStatus('CSV '+rows.length+'건 Pending DB 업로드 중...');
-  const r=await fetch(API+'/api/gm/builder/ui-dictionary-auto/pending-csv/upload',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({rows})});
-  const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||('HTTP '+r.status));
-  if(Number(j.inserted)!==rows.length||Number(j.pending_count)!==rows.length)throw Error('서버 확인 수량 불일치: '+JSON.stringify(j));
-  gmPendingStatus('기존 Pending DB 업로드 완료 '+j.inserted+'건 · 현재 Pending '+j.pending_count+'건');
-  log({action:'UPLOAD_TO_EXISTING_PENDING',...j});await loadAll();alert('Pending 업로드 완료: '+j.inserted+'건. 아래 기존 승인 버튼에서 확인할 수 있습니다.');
- }catch(e){gmPendingStatus('CSV Pending 업로드 실패: '+String(e));log(String(e));}finally{btn.disabled=false;}
+  const check=await run(false);
+  const stats='전체 '+check.received+'건 · 승인 이력 확인 '+check.verified_approved+
+   ' · 대기 후보 확인 '+check.verified_pending+' · 기타 기존 일치 '+check.matched_existing+
+   ' · 기존 사전 재사용 '+check.dictionary_reused+' · 신규 추가 예정 '+check.would_insert;
+  gmPendingStatus('검증 완료 (DB 변경 없음) · '+stats);log(check);
+  if(!confirm(stats+'\n전체 '+check.accounted+'건을 확인했습니다. 누락된 '+check.would_insert+'건을 반영할까요?'))return;
+  const applied=await run(true);
+  const done='전체 '+applied.received+'건 확인 완료 · 기존 승인 '+applied.verified_approved+
+   ' · 기존 대기 '+applied.verified_pending+' · 기타 기존 '+applied.matched_existing+
+   ' · 사전 재사용 '+applied.dictionary_reused+' · 새로 추가 '+applied.inserted;
+  gmPendingStatus(done);log(applied);await loadAll();alert(done);
+ }catch(e){gmPendingStatus('PENDING CSV 검증/업로드 실패: '+String(e));log(String(e));}
+ finally{btn.disabled=false;}
 }
