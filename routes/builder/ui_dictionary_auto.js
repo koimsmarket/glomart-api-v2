@@ -19,6 +19,27 @@ function hasVariable(text){return /%[dsm]/.test(String(text||''))?'Y':'N';}
 // GM_UI_PENDING_MATCH_V004: mirror the verified GM_MATCH_ENGINE comparison-key
 // rules in the server-side candidate observer. The browser engine remains unchanged.
 // Normalize only the candidate KEY; do not mutate the user's rendered DOM text.
+// GM_UI_EDGE_DUP_V008: match GM_MATCH_ENGINE stripEdgeSymbolsLoop's edge symbol set.
+// Only trim decoration at the edges; keep punctuation inside real copy intact.
+function gmPendingStripEdgeSymbols(raw){
+  let x=s(raw);
+  // GM_UI_EDGE_V009: a default-tree glyph is visual decoration, not the UI string.
+  // Keep semantic suffixes (e.g. 2인+) intact even though generic edge stripping removes '+'.
+  const countPlus=/\d+\s*인\+$/.test(x);
+  if(countPlus)x=x.slice(0,-1)+'GMPLUSSAFE';
+  x=x.replace(/^(?:▱\s*)+/u,'');
+  for(let n=0;n<10;n++){
+    const before=x;
+    const leadSlot=(x.match(/^(?:%[sdm])+/)||[''])[0];
+    const tailSlot=(x.match(/(?:%[sdm])+$/)||[''])[0];
+    x=leadSlot+x.slice(leadSlot.length,x.length-tailSlot.length)
+      .replace(/^[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲<>《》〈〉「」『』【】\[\]\(\)\{\}]+/,'')
+      .replace(/[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲<>《》〈〉「」『』【】\[\]\(\)\{\}]+$/,'').trim()+tailSlot;
+    if(x===before)break;
+  }
+  return countPlus?x.replace(/GMPLUSSAFE$/,'+'):x;
+}
+
 function gmPendingMatchKey(raw){
   let x=cleanUiText(raw).replace(/\u00a0/g,' ');
   if(!x)return '';
@@ -33,7 +54,7 @@ function gmPendingMatchKey(raw){
     if(x===old)break;
   }
   // GM_MATCH_ENGINE removeAllQuotesForMatch: comparison only; never alter inner quotes in the original text.
-  return x.replace(/['"\u2018\u2019\u201C\u201D]/g,'').replace(/\s+/g,' ').trim();
+  return gmPendingStripEdgeSymbols(x).replace(/['"\u2018\u2019\u201C\u201D]/g,'').replace(/\s+/g,' ').trim();
 }
 function gmPendingCanonicalText(raw){
   // Edge-symbol-free dictionary input, while preserving inner quotes and placeholders.
@@ -50,7 +71,7 @@ function gmPendingCanonicalText(raw){
     text=text.replace(/[\s★☆●○◆◇▶▷▸•·※▪▫»«'"“”‘’()[\]{}<>〈〉《》【】「」『』:：;；,.。．!?！？…—–-]+$/u,'').trim();
     if(text===before)break;
   }
-  return text;
+  return gmPendingStripEdgeSymbols(text);
 }
 function gmPendingV2Input(item){
   const raw=cleanUiText(item.source_text_ko||item.text||item.kr||item.value||'');
@@ -153,12 +174,11 @@ async function observe(db,row){
     }
     return {same:true};
   }
-  if(!code){
-    // Compare by the same normalized full-key rule as GM_MATCH_ENGINE,
-    // not by raw equality. One DB read per scan, not per candidate.
-    const rows=row._gmKnownDictionary||[];
-    if(rows.some(x=>gmPendingMatchKey(x.kr)===normalized))return {sameText:true};
-  }
+  // A new/unknown GM_CODE is not evidence of a new phrase: compare against all
+  // existing Korean originals by GM_MATCH_ENGINE key. Existing known codes were
+  // handled above so legitimate CHANGED proposals still work.
+  const rows=row._gmKnownDictionary||[];
+  if(rows.some(x=>gmPendingMatchKey(x.kr)===normalized))return {sameText:true};
   await pendingUpsert(db,{...row,gm_code:code||null,source_text_ko:text,change_type:'NEW'});
   return {new:true};
 }
@@ -278,11 +298,29 @@ router.post('/api/gm/builder/ui-dictionary-auto/scan-static',(_req,res)=>res.sta
 // Compatibility endpoint: use the same V2 canonical path instead of writing dropped source columns.
 // GM_UI_CAPTURE_PENDING_ONLY_V001: runtime capture MUST NOT mutate gm_ui_dictionary.
 // Both compatibility and V2 routes use the existing reviewable pending table.
+// V006: reject user content before PENDING SQL; UI fixed labels are not user records.
+function gmPendingSensitiveReason(row,raw){
+  const t=s(raw),loc=s(row.source_locator).toLowerCase(),page=s(row.page_name).toLowerCase();
+  if(/(?:gmtalkrow|gmfriendrow|gmcontactrow|gmdirectrow|conversation-message|chat-bubble|message-item|\broom\.gmtalk)/i.test(loc))return 'PERSONAL_RECORD_LOCATOR';
+  if(/(?:gmrecordtreetitle|gmguppydevlogbtn|gmguppybannerslot)/i.test(loc))return 'CATEGORY_DEV_AD';
+  if(/(?:\b01[016789][\s.-]?[0-9＊*xX•·]{3,4}[\s.-]?[0-9＊*xX•·]{3,4}\b|[가-힣][＊*][가-힣]|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,})/.test(t))return 'PERSONAL_IDENTIFIER';
+  if(/(?:Android\s*\d+|[a-z][a-z0-9_-]*\.[a-z0-9_.-]*(?:apk|speech)|googletts\.|\b[a-z]{2,3}\s*[↔<>\-]\s*[a-z]{2,3}\b)/i.test(t))return 'DEVICE_OR_LANGUAGE_STATE';
+  if(/(?:파일\s*보안등급\s*\d+|보안등급\s*\d+|^대화\s*설정\s*[·:])/i.test(t))return 'VARIABLE_UI_VALUE';
+  if(/(?:gmguppydevlogbtn|gmguppybannerslot)/i.test(loc))return 'DEV_OR_AD';
+  // Do not assume a button is fixed UI: contact names and conversations often live in buttons.
+  if(/(?:\d{2,}\s*만\s*원|신청\s*\d+\s*만)/.test(t))return 'TRANSACTION_CONTENT';
+  return '';
+}
+
 async function captureRuntimeToPending(db,items){
   await ensure(db);
   const existing=(await db.query('SELECT gm_code,kr FROM gm_ui_dictionary')).rows;
   const known=new Set(existing.map(x=>gmPendingMatchKey(x.kr)));
   const seen=new Set();
+  // An older PENDING row may still contain symbols that the current canonical
+  // text strips. Reuse its comparison key instead of inserting another row.
+  const pendingRows=(await db.query("SELECT gm_code,source_text_ko FROM gm_ui_dictionary_pending WHERE status='PENDING' AND change_type='NEW'")).rows;
+  const pendingKnown=new Set(pendingRows.map(x=>[s(x.gm_code).toUpperCase(),gmPendingMatchKey(x.source_text_ko)].join('|')));
   const stats={received:items.length,created:0,changed:0,reused:0,skipped:0,ambiguous_number:0,translation_queued:0};
   for(const item of items){
     const x=item||{};
@@ -298,14 +336,17 @@ async function captureRuntimeToPending(db,items){
     const row={gm_code:code,source_text_ko:raw,page_name:page,source_file:'RUNTIME:'+app,
       source_locator:locator,source_type:'RUNTIME',source_app:app,source_surface:surface,_gmKnownDictionary:existing};
     const clean=gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
-    if(!clean||!hasKo(clean)||!key||gmPendingDynamicReason(row,raw)){
+    if(!clean||!hasKo(clean)||!key||gmPendingSensitiveReason(row,raw)||gmPendingDynamicReason(row,raw)){
       stats.skipped++;continue;
     }
     const uniq=[app,code,key].join('|');
     if(seen.has(uniq)){stats.skipped++;continue;}
     seen.add(uniq);
     if(!code&&known.has(key)){stats.reused++;continue;}
+    // Existing unapproved candidate with the same GM_MATCH_ENGINE key is not new.
+    if(pendingKnown.has([code,key].join('|'))){stats.reused++;continue;}
     const result=await observe(db,row);
+    if(result.new)pendingKnown.add([code,key].join('|'));
     if(result.new)stats.created++;
     else if(result.changed)stats.changed++;
     else if(result.same||result.sameText)stats.reused++;

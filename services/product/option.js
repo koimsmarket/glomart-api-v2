@@ -1,6 +1,32 @@
 'use strict';
 // GM_PRODUCT_SPLIT_V003_OPTION
 const {cleanText,parseMoney,parseMaybeJsonAny,collectPayloadContainers,normalizeUrl,pickPrice,pickNormalPrice,pickDeliveryType,pickDeliveryFee,pickDeliveryText,pickBuyableQty,pickMinOrderQty,pickMaxOrderQty,compactError,toInt}=require('./shared');
+
+// The search-result href belongs to its PID+VID option; IID may change later.
+// Keep the original href bytes, including its actual search context.
+function coupangHrefParts(raw){
+  const value=cleanText(raw);
+  try{
+    const url=new URL(value);
+    const m=url.pathname.match(/^\/v[pm]\/products\/(\d+)\/?$/i);
+    if(url.protocol!=='https:' || !/^(?:www\.)?coupang\.com$/i.test(url.hostname) || !m) return null;
+    return {value,pid:m[1],iid:url.searchParams.get('itemId')||url.searchParams.get('itemid')||'',vid:url.searchParams.get('vendorItemId')||url.searchParams.get('vendoritemid')||''};
+  }catch(_e){return null;}
+}
+function verifiedSearchOptionHref(p,opt){
+  if(cleanText(opt.mall_code).toUpperCase()!=='CPKR') return '';
+  if(!/^(connector-tab|ldjson-search)$/i.test(cleanText(p && p.source))) return '';
+  const found=coupangHrefParts(p.url || p.detailHref || p.product_url || p.productUrl || '');
+  return found && found.pid===cleanText(opt.product_id) && found.vid===cleanText(opt.vendor_item_id) && found.iid===cleanText(opt.item_id) ? found.value : '';
+}
+function replaceStoredItemId(oldHref,pid,vid,newIid){
+  const found=coupangHrefParts(oldHref);
+  if(!found || found.pid!==cleanText(pid) || found.vid!==cleanText(vid) || !/^\d+$/.test(cleanText(newIid))) return cleanText(oldHref);
+  // Replace only the value, not the order/encoding of search context parameters.
+  if(!/(?:[?&])itemId=/i.test(found.value)) return found.value;
+  return found.value.replace(/([?&]itemId=)[^&#]*/i,(_all,key)=>key+newIid);
+}
+
 function pickOptPrice(row, names){
   row=row||{};
   for(const n of names){
@@ -292,7 +318,7 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
   if(!isDetailOptionPayload(p,parent)){result.reason='not_detail_payload';return result;}
   const rows=(Array.isArray(optionRows)?optionRows:[]).filter(o=>cleanText(o&&o.product_id)===cleanText(id&&id.productId));
   if(!rows.length){result.reason='no_option_rows';return result;}
-  const qr=await pool.query(`SELECT product_uid,product_id,item_id,vendor_item_id FROM gm_product WHERE product_uid=$1 AND mall_code='CPKR' LIMIT 1`,[cleanText(id.uid)]);
+  const qr=await pool.query(`SELECT product_uid,product_id,item_id,vendor_item_id,product_url FROM gm_product WHERE product_uid=$1 AND mall_code='CPKR' LIMIT 1`,[cleanText(id.uid)]);
   const current=qr.rows&&qr.rows[0];
   if(!current){result.reason='product_row_missing';return result;}
   const currentPi=[cleanText(current.product_id),cleanText(current.item_id),cleanText(current.vendor_item_id)].filter(Boolean).join('_');
@@ -313,6 +339,7 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
   if(!representative){result.reason='no_buyable_candidate';return result;}
   const repPi=optionPi(representative);
   const changed=repPi!==currentPi;
+  const representativeUrl=replaceStoredItemId(current.product_url,representative.product_id,representative.vendor_item_id,representative.item_id);
   await pool.query(`
     UPDATE gm_product SET
       product_id=$2,item_id=$3,vendor_item_id=$4,pi_ii_vi=$14,
@@ -326,12 +353,13 @@ async function syncCoupangRepresentative(pool,id,optionRows,p,parent){
       soldout_yn='N',sale_status='active',
       buyable_qty=COALESCE($12,buyable_qty),
       thumb_origin_url=COALESCE(NULLIF($13,''),thumb_origin_url),
+      product_url=COALESCE(NULLIF($15,''),product_url),
       updated_at=now()
     WHERE product_uid=$1 AND mall_code='CPKR' AND product_id=$2
   `,[cleanText(id.uid),cleanText(representative.product_id),cleanText(representative.item_id),cleanText(representative.vendor_item_id),
       representative.mall_sale_price,representative.final_supply_price,representative.normal_price,representative.discount_price,
       representative.delivery_fee,cleanText(representative.delivery_eta_text),cleanText(representative.delivery_type),
-      representative.buyable_qty,cleanText(representative.option_image_url),repPi]);
+      representative.buyable_qty,cleanText(representative.option_image_url),repPi,representativeUrl]);
   // The representative itself is a valid sale option: never delete its row.
   result.applied=true;result.changed=changed;result.representative_pi=repPi;result.removed_duplicate=0;
   result.reason=changed?'representative_replaced':'representative_kept';
@@ -392,11 +420,12 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         if(result.samples.length < 5) result.samples.push({ action:'skip', reason:'required option field missing', opt });
         continue;
       }
+      const incomingOptionUrl=verifiedSearchOptionHref(p,opt);
       // GM_CPKR_IID_SYNC_V001: search and detail collections both refresh IID for the SAME PID+VID.
       // The vendor item identity stays unchanged; only item_id and its composite pi_ii_vi move.
       if(mall==='CPKR' && opt.product_id && opt.vendor_item_id){
         const old=await pool.query(`
-          SELECT item_id,pi_ii_vi FROM gm_product_option
+          SELECT item_id,pi_ii_vi,product_url FROM gm_product_option
           WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
           ORDER BY updated_at DESC LIMIT 1`,[opt.product_id,opt.vendor_item_id]);
         if(old.rows.length){
@@ -404,12 +433,13 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
             // Update the old key in place, avoiding a duplicate for changed IID.
             // If the new key already exists, the authoritative option upsert below
             // handles it and full-list reconciliation can retire the old key.
+            const oldOptionUrl=replaceStoredItemId(old.rows[0].product_url,opt.product_id,opt.vendor_item_id,opt.item_id);
             await pool.query(`UPDATE gm_product_option
-              SET product_id=$1,item_id=$3,vendor_item_id=$2,pi_ii_vi=$4,updated_at=now()
+              SET product_id=$1,item_id=$3,vendor_item_id=$2,pi_ii_vi=$4,product_url=$5,updated_at=now()
               WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
                 AND pi_ii_vi<>$4
                 AND NOT EXISTS(SELECT 1 FROM gm_product_option WHERE mall_code='CPKR' AND pi_ii_vi=$4)`,
-              [opt.product_id,opt.vendor_item_id,opt.item_id,opt.pi_ii_vi]);
+              [opt.product_id,opt.vendor_item_id,opt.item_id,opt.pi_ii_vi,oldOptionUrl]);
             try{console.log('[GM_CPKR_IID_SYNC_OPTION]',{source:detailPayload?'detail':'search',pid:opt.product_id,vid:opt.vendor_item_id,old_iid:cleanText(old.rows[0].item_id),new_iid:opt.item_id});}catch(_log){}
           }
         }
@@ -424,7 +454,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       const r = await pool.query(`
         INSERT INTO gm_product_option (
           mall_code, product_id, item_id, vendor_item_id, pi_ii_vi,
-          option_name, option_display_name, option_image_url, option_sort_no,
+          option_name, option_display_name, option_image_url, product_url, option_sort_no,
           mall_sale_price, final_supply_price, normal_price, discount_price,
           delivery_fee, delivery_eta_text, delivery_type,
           soldout_yn, sale_status, active_yn,
@@ -433,7 +463,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         ) VALUES (
           $1,$2,$3,$4,$5,$6,
           $23,
-          $7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
+          $7,$25,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,0,now(),now(),now()
         )
         ON CONFLICT (mall_code, pi_ii_vi) DO UPDATE SET
           product_id=EXCLUDED.product_id,
@@ -455,6 +485,7 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
               THEN EXCLUDED.option_display_name
             ELSE gm_product_option.option_display_name END,
           option_image_url=COALESCE(NULLIF(EXCLUDED.option_image_url,''), gm_product_option.option_image_url),
+          product_url=COALESCE(NULLIF(EXCLUDED.product_url,''), gm_product_option.product_url),
           option_sort_no=EXCLUDED.option_sort_no,
           mall_sale_price=EXCLUDED.mall_sale_price,
           final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product_option.final_supply_price),
@@ -481,7 +512,8 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         opt.buyable_qty, opt.min_order_qty, opt.max_order_qty,
         detailPayload,
         detailPayload && !verifiedZero ? cleanText(opt.option_name) : null,
-        verifiedZero || (mall==='ALKR' && !detailPayload)
+        verifiedZero || (mall==='ALKR' && !detailPayload),
+        incomingOptionUrl
       ]);
       if(r.rows[0] && r.rows[0].inserted) result.inserted += 1;
       else result.updated += 1;
