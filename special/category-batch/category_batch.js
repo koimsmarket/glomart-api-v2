@@ -16,6 +16,9 @@ const CONTROL_CONFIG_KEY='special_category_batch_control';
 const APPLY_YM_CONFIG_KEY='special_category_apply_ym';
 const ORDER_CONFIG_KEY='special_category_order';
 const LEAF_IDS_CONFIG_KEY='special_category_leaf_ids';
+// V006: support existing mobile server-concurrency controls without changing search/UPSERT.
+const CONCURRENCY_CONFIG_KEY='special_category_batch_concurrency';
+const DEFAULT_CONCURRENCY=10;
 const DEFAULT_APPLY_YM='2026-08';
 const DEFAULT_ORDER=[
  {no:1,prefix:'FD',name:'식품'},
@@ -109,6 +112,29 @@ async function loadSpecialPlan(p){
  let leafIds=[];try{const ids=JSON.parse(m[LEAF_IDS_CONFIG_KEY]||'[]');if(Array.isArray(ids))leafIds=[...new Set(ids.map(Number).filter(n=>Number.isSafeInteger(n)&&n>0))];}catch(_e){}
   return {apply_ym,cutoff:applyYmCutoffIso(apply_ym),order,leaf_count:leafIds.length,leaf_ids:leafIds};
 }
+async function getConcurrency(p){
+ const q=await p.query('SELECT config_value FROM gm_runtime_config WHERE config_key=$1 LIMIT 1',[CONCURRENCY_CONFIG_KEY]);
+ const n=Number(q.rows[0]&&q.rows[0].config_value);
+ return Number.isInteger(n)&&n>=1&&n<=32?n:DEFAULT_CONCURRENCY;
+}
+router.get('/api/special/category-batch/concurrency',async(req,res)=>{
+ const m=auth(req,res);if(!m)return;
+ try{const concurrency=await getConcurrency(pool(req));return res.json({ok:true,concurrency});}
+ catch(e){log('CONCURRENCY_READ_ERROR',{member:m,error:S(e&&e.message||e)});return res.status(500).json({ok:false,error:'CONCURRENCY_READ_FAILED'});}
+});
+router.post('/api/special/category-batch/concurrency',async(req,res)=>{
+ const m=auth(req,res);if(!m)return;
+ const concurrency=Number(req.body&&req.body.concurrency);
+ if(!Number.isInteger(concurrency)||concurrency<1||concurrency>32)return res.status(400).json({ok:false,error:'CONCURRENCY_RANGE_1_32'});
+ try{
+  const p=pool(req);
+  await p.query(`INSERT INTO gm_runtime_config(config_key,config_value,value_type,category,mode,enabled,description,updated_at)
+    VALUES($1,$2,'NUMBER','SPECIAL','FIXED',TRUE,$3,now())
+    ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,value_type='NUMBER',category='SPECIAL',mode='FIXED',enabled=TRUE,description=EXCLUDED.description,updated_at=now()`,
+    [CONCURRENCY_CONFIG_KEY,String(concurrency),'SPECIAL 최대 동시 카테고리 lease 수 (1~32)']);
+  log('CONCURRENCY_SAVED',{member:m,concurrency});return res.json({ok:true,concurrency});
+ }catch(e){log('CONCURRENCY_SAVE_ERROR',{member:m,error:S(e&&e.message||e)});return res.status(500).json({ok:false,error:'CONCURRENCY_SAVE_FAILED'});}
+});
 function pruneLeases(){
  const now=Date.now();
  for(const [d,l] of leases){if(!l||Number(l.expires_at||0)<=now){leases.delete(d);log('CLAIM_EXPIRE',{device_id:d,category_id:l&&l.category_id});}}
@@ -154,7 +180,7 @@ async function persistControl(p){
 }
 
 router.get('/api/special/category-batch/control',async(req,res)=>{const m=auth(req,res);if(!m)return;try{const p=pool(req);await ensureControl(p);const plan=await loadSpecialPlan(p);res.json({ok:true,version:'GM_CATEGORY_BATCH_SPECIAL_V022_LAST_SEARCH_TEXT_CAST',control,plan});}catch(e){log('CONTROL_READ_ERROR',{member:m,error:S(e&&e.message||e)});res.status(500).json({ok:false,error:'CONTROL_READ_FAILED'});}});
-router.post('/api/special/category-batch/command',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req);try{await ensureControl(p);const plan=await loadSpecialPlan(p);const cmd=S(req.body&&req.body.command);if(cmd==='#카테고리 검색#')control.mode='RUN';else if(cmd==='#카테고리 일시정지#')control.mode='PAUSE';else if(cmd==='#카테고리 중지#')control.mode='STOPPED';else return res.status(400).json({ok:false,error:'UNKNOWN_COMMAND'});if(cmd==='#카테고리 검색#')control.batch_date=batchDate(req.body&&req.body.batch_date||control.batch_date);control.updated_at=new Date().toISOString();control.updated_by=m;control.command=cmd;await persistControl(p);log('COMMAND',{member:m,mode:control.mode,batch_date:control.batch_date});res.json({ok:true,control,plan});}catch(e){log('COMMAND_ERROR',{member:m,error:S(e&&e.message||e)});res.status(500).json({ok:false,error:'CONTROL_SAVE_FAILED'});}});
+router.post('/api/special/category-batch/command',async(req,res)=>{const m=auth(req,res);if(!m)return;const p=pool(req);try{await ensureControl(p);const plan=await loadSpecialPlan(p);const cmd=S(req.body&&req.body.command);if(cmd==='#카테고리 검색#'&&!plan.leaf_count)return res.status(409).json({ok:false,error:'NO_LEAF_SELECTION',message:'빌더에서 SPECIAL 최말단 카테고리를 선택하고 저장하세요.'});if(cmd==='#카테고리 검색#')control.mode='RUN';else if(cmd==='#카테고리 일시정지#')control.mode='PAUSE';else if(cmd==='#카테고리 중지#')control.mode='STOPPED';else return res.status(400).json({ok:false,error:'UNKNOWN_COMMAND'});if(cmd==='#카테고리 검색#')control.batch_date=batchDate(req.body&&req.body.batch_date||control.batch_date);control.updated_at=new Date().toISOString();control.updated_by=m;control.command=cmd;await persistControl(p);log('COMMAND',{member:m,mode:control.mode,batch_date:control.batch_date});res.json({ok:true,control,plan});}catch(e){log('COMMAND_ERROR',{member:m,error:S(e&&e.message||e)});res.status(500).json({ok:false,error:'CONTROL_SAVE_FAILED'});}});
 
 async function release(deviceId,complete,p){
  const l=leases.get(deviceId);if(!l)return null;
@@ -186,7 +212,9 @@ router.post('/api/special/category-batch/next',async(req,res)=>{
    return res.json({ok:true,state:'LEASED',batch_date:bd,category:categoryPayload(r),plan});
   }
   const prefixes=plan.order.map(x=>x.prefix);
-  if(!prefixes.length||!plan.leaf_ids.length)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
+  if(!prefixes.length||!plan.leaf_ids.length)return res.json({ok:true,state:'EMPTY',reason:!plan.leaf_ids.length?'NO_LEAF_SELECTION':'NO_TOP_CATEGORY_ORDER',category:null,batch_date:bd,plan});
+   const concurrency=await getConcurrency(p);
+   if(claimedIds(deviceId).size>=concurrency)return res.json({ok:true,state:'WAIT',reason:'CONCURRENCY_LIMIT',concurrency,category:null,batch_date:bd,plan});
   const caseSql=plan.order.map((x,i)=>`WHEN gm_code LIKE $${i+3} THEN ${Number(x.no)}`).join(' ');
   const params=[plan.cutoff,prefixes].concat(prefixes.map(x=>x+'-%'));params.push(plan.leaf_ids);
   const leafParam='$'+params.length;
@@ -205,7 +233,7 @@ router.post('/api/special/category-batch/next',async(req,res)=>{
   const claimedNow=claimedIds(deviceId);
   let chosen=null;
   for(const row of q.rows){if(!claimedNow.has(Number(row.category_id))){chosen=row;break;}}
-  if(!chosen)return res.json({ok:true,state:'EMPTY',category:null,batch_date:bd,plan});
+  if(!chosen)return res.json({ok:true,state:q.rows.length>0?'WAIT':'EMPTY',reason:q.rows.length>0?'ALL_CANDIDATES_LEASED':'NO_ELIGIBLE_CATEGORY',category:null,batch_date:bd,plan});
   const lease={category_id:Number(chosen.category_id),member_id:m,leased_at:Date.now(),expires_at:Date.now()+CLAIM_TTL_MS,apply_ym:plan.apply_ym,cutoff:plan.cutoff};
   leases.set(deviceId,lease);
   log('CLAIM',{device_id:deviceId,category_id:lease.category_id,gm_code:chosen.gm_code,name_ko:chosen.name_ko,last_search_at:chosen.last_search_at||null,updated_at:chosen.updated_at||null,apply_ym:plan.apply_ym,cutoff:plan.cutoff,ttl_ms:CLAIM_TTL_MS});
