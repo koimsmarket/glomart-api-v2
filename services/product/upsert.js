@@ -67,9 +67,22 @@ async function upsertProduct(pool, raw, parent={}){
     return { ok:false, skipped:true, reason:'required field missing: ' + missing.join(','), missing, uid:id.uid||'', pi_ii_vi:id.pi||'', mall_code:id.mallCode||'', product_id:id.productId||'', source_url:pickProductUrl(p), title_sample:cleanText(p.title||p.name||p.productName||p.product_name).slice(0,120) };
   }
 
-  // product_url 저장 중단: 필요 시 아래 줄을 부활한다.
-  // const productUrl = normalizeUrl(buildProductUrlFromId(id) || pickProductUrl(p));
-  const productUrl = '';
+  // GM_SEARCH_ORIGINAL_URL_V002: store the actual search-result href without
+  // synthesizing a URL or removing its search context. Detail updates keep it.
+  let productUrl = '';
+  if(id.mallCode === 'CPKR' && /^(connector-tab|ldjson-search)$/i.test(cleanText(p.source))){
+    const originalHref = cleanText(p.url || p.detailHref || p.product_url || p.productUrl || '');
+    try{
+      const u = new URL(originalHref);
+      const m = u.pathname.match(/^\/v[pm]\/products\/(\d+)\/?$/i);
+      const iid = u.searchParams.get('itemId') || u.searchParams.get('itemid') || '';
+      const vid = u.searchParams.get('vendorItemId') || u.searchParams.get('vendoritemid') || '';
+      if(u.protocol === 'https:' && /^(?:www\.)?coupang\.com$/i.test(u.hostname) && m &&
+         m[1] === id.productId && iid === id.itemId && vid === id.vendorItemId){
+        productUrl = originalHref;
+      }
+    }catch(_invalidSearchHref){}
+  }
   const thumbUrl = pickThumbUrl(p);
   const sourceMall = sourceMallFrom(p, p.source_uid || p.sourceUid, productUrl, id.mallCode);
   const sourceMallStored = cleanText(sourceMall).toUpperCase() === cleanText(id.mallCode).toUpperCase() ? '' : sourceMall;
@@ -248,8 +261,8 @@ async function upsertProduct(pool, raw, parent={}){
       supplier_phone=COALESCE(NULLIF(EXCLUDED.supplier_phone,''), gm_product.supplier_phone),
       supplier_email=COALESCE(NULLIF(EXCLUDED.supplier_email,''), gm_product.supplier_email),
       supplier_address=COALESCE(NULLIF(EXCLUDED.supplier_address,''), gm_product.supplier_address),
-      -- product_url 저장 중단: 필요 시 위 insert 값과 함께 부활
-      product_url=gm_product.product_url,
+      -- Replace with the latest valid search href, preserve on all other updates.
+      product_url=COALESCE(NULLIF(EXCLUDED.product_url,''), gm_product.product_url),
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
       soldout_yn=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.soldout_yn ELSE EXCLUDED.soldout_yn END,
       sale_status=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.sale_status ELSE EXCLUDED.sale_status END,
