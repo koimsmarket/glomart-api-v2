@@ -318,11 +318,11 @@ function gmUiCsvParse(src){
  if(new Set(keys).size!==keys.length)throw Error('CSV 중복 컬럼');
  return lines.map((r,i)=>{if(r.length!==keys.length)throw Error('CSV 컬럼 수 불일치: '+(i+2)+'행');return Object.fromEntries(keys.map((k,j)=>[k,r[j]]));});
 }
-// V012: report ALL CSV rows (including held entries) with original Korean and reason.
+// V013: report ALL CSV rows (including held entries) with original Korean and reason.
 function gmUiPendingReconcileReport(data,stage){
  const columns=['row','pending_id','source_text_ko','canonical','result','reason','new_pending_id'];
  const csv='\ufeff'+columns.join(',')+'\r\n'+(data.report||[]).map(r=>columns.map(k=>'"'+String(r[k]??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
- gmPendingFileDownload(csv,'text/csv;charset=utf-8','gm_ui_pending_'+stage+'_V012.csv');
+ gmPendingFileDownload(csv,'text/csv;charset=utf-8','gm_ui_pending_'+stage+'_V013.csv');
 }
 // GM_UI_PENDING_FULL_V012: all rows, including approved history, are counted and reconciled.
 async function gmUiUploadPendingCsv(btn){

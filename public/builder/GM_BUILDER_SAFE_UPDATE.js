@@ -1,7 +1,15 @@
+// V013: recognise a PENDING CSV by its actual headers even when the Builder
+// select box has retained 'category' (or any other table). Never send a PENDING
+// file to the generic safe-update endpoint.
+function gmSafeIsPendingCsv(text){
+ const first=String(text||'').replace(/^\uFEFF/,'').split(/\r?\n/,1)[0];
+ const headers=first.split(',').map(x=>x.trim().replace(/^"|"$/g,''));
+ return ['pending_id','source_text_ko','change_type','status'].every(x=>headers.includes(x));
+}
 // GM_UI_PENDING_FULL_V011: the pending table is not supported by generic safe-update.
 // Reconcile all rows with the existing dedicated admin endpoint instead.
-async function gmPendingSafeReconcile(file,apply){
- const text=await readCsvText(file);
+async function gmPendingSafeReconcile(file,apply,readText){
+ const text=readText===undefined?await readCsvText(file):readText;
  if(!window.XLSX)throw Error('CSV/Excel 파서가 없습니다');
  const wb=XLSX.read(text,{type:'string',raw:true});
  const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:'',raw:false});
@@ -21,11 +29,19 @@ async function gmPendingSafeReconcile(file,apply){
   SKIP:(j.verified_approved||0)+(j.verified_pending||0)+(j.matched_existing||0)+(j.dictionary_reused||0),SKIP_CELL:0,STOPPED:0,OTHER:0};
  return {table:'gm_ui_dictionary_pending',mode:apply?'APPLY':'DRY_RUN',processed:j.accounted,
   updated:0,skipped:counts.SKIP,invalid:counts.FAIL,result_counts:counts,report_file:a.download,
-  status:j.held?'PARTIAL_OR_FAILED':(apply?'SERVER_APPLY_REPORTED':'VALIDATION_ONLY'),details:j};
+  status:j.held?'PARTIAL_OR_FAILED':(apply?'SERVER_APPLY_REPORTED':'VALIDATION_ONLY'),details:j,
+  reconciliation:'전체 '+j.received+'건 · 승인 이력 '+j.verified_approved+' · 기존 PENDING '+(j.verified_pending+j.matched_existing)+' · 신규 '+(apply?j.inserted:j.would_insert)+' · 보류 '+j.held};
 }
 async function uploadSafe(tableKey,file,apply,leafOnly=false){
-  if(tableKey==='gm_ui_dictionary_pending'||tableKey==='ui_dictionary_pending')return gmPendingSafeReconcile(file,apply);
   const text=await readCsvText(file);
+  const isPending=gmSafeIsPendingCsv(text);
+  if(isPending){
+    if(leafOnly)throw Error('PENDING CSV는 카테고리 leaf_yn 업데이트에 사용할 수 없습니다.');
+    // Dedicated endpoint only. A stale 'category' selection must never mutate gm_category.
+    return gmPendingSafeReconcile(file,apply,text);
+  }
+  if(tableKey==='gm_ui_dictionary_pending'||tableKey==='ui_dictionary_pending')
+    throw Error('선택 테이블은 PENDING이지만 CSV가 PENDING 형식이 아닙니다. 업로드 중단.');
   if((tableKey==='member' || tableKey==='gm_member' || !tableKey) && isCafe24MemberCsvText(text)){
     await uploadCafe24MemberText(text,file.name,apply);
     return null;
@@ -65,7 +81,7 @@ function safeUpdateResult(summary,filename){
   if(!summary)state='UNVERIFIED_REPORT';
   const heading=state==='PARTIAL_OR_FAILED'?'일부 실패 / 처리 내역 확인 필요':state==='UNVERIFIED_REPORT'?'서버 응답 확인 · 처리 행 판정 불가':state==='VALIDATION_ONLY'?'검증 완료 (DB 미변경)':'서버 업데이트 처리 응답 수신';
   const details='파일: '+filename+' | '+mode+' | 처리 '+(summary&&summary.processed||0)+'행 | 수정 '+(c.UPDATED||0)+' | 신규 '+(c.INSERTED||0)+' | 실패 '+(c.FAIL||0)+' | 중단 '+(c.STOPPED||0)+' | 건너뜀 '+(c.SKIP||0)+' | 유효 수정 '+(c.VALID_UPDATE||0)+' | 유효 신규 '+(c.VALID_INSERT||0);
-  el.textContent=heading+'\n'+details+'\n보고서: '+(summary&&summary.report_file||'-')+' (다운로드 요청)\nDB 재조회 검증: 미실시';
+  el.textContent=heading+'\n'+details+(summary&&summary.reconciliation?'\n'+summary.reconciliation:'')+'\n보고서: '+(summary&&summary.report_file||'-')+' (다운로드 요청)\nDB 재조회 검증: 미실시';
 }
 function safeUpdateError(err){
  const el=document.getElementById('safeUpdateResult');if(!el)return;
@@ -82,7 +98,7 @@ async function send(apply,button){
 async function sendAll(apply,button){
   const files=[...document.getElementById('multiFiles').files]; if(!files.length){alert('파일들을 선택하세요.');return;}
   const timed=startButtonTimer(button,apply?'전체 업데이트 중':'전체 검증 중'); const result=[];
-  try{ for(const f of files){ const text=await readCsvText(f); if(isCafe24MemberCsvText(text)){ await uploadCafe24MemberText(text,f.name,apply); result.push({file:f.name,table:'cafe24_member',result:'DONE'}); continue; } const key=inferTableFromFileName(f.name); if(!key){result.push({file:f.name,result:'SKIP',reason:'테이블명 추정 실패'});continue;} await uploadSafe(key,f,apply); result.push({file:f.name,table:key,result:'SERVER_RESPONDED'}); } log(result); }catch(e){safeUpdateError(e);log(String(e&&e.message||e));}finally{stopButtonTimer(timed);}
+  try{ for(const f of files){ const text=await readCsvText(f); if(isCafe24MemberCsvText(text)){ await uploadCafe24MemberText(text,f.name,apply); result.push({file:f.name,table:'cafe24_member',result:'DONE'}); continue; } const isPending=gmSafeIsPendingCsv(text);const key=isPending?'gm_ui_dictionary_pending':inferTableFromFileName(f.name); if(!key){result.push({file:f.name,result:'SKIP',reason:'테이블명 추정 실패'});continue;} await uploadSafe(key,f,apply); result.push({file:f.name,table:key,result:'SERVER_RESPONDED'}); } log(result); }catch(e){safeUpdateError(e);log(String(e&&e.message||e));}finally{stopButtonTimer(timed);}
 }
 function dryRun(button){return send(false,button)} function applyUpdate(button){return send(true,button)} function dryRunAll(button){return sendAll(false,button)} function applyAll(button){return sendAll(true,button)}
 fillSelect('upTable').then(()=>{try{const key=new URLSearchParams(location.search||'').get('table');const el=document.getElementById('upTable');if(key&&el&&Array.from(el.options).some(o=>o.value===key))el.value=key;}catch(_){}});

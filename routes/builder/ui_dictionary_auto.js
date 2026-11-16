@@ -443,13 +443,19 @@ router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile',
    const totals={received:items.length,verified_approved:0,verified_pending:0,matched_existing:0,inserted:0,would_insert:0,dictionary_reused:0,invalid:0,held:0};
    for(let i=0;i<items.length;i++){
     const item=items[i],id=s(item.pending_id),status=s(item.status).toUpperCase(),kind=s(item.change_type).toUpperCase();
-    const raw=cleanUiText(item.source_text_ko),canonical=gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
+    // Historical approved text may contain literal '< >' as password symbols;
+    // cleanUiText treats that pair as an HTML tag, so never apply it to history.
+    const raw=status==='APPROVED'?s(item.source_text_ko):cleanUiText(item.source_text_ko);
+    const canonical=status==='APPROVED'?raw:gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
     const code=s(item.gm_code).toUpperCase();
     const reportRow={row:i+2,pending_id:id,source_text_ko:raw,canonical,result:'',reason:''};
     const fail=reason=>{reportRow.result='HELD';reportRow.reason=reason;totals.held++;};
     if(!['PENDING','APPROVED'].includes(status))fail('UNSUPPORTED_STATUS');
     else if(!['NEW','CHANGED','REMOVED'].includes(kind))fail('INVALID_CHANGE_TYPE');
-    else if(!key||!hasKo(raw))fail('INVALID_KOREAN_TEXT');
+    // Approved rows are historical records, not new Korean UI candidates.
+    // Q&A, tip and symbol-only password guidance must be checked by ID/status
+    // before the Korean-only rule is applied to truly new PENDING rows.
+    else if(status==='PENDING'&&!key)fail('EMPTY_MATCH_KEY');
     else if(code&&!/^GM_\d{4,}$/.test(code))fail('INVALID_GM_CODE');
     else if(id&&!/^\d+$/.test(id))fail('INVALID_PENDING_ID');
     else if(id&&csvIds.has(id))fail('DUPLICATED_CSV_PENDING_ID');
@@ -460,10 +466,11 @@ router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile',
      // The source pending_id is the authoritative history identity.
      if(matchById){
       if(s(matchById.status).toUpperCase()!==status)fail('EXISTING_STATUS_CONFLICT');
-      else if(s(matchById.gm_code).toUpperCase()!==code || s(matchById.change_type).toUpperCase()!==kind || gmPendingMatchKey(matchById.source_text_ko)!==key)
+      else if(s(matchById.gm_code).toUpperCase()!==code || s(matchById.change_type).toUpperCase()!==kind || (status==='APPROVED'?s(matchById.source_text_ko)!==raw:(key?gmPendingMatchKey(matchById.source_text_ko)!==key:s(matchById.source_text_ko)!==raw)))
        fail('EXISTING_ID_CONTENT_CONFLICT');
       else {reportRow.result='VERIFIED_'+status;totals[status==='APPROVED'?'verified_approved':'verified_pending']++;}
-     } else if(status==='APPROVED'){
+     } else if(status==='PENDING'&&!hasKo(raw))fail('INVALID_KOREAN_TEXT');
+     else if(status==='APPROVED'){
       // An imported CSV is not authority to create an approved historical record.
       fail('APPROVED_HISTORY_MISSING_IN_DB');
      } else if(!['NEW','CHANGED'].includes(kind))fail('UNSUPPORTED_PENDING_CHANGE');
@@ -501,7 +508,7 @@ router.post('/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile',
    }
    if(apply){await client.query('COMMIT');transaction=false;}
    else{await client.query('ROLLBACK');transaction=false;}
-   console.info('[GM_UI_PENDING_RECONCILE_V012]',JSON.stringify({received:items.length,applied:apply,inserted:totals.inserted,held:totals.held}));
+   console.info('[GM_UI_PENDING_RECONCILE_V013]',JSON.stringify({received:items.length,applied:apply,inserted:totals.inserted,held:totals.held}));
    const accounted=totals.verified_approved+totals.verified_pending+totals.matched_existing+
        totals.dictionary_reused+totals.held+(apply?totals.inserted:totals.would_insert);
    return res.set('Cache-Control','no-store').json({ok:true,mode:apply?'APPLY':'DRY_RUN',
