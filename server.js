@@ -1600,6 +1600,8 @@ app.use(require('./routes/order_history'));
 app.use(require('./routes/cs'));
 app.use(require('./routes/dashboard'));
 app.use(require('./routes/builder'));
+// GM_CATEGORY_BATCH_BUILDER_V005_ROUTE: mount existing SPECIAL search collection API on main server.
+app.use(require('./special/category-batch/category_batch'));
 app.use(require('./routes/network'));
 app.use(require('./routes/ui_dictionary_admin'));
 app.use(require('./routes/smartfit'));
