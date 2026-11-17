@@ -3,7 +3,7 @@
 const {cleanText,parseMoney,parseMaybeJsonAny,collectPayloadContainers,normalizeUrl,pickPrice,pickNormalPrice,pickDeliveryType,pickDeliveryFee,pickDeliveryText,pickBuyableQty,pickMinOrderQty,pickMaxOrderQty,compactError,toInt}=require('./shared');
 const {recordCoupangIids}=require('./iid_history');
 
-// The search-result href belongs to its PID+VID option; IID may change later.
+// The search-result href belongs to its exact PID+IID+VID option.
 // Keep the original href bytes, including its actual search context.
 function coupangHrefParts(raw){
   const value=cleanText(raw);
@@ -389,6 +389,23 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
     && optionJson.rows.length===1
     && Array.isArray(optionJson.rows[0])
     && cleanText(optionJson.rows[0][12])==='search-row';
+  // The actual search-result href identifies the option shown on the card.
+  // It can differ from gm_product's existing representative option.
+  // Correct ONLY a synthetic search-row identity; never rewrite a verified
+  // detail option or change the product's representative because of the href.
+  const searchHref=mall==='CPKR' && !detailPayload &&
+    /^(connector-tab|ldjson-search)$/i.test(cleanText(p&&p.source))
+    ? coupangHrefParts(p.url || p.detailHref || p.product_url || p.productUrl || '') : null;
+  if(searchHref && searchHref.pid===cleanText(id.productId) && searchHref.iid && searchHref.vid &&
+     !optionRows.some(o=>cleanText(o.product_id)===searchHref.pid &&
+       cleanText(o.item_id)===searchHref.iid && cleanText(o.vendor_item_id)===searchHref.vid) &&
+     syntheticOnly && optionRows.length===1){
+    const row=optionRows[0];
+    row.product_id=searchHref.pid;
+    row.item_id=searchHref.iid;
+    row.vendor_item_id=searchHref.vid;
+    row.pi_ii_vi=[searchHref.pid,searchHref.iid,searchHref.vid].join('_');
+  }
   const complete=detailPayload && p.optionCollectionComplete===true
     && p.optionAuthoritative===true && hasVerifiedTotal;
   const verifiedZero=complete && Number(expected)===0 && syntheticOnly;
@@ -542,6 +559,20 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
       if(e && e.code === '42P01') break;
     }
   }
+  // The linked option might already exist in DB even if the search payload
+  // carries only a different option list. Attach the original href to that
+  // exact row without changing any option ID or creating an invented option.
+  if(searchHref && searchHref.pid===cleanText(id.productId) && searchHref.iid && searchHref.vid &&
+     !optionRows.some(o=>cleanText(o.product_id)===searchHref.pid &&
+       cleanText(o.item_id)===searchHref.iid && cleanText(o.vendor_item_id)===searchHref.vid)){
+    try{
+      const attached=await pool.query(`UPDATE gm_product_option
+        SET product_url=$4,updated_at=now()
+        WHERE mall_code='CPKR' AND product_id=$1 AND item_id=$2 AND vendor_item_id=$3`,
+        [searchHref.pid,searchHref.iid,searchHref.vid,searchHref.value]);
+      if(!attached.rowCount)console.warn('[GM_CPKR_SEARCH_HREF_OPTION_MISSING]',{pid:searchHref.pid,iid:searchHref.iid,vid:searchHref.vid});
+    }catch(e){result.errors.push(compactError(e));}
+  }
   if(mall==='CPKR' && !detailPayload && result.errors.length===0 && result.skipped===0){
     try{
       result.search_display=await refreshCoupangSearchDisplays(pool,cleanText(id.productId),priorSearchOptions);
@@ -572,4 +603,35 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
 }
 
 
-module.exports={parseMaybeJsonObject,normalizeOptionJson,makeEmptyOptionJson,makeProductOptionLinkJson,normalizeSoldoutYn,optionRowsFromOptionJson,syncCoupangRepresentative,upsertProductOptions};
+// Repair a previously misassigned representative URL, but only when the
+// referenced option row already exists. An unrecognized href is preserved
+// until its actual option is collected; never fabricate an option to fit it.
+async function reconcileCoupangProductUrl(pool,productUid){
+  const q=await pool.query(`SELECT product_uid,product_id,item_id,vendor_item_id,product_url
+    FROM gm_product WHERE product_uid=$1 AND mall_code='CPKR' LIMIT 1`,[cleanText(productUid)]);
+  const rep=q.rows&&q.rows[0];
+  if(!rep)return {ok:true,action:'missing_product'};
+  const stored=coupangHrefParts(rep.product_url);
+  if(!stored || (stored.pid===cleanText(rep.product_id) &&
+    stored.iid===cleanText(rep.item_id) && stored.vid===cleanText(rep.vendor_item_id)))
+    return {ok:true,action:'already_aligned'};
+  if(stored.pid!==cleanText(rep.product_id))return {ok:false,action:'different_pid_preserved'};
+  // Transfer the misassigned href only to the matching observed option. Do
+  // not overwrite another separately collected URL for that option.
+  const moved=await pool.query(`UPDATE gm_product_option
+    SET product_url=CASE WHEN COALESCE(product_url,'')='' THEN $4 ELSE product_url END,
+        updated_at=now()
+    WHERE mall_code='CPKR' AND product_id=$1 AND item_id=$2 AND vendor_item_id=$3`,
+    [stored.pid,stored.iid,stored.vid,stored.value]);
+  if(!moved.rowCount)return {ok:false,action:'option_not_found_preserved'};
+  const target=await pool.query(`SELECT product_url FROM gm_product_option
+    WHERE mall_code='CPKR' AND product_id=$1 AND item_id=$2 AND vendor_item_id=$3 LIMIT 1`,
+    [cleanText(rep.product_id),cleanText(rep.item_id),cleanText(rep.vendor_item_id)]);
+  const correct=validatedStoredHref(target.rows[0]&&target.rows[0].product_url,
+    rep.product_id,rep.vendor_item_id,rep.item_id);
+  await pool.query(`UPDATE gm_product SET product_url=$2,updated_at=now()
+    WHERE product_uid=$1 AND mall_code='CPKR' AND product_url=$3`,
+    [cleanText(productUid),correct,stored.value]);
+  return {ok:true,action:'moved_to_option',representative_url_restored:!!correct};
+}
+module.exports={parseMaybeJsonObject,normalizeOptionJson,makeEmptyOptionJson,makeProductOptionLinkJson,normalizeSoldoutYn,optionRowsFromOptionJson,syncCoupangRepresentative,upsertProductOptions,reconcileCoupangProductUrl};

@@ -6,7 +6,7 @@ const {pickCpSelectedCode,pickCpFixCode,parseCategoryTreeFromPayload,findCpSelec
 const shared=require('./shared');
 const keyword=require('./keyword');
 const {normalizeMallCategoryJson,pickMallCategoryLeaf}=require('./search_category');
-const {normalizeOptionJson,makeProductOptionLinkJson,upsertProductOptions}=require('./option');
+const {normalizeOptionJson,makeProductOptionLinkJson,upsertProductOptions,reconcileCoupangProductUrl}=require('./option');
 const {recordCoupangIids}=require('./iid_history');
 const {normalizeThumbJson,normalizeDetailJson,detailSignalStats,applyDetailPatch}=require('./detail');
 const {cleanText,toInt,resolveUnitPriceSource,normalizeProductPayload,pickPrice,pickNormalPrice,pickFinalSupplyPrice,pickDiscountPrice,pickDeliveryFee,pickDeliveryText,pickDeliveryType,pickReviewCount,pickMallSalesCount,pickRatingScore,cleanDupMallProductName,pickProductUrl,buildProductUrlFromId,pickThumbUrl,pickSupplierName,pickSupplierId,isStandardCoupangSupplier,pickAny,sourceMallFrom,sourceUidFrom,safeJsonString,compactError,pickTaxType,ensureProductLightJsonColumns,pickBuyableQty,pickMinOrderQty,pickMaxOrderQty,pickReturnShippingFee,normalizeUrl}=shared;
@@ -262,8 +262,16 @@ async function upsertProduct(pool, raw, parent={}){
       supplier_phone=COALESCE(NULLIF(EXCLUDED.supplier_phone,''), gm_product.supplier_phone),
       supplier_email=COALESCE(NULLIF(EXCLUDED.supplier_email,''), gm_product.supplier_email),
       supplier_address=COALESCE(NULLIF(EXCLUDED.supplier_address,''), gm_product.supplier_address),
-      -- Replace with the latest valid search href, preserve on all other updates.
-      product_url=COALESCE(NULLIF(EXCLUDED.product_url,''), gm_product.product_url),
+      -- A search href belongs to its exact option, not merely to this PID.
+      -- Only replace the representative href if its final PID+VID+IID is the
+      -- search option's identity (including a permitted same-VID IID refresh).
+      product_url=CASE
+        WHEN NULLIF(EXCLUDED.product_url,'') IS NOT NULL
+         AND gm_product.product_id=EXCLUDED.product_id
+         AND gm_product.vendor_item_id=EXCLUDED.vendor_item_id
+         AND (gm_product.item_id=EXCLUDED.item_id OR (${refreshRepresentativeIid}))
+          THEN EXCLUDED.product_url
+        ELSE gm_product.product_url END,
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
       soldout_yn=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.soldout_yn ELSE EXCLUDED.soldout_yn END,
       sale_status=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.sale_status ELSE EXCLUDED.sale_status END,
@@ -331,6 +339,12 @@ async function upsertProduct(pool, raw, parent={}){
       {product_id:id.productId,vendor_item_id:id.vendorItemId,item_id:id.itemId}
     ],detailIdentityTrusted?'detail_product':'search_product');
   }
+  // Move an older misassigned href BEFORE a valid representative search URL
+  // can replace it. Only the exact existing option may receive that href.
+  if(id.mallCode==='CPKR' && productUrl){
+    try{await reconcileCoupangProductUrl(pool,id.uid);}
+    catch(e){console.warn('[GM_CPKR_PRODUCT_URL_OWNER_WARN]',{product_uid:id.uid,stage:'before_upsert',error:compactError(e)});}
+  }
   let r;
   try{
     r = await pool.query(sql, vals);
@@ -360,6 +374,13 @@ async function upsertProduct(pool, raw, parent={}){
   }catch(e){
     option_result = { received:optionCount, inserted:0, updated:0, skipped:optionCount, nonactive:0, balance_ok:false, error:compactError(e) };
     console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
+  }
+  // Keep gm_product.product_url tied to the representative option. If an
+  // older search stored another option's href here, move it to its exact
+  // PID+IID+VID option when that row exists; never rewrite any href bytes.
+  if(id.mallCode==='CPKR' && productUrl && option_result.errors.length===0){
+    try{await reconcileCoupangProductUrl(pool,id.uid);}
+    catch(e){console.warn('[GM_CPKR_PRODUCT_URL_OWNER_WARN]',{product_uid:id.uid,error:compactError(e)});}
   }
 
   // Commit the LAST successfully completed detail collection, including 0.
