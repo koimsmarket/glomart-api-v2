@@ -25,6 +25,17 @@ function U(v){
   if(s.indexOf('//')===0) s='https:'+s;
   return s;
 }
+// Do not normalize a stored URL. Parse a copy only to verify its exact option identity.
+function exactCoupangSourceUrl(value,pid,iid,vid){
+  if(typeof value!=='string'||!value) return '';
+  try{
+    const u=new URL(value);
+    const m=u.pathname.match(/^\/v[pm]\/products\/(\d{5,})\/?$/i);
+    if(!m||!/^https?:$/.test(u.protocol)||!/(^|\.)coupang\.com$/i.test(u.hostname))return '';
+    if(m[1]!==String(pid)||u.searchParams.get('itemId')!==String(iid)||u.searchParams.get('vendorItemId')!==String(vid))return '';
+    return value;
+  }catch(_e){return '';}
+}
 function thumbList(row){
   const out=[], seen=new Set();
   function push(v){
@@ -71,7 +82,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
 
     const pr=await pool.query(`
       SELECT product_uid,mall_code,product_id,item_id,vendor_item_id,pi_ii_vi,
-             product_name,mall_product_name,normal_price,discount_price,
+             product_name,mall_product_name,product_url,normal_price,discount_price,
              delivery_fee,delivery_eta_text,delivery_type,
              jeju_delivery_yn,jeju_extra_delivery_fee,island_delivery_yn,island_extra_delivery_fee,
              thumb_origin_url,thumb_json,soldout_yn,sale_status,
@@ -92,7 +103,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     const storedSoldout=String(p.soldout_yn||'N').toUpperCase()==='Y';
     const storedSaleStatus=C(p.sale_status).toLowerCase()||'active';
     const or=await pool.query(`
-      SELECT product_id,item_id,vendor_item_id,pi_ii_vi,updated_at,option_name,option_display_name,option_image_url,
+      SELECT product_id,item_id,vendor_item_id,pi_ii_vi,product_url,updated_at,option_name,option_display_name,option_image_url,
              normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
              soldout_yn,sale_status,buyable_qty,min_order_qty,max_order_qty
         FROM gm_product_option
@@ -137,6 +148,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
         option_display_name:o.option_display_name||'',
         gm_option_translation:optionTranslations.get(C(o.pi_ii_vi))||'',
         productId:o.product_id, itemId:o.item_id, vendorItemId:o.vendor_item_id,
+        product_url:exactCoupangSourceUrl(o.product_url,o.product_id,o.item_id,o.vendor_item_id),
         key:o.pi_ii_vi, pi_ii_vi:o.pi_ii_vi,
         selected:exact,
         price:o.normal_price||0, priceText:o.normal_price||0,
@@ -151,6 +163,9 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     });
 
     const sel=options.find(o=>o.selected)||null;
+    // Prefer the exact selected option URL. The representative URL is valid only
+    // if it identifies that same PID + IID + VID; never borrow another option URL.
+    const selectedUrl=sel?(sel.product_url||exactCoupangSourceUrl(p.product_url,p.product_id,sel.itemId,sel.vendorItemId)):'';
     const images=thumbList(p);
     const requestKey=[pid,iid,vid].filter(Boolean).join('_')||pid;
     // GM_CPKR_IID_SYNC_V001: never return the caller's stale IID in an accepted FAST key.
@@ -173,6 +188,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       itemId:sel?sel.itemId:(p.item_id||iid||''), item_id:sel?sel.itemId:(p.item_id||iid||''),
       vendorItemId:sel?sel.vendorItemId:(vid||p.vendor_item_id||''), vendor_item_id:sel?sel.vendorItemId:(vid||p.vendor_item_id||''),
       pi_ii_vi:sel?sel.pi_ii_vi:(p.pi_ii_vi||requestKey),
+      product_url:selectedUrl, productUrl:selectedUrl,
       title:p.product_name||p.mall_product_name||'', productName:p.product_name||p.mall_product_name||'', mallProductName:p.mall_product_name||'',
       price:sale, priceText:sale, normal_price:sale,
       discount_price:sel?sel.discount_price:(p.discount_price||0),
