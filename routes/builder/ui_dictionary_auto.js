@@ -27,14 +27,21 @@ function gmPendingStripEdgeSymbols(raw){
   // Keep semantic suffixes (e.g. 2인+) intact even though generic edge stripping removes '+'.
   const countPlus=/\d+\s*인\+$/.test(x);
   if(countPlus)x=x.slice(0,-1)+'GMPLUSSAFE';
-  x=x.replace(/^(?:▱\s*)+/u,'');
-  for(let n=0;n<10;n++){
+  // Keep the match-key and stored canonical source in one identical edge-cleaner.
+  // Re-run symbol trimming: decoration may alternate (e.g. "› 🔍 + 제목").
+  // This is deliberately NOT a DOM mutation or a change to GM_MATCH_ENGINE.
+  for(let n=0;n<12;n++){
     const before=x;
     const leadSlot=(x.match(/^(?:%[sdm])+/)||[''])[0];
     const tailSlot=(x.match(/(?:%[sdm])+$/)||[''])[0];
-    x=leadSlot+x.slice(leadSlot.length,x.length-tailSlot.length)
-      .replace(/^[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲↑↓✎<>《》〈〉「」『』【】\[\]\(\)\{\}]+/,'')
-      .replace(/[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲↑↓✎<>《》〈〉「」『』【】\[\]\(\)\{\}]+$/,'').trim()+tailSlot;
+    // Placeholders are semantic boundaries, not decoration; keep their adjacent text intact.
+    if(leadSlot||tailSlot)break;
+    let core=x.slice(leadSlot.length,x.length-tailSlot.length);
+    core=core.replace(/^[\s\-–—~!@#$%^&*_+=＋|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲↑↓✎<>《》〈〉「」『』【】\[\]\(\)\{\}›‹→←]+/u,'')
+      .replace(/[\s\-–—~!@#$%^&*_+=＋|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲↑↓✎<>《》〈〉「」『』【】\[\]\(\)\{\}›‹→←]+$/u,'')
+      .replace(/^(?:[\p{Extended_Pictographic}\uFE0E\uFE0F\u200D\u20E3]\s*)+/u,'')
+      .replace(/(?:\s*[\p{Extended_Pictographic}\uFE0E\uFE0F\u200D\u20E3])+$/u,'').trim();
+    x=leadSlot+core+tailSlot;
     if(x===before)break;
   }
   return countPlus?x.replace(/GMPLUSSAFE$/,'+'):x;
