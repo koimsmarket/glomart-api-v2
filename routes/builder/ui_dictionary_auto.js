@@ -321,14 +321,16 @@ async function captureRuntimeToPending(db,items){
   // text strips. Reuse its comparison key instead of inserting another row.
   const pendingRows=(await db.query("SELECT gm_code,source_text_ko FROM gm_ui_dictionary_pending WHERE status='PENDING' AND change_type='NEW'")).rows;
   const pendingKnown=new Set(pendingRows.map(x=>[s(x.gm_code).toUpperCase(),gmPendingMatchKey(x.source_text_ko)].join('|')));
-  const stats={received:items.length,created:0,changed:0,reused:0,skipped:0,ambiguous_number:0,translation_queued:0};
+  const stats={received:items.length,created:0,changed:0,reused:0,skipped:0,ambiguous_number:0,translation_queued:0,skipped_reasons:{}};
+  // Aggregate diagnostics only: never write captured text or member identifiers to logs.
+  function skip(reason){stats.skipped++;reason=String(reason||'UNKNOWN').slice(0,60);stats.skipped_reasons[reason]=(stats.skipped_reasons[reason]||0)+1;}
   for(const item of items){
     const x=item||{};
     const app=s(x.source_app||x.sourceApp||'').toUpperCase();
     const page=s(x.page||x.page_name||'');
     const surface=s(x.source_surface||x.sourceSurface||page);
     if(/(?:^|\/)(?:builder|admin|administer|manage)(?:\/|$)|ui_dictionary_auto|ui_dictionary_admin/i.test(page+' '+surface)){
-      stats.skipped++;continue;
+      skip('FORBIDDEN_ADMIN_PAGE');continue;
     }
     const raw=cleanUiText(x.source_text_ko||x.text||x.kr||x.value||'');
     const code=s(x.gm_code||x.gmCode).toUpperCase();
@@ -336,11 +338,13 @@ async function captureRuntimeToPending(db,items){
     const row={gm_code:code,source_text_ko:raw,page_name:page,source_file:'RUNTIME:'+app,
       source_locator:locator,source_type:'RUNTIME',source_app:app,source_surface:surface,_gmKnownDictionary:existing};
     const clean=gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
-    if(!clean||!hasKo(clean)||!key||gmPendingSensitiveReason(row,raw)||gmPendingDynamicReason(row,raw)){
-      stats.skipped++;continue;
+    const sensitive=gmPendingSensitiveReason(row,raw);
+    const dynamic=!sensitive?gmPendingDynamicReason(row,raw):'';
+    if(!clean||!hasKo(clean)||!key||sensitive||dynamic){
+      skip(sensitive||dynamic||'INVALID_OR_NON_KOREAN');continue;
     }
     const uniq=[app,code,key].join('|');
-    if(seen.has(uniq)){stats.skipped++;continue;}
+    if(seen.has(uniq)){skip('DUPLICATE_IN_BATCH');continue;}
     seen.add(uniq);
     if(!code&&known.has(key)){stats.reused++;continue;}
     // Existing unapproved candidate with the same GM_MATCH_ENGINE key is not new.
@@ -350,7 +354,7 @@ async function captureRuntimeToPending(db,items){
     if(result.new)stats.created++;
     else if(result.changed)stats.changed++;
     else if(result.same||result.sameText)stats.reused++;
-    else stats.skipped++;
+    else skip(result.dynamic?'DYNAMIC_OBSERVER': 'OBSERVER_SKIPPED');
   }
   return stats;
 }

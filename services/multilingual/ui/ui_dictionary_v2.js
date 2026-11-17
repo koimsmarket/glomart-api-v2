@@ -62,11 +62,24 @@ function dynamicNonUiReason(input,norm){
   // Unknown Smartfit runtime phrases fail closed; vetted immutable UI labels remain capturable.
   const smartfitContext=/(?:^|[\s/#._-])smartfit(?:[\s/#._-]|$)/.test(context);
   if(smartfitContext){
+    // V005: Only verified fixed SmartFit UI copy; never accept user-entered
+    // template/space/category names or product labels via a broad page exemption.
+    if(/(?:sf-card-main|sf-card-product|sf-space-detail-template-row|gm-smartfit-user-content|smartfit-content|data-gm-authored-content|data-gm-smartfit-content|data-gm-content-translate|data-gm-product-translate|data-gm-option-translate)/.test(locator))
+      return 'DYNAMIC_SMARTFIT_CONTENT_LOCATOR';
     const fixedSmartfitLabels=new Set([
       '상품 목록 펼치기', '상품 목록 접기', '공간 없음',
-      '조회', '취소', '확인', '저장', '삭제', '수정', '닫기', '뒤로가기'
+      '조회', '취소', '확인', '저장', '삭제', '수정', '닫기', '뒤로가기',
+      '내가 만든 템플릿', '가져온 템플릿', '등록된 템플릿이 없습니다.',
+      '공간에 지정되지 않은 템플릿', '내 템플릿 전체',
+      '공간 수정', '공간 추가', '공간 생성', '공간 조회',
+      '템플릿 수정', '템플릿 조회', '템플릿 생성',
+      '삭제된 항목', '저장됨', '선택됨', '장바구니 상품 가져오기',
+      '기존 자료를 불러왔습니다.', '공간 상세보기',
+      '공간 상세 및 관리', '공간 조회 및 관리',
+      '템플릿을 불러오지 못했습니다.', '공간 화면을 불러오지 못했습니다.'
     ]);
-    if(!fixedSmartfitLabels.has(raw)) return 'DYNAMIC_SMARTFIT_UNVERIFIED';
+    if(!fixedSmartfitLabels.has(raw) && !/^기존 이미지 \d+장 불러옴$/.test(raw))
+      return 'DYNAMIC_SMARTFIT_UNVERIFIED';
   }
 
   // Explicit code may select a dictionary row only AFTER dynamic-data screening.
