@@ -175,26 +175,24 @@ async function upsertProduct(pool, raw, parent={}){
     '$56','$57','$58','$59','$60','$61','$62','$63',
     'now()','now()','now()'
   ];
-  const detailIdentityTrusted=id.mallCode==='CPKR' && /detail|collector/i.test(cleanText(p.source||p.collector_source||p.collectorSource||'')) &&
+  const identitySource=cleanText(p.source||p.collector_source||p.collectorSource||'');
+  const detailIdentityTrusted=id.mallCode==='CPKR' && /detail|collector/i.test(identitySource) &&
+    !/search|connector-tab|ldjson/i.test(identitySource) &&
     !!(id.productId&&id.itemId&&id.vendorItemId);
-  // Search collection can refresh IID only for the representative's existing PID+VID.
-  // It must never replace the representative VID with a different search option.
-  const searchIdentityTrusted=id.mallCode==='CPKR' && !detailIdentityTrusted &&
-    !!(id.productId&&id.itemId&&id.vendorItemId) &&
-    /search|connector-tab|ldjson/i.test(cleanText(p.source||p.collector_source||p.collectorSource||''));
-  const refreshRepresentativeIid=searchIdentityTrusted ?
-    "gm_product.product_id=EXCLUDED.product_id AND gm_product.vendor_item_id=EXCLUDED.vendor_item_id" : 'FALSE';
+  // GM_CPKR_SAVE_V004: search rows are observations, never authority to
+  // replace the stored representative PID/IID/VID. The verified detail
+  // representative-selection path is unchanged.
   const sql = `
     INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
-      -- Search refreshes IID for SAME PID+VID only; VID must not change through search.
+      -- Search never changes a representative identifier.
       -- Detail representative selection remains under the existing verified-detail policy.
       product_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.product_id ELSE gm_product.product_id END,
-      item_id=CASE WHEN ${detailIdentityTrusted} OR (${refreshRepresentativeIid}) THEN EXCLUDED.item_id ELSE gm_product.item_id END,
+      item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.item_id ELSE gm_product.item_id END,
       vendor_item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.vendor_item_id ELSE gm_product.vendor_item_id END,
-      pi_ii_vi=CASE WHEN ${detailIdentityTrusted} OR (${refreshRepresentativeIid}) THEN EXCLUDED.pi_ii_vi ELSE gm_product.pi_ii_vi END,
+      pi_ii_vi=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.pi_ii_vi ELSE gm_product.pi_ii_vi END,
       glomart_code=CASE
         WHEN NULLIF(EXCLUDED.glomart_code,'') IS NULL THEN gm_product.glomart_code
         WHEN NULLIF(gm_product.glomart_code,'') IS NULL THEN EXCLUDED.glomart_code
@@ -264,12 +262,12 @@ async function upsertProduct(pool, raw, parent={}){
       supplier_address=COALESCE(NULLIF(EXCLUDED.supplier_address,''), gm_product.supplier_address),
       -- A search href belongs to its exact option, not merely to this PID.
       -- Only replace the representative href if its final PID+VID+IID is the
-      -- search option's identity (including a permitted same-VID IID refresh).
+      -- search option's exact identity.
       product_url=CASE
         WHEN NULLIF(EXCLUDED.product_url,'') IS NOT NULL
          AND gm_product.product_id=EXCLUDED.product_id
          AND gm_product.vendor_item_id=EXCLUDED.vendor_item_id
-         AND (gm_product.item_id=EXCLUDED.item_id OR (${refreshRepresentativeIid}))
+         AND gm_product.item_id=EXCLUDED.item_id
           THEN EXCLUDED.product_url
         ELSE gm_product.product_url END,
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),

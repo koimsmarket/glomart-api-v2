@@ -446,11 +446,13 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
         continue;
       }
       const incomingOptionUrl=verifiedSearchOptionHref(p,opt);
-      // GM_CPKR_IID_HISTORY_V001: observe IID without discarding older PID+VID+IID.
-      // Update only the exact former option row; never rewrite a source URL's itemId.
+      // GM_CPKR_SAVE_V004: record all observed IIDs without rewriting an existing
+      // option row. A different IID under the same PID+VID can be a separate
+      // observed identity; only a verified complete detail snapshot may
+      // deactivate a missing option through the existing authoritative path.
       if(mall==='CPKR' && opt.product_id && opt.vendor_item_id && opt.item_id){
         const old=await pool.query(`
-          SELECT item_id,pi_ii_vi,product_url FROM gm_product_option
+          SELECT item_id FROM gm_product_option
           WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2
           ORDER BY updated_at DESC NULLS LAST LIMIT 1`,[opt.product_id,opt.vendor_item_id]);
         const former=old.rows[0]||null;
@@ -458,25 +460,6 @@ async function upsertProductOptions(pool, id, optionJson, p, parent){
           former&&{product_id:opt.product_id,vendor_item_id:opt.vendor_item_id,item_id:former.item_id},
           {product_id:opt.product_id,vendor_item_id:opt.vendor_item_id,item_id:opt.item_id}
         ],detailPayload?'detail_option':'search_option');
-        if(former && opt.pi_ii_vi!==cleanText(former.pi_ii_vi)){
-          const exists=await pool.query(`SELECT 1 FROM gm_product_option
-            WHERE mall_code='CPKR' AND pi_ii_vi=$1 LIMIT 1`,[opt.pi_ii_vi]);
-          if(!exists.rows.length){
-            await pool.query(`UPDATE gm_product_option
-              SET item_id=$4,pi_ii_vi=$5,product_url=$6,updated_at=now()
-              WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2 AND pi_ii_vi=$3
-                AND NOT EXISTS(SELECT 1 FROM gm_product_option WHERE mall_code='CPKR' AND pi_ii_vi=$5)`,
-              [opt.product_id,opt.vendor_item_id,former.pi_ii_vi,opt.item_id,opt.pi_ii_vi,incomingOptionUrl]);
-          }else{
-            // New composite key already exists: keep old identity in history,
-            // but prevent its former option from remaining selectable.
-            await pool.query(`UPDATE gm_product_option
-              SET active_yn='N',updated_at=now()
-              WHERE mall_code='CPKR' AND product_id=$1 AND vendor_item_id=$2 AND pi_ii_vi=$3`,
-              [opt.product_id,opt.vendor_item_id,former.pi_ii_vi]);
-          }
-          try{console.log('[GM_CPKR_IID_SYNC_OPTION]',{source:detailPayload?'detail':'search',pid:opt.product_id,vid:opt.vendor_item_id,old_iid:cleanText(former.item_id),new_iid:opt.item_id});}catch(_log){}
-        }
       }
       const sig = opt.mall_code + '|' + opt.pi_ii_vi;
       if(seen.has(sig)){
