@@ -166,6 +166,17 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     // Prefer the exact selected option URL. The representative URL is valid only
     // if it identifies that same PID + IID + VID; never borrow another option URL.
     const selectedUrl=sel?(sel.product_url||exactCoupangSourceUrl(p.product_url,p.product_id,sel.itemId,sel.vendorItemId)):'';
+    // Optional URL recorded with a successful detail collection. Older content_json
+    // rows contain only images/blocks/text and therefore have no detail URL.
+    let collectedDetailUrl='';
+    if(mall==='CPKR' && sel){
+      try{
+        const dr=await pool.query(`SELECT content_json->>'page_url' AS page_url
+          FROM gm_cpkr_detail_content WHERE product_id=$1`,[pid]);
+        const raw=dr.rows[0]&&dr.rows[0].page_url;
+        collectedDetailUrl=exactCoupangSourceUrl(raw,pid,sel.itemId,sel.vendorItemId);
+      }catch(e){console.warn('[GM_FAST_DETAIL_URL_READ_WARN]',String(e&&e.message||e));}
+    }
     const images=thumbList(p);
     const requestKey=[pid,iid,vid].filter(Boolean).join('_')||pid;
     // GM_CPKR_IID_SYNC_V001: never return the caller's stale IID in an accepted FAST key.
@@ -189,6 +200,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       vendorItemId:sel?sel.vendorItemId:(vid||p.vendor_item_id||''), vendor_item_id:sel?sel.vendorItemId:(vid||p.vendor_item_id||''),
       pi_ii_vi:sel?sel.pi_ii_vi:(p.pi_ii_vi||requestKey),
       product_url:selectedUrl, productUrl:selectedUrl,
+      detail_page_url:collectedDetailUrl, detailPageUrl:collectedDetailUrl,
       title:p.product_name||p.mall_product_name||'', productName:p.product_name||p.mall_product_name||'', mallProductName:p.mall_product_name||'',
       price:sale, priceText:sale, normal_price:sale,
       discount_price:sel?sel.discount_price:(p.discount_price||0),

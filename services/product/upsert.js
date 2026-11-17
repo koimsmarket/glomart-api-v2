@@ -419,8 +419,11 @@ async function upsertProduct(pool, raw, parent={}){
         try{
           const parsed = new URL(rawHref);
           const found = parsed.pathname.match(/^\/v[pm]\/products\/(\d+)\/?$/i);
+          // V013: the same PID alone is insufficient; require the actually collected option.
           if(parsed.protocol==='https:' && /^(?:www\.)?coupang\.com$/i.test(parsed.hostname)
-             && found && found[1]===id.productId) observedDetailUrl=rawHref;
+             && found && found[1]===id.productId
+             && parsed.searchParams.get('itemId')===id.itemId
+             && parsed.searchParams.get('vendorItemId')===id.vendorItemId) observedDetailUrl=rawHref;
         }catch(_invalidDetailUrl){}
       }
       if(Buffer.byteLength(contentText,'utf8')<=1024*1024){
