@@ -302,7 +302,21 @@ router.post('/api/gm/builder/ui-dictionary-auto/scan-static',(_req,res)=>res.sta
 function gmPendingSensitiveReason(row,raw){
   const t=s(raw),loc=s(row.source_locator).toLowerCase(),page=s(row.page_name).toLowerCase();
   if(/(?:gmtalkrow|gmfriendrow|gmcontactrow|gmdirectrow|conversation-message|chat-bubble|message-item|\broom\.gmtalk)/i.test(loc))return 'PERSONAL_RECORD_LOCATOR';
-  if(/(?:gmrecordtreetitle|gmguppydevlogbtn|gmguppybannerslot)/i.test(loc))return 'CATEGORY_DEV_AD';
+  // GM_UI_V012: defend PENDING from authored Guppy lists and user file/call data.
+  // Default bundled Guppy labels remain eligible; other values in those classes fail closed.
+  if(s(row.source_file).toUpperCase()==='RUNTIME:GUPPY'){
+    if(/(?:gmfemain|gmtmopen|gm-file-row|gm-file-item|data-gm-file-item|data-gm-user-category|data-gm-authored-label)/i.test(loc))return 'GUPPY_AUTHORED_ENTRY';
+    const defaults={
+      gpwtopen:["포털", "동영상", "뉴스", "방송", "일반 웹", "KBS 뉴스", "MBC 뉴스", "SBS 뉴스"],
+      gmrecordtreetitle:["생활 지원", "일상생활", "일상대화", "가족·친구", "쇼핑·주문", "업무·학습"]
+    };
+    if(/gpwtopen/i.test(loc)&&!defaults.gpwtopen.includes(t))return 'GUPPY_NONDEFAULT_CHANNEL';
+    if(/gmrecordtreetitle/i.test(loc)&&!defaults.gmrecordtreetitle.includes(t))return 'GUPPY_NONDEFAULT_RECORD_CATEGORY';
+  }
+  if(/(?:^|\s)[12]\d{3}[.\/-]\d{1,2}[.\/-]\d{1,2}\s+\d{1,2}:\d{2}/.test(t))return 'CALL_OR_HISTORY_TIMESTAMP';
+  if(/\.(?:mp4|mov|mkv|avi|webm|mp3|wav|m4a|pdf|jpe?g|png|gif|heic)(?:\s|$)/i.test(t))return 'USER_FILE_NAME';
+  if(/^\d+\s*(?:건|명|회|개)$/.test(t))return 'LIVE_COUNTER';
+  if(/(?:gmguppydevlogbtn|gmguppybannerslot)/i.test(loc))return 'CATEGORY_DEV_AD';
   if(/(?:\b01[016789][\s.-]?[0-9＊*xX•·]{3,4}[\s.-]?[0-9＊*xX•·]{3,4}\b|[가-힣][＊*][가-힣]|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,})/.test(t))return 'PERSONAL_IDENTIFIER';
   if(/(?:Android\s*\d+|[a-z][a-z0-9_-]*\.[a-z0-9_.-]*(?:apk|speech)|googletts\.|\b[a-z]{2,3}\s*[↔<>\-]\s*[a-z]{2,3}\b)/i.test(t))return 'DEVICE_OR_LANGUAGE_STATE';
   if(/(?:파일\s*보안등급\s*\d+|보안등급\s*\d+|^대화\s*설정\s*[·:])/i.test(t))return 'VARIABLE_UI_VALUE';
