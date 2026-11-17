@@ -78,7 +78,12 @@ function dynamicNonUiReason(input,norm){
       '공간 상세 및 관리', '공간 조회 및 관리',
       '템플릿을 불러오지 못했습니다.', '공간 화면을 불러오지 못했습니다.'
     ]);
-    if(!fixedSmartfitLabels.has(raw) && !/^기존 이미지 \d+장 불러옴$/.test(raw))
+    // The SmartFit UI emitter marks only immutable controls/headings, after excluding
+    // authored/product/content regions. Do not open an unrestricted page exemption.
+    const declaredFixed=s(input.source_type||input.sourceType)==='SMARTFIT_FIXED_UI'
+      && /^\/smartfit\//.test(page)
+      && /^sf-fixed:(?:id:|key:|(?:button|label|legend|summary|strong|h[1-6]|div|span|p)[.a-z0-9_-]*:\d+$)/i.test(s(input.source_locator||input.locator));
+    if(!declaredFixed && !fixedSmartfitLabels.has(raw) && !/^기존 이미지 \d+장 불러옴$/.test(raw))
       return 'DYNAMIC_SMARTFIT_UNVERIFIED';
   }
 

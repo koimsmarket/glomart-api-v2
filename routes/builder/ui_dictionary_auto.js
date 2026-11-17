@@ -336,7 +336,7 @@ async function captureRuntimeToPending(db,items){
     const code=s(x.gm_code||x.gmCode).toUpperCase();
     const locator=s(x.locator||x.source_locator||'').slice(0,500);
     const row={gm_code:code,source_text_ko:raw,page_name:page,source_file:'RUNTIME:'+app,
-      source_locator:locator,source_type:'RUNTIME',source_app:app,source_surface:surface,_gmKnownDictionary:existing};
+      source_locator:locator,source_type:(app==='GLOMART'&&/^\/smartfit\//.test(page)&&s(x.source_type)==='SMARTFIT_FIXED_UI'?'SMARTFIT_FIXED_UI':'RUNTIME'),source_app:app,source_surface:surface,_gmKnownDictionary:existing};
     const clean=gmPendingCanonicalText(raw),key=gmPendingMatchKey(raw);
     const sensitive=gmPendingSensitiveReason(row,raw);
     const dynamic=!sensitive?gmPendingDynamicReason(row,raw):'';
