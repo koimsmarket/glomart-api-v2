@@ -179,20 +179,22 @@ async function upsertProduct(pool, raw, parent={}){
   const detailIdentityTrusted=id.mallCode==='CPKR' && /detail|collector/i.test(identitySource) &&
     !/search|connector-tab|ldjson/i.test(identitySource) &&
     !!(id.productId&&id.itemId&&id.vendorItemId);
-  // GM_CPKR_SAVE_V004: search rows are observations, never authority to
-  // replace the stored representative PID/IID/VID. The verified detail
-  // representative-selection path is unchanged.
+  // A PID+VID is one sale option. Only its changing IID may refresh here.
+  // A different VID NEVER changes the stored representative in base UPSERT.
+  // Replacement belongs exclusively to verified-complete detail synchronization.
+  const sameRepresentativeOption=id.mallCode==='CPKR' ?
+    'gm_product.product_id=EXCLUDED.product_id AND gm_product.vendor_item_id=EXCLUDED.vendor_item_id' :
+    'FALSE';
   const sql = `
     INSERT INTO gm_product (${productColumns.join(', ')}) VALUES (${valuesSql.join(', ')})
     ON CONFLICT (product_uid) DO UPDATE SET
       source_mall=COALESCE(NULLIF(EXCLUDED.source_mall,''), gm_product.source_mall),
       source_uid=EXCLUDED.source_uid,
-      -- Search never changes a representative identifier.
-      -- Detail representative selection remains under the existing verified-detail policy.
-      product_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.product_id ELSE gm_product.product_id END,
-      item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.item_id ELSE gm_product.item_id END,
-      vendor_item_id=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.vendor_item_id ELSE gm_product.vendor_item_id END,
-      pi_ii_vi=CASE WHEN ${detailIdentityTrusted} THEN EXCLUDED.pi_ii_vi ELSE gm_product.pi_ii_vi END,
+      -- The representative VID is immutable in base UPSERT.
+      product_id=gm_product.product_id,
+      item_id=CASE WHEN ${sameRepresentativeOption} THEN EXCLUDED.item_id ELSE gm_product.item_id END,
+      vendor_item_id=gm_product.vendor_item_id,
+      pi_ii_vi=CASE WHEN ${sameRepresentativeOption} THEN EXCLUDED.pi_ii_vi ELSE gm_product.pi_ii_vi END,
       glomart_code=CASE
         WHEN NULLIF(EXCLUDED.glomart_code,'') IS NULL THEN gm_product.glomart_code
         WHEN NULLIF(gm_product.glomart_code,'') IS NULL THEN EXCLUDED.glomart_code
@@ -239,13 +241,13 @@ async function upsertProduct(pool, raw, parent={}){
         THEN EXCLUDED.thumb_json ELSE gm_product.thumb_json END,
       detail_json=gm_product.detail_json,
       seasonal_text=COALESCE(NULLIF(EXCLUDED.seasonal_text,''), gm_product.seasonal_text),
-      mall_sale_price=EXCLUDED.mall_sale_price,
-      final_supply_price=COALESCE(EXCLUDED.final_supply_price, gm_product.final_supply_price),
-      normal_price=COALESCE(EXCLUDED.normal_price, gm_product.normal_price),
-      discount_price=EXCLUDED.discount_price,
-      delivery_fee=EXCLUDED.delivery_fee,
-      delivery_eta_text=EXCLUDED.delivery_eta_text,
-      delivery_type=EXCLUDED.delivery_type,
+      mall_sale_price=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN EXCLUDED.mall_sale_price ELSE gm_product.mall_sale_price END,
+      final_supply_price=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN COALESCE(EXCLUDED.final_supply_price,gm_product.final_supply_price) ELSE gm_product.final_supply_price END,
+      normal_price=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN COALESCE(EXCLUDED.normal_price,gm_product.normal_price) ELSE gm_product.normal_price END,
+      discount_price=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN EXCLUDED.discount_price ELSE gm_product.discount_price END,
+      delivery_fee=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN EXCLUDED.delivery_fee ELSE gm_product.delivery_fee END,
+      delivery_eta_text=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN EXCLUDED.delivery_eta_text ELSE gm_product.delivery_eta_text END,
+      delivery_type=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN EXCLUDED.delivery_type ELSE gm_product.delivery_type END,
       tax_type=COALESCE(NULLIF(EXCLUDED.tax_type,''), gm_product.tax_type),
       review_count=EXCLUDED.review_count,
       mall_sales_count=EXCLUDED.mall_sales_count,
@@ -260,23 +262,22 @@ async function upsertProduct(pool, raw, parent={}){
       supplier_phone=COALESCE(NULLIF(EXCLUDED.supplier_phone,''), gm_product.supplier_phone),
       supplier_email=COALESCE(NULLIF(EXCLUDED.supplier_email,''), gm_product.supplier_email),
       supplier_address=COALESCE(NULLIF(EXCLUDED.supplier_address,''), gm_product.supplier_address),
-      -- A search href belongs to its exact option, not merely to this PID.
-      -- Only replace the representative href if its final PID+VID+IID is the
-      -- search option's exact identity.
+      -- Only the representative's own observed href can be stored here.
+      -- On same-VID IID change, clear its now-invalid old IID URL if no new
+      -- exact href was captured. Never assign another VID's URL.
       product_url=CASE
-        WHEN NULLIF(EXCLUDED.product_url,'') IS NOT NULL
-         AND gm_product.product_id=EXCLUDED.product_id
-         AND gm_product.vendor_item_id=EXCLUDED.vendor_item_id
-         AND gm_product.item_id=EXCLUDED.item_id
+        WHEN ${sameRepresentativeOption} AND gm_product.item_id IS DISTINCT FROM EXCLUDED.item_id
+          THEN COALESCE(NULLIF(EXCLUDED.product_url,''),'')
+        WHEN ${sameRepresentativeOption} AND NULLIF(EXCLUDED.product_url,'') IS NOT NULL
           THEN EXCLUDED.product_url
         ELSE gm_product.product_url END,
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
-      soldout_yn=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.soldout_yn ELSE EXCLUDED.soldout_yn END,
-      sale_status=CASE WHEN gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted} THEN gm_product.sale_status ELSE EXCLUDED.sale_status END,
+      soldout_yn=CASE WHEN (${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'}) AND NOT (gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted}) THEN EXCLUDED.soldout_yn ELSE gm_product.soldout_yn END,
+      sale_status=CASE WHEN (${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'}) AND NOT (gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted}) THEN EXCLUDED.sale_status ELSE gm_product.sale_status END,
       product_grade=EXCLUDED.product_grade,
-      buyable_qty=COALESCE(EXCLUDED.buyable_qty, gm_product.buyable_qty),
-      min_order_qty=COALESCE(EXCLUDED.min_order_qty, gm_product.min_order_qty),
-      max_order_qty=COALESCE(EXCLUDED.max_order_qty, gm_product.max_order_qty),
+      buyable_qty=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN COALESCE(EXCLUDED.buyable_qty,gm_product.buyable_qty) ELSE gm_product.buyable_qty END,
+      min_order_qty=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN COALESCE(EXCLUDED.min_order_qty,gm_product.min_order_qty) ELSE gm_product.min_order_qty END,
+      max_order_qty=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN COALESCE(EXCLUDED.max_order_qty,gm_product.max_order_qty) ELSE gm_product.max_order_qty END,
       return_available_yn=EXCLUDED.return_available_yn,
       exchange_available_yn=EXCLUDED.exchange_available_yn,
       return_policy_text=EXCLUDED.return_policy_text,
@@ -300,7 +301,7 @@ async function upsertProduct(pool, raw, parent={}){
     id.uid, resolvedGlomartCode, cleanText(p.gm_category || p.gmCategory),
     categoryKeyword, searchKeyword,
     id.mallCode, sourceMallStored, sourceUid, mallCategoryStored, safeJsonString(mallCategoryJson), cpSelectedCode, cpFixCode, cpMatch,
-    id.productId, id.itemId, id.vendorItemId, '', cleanText(p.internal_product_code || p.internalProductCode),
+    id.productId, id.itemId, id.vendorItemId, id.mallCode==='CPKR'?id.pi:'', cleanText(p.internal_product_code || p.internalProductCode),
     productName, cleanDupMallProductName(productName, p.mall_product_name || p.mallProductName || ''), optionCount,
     productOptionLinkJson ? safeJsonString(productOptionLinkJson) : '{"iid_vid":""}', safeJsonString(thumbJson), '{}', cleanText(p.seasonal_text || p.seasonalText || p.seasonal || ''),
     mallSalePrice, finalSupplyPrice, normalPrice, pickDiscountPrice(p),
@@ -370,7 +371,7 @@ async function upsertProduct(pool, raw, parent={}){
   try{
     option_result = await upsertProductOptions(pool, id, optionJson, p, parent);
   }catch(e){
-    option_result = { received:optionCount, inserted:0, updated:0, skipped:optionCount, nonactive:0, balance_ok:false, error:compactError(e) };
+    option_result = { received:optionCount, inserted:0, updated:0, skipped:optionCount, nonactive:0, balance_ok:false, errors:[compactError(e)], error:compactError(e) };
     console.error('[GM_PRODUCT_OPTION_UPSERT_ERROR]', Object.assign({ uid:id.uid, mall_code:id.mallCode, product_id:id.productId, option_count:optionCount }, compactError(e)));
   }
   // Keep gm_product.product_url tied to the representative option. If an
