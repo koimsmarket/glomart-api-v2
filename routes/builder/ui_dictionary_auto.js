@@ -33,8 +33,8 @@ function gmPendingStripEdgeSymbols(raw){
     const leadSlot=(x.match(/^(?:%[sdm])+/)||[''])[0];
     const tailSlot=(x.match(/(?:%[sdm])+$/)||[''])[0];
     x=leadSlot+x.slice(leadSlot.length,x.length-tailSlot.length)
-      .replace(/^[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲<>《》〈〉「」『』【】\[\]\(\)\{\}]+/,'')
-      .replace(/[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲<>《》〈〉「」『』【】\[\]\(\)\{\}]+$/,'').trim()+tailSlot;
+      .replace(/^[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲↑↓✎<>《》〈〉「」『』【】\[\]\(\)\{\}]+/,'')
+      .replace(/[\s\-–—~!@#$%^&*_+=|\/:;,.?·•※◀▶■□◆◇○●△▽▼▲↑↓✎<>《》〈〉「」『』【】\[\]\(\)\{\}]+$/,'').trim()+tailSlot;
     if(x===before)break;
   }
   return countPlus?x.replace(/GMPLUSSAFE$/,'+'):x;
