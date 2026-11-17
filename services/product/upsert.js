@@ -411,10 +411,29 @@ async function upsertProduct(pool, raw, parent={}){
     try{
       const tbl=id.mallCode==='CPKR'?'gm_cpkr_detail_content':'gm_alkr_detail_content';
       const contentText=safeJsonString(detailJson);
+      // Only a successfully opened Coupang detail page is authoritative for page_url.
+      // Preserve the exact observed location.href; URL() is used for validation only.
+      let observedDetailUrl = '';
+      if(id.mallCode==='CPKR' && /detail/i.test(String(p.source||''))){
+        const rawHref = typeof p.pageUrl==='string' ? p.pageUrl : '';
+        try{
+          const parsed = new URL(rawHref);
+          const found = parsed.pathname.match(/^\/v[pm]\/products\/(\d+)\/?$/i);
+          if(parsed.protocol==='https:' && /^(?:www\.)?coupang\.com$/i.test(parsed.hostname)
+             && found && found[1]===id.productId) observedDetailUrl=rawHref;
+        }catch(_invalidDetailUrl){}
+      }
       if(Buffer.byteLength(contentText,'utf8')<=1024*1024){
-        await pool.query(`INSERT INTO ${tbl}(product_id,content_json,updated_at) VALUES($1,$2::jsonb,NOW())
-          ON CONFLICT(product_id) DO UPDATE SET content_json=EXCLUDED.content_json,updated_at=NOW()`,
-          [id.productId,contentText]);
+        if(id.mallCode==='CPKR'){
+          await pool.query(`INSERT INTO ${tbl}(product_id,content_json,page_url,updated_at) VALUES($1,$2::jsonb,$3,NOW())
+            ON CONFLICT(product_id) DO UPDATE SET content_json=EXCLUDED.content_json,
+              page_url=COALESCE(NULLIF(EXCLUDED.page_url,''),${tbl}.page_url),updated_at=NOW()`,
+            [id.productId,contentText,observedDetailUrl||null]);
+        }else{
+          await pool.query(`INSERT INTO ${tbl}(product_id,content_json,updated_at) VALUES($1,$2::jsonb,NOW())
+            ON CONFLICT(product_id) DO UPDATE SET content_json=EXCLUDED.content_json,updated_at=NOW()`,
+            [id.productId,contentText]);
+        }
       }
     }catch(e){
       // Content backup errors may never interrupt product, option or detail handling.
