@@ -76,7 +76,15 @@ function dynamicNonUiReason(input,norm){
       '삭제된 항목', '저장됨', '선택됨', '장바구니 상품 가져오기',
       '기존 자료를 불러왔습니다.', '공간 상세보기',
       '공간 상세 및 관리', '공간 조회 및 관리',
-      '템플릿을 불러오지 못했습니다.', '공간 화면을 불러오지 못했습니다.'
+      '템플릿을 불러오지 못했습니다.', '공간 화면을 불러오지 못했습니다.',
+      // V001: immutable server validation messages shown to SmartFit users.
+      // Do not relax the dynamic template/product/name/content guards.
+      '다운로드/실행 파일 링크는 등록할 수 없습니다',
+      '소개글에는 HTML 태그를 입력할 수 없습니다',
+      '소개글에는 광고/구매 유도 문구를 입력할 수 없습니다',
+      '소개글에는 연락처를 입력할 수 없습니다',
+      '소개글에는 이메일 주소를 입력할 수 없습니다',
+      '소개글에는 인터넷 주소(URL)를 입력할 수 없습니다'
     ]);
     // The SmartFit UI emitter marks only immutable controls/headings, after excluding
     // authored/product/content regions. Do not open an unrestricted page exemption.
