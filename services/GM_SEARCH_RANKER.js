@@ -80,4 +80,38 @@ async function recordShown(pool, searchKeyword, productUids) {
        AND COALESCE(p.soldout_yn,'N')<>'Y'`,[keyword,uids]);
   return result.rowCount||0;
 }
-module.exports={VERSION,rankResults,relevance,tokens,keywordRotationQuery,recordShown};
+// Temporary URL policy is owned ONLY here, not by route/Runtime.
+// Change DETAIL_URL_PRIORITY only after sufficient real URL hit/success telemetry.
+const DETAIL_URL_PRIORITY=Object.freeze(['CANONICAL','DETAIL','PRODUCT','OPTION']);
+const DETAIL_URL_POLICY='CANONICAL_FIRST_TEMP_V027';
+function exactDetailUrl(raw,pid,iid,vid){
+  if(typeof raw!=='string'||!raw||!pid||!iid||!vid)return '';
+  try{
+    const u=new URL(raw),m=u.pathname.match(/^\/v[pm]\/products\/(\d{5,})\/?$/i);
+    if(u.protocol!=='https:'||!/(^|\.)coupang\.com$/i.test(u.hostname)||!m||m[1]!==pid)return '';
+    if(u.searchParams.get('itemId')!==iid||u.searchParams.get('vendorItemId')!==vid)return '';
+    return raw; // Return the original bytes; never rebuild a stored URL.
+  }catch(_){return '';}
+}
+function rankDetailUrl(args){
+  args=args||{};
+  const mall=String(args.mall||'').toUpperCase();
+  const pid=String(args.pid||'').trim();
+  const opt=args.selectedOption||null;
+  const iid=opt&&String(opt.itemId||opt.item_id||'').trim();
+  const vid=opt&&String(opt.vendorItemId||opt.vendor_item_id||'').trim();
+  const empty={url:'',rank:'NONE',policy:DETAIL_URL_POLICY};
+  if(mall!=='CPKR'||!opt||!/^\d{5,}$/.test(pid)||!/^\d{5,}$/.test(iid)||!/^\d{5,}$/.test(vid)||String(opt.productId||opt.product_id||'')!==pid)return empty;
+  const urls={
+    CANONICAL:'https://www.coupang.com/vp/products/'+pid+'?itemId='+encodeURIComponent(iid)+'&vendorItemId='+encodeURIComponent(vid),
+    DETAIL:exactDetailUrl(args.detailUrl,pid,iid,vid),
+    PRODUCT:exactDetailUrl(args.productUrl,pid,iid,vid),
+    OPTION:exactDetailUrl(args.optionUrl,pid,iid,vid)
+  };
+  for(const source of DETAIL_URL_PRIORITY){
+    if(urls[source])return {url:urls[source],rank:source,policy:DETAIL_URL_POLICY};
+  }
+  return empty;
+}
+module.exports={VERSION,rankResults,relevance,tokens,keywordRotationQuery,recordShown,
+  DETAIL_URL_PRIORITY,DETAIL_URL_POLICY,rankDetailUrl};

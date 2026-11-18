@@ -14,7 +14,8 @@
 
 const express = require('express');
 const router = express.Router();
-const VERSION = 'GM_DETAIL_FAST_SERVER_V006_OPTION_DISPLAY_I18N';
+const VERSION = 'GM_DETAIL_FAST_SERVER_V008_PARALLEL_RANKER_V027';
+const searchRanker=require('../../services/GM_SEARCH_RANKER');
 const OPTION_LANGS=new Set(['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr']);
 
 function db(req){ return req.app.locals.db || req.app.locals.pool; }
@@ -80,7 +81,11 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       return ok(res,{found:false,item:null,reason:'PID_EMPTY'});
     }
 
-    const pr=await pool.query(`
+    // V027: Independent DB lookups start together. URL ranking is applied only
+    // after their results arrive; a missing optional detail table is non-fatal.
+    const targetLang=C(req.query.gm_lang||'').toLowerCase().replace(/_/g,'-').split('-')[0];
+    const t0=Date.now();
+    const productQuery=pool.query(`
       SELECT product_uid,mall_code,product_id,item_id,vendor_item_id,pi_ii_vi,
              product_name,mall_product_name,product_url,normal_price,discount_price,
              delivery_fee,delivery_eta_text,delivery_type,
@@ -91,18 +96,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
        WHERE mall_code=$1 AND product_id=$2
        ORDER BY updated_at DESC NULLS LAST
        LIMIT 1`,[mall,pid]);
-
-    if(!pr.rows.length){
-      console.log('[GM_PRODUCT_DETAIL_FAST_MISS]',{version:VERSION,reason:'PID_NOT_FOUND',mall_code:mall,product_id:pid});
-      return ok(res,{found:false,item:null,reason:'PID_NOT_FOUND'});
-    }
-
-    const p=pr.rows[0];
-    /* 상품 상태는 시간 경과로 자동 복구하지 않는다.
-       외부 수집에서 정상 판매 상태가 다시 들어올 때만 upsert가 active로 복구한다. */
-    const storedSoldout=String(p.soldout_yn||'N').toUpperCase()==='Y';
-    const storedSaleStatus=C(p.sale_status).toLowerCase()||'active';
-    const or=await pool.query(`
+    const optionQuery=pool.query(`
       SELECT product_id,item_id,vendor_item_id,pi_ii_vi,product_url,updated_at,option_name,option_display_name,option_image_url,
              normal_price,discount_price,delivery_fee,delivery_eta_text,delivery_type,
              soldout_yn,sale_status,buyable_qty,min_order_qty,max_order_qty
@@ -110,23 +104,44 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
        WHERE mall_code=$1
          AND product_id=$2
          AND COALESCE(active_yn,'Y')='Y'
-       ORDER BY updated_at DESC NULLS LAST,option_sort_no ASC,pi_ii_vi ASC`,[p.mall_code,p.product_id]);
-
-    // Preserve the existing option display-name i18n logic.
-    let optionTranslations=new Map();
-    const targetLang=C(req.query.gm_lang||'').toLowerCase().replace(/_/g,'-').split('-')[0];
-    if(OPTION_LANGS.has(targetLang)&&or.rows.length){
-      const labels=await pool.query(`SELECT o.pi_ii_vi,o.option_display_name,t.ko,t."${targetLang}" AS translated,
+       ORDER BY updated_at DESC NULLS LAST,option_sort_no ASC,pi_ii_vi ASC`,[mall,pid]);
+    // Detail-content stores body JSON, not a guaranteed URL. Read only likely
+    // top-level URL fields, without fetching the entire content blob.
+    const detailQuery=mall==='CPKR'?pool.query(`SELECT
+      COALESCE(content_json->>'page_url',content_json->>'pageUrl',
+               content_json->>'product_url',content_json->>'productUrl',
+               content_json->>'detailUrl',content_json->>'url','') AS source_url
+      FROM gm_cpkr_detail_content WHERE product_id=$1`,[pid]):Promise.resolve({rows:[]});
+    const translationQuery=OPTION_LANGS.has(targetLang)?pool.query(`SELECT o.pi_ii_vi,o.option_display_name,t.ko,t."${targetLang}" AS translated,
         t.translation_source,t.translation_status
         FROM gm_product_option o LEFT JOIN gm_option_translation t
         ON t.mall_code=o.mall_code AND t.pi_vi=o.product_id||'_'||o.vendor_item_id
-        WHERE o.mall_code=$1 AND o.product_id=$2 AND COALESCE(o.active_yn,'Y')='Y'`,[p.mall_code,p.product_id]);
-      for(const row of labels.rows){
-        const source=C(row.option_display_name),meta=row.translation_source||{};
-        if(!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(source)||C(row.ko)!==source)continue;
-        if(C(row.translation_status)==='U'&&C(meta['__original_'+targetLang])!==source)continue;
-        if(C(row.translated))optionTranslations.set(C(row.pi_ii_vi),C(row.translated));
-      }
+        WHERE o.mall_code=$1 AND o.product_id=$2 AND COALESCE(o.active_yn,'Y')='Y'`,[mall,pid]):Promise.resolve({rows:[]});
+    const settled=await Promise.allSettled([productQuery,optionQuery,detailQuery,translationQuery]);
+    const [productResult,optionResult,detailResult,translationResult]=settled;
+    if(productResult.status!=='fulfilled')throw productResult.reason;
+    if(optionResult.status!=='fulfilled')throw optionResult.reason;
+    const pr=productResult.value,or=optionResult.value;
+    if(detailResult.status!=='fulfilled')console.warn('[GM_DETAIL_FAST_OPTIONAL_DETAIL_ERROR]',String(detailResult.reason&&detailResult.reason.message||detailResult.reason));
+    if(translationResult.status!=='fulfilled')console.warn('[GM_DETAIL_FAST_OPTIONAL_I18N_ERROR]',String(translationResult.reason&&translationResult.reason.message||translationResult.reason));
+    console.log('[GM_DETAIL_FAST_PARALLEL_V027]',{mall_code:mall,product_id:pid,elapsed_ms:Date.now()-t0,
+      detail_ok:detailResult.status==='fulfilled',i18n_ok:translationResult.status==='fulfilled'});
+    if(!pr.rows.length){
+      console.log('[GM_PRODUCT_DETAIL_FAST_MISS]',{version:VERSION,reason:'PID_NOT_FOUND',mall_code:mall,product_id:pid});
+      return ok(res,{found:false,item:null,reason:'PID_NOT_FOUND'});
+    }
+    const p=pr.rows[0];
+    /* 상품 상태는 시간 경과로 자동 복구하지 않는다.
+       외부 수집에서 정상 판매 상태가 다시 들어올 때만 upsert가 active로 복구한다. */
+    const storedSoldout=String(p.soldout_yn||'N').toUpperCase()==='Y';
+    const storedSaleStatus=C(p.sale_status).toLowerCase()||'active';
+    // Existing option translation semantics, based on the independent parallel result.
+    let optionTranslations=new Map();
+    for(const row of (translationResult.status==='fulfilled'?translationResult.value.rows:[])){
+      const source=C(row.option_display_name),meta=row.translation_source||{};
+      if(!/[가-힣ㄱ-ㅎㅏ-ㅣ]/.test(source)||C(row.ko)!==source)continue;
+      if(C(row.translation_status)==='U'&&C(meta['__original_'+targetLang])!==source)continue;
+      if(C(row.translated))optionTranslations.set(C(row.pi_ii_vi),C(row.translated));
     }
     // Select the latest server IID for the same PID + vendor-item ID.
     const requireExact=(mall==='CPKR' && !!vid);
@@ -163,20 +178,18 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     });
 
     const sel=options.find(o=>o.selected)||null;
-    // Prefer the exact selected option URL. The representative URL is valid only
-    // if it identifies that same PID + IID + VID; never borrow another option URL.
-    const selectedUrl=sel?(sel.product_url||exactCoupangSourceUrl(p.product_url,p.product_id,sel.itemId,sel.vendorItemId)):'';
-    // Optional URL recorded with a successful detail collection. Older content_json
-    // rows contain only images/blocks/text and therefore have no detail URL.
-    let collectedDetailUrl='';
-    if(mall==='CPKR' && sel){
-      try{
-        const dr=await pool.query(`SELECT content_json->>'page_url' AS page_url
-          FROM gm_cpkr_detail_content WHERE product_id=$1`,[pid]);
-        const raw=dr.rows[0]&&dr.rows[0].page_url;
-        collectedDetailUrl=exactCoupangSourceUrl(raw,pid,sel.itemId,sel.vendorItemId);
-      }catch(e){console.warn('[GM_FAST_DETAIL_URL_READ_WARN]',String(e&&e.message||e));}
-    }
+    // Only GM_SEARCH_RANKER decides URL rank. Route supplies independent sources.
+    const detailRaw=detailResult.status==='fulfilled'&&detailResult.value.rows.length
+      ? detailResult.value.rows[0].source_url : '';
+    const validatedDetailUrl=sel?exactCoupangSourceUrl(detailRaw,pid,sel.itemId,sel.vendorItemId):'';
+    // CPKR URL policy belongs exclusively to Ranker. ALKR retains its original behavior.
+    const rankedUrl=mall==='CPKR'?searchRanker.rankDetailUrl({mall,pid,selectedOption:sel,
+      detailUrl:detailRaw,productUrl:p.product_url,optionUrl:sel&&sel.product_url}):
+      {url:sel?(sel.product_url||exactCoupangSourceUrl(p.product_url,p.product_id,sel.itemId,sel.vendorItemId)):'',rank:'LEGACY_ALKR',policy:'UNCHANGED'};
+    const selectedUrl=rankedUrl.url;
+    // All Runtime entry fields reflect the Ranker decision, not competing policies.
+    // The originally collected detail URL is exposed separately for diagnostics.
+    if(sel&&selectedUrl)sel.product_url=selectedUrl;
     const images=thumbList(p);
     const requestKey=[pid,iid,vid].filter(Boolean).join('_')||pid;
     // GM_CPKR_IID_SYNC_V001: never return the caller's stale IID in an accepted FAST key.
@@ -200,7 +213,9 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
       vendorItemId:sel?sel.vendorItemId:(vid||p.vendor_item_id||''), vendor_item_id:sel?sel.vendorItemId:(vid||p.vendor_item_id||''),
       pi_ii_vi:sel?sel.pi_ii_vi:(p.pi_ii_vi||requestKey),
       product_url:selectedUrl, productUrl:selectedUrl,
-      detail_page_url:collectedDetailUrl, detailPageUrl:collectedDetailUrl,
+      detail_page_url:selectedUrl, detailPageUrl:selectedUrl,
+      source_detail_page_url:validatedDetailUrl,
+      url_rank:rankedUrl.rank, url_rank_policy:rankedUrl.policy,
       title:p.product_name||p.mall_product_name||'', productName:p.product_name||p.mall_product_name||'', mallProductName:p.mall_product_name||'',
       price:sale, priceText:sale, normal_price:sale,
       discount_price:sel?sel.discount_price:(p.discount_price||0),
@@ -224,7 +239,7 @@ router.get('/api/gm/product/detail-fast', async (req,res)=>{
     console.log('[GM_PRODUCT_DETAIL_FAST_OK]',{
       version:VERSION, mall_code:p.mall_code, product_id:p.product_id,
       requested_iid:iid||'', requested_vid:vid||'', selected_found:!!sel,
-      images:images.length, options:options.length
+      images:images.length, options:options.length, url_rank:rankedUrl.rank
     });
     return ok(res,{found:true,item});
   }catch(e){
