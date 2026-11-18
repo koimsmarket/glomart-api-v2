@@ -182,6 +182,16 @@ async function upsertProduct(pool, raw, parent={}){
   // A PID+VID is one sale option. Only its changing IID may refresh here.
   // A different VID NEVER changes the stored representative in base UPSERT.
   // Replacement belongs exclusively to verified-complete detail synchronization.
+  const saleState = normalizeProductSaleState(p);
+  // GM_SEARCH_REACTIVATE_V001: a newly collected, sellable search listing for
+  // the SAME representative PID+VID is positive availability evidence.
+  // Never revive from stale DB search, transport failures, or a different VID.
+  const freshSearchSaleEvidence = id.mallCode==='CPKR' &&
+    /^(connector-tab|ldjson-search)$/i.test(identitySource) &&
+    saleState.sale_status==='active' &&
+    !!(id.productId&&id.vendorItemId) &&
+    !!(cleanText(p.product_name||p.productName||p.name||productName)) &&
+    !/403|ACCESS_DENIED|FORBIDDEN|BLOCKED|COLLECT_FAIL|ERROR/i.test(errorText);
   const sameRepresentativeOption=id.mallCode==='CPKR' ?
     'gm_product.product_id=EXCLUDED.product_id AND gm_product.vendor_item_id=EXCLUDED.vendor_item_id' :
     'FALSE';
@@ -272,8 +282,8 @@ async function upsertProduct(pool, raw, parent={}){
           THEN EXCLUDED.product_url
         ELSE gm_product.product_url END,
       thumb_origin_url=COALESCE(NULLIF(EXCLUDED.thumb_origin_url,''), gm_product.thumb_origin_url),
-      soldout_yn=CASE WHEN (${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'}) AND NOT (gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted}) THEN EXCLUDED.soldout_yn ELSE gm_product.soldout_yn END,
-      sale_status=CASE WHEN (${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'}) AND NOT (gm_product.sale_status='inactive' AND NOT ${detailIdentityTrusted}) THEN EXCLUDED.sale_status ELSE gm_product.sale_status END,
+      soldout_yn=CASE WHEN (${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'}) AND NOT (gm_product.sale_status='inactive' AND NOT (${detailIdentityTrusted} OR ${freshSearchSaleEvidence})) THEN EXCLUDED.soldout_yn ELSE gm_product.soldout_yn END,
+      sale_status=CASE WHEN (${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'}) AND NOT (gm_product.sale_status='inactive' AND NOT (${detailIdentityTrusted} OR ${freshSearchSaleEvidence})) THEN EXCLUDED.sale_status ELSE gm_product.sale_status END,
       product_grade=EXCLUDED.product_grade,
       buyable_qty=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN COALESCE(EXCLUDED.buyable_qty,gm_product.buyable_qty) ELSE gm_product.buyable_qty END,
       min_order_qty=CASE WHEN ${sameRepresentativeOption} OR ${id.mallCode!=='CPKR'} THEN COALESCE(EXCLUDED.min_order_qty,gm_product.min_order_qty) ELSE gm_product.min_order_qty END,
@@ -295,7 +305,7 @@ async function upsertProduct(pool, raw, parent={}){
   // Keep the existing JSONB NOT NULL schema and its empty link marker.
   const productOptionLinkJson = null;
   const standardCoupangSupplier = isStandardCoupangSupplier(p, id);
-  const saleState = normalizeProductSaleState(p);
+
 
   const vals = [
     id.uid, resolvedGlomartCode, cleanText(p.gm_category || p.gmCategory),
