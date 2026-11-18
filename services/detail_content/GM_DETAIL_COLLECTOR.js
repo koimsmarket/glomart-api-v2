@@ -3111,7 +3111,7 @@ function gmCp403DeniedPage(){
 }
 function gmCp403RejectPage(job,stage,reason){
   log('CPKR_PAGE_REJECT stage='+stage+' reason='+reason+' url='+C(location.href));
-  statusUpdate('CODE_ERROR','쿠팡 상세페이지 접근 오류',{result:'FAIL',reason:reason,disablePurchase:true,noSave:true,key:C(job&&job.key||'')});
+  statusUpdate('CODE_ERROR','상품 상세페이지 접근 오류',{result:'FAIL',reason:reason,disablePurchase:true,noSave:true,key:C(job&&job.key||'')});
   /* Important: do not call saveResult/rememberDraft or mark the product sold out. */
   return true;
 }
@@ -3125,7 +3125,7 @@ function gmCp403InvalidFinalInfo(info){
   }catch(_e){return true;}
 }
 function gmCpUnavailableKind(v){v=C(v);return /^ROUTE_NOT_FOUND::/i.test(v)?'ROUTE_NOT_FOUND':(/^STOPPED::/i.test(v)?'STOPPED':'');}
-function gmCpUnavailableMessage(v){return C(v).replace(/^(?:ROUTE_NOT_FOUND|STOPPED)::/i,'')||'쿠팡 상세 페이지를 열 수 없습니다.';}
+function gmCpUnavailableMessage(v){return C(v).replace(/^(?:ROUTE_NOT_FOUND|STOPPED)::/i,'')||'상품 상세 페이지를 열 수 없습니다.';}
 /* GM_CPKR_IDENTITY_V001: Missing/stopped product is terminal.
  * Never retry as PID+VID or PID-only after a definitive unavailable page. */
 

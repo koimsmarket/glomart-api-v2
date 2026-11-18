@@ -83,7 +83,8 @@ loadAll();loadV2();
 const GM_CLIENT_LANG_TARGET={tw:'zh-TW'};
 const GM_CLIENT_LANGS=['en','zh','vi','ja','tw','th','uz','ne','km','id','tl','mn','my','kk','si','ru','bn','ur','lo','hi','tr','fa','es','fr'];
 const GM_CLIENT_QUEUE_KEY='gm_ui_auto_v037_pending_cells';
-const GM_CLIENT_UPLOAD_BATCH=10;
+const GM_CLIENT_UPLOAD_BATCH=50;
+const GM_CLIENT_BATCH_CHAR_LIMIT=1900; // product runtime V060 serial tags; leave room for markers
 let gmClientRunning=false,gmClientStop=false,gmClientAutoTimer=null,gmClientNextAttemptAt=0;
 let gmClientSuccess=0,gmClientFailed=0,gmClientSaved=0;
 const gmClientSleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -120,6 +121,75 @@ async function gmClientTranslate(kr,lang){
  if(!value||value===kr)throw Error('EMPTY_OR_UNTRANSLATED');
  if((kr.match(/%[dsm]/g)||[]).join('|')!==(value.match(/%[dsm]/g)||[]).join('|'))throw Error('PLACEHOLDER_MISMATCH');
  return value;
+}
+// GM_UI_BATCH_V001: isolated reuse of GM_PRODUCT_I18N_RUNTIME's serial-tag,
+// ~2,000-character, partial-success/bisect method. Do NOT load product DOM/queues.
+// Language groups are never mixed. No positional fallback is allowed.
+function gmUiBatchTag(i){return 'GM'+String(i+1).padStart(3,'0');}
+function gmUiBatchGroups(items){
+ const groups=[];
+ for(const lang of GM_CLIENT_LANGS){
+  let current=[],length=0;
+  for(const row of items){
+   if(!(row.missing||[]).includes(lang))continue;
+   const prepared=gmClientProtect(row.kr),text=prepared.safe;
+   if(!text.trim()||text.length>1800)continue;
+   const cost=text.length+15;
+   if(current.length&&(length+cost>GM_CLIENT_BATCH_CHAR_LIMIT||current.length>=20)){
+    groups.push({lang,rows:current});current=[];length=0;
+   }
+   current.push(row);length+=cost;
+  }
+  if(current.length)groups.push({lang,rows:current});
+ }
+ return groups;
+}
+async function gmUiBatchRequest(rows,lang){
+ const entries=rows.map((row,i)=>({row,tag:gmUiBatchTag(i),protect:gmClientProtect(row.kr)}));
+ const payload=entries.map(x=>x.tag+': '+x.protect.safe).join('\n');
+ const target=GM_CLIENT_LANG_TARGET[lang]||lang;
+ const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl='+encodeURIComponent(target)+'&dt=t&q='+encodeURIComponent(payload);
+ let r;try{r=await fetch(url,{mode:'cors',credentials:'omit',cache:'no-store'});}
+ catch(e){throw Error('BROWSER_CORS_OR_NETWORK_BLOCK: '+String(e&&e.message||e));}
+ if(r.status===403||r.status===429)throw Error('GOOGLE_RATE_LIMIT_HTTP_'+r.status);
+ if(!r.ok)throw Error('GOOGLE_HTTP_'+r.status);
+ const j=await r.json();const output=((j&&j[0])||[]).map(x=>String(x&&x[0]||'')).join('');
+ // Read only explicit serial tags. Never infer output association by line position.
+ const marker=/\bGM\s*0*(\d{1,3})\s*[:：.\-]?\s*/gi;
+ const matches=[...output.matchAll(marker)],seen=new Map();
+ for(let i=0;i<matches.length;i++){
+  const index=Number(matches[i][1])-1;
+  if(index<0||index>=entries.length||seen.has(index))continue;
+  const value=output.slice(matches[i].index+matches[i][0].length,i+1<matches.length?matches[i+1].index:output.length).trim();
+  const x=entries[index];const restored=x.protect.restore(value).trim();
+  if(!restored||restored===x.row.kr)continue;
+  if((x.row.kr.match(/%[dsm]/g)||[]).join('|')!==(restored.match(/%[dsm]/g)||[]).join('|'))continue;
+  if(/ZZGMKEEP/i.test(restored))continue;
+  seen.set(index,restored);
+ }
+ return seen;
+}
+async function gmUiTranslateGroup(rows,lang,onResult){
+ if(!rows.length)return;
+ // Small split-retries for damaged tags or partial Google responses.
+ async function run(part,depth){
+  if(gmClientStop||!part.length)return;
+  let matched;
+  try{matched=await gmUiBatchRequest(part,lang);}
+  catch(e){if(/429|403|CORS|NETWORK/.test(String(e.message||e)))throw e;matched=new Map();}
+  for(const [i,value] of matched)await onResult(part[i],lang,value);
+  const missing=part.filter((_,i)=>!matched.has(i));
+  if(!missing.length)return;
+  if(missing.length===1){
+   // Single cell fallback only for this failed tag; already committed cells never repeat.
+   const row=missing[0];await onResult(row,lang,await gmClientTranslate(row.kr,lang));return;
+  }
+  if(depth>=3){for(const row of missing)await onResult(row,lang,await gmClientTranslate(row.kr,lang));return;}
+  const half=Math.ceil(missing.length/2);
+  await run(missing.slice(0,half),depth+1);
+  await run(missing.slice(half),depth+1);
+ }
+ await run(rows,0);
 }
 // V043: automatically retry translation after transient server/session failures.
 // Existing server-side derzon authorization remains the only upload permission.
@@ -160,21 +230,21 @@ async function startClientTranslation(btn){
    const data=await gmClientAutoFetch(API+'/api/gm/builder/ui-dictionary-auto/v2/client-missing?limit=20&t='+Date.now());
    if(!data.items||!data.items.length){gmClientStatus('누락 셀 0건 · JSON 발행 상태 확인');break;}
    let produced=0,translationError=null;
-   for(const row of data.items){
-    for(const lang of row.missing||[]){
+   try{
+    // All missing cells of one language are translated together; 20 UI rows
+    // are no longer 20*24 separate Google requests.
+    const groups=gmUiBatchGroups(data.items);
+    for(const group of groups){
      if(gmClientStop)break;
-     if(!GM_CLIENT_LANGS.includes(lang))continue;
-     if(gmClientQueueRead().some(x=>x.gm_code===row.gm_code&&x.lang===lang&&x.kr===row.kr))continue;
-     try{
-      const value=await gmClientTranslate(row.kr,lang);
+     gmClientStatus('일괄 번역 '+group.lang+' · '+group.rows.length+'문구 · 서버 저장 '+gmClientSaved+'셀');
+     await gmUiTranslateGroup(group.rows,group.lang,async(row,lang,value)=>{
+      if(gmClientStop)return;
+      if(gmClientQueueRead().some(x=>x.gm_code===row.gm_code&&x.lang===lang&&x.kr===row.kr))return;
       gmClientQueueAdd({gm_code:row.gm_code,kr:row.kr,lang,value});gmClientSuccess++;produced++;
-      gmClientStatus('기기 번역 성공 '+gmClientSuccess+'셀 · 서버 저장 '+gmClientSaved+'셀 · 보관 '+gmClientQueueRead().length+'셀');
-     }catch(e){gmClientFailed++;translationError=e;break;}
-     if(gmClientQueueRead().length>=GM_CLIENT_UPLOAD_BATCH)await gmClientFlush();
-     await gmClientSleep(1800);
+      if(gmClientQueueRead().length>=GM_CLIENT_UPLOAD_BATCH)await gmClientFlush();
+     });
     }
-    if(translationError||gmClientStop)break;
-   }
+   }catch(e){gmClientFailed++;translationError=e;}
    if(gmClientQueueRead().length&&!gmClientStop)await gmClientFlush();
    if(translationError){
     const error=String(translationError.message||translationError);
@@ -325,38 +395,55 @@ function gmUiPendingReconcileReport(data,stage){
  gmPendingFileDownload(csv,'text/csv;charset=utf-8','gm_ui_pending_'+stage+'_V013.csv');
 }
 // GM_UI_PENDING_FULL_V012: all rows, including approved history, are counted and reconciled.
+// V014: bounded reconcile prevents one large CSV from holding a DB transaction
+// or exceeding reverse-proxy timeouts. Report every row and its HELD reason.
 async function gmUiUploadPendingCsv(btn){
  const input=document.getElementById('gmUiPendingCsvFile'),file=input&&input.files&&input.files[0];
  if(!file)return alert('CSV 파일을 선택하세요.');btn.disabled=true;
  try{
   if(file.size>8*1024*1024)throw Error('CSV 파일이 너무 큽니다');
-  const rows=gmUiCsvParse(await file.text());
-  if(!rows.length)throw Error('CSV에 데이터가 없습니다');
+  const rows=gmUiCsvParse(await file.text());if(!rows.length)throw Error('CSV에 데이터가 없습니다');
   if(!rows.every(r=>['pending_id','source_text_ko','change_type','status'].every(k=>k in r)))
-   throw Error('PENDING CSV에는 pending_id/source_text_ko/change_type/status 컬럼이 모두 필요합니다.');
+   throw Error('PENDING CSV 필수 컬럼이 없습니다.');
   const password=await gmUiAskAdminPassword('PENDING CSV 전체 검증');if(!password)return;
   const url=API+'/api/gm/builder/ui-dictionary-auto/pending-csv/reconcile';
-  async function run(apply){
+  const STEP=40;
+  const keys=['verified_approved','verified_pending','matched_existing','inserted','would_insert','dictionary_reused','invalid','held'];
+  async function call(part,apply){
    const r=await fetch(url,{method:'POST',credentials:'same-origin',cache:'no-store',
-    headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},
-    body:JSON.stringify({rows,apply})});
-   const j=await r.json();
-   if(!r.ok||!j.ok){log(j);throw Error((j.error||'HTTP '+r.status)+' '+(j.detail||'')+' · 불일치 '+(j.invalid||0)+'건 (로그 참조)');}
-   if(j.accounted!==rows.length||!j.all_rows_accounted)throw Error('전체 행 검증 수량 불일치: '+JSON.stringify(j));
+    headers:{'Content-Type':'application/json','x-gm-builder-admin-password':password},body:JSON.stringify({rows:part,apply})});
+   let j;try{j=await r.json();}catch(_){throw Error('서버 JSON 응답 오류 HTTP '+r.status);}
+   if(!r.ok||!j.ok)throw Error((j.error||'HTTP '+r.status)+' '+String(j.detail||''));
+   if(j.accounted!==part.length||!j.all_rows_accounted)throw Error('CSV 검증 수량 불일치');
    return j;
   }
-  const check=await run(false);
-  const stats='전체 '+check.received+'건 · 보류 '+check.held+'건 · 승인 이력 확인 '+check.verified_approved+
-   ' · 대기 후보 확인 '+check.verified_pending+' · 기타 기존 일치 '+check.matched_existing+
-   ' · 기존 사전 재사용 '+check.dictionary_reused+' · 신규 추가 예정 '+check.would_insert;
-  gmPendingStatus('검증 완료 (DB 변경 없음) · '+stats);log(check);
+  async function phase(apply){
+   const result={ok:true,received:rows.length,accounted:0,report:[]};for(const k of keys)result[k]=0;
+   for(let off=0;off<rows.length;off+=STEP){
+    const part=rows.slice(off,off+STEP);
+    gmPendingStatus((apply?'업로드':'사전 검증')+' '+Math.min(off+STEP,rows.length)+'/'+rows.length+'건');
+    const j=await call(part,apply);
+    for(const k of keys)result[k]+=Number(j[k]||0);
+    result.accounted+=Number(j.accounted||0);
+    for(const item of j.report||[])result.report.push({...item,row:Number(item.row||2)+off});
+   }
+   result.all_rows_accounted=result.accounted===rows.length;
+   return result;
+  }
+  const check=await phase(false);
   gmUiPendingReconcileReport(check,'dryrun');
-  if(!confirm(stats+'\n전체 '+check.accounted+'건을 확인했습니다. 누락된 '+check.would_insert+'건을 반영할까요?'))return;
-  const applied=await run(true);
-  const done='전체 '+applied.received+'건 확인 완료 · 보류 '+applied.held+'건 · 기존 승인 '+applied.verified_approved+
-   ' · 기존 대기 '+applied.verified_pending+' · 기타 기존 '+applied.matched_existing+
-   ' · 사전 재사용 '+applied.dictionary_reused+' · 새로 추가 '+applied.inserted;
-  gmPendingStatus(done);log(applied);gmUiPendingReconcileReport(applied,'apply');await loadAll();alert(done);
- }catch(e){gmPendingStatus('PENDING CSV 검증/업로드 실패: '+String(e));log(String(e));}
+  const stats='전체 '+rows.length+'건 · 보류 '+check.held+'건 · 기존 승인 '+check.verified_approved+
+   ' · 기존 대기 '+check.verified_pending+' · 사전 재사용 '+check.dictionary_reused+' · 신규 예정 '+check.would_insert;
+  gmPendingStatus('검증 완료 · '+stats+' · 검토 CSV 다운로드됨');log(check);
+  if(check.held){
+   // Do not silently turn a partial/invalid CSV into an apparently successful import.
+   alert('보류 '+check.held+'건이 있습니다. 다운로드된 검증 CSV의 reason을 확인하세요. 정상 후보만 적용할 수도 있습니다.');
+  }
+  if(!confirm(stats+'\n검증 결과를 확인했습니다. 정상 신규 후보를 반영할까요?'))return;
+  const applied=await phase(true);
+  gmUiPendingReconcileReport(applied,'apply');
+  const done='총 '+rows.length+'건 · 신규 등록 '+applied.inserted+'건 · 보류 '+applied.held+'건 · 적용 보고서 다운로드됨';
+  gmPendingStatus(done);log(applied);await loadAll();alert(done);
+ }catch(e){gmPendingStatus('PENDING CSV 검증/업로드 실패: '+String(e));log(String(e));alert('검증/업로드 실패: '+String(e));}
  finally{btn.disabled=false;}
 }
