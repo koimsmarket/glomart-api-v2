@@ -1059,6 +1059,21 @@ router.post('/api/gm/smartfit/trash/permanent-delete', async (req,res)=>{
       const client=await pool.connect();
       try{
         await client.query('BEGIN');
+        // Repair historical creator-owned counts under this deletion transaction.
+        // Actual collection ownership is checked live; a stored count alone cannot lock deletion.
+        if(type==='template'){
+          const lock=await getTemplateCollectionLock(client,id);
+          if(lock.is_locked){
+            const err=new Error('active external collection');
+            err.smartfitBlockReason='IN_USE';
+            throw err;
+          }
+          const repaired=await client.query(
+            'UPDATE gm_smartfit_template SET collection_count=$1 WHERE template_id=$2 AND collection_count IS DISTINCT FROM $1 RETURNING template_id',
+            [lock.collection_count,id]
+          );
+          if(repaired.rowCount) console.info('[SMARTFIT_DELETE_COUNT_REPAIRED]',{template_id:id,actual_count:lock.collection_count});
+        }
         const result=type==='space'
           ? await getSmartfitDeleteService().deleteSpace(client,member,id)
           : await getSmartfitDeleteService().deleteTemplate(client,member,id);
@@ -1067,7 +1082,9 @@ router.post('/api/gm/smartfit/trash/permanent-delete', async (req,res)=>{
       }catch(e){
         try{await client.query('ROLLBACK');}catch(_){}
         const st=(e&&e.deleteState)||{};
-        blocked.push({id,target_type:type,detail:String(e&&e.message||e),image_deleted:!!st.image_deleted,item_deleted_count:Number(st.item_deleted_count||0),db_deleted:!!st.db_deleted});
+        const reason=e&&e.smartfitBlockReason==='IN_USE'?'IN_USE':'DELETE_ERROR';
+        console.error('[SMARTFIT_PERMANENT_DELETE_FAIL]',{target_type:type,id,reason,detail:String(e&&e.message||e)});
+        blocked.push({id,target_type:type,reason,detail:String(e&&e.message||e),image_deleted:!!st.image_deleted,item_deleted_count:Number(st.item_deleted_count||0),db_deleted:!!st.db_deleted});
       }finally{ client.release(); }
     }
     ok(res,{target_type:type,deleted,deleted_count:deleted.length,blocked,blocked_count:blocked.length});
