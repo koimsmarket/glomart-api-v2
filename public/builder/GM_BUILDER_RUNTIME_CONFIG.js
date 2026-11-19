@@ -12,12 +12,27 @@ async function loadRuntimeConfig(){
   try{
     const r=await fetch(`${API}/api/gm/builder/config?t=${Date.now()}`,{cache:'no-store'});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||`HTTP ${r.status}`);
     const items=j.items||[];paintRuntimeSummary(items);
+    const reward=items.find(x=>x.config_key==='gpay_reward_rate_pct');
+    const rewardInput=document.getElementById('gmGpayRewardPercent');if(rewardInput)rewardInput.value=reward?String(reward.config_value):'2.5';
+    document.querySelectorAll('[data-gpay-reward-pct]').forEach(el=>el.textContent=reward?String(reward.config_value):'2.5');
     tb.innerHTML=items.map(x=>{const protectedKey=x.config_key==='gm_v1'||x.config_key==='gm_v2';return `<tr data-key="${cfgEsc(x.config_key)}"><td>${cfgEsc(x.category)}</td><td><b>${cfgEsc(x.config_key)}</b></td><td><input class="c-val" value="${cfgEsc(x.config_value)}" ${protectedKey?'readonly':''}></td><td><input class="c-type" value="${cfgEsc(x.value_type)}" ${protectedKey?'readonly':''}></td><td><input class="c-mode" value="${cfgEsc(x.mode)}" ${protectedKey?'readonly':''}></td><td><input class="c-on" type="checkbox" ${x.enabled?'checked':''} ${protectedKey?'disabled':''}></td><td><input class="c-desc" value="${cfgEsc(x.description||'')}" ${protectedKey?'readonly':''}></td><td>${protectedKey?'-':`<button onclick="saveRuntimeRow(this)">저장</button>`}</td></tr>`;}).join('');
   }catch(e){tb.innerHTML=`<tr><td colspan="8">설정 조회 실패: ${cfgEsc(e&&e.message||e)}</td></tr>`;}
 }
 async function saveRuntimeRow(btn){
   const tr=btn.closest('tr');const body={config_key:tr.dataset.key,config_value:tr.querySelector('.c-val').value,value_type:tr.querySelector('.c-type').value,category:tr.children[0].textContent.trim(),mode:tr.querySelector('.c-mode').value,enabled:tr.querySelector('.c-on').checked,description:tr.querySelector('.c-desc').value};
   const r=await fetch(`${API}/api/gm/builder/config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'runtime-config.saved',key:body.config_key,value:body.config_value});await loadRuntimeConfig();
+}
+async function saveGpayRewardPolicy(){
+  const el=document.getElementById('gmGpayRewardPercent'),st=document.getElementById('gmGpayRewardPolicyStatus');if(!el)return;
+  const v=String(el.value||'').trim();
+  if(!/^\d+(?:\.\d{1,2})?$/.test(v)||Number(v)>100){if(st)st.textContent='0~100 사이 숫자(소수 2자리까지)를 입력하세요.';return;}
+  try{
+    const body={config_key:'gpay_reward_rate_pct',config_value:v,value_type:'NUMBER',category:'GPAY',mode:'FIXED',enabled:true,description:'G-PAY 구매확정 적립률(%) · 순상품 실결제금액 · 10원 미만 절사'};
+    const r=await fetch(`${API}/api/gm/builder/config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||`HTTP ${r.status}`);
+    if(st)st.textContent='저장 완료: '+v+'% · 새 주문부터 적용';
+    await loadRuntimeConfig();
+  }catch(e){if(st)st.textContent='저장 실패: '+String(e&&e.message||e);}
 }
 async function addRuntimeConfig(){
   const body={config_key:document.getElementById('cfgKey').value.trim(),config_value:document.getElementById('cfgValue').value.trim(),category:document.getElementById('cfgCategory').value.trim(),value_type:document.getElementById('cfgType').value,mode:document.getElementById('cfgMode').value.trim(),description:document.getElementById('cfgDesc').value.trim(),enabled:true};

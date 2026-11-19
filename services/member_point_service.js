@@ -2,14 +2,14 @@
 // GM_MEMBER_POINT_SERVICE_V001
 // Reward policy:
 // - use: explicit user action only, max 20% of pure product amount, floor below 10 KRW
-// - earn: purchase-confirm only, 3% of pure product amount actually paid after point use, floor below 10 KRW
+// - earn: purchase-confirm only, configured rate of pure product amount actually paid after point use, floor below 10 KRW
 // - shipping/remote shipping is excluded from both use-limit and earning base.
 
 function clean(v){return String(v==null?'':v).trim();}
 function money(v){const n=Number(v);return Number.isFinite(n)?Math.max(0,Math.round(n)):0;}
 function floor10(v){return Math.floor(Math.max(0,Number(v)||0)/10)*10;}
 const POINT_USE_RATE=0.20;
-const REWARD_RATE=0.03;
+const rewardPolicy=require('./gpay_reward_policy');
 
 async function resolveMember(client,id){
   const key=clean(id); if(!key)return null;
@@ -25,7 +25,7 @@ async function ensureBalance(client,memberId,legacyBalance){
 }
 
 function maxUseForProduct(productAmount){return floor10(money(productAmount)*POINT_USE_RATE);}
-function rewardForPaidProduct(paidProductAmount){return floor10(money(paidProductAmount)*REWARD_RATE);}
+function rewardForPaidProduct(paidProductAmount,rate){return rewardPolicy.rewardForPaidProduct(money(paidProductAmount),rate);}
 
 async function getSummary(pool,requestedMember){
   const client=await pool.connect();
@@ -107,7 +107,7 @@ async function confirmPurchaseReward(pool,orderNo){
     if(!oq.rows.length)throw new Error('order_not_found');
     const order=oq.rows[0],memberId=clean(order.member_id);
     if(!memberId)throw new Error('member_order_required');
-    // V125: hard authorization boundary; no non-GPAY order can receive this 3% reward.
+    // V125: hard authorization boundary; no non-GPAY order can receive this configured-rate reward.
     if(clean(order.payment_method).toUpperCase()!=='GPAY')throw new Error('gpay_reward_only');
     const sellerStatus=clean(order.seller_status).toUpperCase(),shippingStatus=clean(order.shipping_status).toUpperCase();
     if(!(order.delivered_at || sellerStatus==='DELIVERED' || ['DELIVERED','COMPLETE','COMPLETED'].includes(shippingStatus)))throw new Error('order_not_delivered');
@@ -131,12 +131,12 @@ async function confirmPurchaseReward(pool,orderNo){
     if(grant>0){
       await client.query('UPDATE gm_point_balance SET balance_amount=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);
       await client.query(`INSERT INTO gm_point_transaction(member_id,order_no,transaction_at,transaction_type,grant_amount,use_amount,balance_after,description,created_at)
-        VALUES($1,$2,NOW(),'PURCHASE_CONFIRM_GRANT',$3,0,$4,$5,NOW())`,[memberId,orderNo,grant,after,'구매확정 3% 적립']);
+        VALUES($1,$2,NOW(),'PURCHASE_CONFIRM_GRANT',$3,0,$4,$5,NOW())`,[memberId,orderNo,grant,after,'G-PAY 구매확정 적립']);
       await client.query('UPDATE gm_member SET point_balance=$2,updated_at=NOW() WHERE member_id=$1',[memberId,after]);
     }
     await client.query(`UPDATE gm_order SET customer_status='PURCHASE_CONFIRMED',purchase_confirmed_yn='Y',purchase_confirmed_at=COALESCE(purchase_confirmed_at,NOW()),point_granted_amount=$2,point_reward_status=CASE WHEN UPPER(COALESCE(payment_method,''))='GPAY' THEN 'GRANTED' ELSE point_reward_status END,updated_at=NOW() WHERE order_no=$1`,[orderNo,grant]);
     await client.query('COMMIT');
-    return {ok:true,order_no:orderNo,member_id:memberId,product_amount:product,point_used_amount:used,product_paid_amount:paidProduct,reward_rate:REWARD_RATE,point_granted_amount:grant,point_balance_after:after};
+    return {ok:true,order_no:orderNo,member_id:memberId,product_amount:product,point_used_amount:used,product_paid_amount:paidProduct,reward_rate:null,point_granted_amount:grant,point_balance_after:after};
   }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e;}finally{client.release();}
 }
 
@@ -173,4 +173,4 @@ async function applyOrderPointInTransaction(client,input){
   return {ok:true,order_no:orderNo,point_used_amount:amount,balance_after:after};
 }
 
-module.exports={applyOrderPointInTransaction,POINT_USE_RATE,REWARD_RATE,floor10,maxUseForProduct,rewardForPaidProduct,getSummary,getTransactions,applyOrderPoint,confirmPurchaseReward};
+module.exports={applyOrderPointInTransaction,POINT_USE_RATE,floor10,maxUseForProduct,rewardForPaidProduct,getSummary,getTransactions,applyOrderPoint,confirmPurchaseReward};

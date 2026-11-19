@@ -94,6 +94,10 @@ router.post('/api/gm/builder/config',async(req,res)=>{
   if(!KEY_RE.test(key))return fail(res,400,'invalid config_key');
   if(!TYPES.has(type))return fail(res,400,'invalid value_type');
   if(!MODE_RE.test(mode))return fail(res,400,'invalid mode');
+  if(key==='gpay_reward_rate_pct'){
+    if(type!=='NUMBER'||category!=='GPAY'||mode!=='FIXED'||!enabled)return fail(res,400,'G-PAY reward policy metadata invalid');
+    try{require('../../services/gpay_reward_policy').validate(value);}catch(_e){return fail(res,400,'G-PAY reward rate must be 0~100%, at most 2 decimals');}
+  }
   if(key==='gm_v1')return fail(res,400,'gm_v1 is protected: AUTO_1MIN');
   if(key==='gm_v2'||key==='gm_v3'||key==='gm_v1_builder_pending'||key.startsWith('gm_builder_manual_')||['gm_ui_dictionary_auto_version','category_pack_base_started_at','category_pack_last_updated_at'].includes(key))return fail(res,400,'version is protected: use dedicated publisher or version-control');
   if(IMAGE_VECTOR_PROTECTED_KEYS.has(key))return fail(res,409,'IMAGE_VECTOR_CONFIG_PROTECTED',{detail:'Use the dedicated image-vector representative settings/build flow. LIVE/build/epoch keys are internal state.'});

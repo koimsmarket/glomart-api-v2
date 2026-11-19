@@ -19,7 +19,7 @@
       '<td>'+esc(x.payment_status||'')+'</td><td>'+esc(x.seller_status||x.shipping_status||'')+'</td>'+ 
       '<td>'+(x.delivered_at?esc(String(x.delivered_at)):'-')+'</td></tr>').join('');
   }
-  W.loadPurchaseConfirmCandidates=async function(){try{status('구매확정 대상 조회 중...');const j=await json('/api/gm/builder/purchase-confirm/candidates?limit=300');render(j.items||[]);status('대상 '+Number(j.count||0).toLocaleString('ko-KR')+'건 · 적립금은 순상품 실결제액 3%, 10원 미만 절사 · 배송비 제외');}catch(e){status('조회 실패: '+e.message,true);}};
+  W.loadPurchaseConfirmCandidates=async function(){try{status('구매확정 대상 조회 중...');const j=await json('/api/gm/builder/purchase-confirm/candidates?limit=300');render(j.items||[]);status('대상 '+Number(j.count||0).toLocaleString('ko-KR')+'건 · 적립금은 순상품 실결제액 기준, 10원 미만 절사 · 배송비 제외');}catch(e){status('조회 실패: '+e.message,true);}};
   W.purchaseConfirmSelectAll=function(on){qa('#purchaseConfirmRows input[type=checkbox][data-order]').forEach(x=>x.checked=!!on);};
   W.confirmSelectedPurchases=async function(){const list=selected();if(!list.length){status('구매확정할 주문을 선택하세요.',true);return;}if(!confirm('선택한 '+list.length+'건을 구매확정하고 적립금 및 G-PAY 대리점 인센티브를 확정합니까?'))return;try{status('구매확정 처리 중...');const j=await json('/api/gm/builder/purchase-confirm/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({order_nos:list})});const failed=(j.results||[]).filter(x=>!x.ok);status('완료 '+(j.processed||0)+'건 / 실패 '+(j.failed||0)+'건'+(failed.length?' · '+failed.map(x=>x.order_no+': '+x.error).join(' | '):''),failed.length>0);await W.loadPurchaseConfirmCandidates();}catch(e){status('처리 실패: '+e.message,true);}};
   D.addEventListener('DOMContentLoaded',function(){if(q('#purchaseConfirmRows'))W.loadPurchaseConfirmCandidates();});

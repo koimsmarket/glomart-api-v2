@@ -3,6 +3,13 @@
 const router=require('express').Router();
 const point=require('../../services/member_point_service');
 const {quote}=require('../../services/bank/gpay_settlement_contract');
+const rewardPolicy=require('../../services/gpay_reward_policy');
+router.get('/api/gm/gpay/reward-policy',async(req,res)=>{
+ res.set('Cache-Control','no-store, no-cache, must-revalidate');
+ try{const pool=req.app.locals.pool;if(!pool)return res.status(503).json({ok:false,code:'DB_UNAVAILABLE'});
+  return res.json({ok:true,reward_rate_pct:await rewardPolicy.getPercent(pool)});
+ }catch(e){console.error('[GM_GPAY_POLICY_READ]',String(e&&e.message||e));return res.status(503).json({ok:false,code:'GPAY_POLICY_UNAVAILABLE'});}
+});
 router.post('/api/gm/gpay/settlement/quote',async(req,res)=>{
   res.set('Cache-Control','no-store');
   try{
@@ -14,9 +21,10 @@ router.post('/api/gm/gpay/settlement/quote',async(req,res)=>{
     const summary=await point.getSummary(pool,mid);
     if(!summary.found)return res.status(404).json({ok:false,code:'MEMBER_NOT_FOUND'});
     const available=summary.point.available_point;
-    const result=quote({product_amount_krw:b.product_amount_krw,shipping_amount_krw:b.shipping_amount_krw,point_use_krw:b.point_use_krw,available_point_krw:available});
+    const rewardRate=await rewardPolicy.getRate(pool);
+    const result=quote({reward_rate:rewardRate,product_amount_krw:b.product_amount_krw,shipping_amount_krw:b.shipping_amount_krw,point_use_krw:b.point_use_krw,available_point_krw:available});
     console.info('[GM_GPAY_SETTLEMENT_V065] QUOTE_OK member=Y point_used='+result.point_used_amount_krw+' gpay='+result.pay_amount_g);
-    return res.json({ok:true,member_id:mid,settlement:result,authoritative:false});
+    return res.json({ok:true,member_id:mid,settlement:result,reward_rate_pct:rewardRate*100,authoritative:false});
   }catch(e){
     const reason=String(e&&e.message||e);
     if(/^(product_amount_|shipping_amount_|point_use_|available_point_|pay_amount_)/.test(reason))return res.status(400).json({ok:false,code:reason});

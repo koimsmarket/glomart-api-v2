@@ -1153,7 +1153,7 @@ async function gmOrderCreateHandler(req, res) {
       const expectedReward=Number(raw.reward_expected);
       const paidProduct=Number(orderRow.total_product_price)-gmGpayVerification.pointUsed;
       if(raw.reward_expected===undefined||!Number.isSafeInteger(expectedReward)||expectedReward<0||expectedReward%10!==0||
-         expectedReward!==gmGpayPointV072.rewardForPaidProduct(paidProduct)){
+         expectedReward!==gmGpayPointV072.rewardForPaidProduct(paidProduct,await require('../services/gpay_reward_policy').getRate(client))){
         throw new Error('GPAY_ORDERFORM_REWARD_MISMATCH');
       }
       await client.query(`UPDATE gm_order SET point_reward_pending_amount=$2,point_reward_status='PENDING',updated_at=NOW() WHERE order_no=$1`,[orderRow.order_no,expectedReward]);
