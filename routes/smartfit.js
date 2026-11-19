@@ -230,6 +230,14 @@ function addImageUrls(row, type){
   const id=type==='space' ? i(row.space_id,0) : i(row.template_id,0);
   let images=[];
   try{ if(id>0) images=r2.imageFiles(type,id,count); }catch(_){ images=[]; }
+  // GM_SF_IMAGE_V004: reuse existing updated_at, no migration or image-version column.
+  // The fixed R2 object key is refreshed when its parent record's server timestamp changes.
+  const modified=row && row.updated_at;
+  const version=modified instanceof Date ? modified.toISOString() : s(modified || '');
+  if(version) images=images.map(file=>Object.assign({},file,{
+    url:file.url ? file.url+(file.url.includes('?')?'&':'?')+'gmiv='+encodeURIComponent(version) : '',
+    small_url:file.small_url ? file.small_url+(file.small_url.includes('?')?'&':'?')+'gmiv='+encodeURIComponent(version) : ''
+  }));
   return Object.assign({}, row, { image_count:count, image_files:images });
 }
 
@@ -295,10 +303,15 @@ router.post('/api/gm/smartfit/image/commit', express.json({limit:'128kb'}), asyn
     if(!requestId) return fail(res,400,'request_id required');
     const finalImageCount=Math.max(0,Math.min(r2.CURRENT_UI_IMAGE_LIMIT,Number(b.image_count)||0));
     const result=await r2.applyPreparedImagePlan({type,id,oldCount:imageCount(ownerRow.image_count),plan:changes,requestId,imageCount:finalImageCount});
-    if(type==='space') await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE space_id=$2',[result.image_count,id]);
-    else await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[result.image_count,id]);
+    // Return the confirmed DB timestamp and matching immutable R2 URLs to the mobile cache.
+    // clock_timestamp() is the actual completion time, not the transaction start.
+    const saved=type==='space'
+      ? await pool.query('UPDATE gm_smartfit_space SET image_count=$1, updated_at=clock_timestamp() WHERE space_id=$2 RETURNING *',[result.image_count,id])
+      : await pool.query('UPDATE gm_smartfit_template SET image_count=$1, updated_at=clock_timestamp() WHERE template_id=$2 RETURNING *',[result.image_count,id]);
+    if(!saved.rows.length) throw new Error('image owner disappeared during commit');
+    const withUrls=addImageUrls(saved.rows[0],type);
     console.log('[SMARTFIT_IMAGE_FINALIZE_V057] DONE',{resource_type:type,resource_id:id,image_count:result.image_count,ms:Date.now()-startedAt});
-    ok(res,{resource_type:type,resource_id:id,image_count:result.image_count,images:result.images,operations:result.operations});
+    ok(res,{resource_type:type,resource_id:id,image_count:result.image_count,images:withUrls.image_files,image_files:withUrls.image_files,updated_at:saved.rows[0].updated_at,operations:result.operations});
   }catch(e){
     console.error('[SMARTFIT_IMAGE_COMMIT] FAIL',{message:String(e&&e.message||e),restore_error:e&&e.restore_error,ms:Date.now()-startedAt});
     fail(res,400,'image commit failed',{detail:String(e.message||e),restore_error:e&&e.restore_error});
