@@ -37,7 +37,12 @@ async function saveGpayRewardPolicy(){
 async function addRuntimeConfig(){
   const body={config_key:document.getElementById('cfgKey').value.trim(),config_value:document.getElementById('cfgValue').value.trim(),category:document.getElementById('cfgCategory').value.trim(),value_type:document.getElementById('cfgType').value,mode:document.getElementById('cfgMode').value.trim(),description:document.getElementById('cfgDesc').value.trim(),enabled:true};
   if(!body.config_key){alert('config_key를 입력하세요.');return;}
-  const r=await fetch(`${API}/api/gm/builder/config`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'runtime-config.added',key:body.config_key});await loadRuntimeConfig();
+  try{
+    const r=await fetch(`${API}/api/gm/builder/config`,{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify(body)});
+    const j=await r.json();if(!r.ok||!j.ok){alert((j&&j.error)||`HTTP ${r.status}`);return;}
+    try{log({action:'runtime-config.added',key:body.config_key});}catch(_e){}
+    await loadRuntimeConfig();
+  }catch(e){console.error('[GM_GPAY_REWARD_V005] addRuntimeConfig',e);alert('저장 실패: '+String(e&&e.message||e));}
 }
 async function nextGmV2(){const r=await fetch(`${API}/api/gm/builder/config/gm-v2/next`,{method:'POST'});const j=await r.json();if(!r.ok||!j.ok){alert(j.error||`HTTP ${r.status}`);return;}log({action:'gm_v2.next',value:j.item&&j.item.config_value});await loadRuntimeConfig();}
 
@@ -230,3 +235,7 @@ async function updateBuilderVersion(key,btn){
 }
 window.loadBuilderVersions=loadBuilderVersions;
 window.updateBuilderVersion=updateBuilderVersion;
+
+/* GM_GPAY_REWARD_V005: keep legacy inline callbacks globally visible. */
+window.addRuntimeConfig=addRuntimeConfig;
+window.saveGpayRewardPolicy=saveGpayRewardPolicy;
