@@ -81,11 +81,20 @@ module.exports = function createSmartfitDeleteService(deps){
     const list=Array.from(new Set((keys||[]).filter(Boolean)));
     if(!list.length){ log(ctx.kind,ctx.id,ctx.step,{requested:0,verified:0,remaining:0},ctx.startedAt); return {requested:0,verified:0,remaining:0}; }
     await r2.deleteKeys(list);
+    // Verify with bounded parallelism: the previous serial HEAD loop spent
+    // nearly all of permanent-delete latency waiting on R2 round trips.
+    // Every reserved slot is still checked (including historical stray keys).
     const remained=[];
-    for(const key of list){
-      try{ await r2.headObject(key); remained.push(key); }
-      catch(e){ if(!notFound(e)) throw e; }
+    const parallelism=Math.max(1,Math.min(8,Number(process.env.GM_SMARTFIT_R2_VERIFY_CONCURRENCY)||5));
+    let nextIndex=0;
+    async function verifyWorker(){
+      while(nextIndex<list.length){
+        const key=list[nextIndex++];
+        try{ await r2.headObject(key); remained.push(key); }
+        catch(e){ if(!notFound(e)) throw e; }
+      }
     }
+    await Promise.all(Array.from({length:Math.min(parallelism,list.length)},verifyWorker));
     log(ctx.kind,ctx.id,ctx.step,{requested:list.length,verified:list.length-remained.length,remaining:remained.length},ctx.startedAt);
     if(remained.length) throw new Error(`r2 image delete verification failed: remained=${remained.length}`);
     return {requested:list.length,verified:list.length,remaining:0};
