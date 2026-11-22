@@ -1,6 +1,8 @@
 FROM node:20-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
+# Skip only the optional ONNX Runtime CUDA download; retain CPU bindings.
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --registry=https://registry.npmjs.org \
     && npm install --no-save --omit=dev @huggingface/transformers@3.8.1 argon2@0.41.1 --registry=https://registry.npmjs.org \
