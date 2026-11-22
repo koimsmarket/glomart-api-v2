@@ -88,15 +88,10 @@ function dynamicNonUiReason(input,norm){
     ]);
     // The SmartFit UI emitter marks only immutable controls/headings, after excluding
     // authored/product/content regions. Do not open an unrestricted page exemption.
-    // Existing DB pending.source_type accepts only STATIC/RUNTIME.
-    // Reject legacy SMARTFIT_FIXED_UI requests before a DB write; no migration.
-    if(s(input.source_type||input.sourceType).toUpperCase()==='SMARTFIT_FIXED_UI')
-      return 'DYNAMIC_SMARTFIT_LEGACY_TYPE';
-    // A locator, marker, or GM_CODE is never evidence of static content.
-    // Only audited immutable SmartFit labels may reach the existing pending flow.
-    if(s(input.source_app||input.sourceApp).toUpperCase()!=='GLOMART'
-       || !/^\/smartfit\//.test(page)
-       || !fixedSmartfitLabels.has(raw))
+    const declaredFixed=s(input.source_type||input.sourceType)==='SMARTFIT_FIXED_UI'
+      && /^\/smartfit\//.test(page)
+      && /^sf-fixed:(?:id:|key:|(?:button|label|legend|summary|strong|h[1-6]|div|span|p)[.a-z0-9_-]*:\d+$)/i.test(s(input.source_locator||input.locator));
+    if(!declaredFixed && !fixedSmartfitLabels.has(raw) && !/^기존 이미지 \d+장 불러옴$/.test(raw))
       return 'DYNAMIC_SMARTFIT_UNVERIFIED';
   }
 
