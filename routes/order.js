@@ -1001,6 +1001,8 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
       RETURNING b.mall_code,b.pi_ii_vi
     `,[orderNo,clean(row.member_id),clean(row.guest_key)]);
     const basketDeleted=basketCleanup.rowCount||0;
+    // GM_BASKET_GET_V009: let the client mirror only precisely deleted external basket rows.
+    const basketDeletedUids=(basketCleanup.rows||[]).map(r=>`${r.mall_code}_${r.pi_ii_vi}`);
 
     await client.query('COMMIT');
     console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({
@@ -1012,7 +1014,8 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
       cafe24_order_no:cafeNo,
       item_count:itemResult.itemCount,
       order_action:action,
-      basket_deleted:basketDeleted
+      basket_deleted:basketDeleted,
+      basket_deleted_uids:basketDeletedUids
     });
     orderCompletedAfterResponse(req,orderNo,{ source:'cafe24-confirm', order_mode:clean(raw.order_mode||'internal').toLowerCase() });
   }catch(e){
