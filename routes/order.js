@@ -957,7 +957,9 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
     if(status!=='PENDING_DETAIL'){
       await client.query('ROLLBACK');
       if(clean(ex.cafe24_order_no)===cafeNo){
-        return ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,existing:true,item_count:0,basket_deleted:0});
+        const ordered=await client.query("SELECT mall_code,pi_ii_vi FROM gm_order_item WHERE order_no=$1 AND mall_code <> 'GMKR'",[orderNo]);
+        const basketCleanupUids=ordered.rows.map(r=>`${r.mall_code}_${r.pi_ii_vi}`);
+        return ok(res,{action:'order.cafe24-confirm',order_no:orderNo,cafe24_order_no:cafeNo,existing:true,item_count:0,basket_deleted:0,basket_cleanup_uids:basketCleanupUids});
       }
       return fail(res,409,'order already completed',{order_no:orderNo,order_status:ex.order_status||null});
     }
@@ -1001,6 +1003,9 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
       RETURNING b.mall_code,b.pi_ii_vi
     `,[orderNo,clean(row.member_id),clean(row.guest_key)]);
     const basketDeleted=basketCleanup.rowCount||0;
+    const basketDeletedUids=(basketCleanup.rows||[]).map(r=>`${r.mall_code}_${r.pi_ii_vi}`);
+    const cleanupScope=await client.query("SELECT mall_code,pi_ii_vi FROM gm_order_item WHERE order_no=$1 AND mall_code <> 'GMKR'",[orderNo]);
+    const basketCleanupUids=cleanupScope.rows.map(r=>`${r.mall_code}_${r.pi_ii_vi}`);
 
     await client.query('COMMIT');
     console.log('[GM_CAFE24_ORDER_CONFIRM_OK]',JSON.stringify({
@@ -1012,7 +1017,9 @@ router.post('/api/gm/order/cafe24-confirm', async (req,res)=>{
       cafe24_order_no:cafeNo,
       item_count:itemResult.itemCount,
       order_action:action,
-      basket_deleted:basketDeleted
+      basket_deleted:basketDeleted,
+      basket_deleted_uids:basketDeletedUids,
+      basket_cleanup_uids:basketCleanupUids
     });
     orderCompletedAfterResponse(req,orderNo,{ source:'cafe24-confirm', order_mode:clean(raw.order_mode||'internal').toLowerCase() });
   }catch(e){
@@ -1213,7 +1220,7 @@ async function gmOrderCreateHandler(req, res) {
       deleted_keys:basketDeletedRows.map(row=>row.cart_item_key||((row.mall_code||'')+'_'+(row.pi_ii_vi||'')))
     }));
     console.log('[GM_ORDER_CREATE_OK]', JSON.stringify({ order_no:orderRow.order_no, action:orderAction, items:itemResult.itemCount, total:orderRow.total_payment_price, tax_complete:taxTotals.complete, supply_amount:taxTotals.supply_amount, vat_amount:taxTotals.vat_amount, basket_deleted:basketDeleted, basket_remain:basketRemain }));
-    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price, basket_deleted:basketDeleted, basket_before:basketBefore, basket_remain:basketRemain });
+    ok(res, { action:'order.create', order_no:orderRow.order_no, cafe24_order_no:orderRow.cafe24_order_no, order_action:orderAction, item_count:itemResult.itemCount, total_payment_price:orderRow.total_payment_price, basket_deleted:basketDeleted, basket_deleted_uids:basketDeletedRows.map(r=>`${r.mall_code}_${r.pi_ii_vi}`), basket_before:basketBefore, basket_remain:basketRemain });
     // Clean normal paid G-PAY event rows; retain main Saga row and all exceptional histories.
     if(gmGpayVerification.applicable && gpaySagaTxId){
       enqueueAfterResponse('[GM_GPAY_V109] CLEANUP_FAILED',()=>
