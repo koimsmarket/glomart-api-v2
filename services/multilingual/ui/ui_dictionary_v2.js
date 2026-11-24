@@ -56,6 +56,26 @@ function dynamicNonUiReason(input,norm){
   const meta=[input.source_type,input.sourceType,input.kind,input.role,input.field,input.field_name,input.fieldName,input.semantic,input.value_type,input.valueType].map(s).join(' ').toLowerCase();
   const context=[page,surface,locator,meta].join(' ');
 
+  // GM_UI_CAPTURE_GUARD_V001: a positional calendar/order value is not a UI label.
+  // Restrict rules by page/locator so static copy containing numerals stays valid.
+  const guppyPage=/^\/guppy\/?/.test(page);
+  const orderformPage=/^\/order\/orderform\.html$/.test(page);
+  if(guppyPage){
+    if(/gmchatv004levelheader/.test(locator)&&/^(?:\d{4}년|\d{1,2}월)$/.test(raw))return 'DYNAMIC_CALENDAR_YEAR_MONTH';
+    if(/gmchatv002header/.test(locator)&&/^\d{1,2}일\s+\d+건$/.test(raw))return 'DYNAMIC_CALENDAR_DAY_COUNT';
+  }
+  if(orderformPage){
+    if(/^수량\s*[:：]\s*\d+\s*개$/.test(raw))return 'DYNAMIC_ORDER_QUANTITY';
+    if(/^상품중량\s*[:：]\s*(?:\d+(?:\.\d+)?\s*)?kg\s*[x*×]\s*(?:\d+\s*)?개\s*=\s*(?:\d+(?:\.\d+)?\s*)?kg$/i.test(raw))return 'DYNAMIC_ORDER_WEIGHT';
+    if(/^(?:에 자동 저장됩니다|필수\] 개인정보 수집·이용 동의)$/.test(raw)||
+      /^개인정보 제3자 제공 동의\s*\(해외배송 상품\s*$/.test(raw)||
+      /^주문을 완료하면\s+및\s+에 동의하게 됩니다/.test(raw)||
+      /^적립금은\s+기준으로 관리됩니다/.test(raw)||
+      /^인증 요청 후\s+지나 결제하면/.test(raw)||
+      /^이 경우 이메일 인증 절차 없이 자동으로 주문이 처리됩니다\. 갱신하시려면\s+에서/.test(raw)||
+      /^할 수 있으며, 본인확인은 서비스 재개 후 자동 처리됩니다/.test(raw))return 'INCOMPLETE_ORDERFORM_FRAGMENT';
+  }
+
   // V012: A GM_CODE is NOT proof that rendered content is static.
   // Smartfit space/category titles are data even inside button/label elements.
   // Keep this rule ahead of the explicit-code allowance and ahead of every DB write.
