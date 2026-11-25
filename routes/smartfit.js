@@ -5,7 +5,7 @@ const r2 = require('../services/r2');
 const createSmartfitDeleteService = require('../services/smartfit_delete_service');
 const router = express.Router();
 
-const VERSION = 'GM_SMARTFIT_SERVER_V087_COLLECTION_LOCK_ALIAS_FIX';
+const VERSION = 'GM_SMARTFIT_SERVER_V089_ORDER_SNAPSHOT_V004';
 function r2EnvStatus(){
   return {
     account: !!String(process.env.R2_ACCOUNT_ID || '').trim(),
@@ -578,7 +578,11 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         if(merged.has(key)){
           const previous=merged.get(key);
           previous.quantity=Math.min(999,previous.quantity+qty);
+          // Do not let the later duplicate erase fields from the first basket row.
         }else{
+          // Preserve order fields from the basket snapshot. Do not rely on later product lookups.
+          const pick=(...keys)=>{for(const k of keys){if(Object.prototype.hasOwnProperty.call(raw,k) && raw[k]!==undefined)return raw[k];}return null;};
+          const optionalInt=(...keys)=>{const v=pick(...keys);return v===null || v===''?null:i(v,0);};
           merged.set(key,{
             item_role:itemRoleNumber(raw.item_role ?? raw.role),
             mall_code:mallCode,
@@ -589,6 +593,27 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
             option_value:s(raw.option_value || raw.optionValue || ''),
             product_url:s(raw.product_url || raw.productUrl || ''),
             thumb_url:s(raw.thumb_url || raw.thumbUrl || raw.thumb_origin_url || ''),
+            thumb_file_name:s(raw.thumb_file_name || raw.thumbFileName || ''),
+            amount:optionalInt('amount'),
+            amount_type:s(pick('amount_type','amountType') || 'unit'),
+            delivery_type:pick('delivery_type','deliveryType'),
+            delivery_fee:optionalInt('delivery_fee','deliveryFee') ?? 0,
+            source_mall:pick('source_mall','sourceMall'),
+            source_uid:pick('source_uid','sourceUid'),
+            internal_product_code:pick('internal_product_code','internalProductCode'),
+            cafe24_product_no:pick('cafe24_product_no','cafe24ProductNo'),
+            gm_internal_link:optionalInt('gm_internal_link','gmInternalLink') ?? 0,
+            cart_item_key:pick('cart_item_key','cartItemKey'),
+            jeju_delivery_yn:pick('jeju_delivery_yn','jejuDeliveryYn'),
+            jeju_extra_delivery_fee:optionalInt('jeju_extra_delivery_fee','jejuExtraDeliveryFee'),
+            island_delivery_yn:pick('island_delivery_yn','islandDeliveryYn'),
+            island_extra_delivery_fee:optionalInt('island_extra_delivery_fee','islandExtraDeliveryFee'),
+            delivery_eta_text:pick('delivery_eta_text','deliveryEtaText'),
+            delivery_day_min:optionalInt('delivery_day_min','deliveryDayMin'),
+            delivery_day_max:optionalInt('delivery_day_max','deliveryDayMax'),
+            free_delivery_threshold:optionalInt('free_delivery_threshold','freeDeliveryThreshold'),
+            eta_source_updated_at:pick('eta_source_updated_at','etaSourceUpdatedAt'),
+            eta_snapshot_saved_at:pick('eta_snapshot_saved_at','etaSnapshotSavedAt'),
             member_id:member
           });
         }
@@ -620,10 +645,24 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         let itemId=0;
         for(const row of merged.values()){
           itemId++;
-          await client.query(`INSERT INTO gm_smartfit_item
-            (template_id,item_id,item_role,member_id,mall_code,pi_ii_vi,quantity,product_name,option_name,option_value,product_url,thumb_url)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-            [saved.template_id,itemId,row.item_role,row.member_id,row.mall_code,row.pi_ii_vi,row.quantity,row.product_name,row.option_name,row.option_value,row.product_url,row.thumb_url]);
+          // Match the actual operating schema. Columns missing from a pending migration
+          // are rejected instead of silently dropping basket order information.
+          const orderColumns=[
+            'amount','amount_type','delivery_type','delivery_fee','thumb_file_name',
+            'source_mall','source_uid','internal_product_code','cafe24_product_no',
+            'gm_internal_link','cart_item_key','jeju_delivery_yn','jeju_extra_delivery_fee',
+            'island_delivery_yn','island_extra_delivery_fee','delivery_eta_text',
+            'delivery_day_min','delivery_day_max','free_delivery_threshold',
+            'eta_source_updated_at','eta_snapshot_saved_at'
+          ];
+          const missing=orderColumns.filter(c=>!itemSchema.cols.has(c));
+          if(missing.length) throw new Error('SmartFit order columns missing: '+missing.join(','));
+          const fields=['template_id','item_id','item_role','member_id','mall_code',
+            'pi_ii_vi','quantity','product_name','option_name','option_value',
+            'product_url','thumb_url',...orderColumns];
+          const values=fields.map(f=>f==='template_id'?saved.template_id:(f==='item_id'?itemId:row[f]));
+          const placeholders=fields.map((_,idx)=>'$'+(idx+1));
+          await client.query('INSERT INTO gm_smartfit_item ('+fields.join(',')+') VALUES ('+placeholders.join(',')+')',values);
           savedItemCount++;
         }
         if(savedItemCount!==normalizedItemCount) throw new Error('smartfit item save count mismatch');
@@ -821,8 +860,8 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
     }
     items=items.slice(0,limit);
     const itemMeta=Array.isArray(template.content_json&&template.content_json.item_meta)?template.content_json.item_meta:[];
-    const itemMetaMap=new Map(itemMeta.map(x=>[s(x.mall_code||'')+'|'+s(x.product_uid||''),x]));
-    items=items.map(row=>Object.assign({},itemMetaMap.get(s(row.mall_code||'')+'|'+s(row.product_uid||''))||{},row));
+    const itemMetaMap=new Map(itemMeta.map(x=>{const m=s(x.mall_code||'');return [m+'|'+itemIdentity(x,m),x];}));
+    items=items.map(row=>Object.assign({},itemMetaMap.get(s(row.mall_code||'')+'|'+s(row.pi_ii_vi||''))||{},row));
     if(member && collected){
       let d=[];
       try{
