@@ -94,6 +94,27 @@ async function getSmartfitItemSchema(client){
   return {cols,sortCol};
 }
 
+/* GM_SF_I18N_V005: server stores the Korean product source, never a user's translated UI label.
+ * Resolve by precise mall/option identity first, then canonical product UID (PID).
+ * No English-to-Korean machine back-translation and no changes to order attributes. */
+async function resolveSmartfitKoreanSourceV005(client,row){
+  const mall=s(row.mall_code).toUpperCase();
+  const pi=s(row.pi_ii_vi);
+  const pid=mall==='CPKR'?(pi.match(/^(\d+)_/)||[])[1]:'';
+  const uid=pid?'CPKR_'+pid:s(row.source_uid||'');
+  const sql=`SELECT product_name FROM gm_product
+    WHERE mall_code=$1 AND (pi_ii_vi=$2 OR ($3<>'' AND product_uid=$3))
+    ORDER BY CASE WHEN pi_ii_vi=$2 THEN 0 ELSE 1 END LIMIT 1`;
+  const data=(await client.query(sql,[mall,pi,uid])).rows[0]||null;
+  const ko=v=>/[가-힣]/.test(s(v));
+  if(data&&ko(data.product_name))row.product_name=s(data.product_name);
+  // Pure numerical/SKU labels need no translation; original option must not be guessed.
+  const option=(await client.query('SELECT option_name FROM gm_product_option WHERE mall_code=$1 AND pi_ii_vi=$2 LIMIT 1',[mall,pi])).rows[0]||null;
+  if(option&&ko(option.option_name))row.option_name=s(option.option_name);
+  if(!ko(row.product_name))throw new Error('SMARTFIT_KOREAN_SOURCE_UNAVAILABLE mall='+mall+' pi_ii_vi='+pi);
+  return row;
+}
+
 async function loadTemplateItemsCompat(client, templateId){
   const schema=await getSmartfitItemSchema(client);
   const where=['template_id=$1'];
@@ -644,6 +665,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
         await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
         let itemId=0;
         for(const row of merged.values()){
+          await resolveSmartfitKoreanSourceV005(client,row);
           itemId++;
           // Match the actual operating schema. Columns missing from a pending migration
           // are rejected instead of silently dropping basket order information.
@@ -666,6 +688,12 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           savedItemCount++;
         }
         if(savedItemCount!==normalizedItemCount) throw new Error('smartfit item save count mismatch');
+        // The authored JSON metadata also lives on the server: never retain a
+        // user-language translation as its authoritative item product_name.
+        const sourceMeta=Array.from(merged.values()).map(x=>Object.assign({},x));
+        await client.query(`UPDATE gm_smartfit_template SET
+          content_json=jsonb_set(COALESCE(content_json,'{}'::jsonb),'{item_meta}',$2::jsonb,true)
+          WHERE template_id=$1`,[saved.template_id,JSON.stringify(sourceMeta)]);
       }
       console.log('[SMARTFIT_ITEM_SAVE_V072] DONE',{
         template_id:saved.template_id,
@@ -818,12 +846,45 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
   }catch(e){ console.error('[SMARTFIT_TEMPLATE_DETAIL_V085] FAIL',{code:e&&e.code,message:String(e&&e.message||e),detail:e&&e.detail,hint:e&&e.hint,stack:e&&e.stack}); fail(res,500,'template detail failed',{ detail:String(e.message||e), code:e&&e.code||'' }); }
 });
 
+/* GM_SF_I18N_V005: initial-read only: query existing product/option translation tables.
+ * Explicit SHA-256 source-version match is mandatory. This is NOT called on flag change. */
+async function attachSmartfitCurrentTranslationV005(client,rows,target){
+ if(target==='ko'||!LANGS.has(target)||target==='ot')return;
+ const tableLang='"'+target+'"'; // strict allowlist above, never arbitrary SQL identifier
+ const productIds=rows.map(r=>s(r.product_id||(s(r.pi_ii_vi).match(/^(\d+)_/)||[])[1]||''));
+ const optionIds=rows.map(r=>{const p=s(r.pi_ii_vi).split('_');return p.length===3?p[0]+'_'+p[2]:'';});
+ const malls=rows.map(r=>s(r.mall_code).toUpperCase());
+ if(!rows.length)return;
+ const [p,o]=await Promise.all([
+  client.query(`SELECT t.mall_code,t.product_id,t.${tableLang} AS translated,t.source_hash,t.source_lang,t.translation_status,t.ko
+    FROM UNNEST($1::text[],$2::text[]) x(mall_code,product_id)
+    JOIN gm_product_translation t ON t.mall_code=x.mall_code AND t.product_id=x.product_id`,[malls,productIds]),
+  client.query(`SELECT t.mall_code,t.pi_vi,t.${tableLang} AS translated,t.source_hash,t.source_lang,t.translation_status,t.ko
+    FROM UNNEST($1::text[],$2::text[]) x(mall_code,pi_vi)
+    JOIN gm_option_translation t ON t.mall_code=x.mall_code AND t.pi_vi=x.pi_vi`,[malls,optionIds])
+ ]);
+ const key=(mall,id)=>mall+'\u0000'+id;
+ const pmap=new Map(p.rows.map(x=>[key(x.mall_code,x.product_id),x]));
+ const omap=new Map(o.rows.map(x=>[key(x.mall_code,x.pi_vi),x]));
+ function valid(record,source){return record&&s(record.translated)&&s(record.translated)!==s(source)&&
+   (!s(record.source_lang)||s(record.source_lang)==='ko')&&s(record.translation_status).toUpperCase()!=='U'&&
+   (s(record.source_hash)===crypto.createHash('sha256').update(s(source)).digest('hex')||
+    (!s(record.source_hash)&&s(record.ko)===s(source)));}
+ rows.forEach((r,i)=>{
+  const p=pmap.get(key(malls[i],productIds[i])),o=omap.get(key(malls[i],optionIds[i]));
+  if(valid(p,r.product_name))r.translated_name=s(p.translated);
+  if(valid(o,r.option_name))r.translated_option_name=s(o.translated);
+  r.i18n_lang=target;
+ });
+}
+
 router.get('/api/gm/smartfit/item/list', async (req,res)=>{
   try{
     const pool=db(req);
     const templateId=i(req.query.template_id || req.query.templateId,0);
     const member=s(req.query.member_id || req.query.memberId || '');
     const q=s(req.query.q || req.query.keyword || '');
+    const requestedLang=safeLang(req.query.gm_lang||req.query.lang||'ko');
     const limit=Math.min(120, Math.max(1, i(req.query.limit,120)));
     if(!templateId) return fail(res,400,'template_id required');
     const template=(await pool.query(`SELECT template_id, creator_member_id, visibility, search_visible, is_active, is_deleted, content_json
@@ -891,6 +952,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
       }
       items.sort((a,b)=>(i(a.sort_no,0)-i(b.sort_no,0)) || String(a.item_id).localeCompare(String(b.item_id)));
     }
+    await attachSmartfitCurrentTranslationV005(pool,items,requestedLang);
     ok(res,{ items, count:items.length, template_id:templateId, limit, access:{owner,collected,public:publicReadable} });
   }catch(e){
     console.error('[SMARTFIT_ITEM_LIST_ERROR_V067]',{
