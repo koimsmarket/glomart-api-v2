@@ -283,6 +283,16 @@ router.post(['/api/basket/bulk-upsert','/api/gm/basket/bulk-upsert'], async (req
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
 
+/* GM_BASKET_C24_SYNC_V011: count ONLY; no product rows returned. */
+router.get('/api/gm/basket/count', async (req,res)=>{
+  const pool=db(req),owner=ownerWhere(req.query||{});
+  if(!pool)return res.status(500).json({ok:false,error:'DB pool is not attached'});
+  if(!owner)return res.status(400).json({ok:false,error:'member_id is required'});
+  try{const external_count=await ownerExternalCount(pool,owner);
+    res.json({ok:true,external_count});
+  }catch(e){res.status(500).json({ok:false,error:e.message});}
+});
+
 router.get(['/api/basket','/api/gm/basket/list'], async (req,res)=>{
   const pool=db(req), owner=ownerWhere(req.query||{});
   if(!pool) return res.status(500).json({ok:false,error:'DB pool is not attached'});
