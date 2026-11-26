@@ -780,7 +780,12 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount, product_locked:productLocked });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
-    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount, product_locked:productLocked });
+    // V015: return authoritative committed IDs with the existing save response.
+    // Post-COMMIT read is best-effort: never invalidate a successful save.
+    let committedItems=null;
+    try{ committedItems=(await loadTemplateItemsCompat(client,saved.template_id)).rows.map(itemCompatRow); }
+    catch(readErr){ console.warn('[GM_SF_V015] SAVE_ITEMS_CONFIRM_READ_FAIL',String(readErr&&readErr.message||readErr)); }
+    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount, product_locked:productLocked, committed_items:committedItems });
   }catch(e){
     try{await client.query('ROLLBACK');}catch(_){}
     console.error('[SMARTFIT_SAVE_V136][ERROR]', {
