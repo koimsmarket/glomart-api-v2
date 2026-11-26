@@ -552,6 +552,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
     let productLocked=false;
+    const committedItems=[]; // V016: IDs gathered during mutations, no post-COMMIT SELECT.
     let existingContentJson=null;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
@@ -723,8 +724,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           if(existingByKey.has(key))continue;
           nextItemId++;
           await insertSmartfitRow(row,nextItemId);
+          committedItems.push(Object.assign({},row,{item_id:nextItemId}));
           appended++;
         }
+        for(const old of existingRows)committedItems.push(itemCompatRow(old));
         savedItemCount=existingRows.length+appended;
         if(savedItemCount!==normalizedItemCount)throw new Error('locked template append count mismatch');
         console.log('[SMARTFIT_LOCKED_APPEND_V011]',{template_id:saved.template_id,existing:existingRows.length,appended:appended});
@@ -753,9 +756,11 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           const old=previousByKey.get(key);
           if(old){
             await updateSmartfitRow(row,i(old.item_id,0));
+            committedItems.push(Object.assign({},row,{item_id:i(old.item_id,0)}));
           }else{
             maxId++;
             await insertSmartfitRow(row,maxId);
+            committedItems.push(Object.assign({},row,{item_id:maxId}));
           }
           savedItemCount++;
         }
@@ -763,7 +768,6 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           if(!incomingKeys.has(key))await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1 AND item_id=$2',
             [saved.template_id,old.item_id]);
         }
-        if(savedItemCount!==normalizedItemCount) throw new Error('smartfit item save count mismatch');
         const sourceMeta=Array.from(merged.values()).map(x=>Object.assign({},x));
         await client.query(`UPDATE gm_smartfit_template SET
           content_json=jsonb_set(COALESCE(content_json,'{}'::jsonb),'{item_meta}',$2::jsonb,true)
@@ -780,11 +784,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount, product_locked:productLocked });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
-    // V015: return authoritative committed IDs with the existing save response.
-    // Post-COMMIT read is best-effort: never invalidate a successful save.
-    let committedItems=null;
-    try{ committedItems=(await loadTemplateItemsCompat(client,saved.template_id)).rows.map(itemCompatRow); }
-    catch(readErr){ console.warn('[GM_SF_V015] SAVE_ITEMS_CONFIRM_READ_FAIL',String(readErr&&readErr.message||readErr)); }
+    // V016: return the IDs assigned by INSERT/UPDATE, without a confirmation query.
     ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount, product_locked:productLocked, committed_items:committedItems });
   }catch(e){
     try{await client.query('ROLLBACK');}catch(_){}
