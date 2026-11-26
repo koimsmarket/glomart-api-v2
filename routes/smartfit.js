@@ -714,17 +714,46 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           await client.query(`UPDATE gm_smartfit_template SET content_json=jsonb_set(COALESCE(content_json,'{}'::jsonb),'{item_meta}',$2::jsonb,true) WHERE template_id=$1`,[saved.template_id,JSON.stringify(metadata)]);
         }
       }else{
-        console.log('[SMARTFIT_ITEM_CURRENT_DELETE]',{template_id:saved.template_id});
-        await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
-        let itemId=0;
-        for(const row of merged.values()){
-          itemId++;
-          await insertSmartfitRow(row,itemId);
+        // GM_SF_ITEM_SYNC_V012: reconcile by stable mall + pi_ii_vi. Never wipe
+        // unrelated items or renumber old item IDs when only one was removed.
+        const existingRows=(await loadTemplateItemsCompat(client,saved.template_id)).rows;
+        const oldByIdentity=new Map();
+        for(const old of existingRows){
+          const key=s(old.mall_code||'CPKR')+'|'+s(old.pi_ii_vi);
+          if(oldByIdentity.has(key))throw new Error('duplicate existing template product identity');
+          oldByIdentity.set(key,old);
+        }
+        let nextItemId=existingRows.reduce((max,row)=>Math.max(max,i(row.item_id,0)),0);
+        for(const [key,old] of oldByIdentity){
+          if(!merged.has(key)){
+            await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1 AND item_id=$2',[saved.template_id,old.item_id]);
+            console.log('[SMARTFIT_ITEM_DELETE_V012]',{template_id:saved.template_id,item_id:old.item_id});
+          }
+        }
+        for(const [key,row] of merged){
+          const old=oldByIdentity.get(key);
+          if(old){
+            // The original source is already authoritative on this saved item.
+            // A deleted/inactive gm_product must not block a quantity change.
+            const columns=['quantity','item_role','option_value','product_url','thumb_url',
+              'amount','amount_type','delivery_type','delivery_fee','thumb_file_name',
+              'source_mall','source_uid','internal_product_code','cafe24_product_no',
+              'gm_internal_link','cart_item_key','jeju_delivery_yn','jeju_extra_delivery_fee',
+              'island_delivery_yn','island_extra_delivery_fee','delivery_eta_text',
+              'delivery_day_min','delivery_day_max','free_delivery_threshold',
+              'eta_source_updated_at','eta_snapshot_saved_at'];
+            const selected=columns.filter(col=>itemSchema.cols.has(col));
+            const values=selected.map(col=>row[col]==null?old[col]:row[col]);
+            values.push(saved.template_id,old.item_id);
+            await client.query('UPDATE gm_smartfit_item SET '+selected.map((col,index)=>col+'=$'+(index+1)).join(',')+
+              ' WHERE template_id=$'+(selected.length+1)+' AND item_id=$'+(selected.length+2),values);
+          }else{
+            await insertSmartfitRow(row,++nextItemId);
+            console.log('[SMARTFIT_ITEM_INSERT_V012]',{template_id:saved.template_id,item_id:nextItemId});
+          }
           savedItemCount++;
         }
-        if(savedItemCount!==normalizedItemCount) throw new Error('smartfit item save count mismatch');
-        // The authored JSON metadata also lives on the server: never retain a
-        // user-language translation as its authoritative item product_name.
+        if(savedItemCount!==normalizedItemCount)throw new Error('smartfit item save count mismatch');
         const sourceMeta=Array.from(merged.values()).map(x=>Object.assign({},x));
         await client.query(`UPDATE gm_smartfit_template SET
           content_json=jsonb_set(COALESCE(content_json,'{}'::jsonb),'{item_meta}',$2::jsonb,true)
@@ -740,7 +769,7 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     console.log('[SMARTFIT_SAVE_V136] STEP6_COMMIT', { template_id:saved && saved.template_id, saved_item_count:savedItemCount, product_locked:productLocked });
     await client.query('COMMIT');
     console.log('[SMARTFIT_SAVE_DB] TEMPLATE_DONE', { template_id:saved && saved.template_id, image_count:imageCount(saved && saved.image_count) });
-    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount, product_locked:productLocked });
+    ok(res,{ template:addImageUrls(Object.assign({},saved,{ title:coalesceTitle(saved), author:displayAuthor(saved) }),'template'), received_item_count:receivedItemCount, normalized_item_count:normalizedItemCount, saved_item_count:savedItemCount, product_locked:productLocked, saved_items:savedItems });
   }catch(e){
     try{await client.query('ROLLBACK');}catch(_){}
     console.error('[SMARTFIT_SAVE_V136][ERROR]', {
@@ -950,6 +979,57 @@ async function attachSmartfitCurrentTranslationV005(client,rows,target){
   r.i18n_lang=target;
  });
 }
+
+/* GM_SF_ITEM_SYNC_V012: single-item edit/delete; protect existing item IDs.
+ * Caller member, template and item are checked within a single row-lock transaction.
+ * The editor may update its IndexedDB without awaiting this network request. */
+router.post('/api/gm/smartfit/item/mutate', express.json({limit:'32kb'}), async (req,res)=>{
+  const pool=db(req),client=await pool.connect();
+  try{
+    const b=req.body||{},member=s(b.member_id||b.memberId);
+    const templateId=i(b.template_id||b.templateId,0),itemId=i(b.item_id||b.itemId,0);
+    const action=s(b.action).toUpperCase();
+    if(!member)return fail(res,401,'login required');
+    if(!templateId||!itemId||!['UPDATE','DELETE'].includes(action))return fail(res,400,'invalid item mutation');
+    await client.query('BEGIN');
+    const t=(await client.query('SELECT template_id,creator_member_id,content_json FROM gm_smartfit_template WHERE template_id=$1 AND is_active=\'T\' AND COALESCE(is_deleted,\'F\')<>\'T\' FOR UPDATE',[templateId])).rows[0];
+    if(!t)throw new Error('template not found');
+    if(!(await isOwnerOrAdmin(client,member,t.creator_member_id)))throw new Error('permission denied');
+    const locked=await getTemplateCollectionLock(client,templateId);
+    if(locked.is_locked)throw new Error('collected template existing products cannot be modified or deleted');
+    const existing=(await client.query('SELECT * FROM gm_smartfit_item WHERE template_id=$1 AND item_id=$2 FOR UPDATE',[templateId,itemId])).rows[0];
+    if(!existing)throw new Error('template item not found');
+    if(action==='DELETE'){
+      await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1 AND item_id=$2',[templateId,itemId]);
+    }else{
+      const qty=Math.max(1,Math.min(999,i(b.quantity??b.qty,0)));
+      if(!qty)throw new Error('invalid quantity');
+      await client.query('UPDATE gm_smartfit_item SET quantity=$1 WHERE template_id=$2 AND item_id=$3',[qty,templateId,itemId]);
+    }
+    // Keep the authored metadata in step with the operating product rows.
+    const content=t.content_json&&typeof t.content_json==='object'?Object.assign({},t.content_json):{};
+    if(Array.isArray(content.item_meta)){
+      const key=s(existing.mall_code||'CPKR')+'|'+s(existing.pi_ii_vi);
+      content.item_meta=content.item_meta.filter(row=>{
+        const mall=s(row.mall_code||'CPKR'),identity=itemIdentity(row,mall);
+        return action!=='DELETE'||mall+'|'+identity!==key;
+      }).map(row=>{
+        const mall=s(row.mall_code||'CPKR'),identity=itemIdentity(row,mall);
+        if(action==='UPDATE'&&mall+'|'+identity===key)return Object.assign({},row,{quantity:Math.max(1,Math.min(999,i(b.quantity??b.qty,1)))});
+        return row;
+      });
+      await client.query('UPDATE gm_smartfit_template SET content_json=$1::jsonb,updated_at=CURRENT_TIMESTAMP WHERE template_id=$2',[JSON.stringify(content),templateId]);
+    }
+    const count=(await client.query('SELECT COUNT(*)::int AS n FROM gm_smartfit_item WHERE template_id=$1',[templateId])).rows[0].n;
+    await client.query('COMMIT');
+    console.log('[SMARTFIT_ITEM_MUTATE_V012]',{action,template_id:templateId,item_id:itemId,member_id:member,item_count:count});
+    ok(res,{action,template_id:templateId,item_id:itemId,item_count:count,quantity:action==='UPDATE'?Math.max(1,Math.min(999,i(b.quantity??b.qty,1))):null});
+  }catch(e){
+    try{await client.query('ROLLBACK');}catch(_){}
+    console.error('[SMARTFIT_ITEM_MUTATE_V012_FAIL]',String(e&&e.message||e));
+    fail(res,400,'item mutate failed',{detail:String(e&&e.message||e)});
+  }finally{client.release();}
+});
 
 router.get('/api/gm/smartfit/item/list', async (req,res)=>{
   try{
