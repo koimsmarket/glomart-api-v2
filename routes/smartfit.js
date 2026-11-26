@@ -538,9 +538,11 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
     await assertSpaceOwnerIfSet(client, member, spaceIdValue);
     let saved;
     let productLocked=false;
+    let existingContentJson=null;
     if(templateId){
       const old=(await client.query('SELECT * FROM gm_smartfit_template WHERE template_id=$1 FOR UPDATE',[templateId])).rows[0];
       if(!old) throw new Error('template not found');
+      existingContentJson=old.content_json;
       if(!(await isOwnerOrAdmin(client, member, old.creator_member_id))) throw new Error('permission denied');
       console.log('[SMARTFIT_SAVE_V139] STEP2_COLLECTION_CHECK', { template_id:templateId });
       let collectedCount=0;
@@ -651,22 +653,10 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
        * 퍼가기 이후에는 상품 구성만 고정한다.
        * 제목·설명·공간·카테고리·공개 여부 등 템플릿 일반정보는 계속 수정 가능하다.
        */
-      if(productLocked){
-        const existing=(await loadTemplateItemsCompat(client,saved.template_id)).rows
-          .map(row=>({mall_code:s(row.mall_code||'CPKR'),pi_ii_vi:s(row.pi_ii_vi),quantity:Math.max(1,i(row.quantity,1)),item_role:itemRoleNumber(row.item_role)}));
-        const incoming=Array.from(merged.values()).map(row=>({mall_code:row.mall_code,pi_ii_vi:row.pi_ii_vi,quantity:row.quantity,item_role:row.item_role}));
-        const same=JSON.stringify(existing)===JSON.stringify(incoming);
-        console.log('[SMARTFIT_SAVE_PRODUCT_LOCK_COMPARE]',{template_id:saved.template_id,existing:existing.length,incoming:incoming.length,same});
-        if(!same) throw new Error('collected template products cannot be modified');
-        savedItemCount=existing.length;
-        normalizedItemCount=existing.length;
-      }else{
-        console.log('[SMARTFIT_ITEM_CURRENT_DELETE]',{template_id:saved.template_id});
-        await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
-        let itemId=0;
-        for(const row of merged.values()){
-          await resolveSmartfitKoreanSourceV005(client,row);
-          itemId++;
+      // Additions to locked templates insert only NEW rows; existing item IDs and data remain intact.
+      async function insertSmartfitRow(row,itemId){
+        // Korean originals must be verified for newly inserted items only.
+        await resolveSmartfitKoreanSourceV005(client,row);
           // Match the actual operating schema. Columns missing from a pending migration
           // are rejected instead of silently dropping basket order information.
           const orderColumns=[
@@ -685,6 +675,51 @@ router.post('/api/gm/smartfit/template/save', async (req,res)=>{
           const values=fields.map(f=>f==='template_id'?saved.template_id:(f==='item_id'?itemId:row[f]));
           const placeholders=fields.map((_,idx)=>'$'+(idx+1));
           await client.query('INSERT INTO gm_smartfit_item ('+fields.join(',')+') VALUES ('+placeholders.join(',')+')',values);
+          
+      }
+      if(productLocked){
+        // A collected template protects existing rows, but NEW products may be appended.
+        // Match by mall+identity; never trust client-supplied item_id or amounts to change protected rows.
+        const existingRows=(await loadTemplateItemsCompat(client,saved.template_id)).rows;
+        const existingByKey=new Map();
+        for(const old of existingRows){
+          const key=s(old.mall_code||'CPKR')+'|'+s(old.pi_ii_vi);
+          if(existingByKey.has(key))throw new Error('duplicate existing template product identity');
+          existingByKey.set(key,old);
+        }
+        const incomingByKey=new Map(Array.from(merged.values()).map(row=>[row.mall_code+'|'+row.pi_ii_vi,row]));
+        for(const [key,old] of existingByKey){
+          const input=incomingByKey.get(key);
+          if(!input || input.quantity!==Math.max(1,i(old.quantity,1)) || input.item_role!==itemRoleNumber(old.item_role)){
+            throw new Error('collected template existing products cannot be modified or deleted');
+          }
+        }
+        let nextItemId=existingRows.reduce((n,row)=>Math.max(n,i(row.item_id,0)),0);
+        let appended=0;
+        for(const [key,row] of incomingByKey){
+          if(existingByKey.has(key))continue;
+          nextItemId++;
+          await insertSmartfitRow(row,nextItemId);
+          appended++;
+        }
+        savedItemCount=existingRows.length+appended;
+        if(savedItemCount!==normalizedItemCount)throw new Error('locked template append count mismatch');
+        console.log('[SMARTFIT_LOCKED_APPEND_V011]',{template_id:saved.template_id,existing:existingRows.length,appended:appended});
+        {
+          // Preserve the previously saved metadata of collected/protected products.
+          const previousMeta=Array.isArray(existingContentJson&&existingContentJson.item_meta)?existingContentJson.item_meta:[];
+          const previousMap=new Map(previousMeta.map(x=>[s(x.mall_code||'CPKR')+'|'+itemIdentity(x,s(x.mall_code||'CPKR')),x]));
+          const metadata=existingRows.map(x=>{const key=s(x.mall_code||'CPKR')+'|'+s(x.pi_ii_vi);return previousMap.get(key)||x;});
+          for(const [key,row] of incomingByKey)if(!existingByKey.has(key))metadata.push(row);
+          await client.query(`UPDATE gm_smartfit_template SET content_json=jsonb_set(COALESCE(content_json,'{}'::jsonb),'{item_meta}',$2::jsonb,true) WHERE template_id=$1`,[saved.template_id,JSON.stringify(metadata)]);
+        }
+      }else{
+        console.log('[SMARTFIT_ITEM_CURRENT_DELETE]',{template_id:saved.template_id});
+        await client.query('DELETE FROM gm_smartfit_item WHERE template_id=$1',[saved.template_id]);
+        let itemId=0;
+        for(const row of merged.values()){
+          itemId++;
+          await insertSmartfitRow(row,itemId);
           savedItemCount++;
         }
         if(savedItemCount!==normalizedItemCount) throw new Error('smartfit item save count mismatch');
@@ -846,6 +881,44 @@ router.get('/api/gm/smartfit/template/detail', async (req,res)=>{
   }catch(e){ console.error('[SMARTFIT_TEMPLATE_DETAIL_V085] FAIL',{code:e&&e.code,message:String(e&&e.message||e),detail:e&&e.detail,hint:e&&e.hint,stack:e&&e.stack}); fail(res,500,'template detail failed',{ detail:String(e.message||e), code:e&&e.code||'' }); }
 });
 
+/* GM_SF_SESSION_V001: When reading a selected template, recover verified Korean
+ * source strings from the existing product/option tables in two BATCH queries.
+ * No new server columns, no writes to SmartFit or product tables, no fake
+ * Korean translation, and no blocking when an old product has been removed. */
+async function attachSmartfitOriginalNamesV001(client,rows){
+ if(!rows.length)return;
+ const records=rows.map(r=>{
+   const mall=s(r.mall_code).toUpperCase(),pi=s(r.pi_ii_vi);
+   const pid=s(r.product_id)||(mall==='CPKR'?(pi.match(/^(\d+)_/)||[])[1]:'');
+   return {mall,pi,uid:s(r.product_uid)||(pid?mall+'_'+pid:'')};
+ });
+ const products=records.filter(x=>x.mall&&x.uid);
+ const options=records.filter(x=>x.mall&&x.pi);
+ const [productRows,optionRows]=await Promise.all([
+   products.length?client.query(`SELECT p.mall_code,p.product_uid,p.product_name
+     FROM gm_product p JOIN UNNEST($1::text[],$2::text[]) AS k(mall_code,product_uid)
+     ON p.mall_code=k.mall_code AND p.product_uid=k.product_uid`,
+      [products.map(x=>x.mall),products.map(x=>x.uid)]):Promise.resolve({rows:[]}),
+   options.length?client.query(`SELECT o.mall_code,o.pi_ii_vi,
+        COALESCE(NULLIF(o.option_display_name,''),o.option_name) AS original_option_name
+     FROM gm_product_option o JOIN UNNEST($1::text[],$2::text[]) AS k(mall_code,pi_ii_vi)
+     ON o.mall_code=k.mall_code AND o.pi_ii_vi=k.pi_ii_vi`,
+      [options.map(x=>x.mall),options.map(x=>x.pi)]):Promise.resolve({rows:[]})
+ ]);
+ const key=(mall,id)=>s(mall).toUpperCase()+'\u0000'+s(id);
+ const pmap=new Map(productRows.rows.map(r=>[key(r.mall_code,r.product_uid),r]));
+ const omap=new Map(optionRows.rows.map(r=>[key(r.mall_code,r.pi_ii_vi),r]));
+ const isKorean=v=>/[가-힣]/.test(s(v));
+ rows.forEach((row,index)=>{
+   const r=records[index],p=pmap.get(key(r.mall,r.uid)),o=omap.get(key(r.mall,r.pi));
+   if(p&&isKorean(p.product_name))row.product_name=s(p.product_name);
+   if(o&&s(o.original_option_name))row.option_name=s(o.original_option_name);
+   // Explicit source fields are display/IndexedDB metadata only, not DB columns.
+   if(isKorean(row.product_name))row.original_product_name=s(row.product_name);
+   if(s(row.option_name)&&(o||isKorean(row.option_name)))row.original_option_name=s(row.option_name);
+ });
+}
+
 /* GM_SF_I18N_V005: initial-read only: query existing product/option translation tables.
  * Explicit SHA-256 source-version match is mandatory. This is NOT called on flag change. */
 async function attachSmartfitCurrentTranslationV005(client,rows,target){
@@ -952,6 +1025,7 @@ router.get('/api/gm/smartfit/item/list', async (req,res)=>{
       }
       items.sort((a,b)=>(i(a.sort_no,0)-i(b.sort_no,0)) || String(a.item_id).localeCompare(String(b.item_id)));
     }
+    try{await attachSmartfitOriginalNamesV001(pool,items);}catch(sourceError){console.warn('[GM_SF_ORIGINAL_READ]',String(sourceError&&sourceError.message||sourceError));}
     await attachSmartfitCurrentTranslationV005(pool,items,requestedLang);
     ok(res,{ items, count:items.length, template_id:templateId, limit, access:{owner,collected,public:publicReadable} });
   }catch(e){
